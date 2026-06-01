@@ -188,6 +188,14 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		fsvc.ServeFile(w, r, r.URL.Query().Get("path"))
 	})
+	// /fs/stat → resolve+classify a (possibly relative/~/$VAR) path against a base
+	// cwd, so a terminal-clicked path routes into Files on the right host.
+	mux.HandleFunc("/fs/stat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		q := r.URL.Query()
+		_ = json.NewEncoder(w).Encode(fsvc.Stat(q.Get("path"), q.Get("base")))
+	})
 	// File mutations (the Files browser's context-menu ops + editor save).
 	mux.HandleFunc("/fs/mkdir", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

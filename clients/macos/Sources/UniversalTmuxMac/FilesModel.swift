@@ -26,6 +26,7 @@ struct FileEntry: Codable, Hashable {
 
 private struct ListResp: Codable { let path: String; let entries: [FileEntry] }
 private struct HomeResp: Codable { let home: String; let roots: [String]; let sep: String }
+private struct StatResp: Codable { let path: String; let name: String; let isDir: Bool; let exists: Bool; let size: Int64 }
 
 // MARK: - tree node (reference type for lazy expansion)
 
@@ -98,6 +99,7 @@ final class FileTab: ObservableObject, Identifiable {
     @Published var content: FileContent = .empty
     @Published var sep: String = "/"
     @Published var zoom: CGFloat = 1.0   // preview zoom (⌘+/−/0), independent of the global UI scale
+    @Published var pendingLine: Int? = nil   // line to jump to after a terminal cmd+click open
 
     // editor
     @Published var editing = false
@@ -276,6 +278,7 @@ final class FileTab: ObservableObject, Identifiable {
 
     func open(_ node: FileNode) {
         let e = node.entry
+        pendingLine = nil    // a normal tree click never jumps to a line
         selection = e.path
         guard !e.isDir else { return }
         let kind = kindFor(e.name, size: e.size)
@@ -311,6 +314,36 @@ final class FileTab: ObservableObject, Identifiable {
         } catch {
             if selection == e.path { content = .error(error.localizedDescription) }
         }
+    }
+
+    /// Open a path a terminal cmd+click resolved (via /fs/stat) on this host:
+    /// a directory roots the tree there; a file roots the tree at its parent and
+    /// previews it, jumping to `line` if one was clicked. A path that no longer
+    /// exists falls back to showing its parent directory.
+    func openResolved(_ path: String, isDir: Bool, exists: Bool, name: String, size: Int64, line: Int?) async {
+        // Learn the host's separator so parentPath() is correct (Win `\` vs Unix `/`).
+        if let url = URL(string: httpBase + "/fs/home"),
+           let (d, _) = try? await fsSession.data(from: url),
+           let h = try? JSONDecoder().decode(HomeResp.self, from: d) {
+            sep = h.sep
+        }
+        if isDir {
+            await setRoot(path)
+            selection = path
+            return
+        }
+        await setRoot(parentPath(path))   // show the file's directory context
+        guard exists else { return }       // parent shown; the file itself is gone
+        pendingLine = line
+        selection = path
+        let e = FileEntry(name: name, path: path, isDir: false, size: size, mtime: 0, mode: "")
+        let kind = kindFor(name, size: size)
+        if kind == .media {
+            content = readURL(path).map { .media($0) } ?? .error("bad path")
+            return
+        }
+        content = .loading(path)
+        await fetchContent(e, kind: kind)
     }
 
     // MARK: helpers
@@ -380,6 +413,30 @@ final class FilesModel: ObservableObject {
         activeID = t.id
         t.start(at: startPath)
         return t
+    }
+
+    /// Open a path clicked in `machine`'s terminal: resolve+classify it on that host
+    /// (relative paths against the session cwd `base`), then root the tree / preview
+    /// the file. `line` jumps the editor when a `file:line` was clicked.
+    func openTerminalPath(_ machine: Machine, rawPath: String, base: String, line: Int?) {
+        let t = FileTab(machine: machine)
+        tabs.append(t)
+        activeID = t.id
+        Task {
+            if let s = await Self.stat(machine.httpBase, path: rawPath, base: base) {
+                await t.openResolved(s.path, isDir: s.isDir, exists: s.exists, name: s.name, size: s.size, line: line)
+            } else {
+                t.start()   // old broker without /fs/stat → fall back to home
+            }
+        }
+    }
+
+    private static func stat(_ httpBase: String, path: String, base: String) async -> StatResp? {
+        guard var c = URLComponents(string: httpBase + "/fs/stat") else { return nil }
+        c.queryItems = [.init(name: "path", value: path), .init(name: "base", value: base)]
+        guard let url = c.url,
+              let (d, _) = try? await fsSession.data(from: url) else { return nil }
+        return try? JSONDecoder().decode(StatResp.self, from: d)
     }
 
     func closeTab(_ id: UUID) {

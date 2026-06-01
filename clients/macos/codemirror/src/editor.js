@@ -176,4 +176,20 @@ window.UTEditor = {
   setEditable(editable) {
     if (view) view.dispatch({ effects: readOnlyConf.reconfigure(EditorState.readOnly.of(!editable)) });
   },
+
+  // Scroll to (and place the cursor on) a 1-based line — used when a terminal
+  // cmd+click carried a `file:line` suffix. Deferred a frame so it runs after the
+  // just-dispatched setContent has laid out.
+  gotoLine(line) {
+    if (!view) return;
+    requestAnimationFrame(() => {
+      const total = view.state.doc.lines;
+      const n = Math.max(1, Math.min(line | 0, total));
+      const l = view.state.doc.line(n);
+      view.dispatch({
+        selection: { anchor: l.from },
+        effects: EditorView.scrollIntoView(l.from, { y: "center" }),
+      });
+    });
+  },
 };

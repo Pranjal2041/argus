@@ -494,6 +494,16 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.appBackground)
         .ignoresSafeArea(.container, edges: .top) // column-level: kill the titlebar/notch reserve
+        .onAppear {
+            // Route a terminal cmd+click on a file path to the Files window for the
+            // VISIBLE session's host (paths live on the node, not the Mac).
+            terminals.openPathHandler = { path, line in
+                guard let ref = state.selection, let m = state.machine(for: ref) else { return }
+                let cwd = state.session(for: ref)?.path ?? ""
+                files.openTerminalPath(m, rawPath: path, base: cwd, line: line)
+                openWindow(id: "files")
+            }
+        }
         .overlay(alignment: .leading) {
             Rectangle().fill(Theme.border).frame(width: hairline).ignoresSafeArea()
         }

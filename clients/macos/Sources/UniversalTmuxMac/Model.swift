@@ -98,6 +98,15 @@ final class AppState: ObservableObject {
         machines.flatMap { m in (sessionsByMachine[m.id] ?? []).map { SessionRef(machineID: m.id, session: $0.name) } }
     }
 
+    /// The machine that owns a session ref (for routing a terminal path-click to
+    /// the right host's Files/broker).
+    func machine(for ref: SessionRef) -> Machine? { machines.first { $0.id == ref.machineID } }
+
+    /// The session info (incl. its cwd in `.path`) for a ref.
+    func session(for ref: SessionRef) -> SessionInfo? {
+        (sessionsByMachine[ref.machineID] ?? []).first { $0.name == ref.session }
+    }
+
     /// Every session across ALL machines whose broker state == "waiting"
     /// (blocked on the user), paired with its machine's display name and sorted
     /// most-recently-active first. Drives the pinned "Needs attention" inbox.

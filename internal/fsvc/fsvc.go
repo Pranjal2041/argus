@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -37,6 +38,75 @@ type HomeResult struct {
 	Home  string   `json:"home"`
 	Roots []string `json:"roots"` // "/" on Unix, drive letters on Windows
 	Sep   string   `json:"sep"`   // path separator
+}
+
+// StatResult is the response for /fs/stat: a path resolved + classified on THIS
+// host, so a terminal-clicked path can be routed into Files without the client
+// guessing remote filesystem semantics (relative vs absolute, ~, $VAR, the OS
+// separator).
+type StatResult struct {
+	Path   string `json:"path"`   // absolute, cleaned, platform-native
+	Name   string `json:"name"`   // base name
+	IsDir  bool   `json:"isDir"`
+	Exists bool   `json:"exists"`
+	Size   int64  `json:"size"`
+}
+
+// Stat resolves `path` (which may be relative, or start with ~ or $VAR) against
+// `base` (the clicking session's working directory), cleans it to an absolute
+// platform-native path, and reports whether it exists and is a directory. All
+// resolution happens on the host that owns the path, so Windows `\` vs Unix `/`,
+// symlinks, and the user's real $HOME/$VAR are handled correctly.
+func Stat(path, base string) StatResult {
+	p := strings.TrimSpace(path)
+	// ~ and ~/… → the broker user's home.
+	if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = home
+		}
+	} else if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[2:])
+		}
+	}
+	// $VAR / ${VAR} (the implicit-link detector matches these).
+	if strings.Contains(p, "$") {
+		p = os.ExpandEnv(p)
+	}
+
+	// Build resolution candidates, in priority order, then return the first that
+	// exists (or the first as a best-effort path if none do).
+	var cands []string
+	rooted := strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
+	base = strings.TrimSpace(base)
+	switch {
+	case filepath.IsAbs(p):
+		cands = []string{p}
+	case runtime.GOOS == "windows" && rooted:
+		// On Windows the terminal's link detector matches `X:/path` starting at the
+		// `/`, dropping the drive letter — so we receive a driveless-rooted path.
+		// It's rooted on SOME drive: probe each drive root, then fall back to the cwd.
+		for _, root := range systemRoots() {
+			cands = append(cands, filepath.Join(root, p))
+		}
+		if base != "" {
+			cands = append(cands, filepath.Join(base, p))
+		}
+	default: // relative → resolve against the session cwd
+		if base != "" {
+			cands = append(cands, filepath.Join(base, p))
+		}
+		cands = append(cands, p)
+	}
+
+	for _, c := range cands {
+		c = filepath.Clean(c)
+		if fi, err := os.Stat(c); err == nil {
+			return StatResult{Path: c, Name: filepath.Base(c), IsDir: fi.IsDir(), Exists: true, Size: fi.Size()}
+		}
+	}
+	best := filepath.Clean(cands[0])
+	return StatResult{Path: best, Name: filepath.Base(best)}
 }
 
 // Home returns the user's home dir, the platform's filesystem roots, and the

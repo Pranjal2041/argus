@@ -18,6 +18,7 @@ struct CodeMirrorView: NSViewRepresentable {
     let path: String        // document identity — content is pushed only when this changes
     let fontSize: CGFloat
     let editable: Bool
+    let scrollToLine: Int?  // jump here once this file loads (terminal cmd+click)
     let onChange: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onChange: onChange) }
@@ -32,6 +33,7 @@ struct CodeMirrorView: NSViewRepresentable {
         wv.layer?.backgroundColor = paneBG.cgColor
         context.coordinator.webView = wv
         context.coordinator.pending = (text, filename, path, fontSize, editable)
+        context.coordinator.scrollLine = scrollToLine
         let dir = Bundle.main.resourceURL!.appendingPathComponent("codemirror")
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
         return wv
@@ -39,7 +41,7 @@ struct CodeMirrorView: NSViewRepresentable {
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
         context.coordinator.onChange = onChange
-        context.coordinator.update(text, filename, path, fontSize, editable)
+        context.coordinator.update(text, filename, path, fontSize, editable, scrollToLine)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -50,6 +52,8 @@ struct CodeMirrorView: NSViewRepresentable {
         private var loadedPath: String?     // which file's content is in the editor
         private var curFont: CGFloat = 0
         private var curEditable = false
+        var scrollLine: Int? = nil          // requested jump line for the loaded file
+        private var curScrollLine: Int? = nil
 
         init(onChange: @escaping (String) -> Void) { self.onChange = onChange }
 
@@ -61,20 +65,30 @@ struct CodeMirrorView: NSViewRepresentable {
         // (e.g. a keystroke flipping `dirty`), the editor owns its content — we never
         // push text back in, so the cursor/scroll position is preserved. A bumped
         // saveTick pulls the LIVE content out via getContent() for a save.
-        func update(_ text: String, _ name: String, _ path: String, _ font: CGFloat, _ editable: Bool) {
+        func update(_ text: String, _ name: String, _ path: String, _ font: CGFloat, _ editable: Bool, _ scrollLine: Int?) {
+            self.scrollLine = scrollLine
             guard ready else { pending = (text, name, path, font, editable); return }
             if loadedPath != path {
                 load(text, name, path, font, editable)
             } else {
                 if curFont != font { setFont(font) }
                 if curEditable != editable { setEditable(editable) }
+                maybeScroll()   // re-clicking a different line in the same open file
             }
         }
         private func load(_ text: String, _ name: String, _ path: String, _ font: CGFloat, _ editable: Bool) {
             loadedPath = path
+            curScrollLine = nil   // new document → allow a jump
             webView?.evaluateJavaScript("window.UTEditor.setContent(\(js(text)), \(js(name)), \(editable ? "false" : "true"))")
             curEditable = editable
             setFont(font)
+            maybeScroll()
+        }
+        /// Jump to the requested line once (per file / per line change).
+        private func maybeScroll() {
+            guard let line = scrollLine, line != curScrollLine else { return }
+            curScrollLine = line
+            webView?.evaluateJavaScript("window.UTEditor.gotoLine(\(line))")
         }
         private func setFont(_ font: CGFloat) {
             curFont = font
@@ -187,7 +201,8 @@ struct FileContentView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         case .text(let t, let name, let path):
             CodeMirrorView(text: t, filename: name, path: path, fontSize: editorBaseFont * tab.zoom,
-                           editable: tab.editing, onChange: { tab.editorChanged($0) })   // persists; no .id
+                           editable: tab.editing, scrollToLine: tab.pendingLine,
+                           onChange: { tab.editorChanged($0) })   // persists; no .id
         case .image(let img):
             ImageViewer(image: img, zoom: tab.zoom).id(tab.selection ?? "")
         case .pdf(let data):
