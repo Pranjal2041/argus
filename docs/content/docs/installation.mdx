@@ -86,6 +86,22 @@ The Windows broker hosts its ConPTY sessions **in-process** (unlike tmux, which 
 daemon). Restarting the broker ends its live sessions — check what's running before you redeploy.
 </Callout>
 
+**Windows Defender may quarantine the binaries.** Unsigned Go executables that spawn consoles
+and do networking trip Defender's ML heuristic (e.g. `Program:Win32/Contebrew.A!ml`) — a false
+positive. If `ut-broker.exe` or `ut.exe` disappears after you copy or run it, that's why. Add a
+Defender exclusion for the install folder (PowerShell, **as admin**) — do this *before*
+re-copying the binary, or the fresh copy gets re-quarantined:
+
+```powershell
+Add-MpPreference -ExclusionPath "C:\ProgramData\ut"
+Add-MpPreference -ExclusionProcess "ut-broker.exe","ut.exe"
+```
+
+Authenticode-signing the binaries reduces this over time (via publisher reputation) but doesn't
+fix it instantly; submitting the file to Microsoft's
+[false-positive portal](https://www.microsoft.com/en-us/wdsi/filesubmission) clears a specific
+detection for everyone.
+
 </Tab>
 
 <Tab value="Web fallback">
