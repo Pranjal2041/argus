@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# ut — a drop-in for tmux that publishes this tmux server to your tailnet.
+#
+# Usage:
+#   ut [name]               attach or create a session (default name = current dir)
+#   ut -L <socket> [name]   use a separate tmux server + broker, like `tmux -L`
+#
+# Model (DESIGN.md "Core principle"): the first `ut` on a tmux socket lazily starts
+# ONE broker for that server; later `ut` reuse it. The broker joins the tailnet via
+# tsnet using a SINGLE shared key (~/.universal-tmux/authkey), but keeps its device
+# IDENTITY node-local (/tmp) — so dozens of jobs across nodes each become their own
+# device off that one key and never clash. With no key it serves on loopback (your
+# Mac, already on the tailnet). The client discovers brokers by the /whoami
+# handshake, so device names don't matter to it.
+set -euo pipefail
+
+UT_HOME="${UT_HOME:-$HOME/.universal-tmux}"            # shared (NFS ok): binary + the one key
+BROKER="${UT_BROKER:-$UT_HOME/ut-broker}"
+PORT="${UT_PORT:-8722}"
+USERNAME="$(id -un 2>/dev/null || echo user)"
+LOCAL="${UT_LOCAL_DIR:-/tmp/ut-$USERNAME}"             # NODE-LOCAL: identity/state/pidfiles (never NFS)
+
+# --- args: optional `-L <socket>`, then optional session name --------------
+socket="ut"
+if [ "${1:-}" = "-L" ]; then
+  [ $# -ge 2 ] || { echo "ut: -L needs a socket name" >&2; exit 2; }
+  socket="$2"; shift 2
+fi
+explicit="${1:-}"                                       # explicit session name (optional)
+sanitize() { printf '%s' "$1" | tr ':.' '__'; }         # tmux forbids ':' and '.' in names
+
+command -v tmux >/dev/null 2>&1 || { echo "ut: tmux not found in PATH" >&2; exit 1; }
+mkdir -p "$LOCAL"
+PIDFILE="$LOCAL/broker-$socket.pid"
+LOGFILE="$LOCAL/broker-$socket.log"
+
+# A broker for this socket is already up if its tmux-hosted supervisor session is
+# alive (it respawns the broker, so this also covers the broker's restart gap), or
+# its pidfile points at a live ut-broker (tsnet brokers do NOT listen on loopback),
+# or — local mode — something answers on loopback.
+broker_running() {
+  local pid
+  if tmux -L "$socket" has-session -t "_ut-$socket" 2>/dev/null; then
+    return 0
+  fi
+  if [ -f "$PIDFILE" ]; then
+    pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && ps -p "$pid" -o command= 2>/dev/null | grep -q "ut-broker"; then
+      return 0
+    fi
+  fi
+  curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/sessions" >/dev/null 2>&1
+}
+
+# --- session: a NAMED arg reconnects (attach-or-create); NO name makes a NEW
+#     session every time, named after the dir with a numeric suffix when taken —
+#     so you CAN run several sessions from one directory, exactly like plain tmux.
+if [ -n "$explicit" ]; then
+  name="$(sanitize "$explicit")"; [ -n "$name" ] || name="main"
+  tmux -L "$socket" new-session -A -d -s "$name" -c "$PWD" 2>/dev/null || true
+else
+  base="$(sanitize "$(basename "$PWD")")"; [ -n "$base" ] || base="main"
+  name="$base"; n=2
+  while tmux -L "$socket" has-session -t "=$name" 2>/dev/null; do name="$base-$n"; n=$((n+1)); done
+  tmux -L "$socket" new-session -d -s "$name" -c "$PWD" 2>/dev/null || true
+fi
+
+# --- ensure exactly one broker is serving this socket ----------------------
+# The broker is HOSTED INSIDE a hidden tmux session on this same -L socket, not
+# launched with a bare `nohup &`. This matters on shared/cluster nodes: `nohup`
+# only blocks SIGHUP, so when the launching SSH/login session is torn down (e.g.
+# a SLURM cluster's pam_slurm_adopt extern-step cleanup) a backgrounded broker gets reaped —
+# while tmux servers survive because tmux fully daemonizes (setsid into its own
+# session). Hosting the broker under tmux gives it that same survival, and a
+# respawn loop restarts it if it ever exits. The supervisor session name is
+# hidden from clients (internalSessionPrefix in internal/tmux).
+if ! broker_running; then
+  [ -x "$BROKER" ] || { echo "ut: broker not found at $BROKER (set UT_BROKER)" >&2; exit 1; }
+  host="ut-$(hostname -s 2>/dev/null || hostname)"
+  [ "$socket" = "ut" ] || host="${host}-${socket}"
+
+  # Self-restarting supervisor (node-local, never NFS). It reads the authkey at
+  # runtime rather than embedding it, so the key never lands in this script file.
+  SUP="$LOCAL/supervise-$socket.sh"
+  cat > "$SUP" <<SUPEOF
+#!/usr/bin/env bash
+# ut broker supervisor — hosted by tmux so it inherits tmux's daemonization and
+# outlives SSH/login teardown. Restarts the broker if it ever exits.
+exec >>'$LOGFILE' 2>&1
+KEY="\$(cat '$UT_HOME/authkey' 2>/dev/null || true)"
+[ -n "\$KEY" ] || KEY="\${TS_AUTHKEY:-}"
+while true; do
+  if [ -n "\$KEY" ]; then
+    # tailnet mode: per-node device, NODE-LOCAL identity (never NFS), one shared key.
+    TS_AUTHKEY="\$KEY" '$BROKER' --tmux-socket '$socket' --session '$name' \\
+      --listen ':${PORT}' --tsnet-host '$host' --tsnet-dir '$LOCAL/tsnet-$socket' &
+  else
+    # local mode: your Mac is already on the tailnet, so serve on loopback.
+    '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${PORT}' &
+  fi
+  BPID=\$!
+  echo "\$BPID" > '$PIDFILE'
+  echo "[supervisor \$(date '+%F %T')] broker pid \$BPID started"
+  wait "\$BPID"
+  echo "[supervisor \$(date '+%F %T')] broker exited \$?, restart in 2s"
+  sleep 2
+done
+SUPEOF
+  chmod 700 "$SUP"
+  tmux -L "$socket" kill-session -t "_ut-$socket" 2>/dev/null || true
+  tmux -L "$socket" new-session -d -s "_ut-$socket" "$SUP" 2>/dev/null || true
+fi
+
+# --- behave exactly like tmux: attach to the session ----------------------
+[ -n "${UT_NO_ATTACH:-}" ] && exit 0      # test hook: skip the interactive attach
+exec tmux -L "$socket" attach -t "$name"

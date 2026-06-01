@@ -1,0 +1,37 @@
+# Go build output
+/bin/
+*.test
+*.out
+
+# Node / web deps
+web/node_modules/
+
+# Tailscale tsnet local state
+*-tsstate/
+ts-state/
+*.tsstate/
+
+# Swift build artifacts
+.build/
+clients/macos/.build/
+clients/macos/Argus.app/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# CodeMirror bundle build deps (the bundled Resources/codemirror/editor.js is committed)
+clients/macos/codemirror/node_modules/
+
+# gomobile-generated sources jar (paired with the ignored uttsnet.aar)
+clients/android/app/libs/uttsnet-sources.jar
+
+# local secrets (image API keys, etc.) — never commit
+.env
+
+# icon-generation explorations (keep brand/argus-*.png + scripts)
+brand/icons/
+brand/icons_v1_peacock/
+brand/icons_v2_palettes/
+brand/__pycache__/

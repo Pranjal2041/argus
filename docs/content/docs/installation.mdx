@@ -1,0 +1,98 @@
+---
+title: Installation
+description: Get the broker and each client running.
+---
+
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+<Callout title="Prerequisite — Tailscale">
+Argus rides your [Tailscale](https://tailscale.com) tailnet. Your machines (and the app) need
+to belong to the same tailnet. Brokers join rootlessly via an auth key; a Mac or Windows host
+that's already on the tailnet can simply serve on loopback.
+</Callout>
+
+## Build the broker
+
+The broker is a single Go binary. Build it once per host architecture:
+
+```sh
+go build -o bin/ut-broker ./cmd/ut-broker
+```
+
+<Tabs items={['Broker', 'macOS app', 'Android app', 'Windows', 'Web fallback']}>
+
+<Tab value="Broker">
+
+Run the broker on any host you want to reach. On a host that's already on your tailnet you can
+serve on loopback:
+
+```sh
+./bin/ut-broker --listen 127.0.0.1:8722
+```
+
+Or use the [`ut` CLI](/docs/cli) — a drop-in for `tmux` that starts the broker for you and
+publishes the tmux server to your tailnet:
+
+```sh
+ut                 # attach/create a session in $PWD and publish this server
+ut my-experiment   # a named session (attach-or-create)
+ut -L scratch      # a separate tmux server + broker, like `tmux -L`
+```
+
+On a cluster, run `ut` inside your allocation; the first `ut` lazily starts the broker as a
+child of that allocation's process tree.
+
+</Tab>
+
+<Tab value="macOS app">
+
+```sh
+cd clients/macos
+swift build -c release && bash build-app.sh
+cp -R Argus.app /Applications/ && open /Applications/Argus.app
+```
+
+The app discovers brokers automatically by probing your tailnet — no hostnames to configure.
+Terminal font size and UI scale are independently adjustable in Settings.
+
+</Tab>
+
+<Tab value="Android app">
+
+```sh
+cd clients/android
+bash dev-install.sh   # builds the debug APK and installs to the connected device
+```
+
+The phone joins the tailnet itself via an embedded `tsnet` core — paste a Tailscale auth key in
+the app; no system Tailscale client or manual hostnames required. The Android client includes
+the file explorer, port forwarding, and a built-in PDF viewer.
+
+</Tab>
+
+<Tab value="Windows">
+
+Build the broker for Windows and run it on the box — it speaks ConPTY behind the same
+`SessionProvider` interface:
+
+```sh
+GOOS=windows GOARCH=amd64 go build -o ut-broker.exe ./cmd/ut-broker
+```
+
+The macOS and Android apps reach a Windows host like any other broker.
+
+<Callout type="warn">
+The Windows broker hosts its ConPTY sessions **in-process** (unlike tmux, which is a separate
+daemon). Restarting the broker ends its live sessions — check what's running before you redeploy.
+</Callout>
+
+</Tab>
+
+<Tab value="Web fallback">
+
+A zero-install **xterm.js** client lives in `web/`. Point it at a broker's `--listen` address
+for a browser terminal when you can't install the native app.
+
+</Tab>
+
+</Tabs>

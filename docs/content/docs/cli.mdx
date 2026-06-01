@@ -1,0 +1,51 @@
+---
+title: The ut CLI
+description: A drop-in for tmux that publishes a host's tmux server to your tailnet.
+---
+
+`ut` is a thin wrapper around `tmux`. It behaves like `tmux` for attaching and creating
+sessions, and additionally makes sure exactly **one broker** is running for the chosen tmux
+socket so the server is reachable from the Argus app.
+
+## Usage
+
+```sh
+ut [name]               # attach or create a session (default name = current dir)
+ut -L <socket> [name]   # use a separate tmux server + broker, like `tmux -L`
+```
+
+- A **named** argument reconnects (attach-or-create), exactly like `tmux new-session -A`.
+- **No** name makes a new session every time, named after the directory with a numeric suffix
+  when the name is taken — so you can run several sessions from one directory.
+
+## The model
+
+The first `ut` on a socket lazily starts one broker for that server; later invocations reuse it.
+The broker joins the tailnet via `tsnet` using a single shared key
+(`~/.universal-tmux/authkey`) but keeps its device **identity** node-local — so dozens of jobs
+across nodes each become their own tailnet device off that one key and never clash. With no key,
+the broker serves on loopback (useful on a Mac that's already on the tailnet).
+
+The client discovers brokers by the [`/whoami` handshake](/docs/architecture#discovery--capability-based-never-by-hostname),
+so device names don't matter to it.
+
+## Environment
+
+| variable | default | meaning |
+|---|---|---|
+| `UT_HOME` | `$HOME/.universal-tmux` | shared dir (NFS ok): the broker binary + the one auth key |
+| `UT_BROKER` | `$UT_HOME/ut-broker` | path to the broker binary |
+| `UT_PORT` | `8722` | port the broker listens on |
+| `UT_LOCAL_DIR` | `/tmp/ut-$USER` | **node-local** state: identity, pidfiles, logs (never NFS) |
+
+<Callout type="info">
+Isolation between two allocations on one node is opt-in: each passes a distinct socket
+(`ut -L <name>`), exactly as with `tmux`. By default they share the node's default server and
+one broker.
+</Callout>
+
+## tmux version notes
+
+- Control mode works on **tmux 3.2a** (subscriptions and `pause-after` confirmed).
+- **OSC 8 ⌘-click** to open files needs **tmux ≥ 3.4** — build 3.5a/3.6 into `$HOME/local`
+  for fresh sessions; never `kill-server` a shared one.

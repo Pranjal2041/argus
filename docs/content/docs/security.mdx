@@ -1,0 +1,46 @@
+---
+title: Security model
+description: Why there is nothing public to breach.
+---
+
+Argus is designed so there is **no central service to trust or attack**. Every component runs on
+your own machines and is reachable only over your private tailnet.
+
+## Tailnet-only reach
+
+All traffic — terminals, files, ports — rides your **Tailscale tailnet** (WireGuard). Brokers
+listen on the tailnet (or loopback) and are reachable only by devices that belong to your
+tailnet. Nothing is exposed to the public internet.
+
+## No central server
+
+There is no backend, no relay, no shared database. The app dials each host's broker **directly**,
+peer-to-peer. A compromise of one host doesn't hand over the others, and a host that goes away
+simply drops off the map. A dead host's broker auto-removes its tailnet device because it joins
+with an **ephemeral** key.
+
+## Identity handshake
+
+Discovery requires the broker identity handshake:
+
+```
+GET /whoami  →  { "marker": "universal-tmux-broker", "name": "<display name>" }
+```
+
+The client trusts only peers that return this marker, so an unrelated service that happens to
+listen on port `8722` is never mistaken for a broker. A broker only ever serves the host it was
+started on.
+
+## Secrets
+
+- Tailscale auth keys are read from `~/.universal-tmux/authkey` (mode `600`) and are **never**
+  committed — the repository only contains a `tskey-auth-…` placeholder.
+- Image-generation and other API keys live in a git-ignored `.env`.
+- The full git history has been scanned to confirm no real keys, tokens, or passwords were ever
+  committed.
+
+<Callout type="warn">
+Mutating broker actions (rename / kill / write / delete) are reachable by anything on your
+tailnet. Keep your tailnet ACLs tight; an optional `tag:utmux-broker` ACL can gate exactly which
+devices may reach brokers.
+</Callout>

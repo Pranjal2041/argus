@@ -1,0 +1,46 @@
+---
+title: Introduction
+description: One watchful eye over every coding agent, on every machine.
+---
+
+**Argus** is a native app (macOS · Android · Windows) that reaches every `claude`
+coding-agent session across all your machines at once — your Mac, SLURM/HPC clusters,
+Windows boxes, your phone — over [Tailscale](https://tailscale.com), peer-to-peer, with
+**no central server**.
+
+Beyond terminals it's a cross-host **file explorer + editor** and a **port-forward hub**:
+one calm pane of glass over a sprawl of agents and compute.
+
+<Callout title="Formerly universal_tmux">
+Argus is named for **Argus Panoptes**, the hundred-eyed giant of Greek myth who watched over
+everything. The `ut` CLI and the per-host broker keep the old `universal_tmux` name
+internally — it's load-bearing for tailnet discovery.
+</Callout>
+
+## Why it exists
+
+Coding agents now run *everywhere* — a few on your laptop, a dozen on a cluster behind SLURM,
+some on a Windows box, maybe one on your phone. Checking on them means a drawer full of SSH
+sessions, port-forwards, and `tmux attach`, each tied to one host.
+
+Argus collapses all of that into a single client that sees **every session on every machine**
+and tells you which agents are **working**, **waiting on you**, or **idle** — so your
+attention goes where it's needed instead of hunting for it. It does this without a backend:
+each host runs a small broker, and the app dials those brokers directly over your tailnet.
+
+## The three pillars
+
+<Cards>
+  <Card title="Terminals" href="/docs/installation" description="Stream any session live — tmux control-mode on Unix, ConPTY on Windows — over a binary WebSocket, with reflow, 100k scrollback, and auto-reconnect." />
+  <Card title="Files" href="/docs/files" description="Browse any host's filesystem, edit text in a real CodeMirror editor, preview images / PDF / media, upload and download." />
+  <Card title="Ports" href="/docs/ports" description="Bind a local port and tunnel it over the tailnet to any remote broker — no ssh -L juggling." />
+</Cards>
+
+## Read next
+
+<Cards>
+  <Card title="Architecture" href="/docs/architecture" description="The layered design: SessionProvider, broker, tailnet transport, native clients." />
+  <Card title="Installation" href="/docs/installation" description="Get the broker and each client running." />
+  <Card title="The ut CLI" href="/docs/cli" description="A drop-in for tmux that publishes a host to your tailnet." />
+  <Card title="Security model" href="/docs/security" description="Why there is nothing public to breach." />
+</Cards>

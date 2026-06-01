@@ -1,0 +1,43 @@
+---
+title: Files
+description: A cross-host file explorer, viewer, and editor that rides the same broker.
+---
+
+Files is the third pillar, alongside terminals and ports. It's a cross-host file browser with a
+real editor that rides the **same per-host broker** you already run everywhere — so there's
+nothing extra to deploy. The terminal stays the main interface; Files is a secondary, tabbed
+window.
+
+## What it does
+
+- **Browse** any host's filesystem (Mac, Linux, Windows) in a flat, dense, Explorer-style tree.
+- **Reveal from a session** — jump straight to a session's working directory on its host.
+- **View** anything — source with syntax highlighting, images, PDF, audio/video, binary.
+- **Edit** text in a real editor and save back atomically.
+- **Transfer** — upload and download files, with progress.
+- **Search** — filter the current directory client-side.
+
+## How it works
+
+The transport is **broker endpoints**, not a separate service or port — the same rationale as
+the port hub. The broker exposes a small `/fs/*` API:
+
+| endpoint | purpose |
+|---|---|
+| `GET /fs/home` | the host's home directory |
+| `GET /fs/list` | list a directory (entries carry full absolute paths) |
+| `GET /fs/read` | stream a file (`Range` + content-type via `http.ServeContent`) |
+| `POST /fs/write` | write a file atomically (temp + rename) |
+| `POST /fs/mkdir` | create a directory |
+| `POST /fs/rename` | rename / move |
+| `POST /fs/delete` | delete |
+
+The text engine is **CodeMirror 6** running in a `WKWebView` on macOS — read-only for the
+viewer, editable for the editor — with syntax highlighting for dozens of languages. Media uses
+native players (AppKit `AVPlayerView` for video). The Android client renders PDFs with the
+platform `PdfRenderer`.
+
+<Callout type="info">
+The editor and the folder/interface fonts scale independently, and content panes support
+⌘+ / ⌘− / ⌘0 zoom.
+</Callout>

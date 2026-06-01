@@ -1,0 +1,29 @@
+---
+title: Ports
+description: A port-forward hub over the tailnet — no ssh -L juggling.
+---
+
+The port hub lets you reach a service running on any remote host as if it were local. Bind a
+port on your machine and Argus tunnels it over the tailnet to the chosen broker, which connects
+to the target on its own host.
+
+## What it does
+
+- **Forward a local port** to `host:port` on any remote broker.
+- **Discover listeners** — the broker reports the ports currently listening on its host, so you
+  can forward one with a tap instead of remembering numbers.
+- **Manage forwards** — see active tunnels and tear them down.
+
+## How it works
+
+A `forward.Manager` binds the local port and tunnels each connection over the WebSocket to the
+remote broker's `/forward` endpoint, which dials the target locally. Because the broker is
+already your universal per-host reach, the forward needs no extra daemon or open firewall port.
+
+On Android, the forward agent runs **inside the embedded `tsnet` core** (`Engine.StartForward`),
+so the phone can forward ports over the tailnet without a system Tailscale client.
+
+<Callout type="info">
+Listener discovery is host-aware: `lsof`-style enumeration on Unix, `netstat -ano` on Windows
+(IPv4 and IPv6).
+</Callout>

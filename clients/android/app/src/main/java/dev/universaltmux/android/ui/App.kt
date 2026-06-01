@@ -1,0 +1,344 @@
+package dev.universaltmux.android
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SettingsEthernet
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.launch
+
+private val ink = Color(0xFF1A1B26)
+private val panel = Color(0xFF16161E)
+private val accent = Color(0xFF7AA2F7)
+private val waiting = Color(0xFFE0AF68)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun App(vm: AppViewModel) {
+    MaterialTheme(colorScheme = darkColorScheme(primary = accent, background = ink, surface = panel)) {
+        val drawerState = rememberDrawerState(DrawerValue.Open)
+        val scope = rememberCoroutineScope()
+        var showAdd by remember { mutableStateOf(false) }
+        var showKey by remember { mutableStateOf(false) }
+        var newSessionFor by remember { mutableStateOf<Broker?>(null) }
+        var showAbout by remember { mutableStateOf(false) }
+        var screen by remember { mutableStateOf(0) }   // 0 = terminal, 1 = files, 2 = ports
+
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            // Only allow the swipe gesture while the drawer is already open (to swipe it
+            // closed). When closed, the edge-swipe is off so it can't hijack terminal
+            // scrolling or pop open mid-scroll — open it with the top-left menu button.
+            gesturesEnabled = drawerState.isOpen,
+            drawerContent = {
+                ModalDrawerSheet(drawerContainerColor = panel) {
+                    Sidebar(
+                        vm = vm,
+                        onSelect = { b, s -> vm.selected = b to s; scope.launch { drawerState.close() } },
+                        onAddBroker = { showAdd = true },
+                        onNewSession = { newSessionFor = it },
+                        onAuthKey = { showKey = true },
+                        onAbout = { showAbout = true },
+                    )
+                }
+            },
+        ) {
+            Scaffold(
+                containerColor = ink,
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            val sel = vm.selected
+                            Text(
+                                when {
+                                    screen == 1 -> "Files"
+                                    screen == 2 -> "Ports"
+                                    sel != null -> "${sel.second}  ·  ${sel.first.name}"
+                                    else -> "Argus"
+                                },
+                                maxLines = 1,
+                            )
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Filled.Menu, "Sessions")
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { screen = if (screen == 1) 0 else 1 }) {
+                                Icon(if (screen == 1) Icons.Filled.Terminal else Icons.Filled.Folder,
+                                    "Files", tint = if (screen == 1) accent else Color.White)
+                            }
+                            IconButton(onClick = { screen = if (screen == 2) 0 else 2 }) {
+                                Icon(Icons.Filled.SettingsEthernet, "Ports", tint = if (screen == 2) accent else Color.White)
+                            }
+                            IconButton(onClick = { vm.refreshAll() }) { Icon(Icons.Filled.Refresh, "Refresh") }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = panel, titleContentColor = Color.White),
+                    )
+                },
+            ) { pad ->
+                Box(Modifier.padding(pad).fillMaxSize().background(ink)) {
+                    if (screen == 1) {
+                        FilesScreen(vm)
+                    } else if (screen == 2) {
+                        PortsScreen(vm)
+                    } else {
+                        val sel = vm.selected
+                        if (sel == null) {
+                            Text(
+                                "Open the menu to add a broker and pick a session.",
+                                color = Color(0xFF9AA5CE),
+                                modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                            )
+                        } else {
+                            key(sel.first.id, sel.second) { TerminalScreen(sel.first, sel.second) }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showAdd) AddBrokerDialog(vm, onDismiss = { showAdd = false })
+        if (showKey) AuthKeyDialog(vm, onDismiss = { showKey = false })
+        if (showAbout) AboutDialog(onDismiss = { showAbout = false })
+        newSessionFor?.let { b -> NewSessionDialog(b, vm, onDismiss = { newSessionFor = null }) }
+    }
+}
+
+@Composable
+private fun AboutDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Argus") },
+        text = {
+            Column {
+                Text(
+                    "One watchful eye over every coding agent, on every machine.",
+                    color = Color.White, fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Reach every claude session across your Mac, clusters, Windows, and phone — terminals, ports, and files — over Tailscale, peer-to-peer. No central server.",
+                    color = Color(0xFF9AA5CE), fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Named for Argus Panoptes, the hundred-eyed watcher.",
+                    color = Color(0xFF565F89), fontSize = 11.sp,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun AuthKeyDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+    var key by remember { mutableStateOf(vm.authKey) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Tailnet key") },
+        text = {
+            Column {
+                Text(
+                    "Paste a Tailscale auth key. The app joins your tailnet itself and auto-discovers brokers — no Tailscale app or manual hostnames needed.",
+                    fontSize = 13.sp, color = Color(0xFF9AA5CE),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = key, onValueChange = { key = it }, singleLine = true, placeholder = { Text("tskey-auth-…") })
+                Text("status: ${vm.engineStatus}", color = Color(0xFF9AA5CE), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.joinTailnet(key); onDismiss() }) { Text("Join & discover") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun Sidebar(
+    vm: AppViewModel,
+    onSelect: (Broker, String) -> Unit,
+    onAddBroker: () -> Unit,
+    onNewSession: (Broker) -> Unit,
+    onAuthKey: () -> Unit,
+    onAbout: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize().padding(top = 12.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f).clickable(onClick = onAbout)) {
+                Text("Argus", color = Color.White, fontSize = 18.sp)
+                Text("tailnet: ${vm.engineStatus}", color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
+            }
+            IconButton(onClick = onAbout) { Icon(Icons.Filled.Info, "About", tint = Color(0xFF565F89)) }
+            IconButton(onClick = onAuthKey) { Icon(Icons.Filled.VpnKey, "Tailnet key", tint = Color(0xFF9AA5CE)) }
+            IconButton(onClick = onAddBroker) { Icon(Icons.Filled.Add, "Add broker", tint = accent) }
+        }
+        Divider(color = Color(0xFF2A2B3C))
+        LazyColumn(Modifier.weight(1f)) {
+            items(vm.brokers, key = { it.id }) { b ->
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(b.name, color = accent, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { onNewSession(b) }) { Icon(Icons.Filled.Add, "New session", tint = Color(0xFF9AA5CE)) }
+                    IconButton(onClick = { vm.removeBroker(b) }) { Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFF565F89)) }
+                }
+                val list = vm.sessions[b.id].orEmpty()
+                if (list.isEmpty()) {
+                    Text("no sessions", color = Color(0xFF565F89), fontSize = 12.sp,
+                        modifier = Modifier.padding(start = 24.dp, bottom = 6.dp))
+                } else {
+                    list.forEach { s ->
+                        val sel = vm.selected
+                        val active = sel?.first?.id == b.id && sel.second == s.name
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable { onSelect(b, s.name) }
+                                .background(if (active) Color(0xFF24283B) else Color.Transparent)
+                                .padding(start = 24.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(Modifier.size(8.dp).background(
+                                if (s.state == "waiting") waiting else if (s.state == "working") accent else Color(0xFF565F89),
+                                RoundedCornerShape(4.dp),
+                            ))
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(s.name, color = Color.White, fontSize = 14.sp, maxLines = 1)
+                                if (s.path.isNotEmpty())
+                                    Text(s.path, color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+            if (vm.brokers.isEmpty()) {
+                item {
+                    Text(
+                        "No brokers yet. Tap + to add one by its tailnet hostname.",
+                        color = Color(0xFF9AA5CE), fontSize = 13.sp,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerminalScreen(broker: Broker, session: String) {
+    val context = LocalContext.current
+    val rt = remember(broker.id, session) { RemoteTerminal(context, broker, session) }
+    DisposableEffect(rt) { onDispose { rt.close() } }
+
+    Column(Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { rt.view },
+            modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
+        )
+        AccessoryKeys(onBytes = { rt.sendBytes(it) }, onKeyboard = { rt.showKeyboard() })
+    }
+}
+
+@Composable
+private fun AccessoryKeys(onBytes: (ByteArray) -> Unit, onKeyboard: () -> Unit) {
+    val keys = listOf(
+        "esc" to byteArrayOf(27),
+        "tab" to byteArrayOf(9),
+        "^C" to byteArrayOf(3),
+        "^Z" to byteArrayOf(26),
+        "↑" to byteArrayOf(27, 91, 65),
+        "↓" to byteArrayOf(27, 91, 66),
+        "←" to byteArrayOf(27, 91, 68),
+        "→" to byteArrayOf(27, 91, 67),
+        "/" to byteArrayOf('/'.code.toByte()),
+        "|" to byteArrayOf('|'.code.toByte()),
+        "~" to byteArrayOf('~'.code.toByte()),
+        "-" to byteArrayOf('-'.code.toByte()),
+    )
+    Row(
+        Modifier.fillMaxWidth().background(panel).horizontalScroll(rememberScrollState())
+            .padding(horizontal = 6.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onKeyboard) { Text("⌨", color = accent, fontSize = 18.sp) }
+        keys.forEach { (label, bytes) ->
+            Box(
+                Modifier.padding(horizontal = 3.dp).size(width = 46.dp, height = 38.dp)
+                    .background(Color(0xFF24283B), RoundedCornerShape(8.dp))
+                    .clickable { onBytes(bytes) },
+                contentAlignment = Alignment.Center,
+            ) { Text(label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 15.sp) }
+        }
+    }
+}
+
+@Composable
+private fun AddBrokerDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+    var host by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add broker") },
+        text = {
+            Column {
+                Text("Tailnet hostname of a node running the broker.", fontSize = 13.sp, color = Color(0xFF9AA5CE))
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = host, onValueChange = { host = it }, singleLine = true,
+                    placeholder = { Text("ut-host.your-tailnet.ts.net") },
+                )
+                vm.lastError?.let { Text(it, color = Color(0xFFF7768E), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
+                if (vm.busy) Text("probing…", color = Color(0xFF9AA5CE), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.addBroker(host); if (!vm.busy) onDismiss() }) { Text("Add") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun NewSessionDialog(broker: Broker, vm: AppViewModel, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New session on ${broker.name}") },
+        text = {
+            OutlinedTextField(
+                value = name, onValueChange = { name = it }, singleLine = true,
+                placeholder = { Text("session name") },
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { if (name.isNotBlank()) { vm.create(broker, name.trim(), null); onDismiss() } }) { Text("Create") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}

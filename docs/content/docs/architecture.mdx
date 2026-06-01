@@ -1,0 +1,64 @@
+---
+title: Architecture
+description: How one client reaches every session on every machine, with no central server.
+---
+
+Argus is built in swappable layers. Only one of them — the **SessionProvider** — knows about
+a specific multiplexer or OS; everything above it is generic.
+
+## Core principle
+
+> `ut` is a drop-in for `tmux`. The unit is the **tmux server (its socket)** — not a SLURM/PBS
+> job — so the same binary works identically on a cluster node, a plain SSH box, or your Mac.
+
+The first `ut` on a socket lazily starts **one broker** for that server; every later `ut`
+reuses it. The broker publishes that server's sessions to your tailnet and exits when the
+server dies, so its device removes itself. You isolate brokers by choosing a different socket
+(`ut -L <name>`), exactly as with `tmux`.
+
+## The layers
+
+<Cards>
+  <Card title="L0 · Substrate" description="The real multiplexer. Unix = tmux in control mode (tmux -CC). Windows = ConPTY directly." />
+  <Card title="L1 · SessionProvider" description="The modular seam: one interface modeled on tmux control-mode vocabulary (list/subscribe/send-keys/spawn/rename/kill). Impl: TmuxControlModeProvider; ConPtyProvider on Windows." />
+  <Card title="L2 · Broker" description="One per tmux socket. Owns a single -CC channel, derives topology from the % notification stream, and exposes one WebSocket per client. Embeds tsnet for a rootless tailnet listener." />
+  <Card title="L3 · Transport" description="Tailscale everywhere (tsnet, rootless, no TUN). Brokers reached directly, peer-to-peer. No central hub, no SSH transport." />
+  <Card title="L4 · Client + renderer" description="Native, macOS-first (AppKit + SwiftTerm). Android in Kotlin/Compose with an embedded tsnet core. xterm.js web client as a zero-install fallback." />
+</Cards>
+
+## Discovery — capability-based, never by hostname
+
+The client does **not** find brokers by hostname or tag. It probes port `8722` on every online
+tailnet peer and accepts only those that answer the broker identity handshake:
+
+```
+GET /whoami  →  { "marker": "universal-tmux-broker", "name": "<display name>" }
+```
+
+So an unrelated service on `8722` is never mistaken for a broker, and brokers need no renaming
+to be found. A `tag:utmux-broker` ACL stays **optional** — used only to gate which devices the
+client may reach. Brokers join with an **ephemeral** key, so a dead one's tailnet device
+auto-removes.
+
+## Protocol
+
+One binary **WebSocket** per client, with a 1-byte opcode framing two lanes on the same socket:
+
+- **raw** — `OUTPUT(pane, bytes)` down; `INPUT(pane, bytes)`, `RESIZE(pane, w, h)` up.
+- **control** — JSON `EVENT` (topology) and request-id `RPC` (list / rename / spawn / open-file).
+
+Flow control uses `refresh-client -f pause-after=N` so a streaming pane can't back up and trip
+tmux's slow-control-client disconnect (`%pause` / `%continue`, confirmed on tmux 3.2a).
+
+## Clusters are not a special case
+
+A cluster is just a machine where you run `ut` inside an allocation. Nothing reads
+`$SLURM_JOB_ID` or any scheduler variable. **Durability = the allocation, not tmux**: the
+scheduler's cgroup tears down every process — broker and tmux server alike — when the job ends,
+so recovery is `--requeue`-style auto-rerun plus a **stable socket name** the client transparently
+reattaches to when the job comes back.
+
+<Callout type="info">
+The broker, the file service, and the port-forward agent all ride the **same** per-host broker
+over the tailnet — so adding Files or Ports needs zero extra deployment.
+</Callout>
