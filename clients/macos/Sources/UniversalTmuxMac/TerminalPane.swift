@@ -14,6 +14,9 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     var onState: ((ConnState) -> Void)?
     /// Forwarded scroll position (0=top … 1=bottom) for the jump-to-bottom pill.
     var onScroll: ((Double) -> Void)?
+    /// A clicked file PATH (not a web URL) on this pane's host, with an optional
+    /// line number — routed to the host's Files window instead of the local Mac.
+    var onOpenPath: ((_ path: String, _ line: Int?) -> Void)?
 
     init(url: URL) {
         view = TerminalView(frame: .zero)
@@ -130,8 +133,66 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) { onScroll?(position) }
-    func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-        if let u = URL(string: link) { NSWorkspace.shared.open(u) }
+    /// Schemes that are universal/network — these open on the Mac, as they should.
+    /// Everything else SwiftTerm hands us (bare paths, `file:` URLs) is a path on the
+    /// REMOTE host this pane is connected to, so it's routed into that host's Files.
+    private static let networkSchemes: Set<String> = [
+        "http", "https", "ftp", "ftps", "mailto", "ssh", "sftp", "git",
+        "tel", "sms", "facetime", "magnet", "ipfs", "ipns", "gemini", "gopher", "news",
+    ]
+
+    func requestOpenLink(source: TerminalView, link rawLink: String, params: [String: String]) {
+        // SwiftTerm's implicit-link matcher (Ghostty line map) sometimes hands back
+        // the matched text duplicated (e.g. "a/b.mdxa/b.mdx") when its heuristic row
+        // group double-counts the line. Collapse an exact doubling first.
+        let link = Self.collapseDoubled(rawLink)
+        // A real network/web URL is host-independent → open it locally on the Mac.
+        if let u = URL(string: link), let scheme = u.scheme?.lowercased(),
+           PaneConn.networkSchemes.contains(scheme) {
+            NSWorkspace.shared.open(u)
+            return
+        }
+        // Otherwise it's a filesystem path that lives on THIS pane's host (the Mac
+        // can't resolve it). Strip a file:// wrapper + a trailing :line[:col], and
+        // hand the path up to be opened in the host's Files window.
+        var path = link
+        if path.lowercased().hasPrefix("file:") { path = Self.pathFromFileURL(path) }
+        let (clean, line) = Self.splitLineSuffix(path)
+        onOpenPath?(clean, line)
+    }
+
+    /// If `s` is exactly its first half repeated (`X+X`), return `X`; else `s`.
+    /// Works around the SwiftTerm implicit-link duplication described above.
+    private static func collapseDoubled(_ s: String) -> String {
+        let n = s.count
+        guard n >= 2, n % 2 == 0 else { return s }
+        let mid = s.index(s.startIndex, offsetBy: n / 2)
+        return s[..<mid] == s[mid...] ? String(s[..<mid]) : s
+    }
+
+    /// `file:///a/b`, `file://host/a/b`, or `file:/a/b` → `/a/b` (host dropped: we
+    /// already know which host this pane is on), percent-decoded.
+    private static func pathFromFileURL(_ s: String) -> String {
+        var r = String(s.dropFirst(5)) // after "file:"
+        if r.hasPrefix("//") {
+            r = String(r.dropFirst(2))                       // "host/path" or "/path"
+            if !r.hasPrefix("/"), let i = r.firstIndex(of: "/") {
+                r = String(r[i...])                          // drop the host authority
+            }
+        }
+        return r.removingPercentEncoding ?? r
+    }
+
+    /// Splits a trailing `:line` or `:line:col` (compiler / linter / traceback
+    /// style) off a path. `foo.py:42:7` → ("foo.py", 42); a plain path → (path, nil).
+    private static let lineSuffixRE = try! NSRegularExpression(pattern: #"^(.+?):(\d+)(?::\d+)?$"#)
+    private static func splitLineSuffix(_ s: String) -> (path: String, line: Int?) {
+        let range = NSRange(s.startIndex..<s.endIndex, in: s)
+        guard let m = lineSuffixRE.firstMatch(in: s, range: range),
+              let pr = Range(m.range(at: 1), in: s),
+              let lr = Range(m.range(at: 2), in: s),
+              let line = Int(s[lr]) else { return (s, nil) }
+        return (String(s[pr]), line)
     }
     func bell(source: TerminalView) {
         switch BellMode(rawValue: UserDefaults.standard.string(forKey: TermPrefs.bellModeKey) ?? TermPrefs.defaultBellMode) ?? .audible {
@@ -189,6 +250,9 @@ final class TerminalController: ObservableObject {
     @Published var connState: [String: ConnState] = [:]
     /// Whether the visible terminal is scrolled to the live bottom.
     @Published var atBottom = true
+    /// Set by the detail view: routes a terminal-clicked path (+ optional line) to
+    /// the Files window for the currently-visible session's host.
+    var openPathHandler: ((_ path: String, _ line: Int?) -> Void)?
 
     private var visible: PaneConn? { lastShownID.flatMap { conns[$0] } }
 
@@ -312,6 +376,7 @@ final class TerminalController: ObservableObject {
             conn = existing
         } else {
             conn = PaneConn(url: url)
+            conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }
             conn.onScroll = { [weak self] pos in
                 guard let self, ref.id == self.lastShownID else { return }
