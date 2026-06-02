@@ -30,7 +30,7 @@ struct UniversalTmuxApp: App {
             CommandGroup(replacing: .pasteboard) {
                 Button("Copy") { NSApplication.shared.sendAction(Selector(("copy:")), to: nil, from: nil) }
                     .keyboardShortcut("c", modifiers: .command)
-                Button("Paste") { NSApplication.shared.sendAction(Selector(("paste:")), to: nil, from: nil) }
+                Button("Paste") { terminals.pasteFromClipboard() }
                     .keyboardShortcut("v", modifiers: .command)
                 Button("Select All") { NSApplication.shared.sendAction(Selector(("selectAll:")), to: nil, from: nil) }
                     .keyboardShortcut("a", modifiers: .command)
