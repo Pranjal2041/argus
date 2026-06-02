@@ -17,6 +17,9 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// A clicked file PATH (not a web URL) on this pane's host, with an optional
     /// line number — routed to the host's Files window instead of the local Mac.
     var onOpenPath: ((_ path: String, _ line: Int?) -> Void)?
+    /// A clicked `localhost:port` dashboard URL on this pane's host — routed to the
+    /// embedded Dashboards window (auto-forwarding the port if the host is remote).
+    var onOpenLocalhost: ((_ port: Int, _ path: String, _ scheme: String) -> Void)?
 
     init(url: URL) {
         view = TerminalView(frame: .zero)
@@ -146,9 +149,21 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // the matched text duplicated (e.g. "a/b.mdxa/b.mdx") when its heuristic row
         // group double-counts the line. Collapse an exact doubling first.
         let link = Self.collapseDoubled(rawLink)
-        // A real network/web URL is host-independent → open it locally on the Mac.
+        // A real network/web URL.
         if let u = URL(string: link), let scheme = u.scheme?.lowercased(),
            PaneConn.networkSchemes.contains(scheme) {
+            // A localhost dashboard URL printed by a session is meaningless on the Mac
+            // (the port is on the session's HOST) → open it in the embedded Dashboards
+            // window, auto-forwarding if the host is remote.
+            if (scheme == "http" || scheme == "https"), let host = u.host?.lowercased(),
+               ["localhost", "127.0.0.1", "0.0.0.0", "::1"].contains(host) {
+                let port = u.port ?? (scheme == "https" ? 443 : 80)
+                var path = u.path.isEmpty ? "/" : u.path
+                if let q = u.query { path += "?\(q)" }
+                onOpenLocalhost?(port, path, scheme)
+                return
+            }
+            // Any other (external) URL is host-independent → open it on the Mac.
             NSWorkspace.shared.open(u)
             return
         }
@@ -253,6 +268,9 @@ final class TerminalController: ObservableObject {
     /// Set by the detail view: routes a terminal-clicked path (+ optional line) to
     /// the Files window for the currently-visible session's host.
     var openPathHandler: ((_ path: String, _ line: Int?) -> Void)?
+    /// Set by the detail view: routes a terminal-clicked localhost URL to the
+    /// Dashboards window for the currently-visible session's host.
+    var openLocalhostHandler: ((_ port: Int, _ path: String, _ scheme: String) -> Void)?
 
     private var visible: PaneConn? { lastShownID.flatMap { conns[$0] } }
 
@@ -377,6 +395,7 @@ final class TerminalController: ObservableObject {
         } else {
             conn = PaneConn(url: url)
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
+            conn.onOpenLocalhost = { [weak self] port, path, scheme in self?.openLocalhostHandler?(port, path, scheme) }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }
             conn.onScroll = { [weak self] pos in
                 guard let self, ref.id == self.lastShownID else { return }
