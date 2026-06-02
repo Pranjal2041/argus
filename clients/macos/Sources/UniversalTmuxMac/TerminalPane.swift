@@ -5,9 +5,12 @@ import SwiftUI
 /// One live terminal: a SwiftTerm view + its broker connection + delegate.
 /// Kept alive for the lifetime of the app session so switching away and back
 /// preserves scrollback and the connection (no reconnect, no reload).
+private struct PasteHome: Decodable { let home: String; let sep: String }
+
 final class PaneConn: NSObject, TerminalViewDelegate {
     let view: TerminalView
     private let client: BrokerClient
+    private let httpBase: String   // broker http(s) base, for uploading pasted images
     private var lastPane = ""
 
     /// Forwarded live connection state (for the header status chip).
@@ -24,6 +27,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     init(url: URL) {
         view = TerminalView(frame: .zero)
         client = BrokerClient(url: url)
+        httpBase = PaneConn.httpBase(from: url)
         super.init()
         view.terminalDelegate = self
         // Keep text selectable. With mouse reporting ON (SwiftTerm's default),
@@ -64,6 +68,59 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// Send raw input to this pane's active pane (op=input, empty pane id).
     func sendInput(_ text: String) {
         client.send(op: Op.input, pane: lastPane, payload: Array(text.utf8))
+    }
+
+    // MARK: image paste (bridge the Mac clipboard to the remote agent)
+
+    /// Upload a pasted clipboard image to the session's HOST and type its path into
+    /// the agent. A remote agent (claude/codex on Babel/Windows) can't read the
+    /// Mac's clipboard, so this is the file-path-bridge approach the community uses.
+    func handleImagePaste(_ png: Data) {
+        guard !httpBase.isEmpty else { return }
+        Task {
+            var home = "", sep = "/"
+            if let u = URL(string: httpBase + "/fs/home"),
+               let (d, _) = try? await URLSession.shared.data(from: u),
+               let h = try? JSONDecoder().decode(PasteHome.self, from: d) {
+                home = h.home; sep = h.sep
+            }
+            guard !home.isEmpty else { return }
+            let folder = home + sep + ".argus-pastes"
+            _ = await self.fsPost("/fs/mkdir", query: ["path": folder])   // ok if it already exists
+            let path = folder + sep + "paste-\(UUID().uuidString.prefix(8)).png"
+            if await self.fsWrite(path: path, data: png) {
+                DispatchQueue.main.async { self.sendInput(path + " ") }
+            } else {
+                DispatchQueue.main.async { NSSound.beep() }
+            }
+        }
+    }
+
+    @discardableResult
+    private func fsPost(_ ep: String, query: [String: String]) async -> Bool {
+        guard var c = URLComponents(string: httpBase + ep) else { return false }
+        c.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = c.url else { return false }
+        var req = URLRequest(url: url); req.httpMethod = "POST"
+        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        return (resp as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    private func fsWrite(path: String, data: Data) async -> Bool {
+        guard var c = URLComponents(string: httpBase + "/fs/write") else { return false }
+        c.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let url = c.url else { return false }
+        var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = data
+        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        return (resp as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// http(s) base for the broker, derived from its ws(s) URL.
+    private static func httpBase(from ws: URL) -> String {
+        var c = URLComponents(url: ws, resolvingAgainstBaseURL: false)
+        c?.scheme = (ws.scheme == "wss") ? "https" : "http"
+        c?.path = ""; c?.query = nil
+        return c?.string ?? ""
     }
 
     /// Style the enclosing scroller to an unobtrusive dark overlay (best-effort).
@@ -274,6 +331,44 @@ final class TerminalController: ObservableObject {
 
     private var visible: PaneConn? { lastShownID.flatMap { conns[$0] } }
 
+    private var keyMonitor: Any?
+    init() {
+        // SwiftTerm's keyDown isn't `open`, so we can't subclass it. A local key
+        // monitor (runs before the view sees the key) lets us add: Shift+Enter →
+        // newline, and ⌃V of a clipboard image → bridge it to the session's host.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // NB: `interceptKey` returns nil to SWALLOW the event — must not `?? event`
+            // it, or a consumed key gets handed back to the view and double-fires.
+            guard let self else { return event }
+            return self.interceptKey(event)
+        }
+    }
+    deinit { if let m = keyMonitor { NSEvent.removeMonitor(m) } }
+
+    /// Returns nil to swallow the event, or the event to let it pass through.
+    private func interceptKey(_ event: NSEvent) -> NSEvent? {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // The Enter keyDown sometimes fires a hair before the Shift bit lands in the
+        // event, so also consult the LIVE modifier state at handler time.
+        let live = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let shiftDown = mods.contains(.shift) || live.contains(.shift)
+        let frView = event.window?.firstResponder as? NSView
+        let inTerm = (frView != nil && visible != nil) && frView!.isDescendant(of: visible!.view)
+        guard inTerm, let conn = visible else { return event }
+        // Shift+Enter → newline (LF), as long as no cmd/ctrl/opt is involved.
+        if (event.keyCode == 36 || event.keyCode == 76),
+           shiftDown, mods.isDisjoint(with: [.command, .control, .option]) {
+            conn.sendInput("\n")   // LF == Ctrl+J == claude/codex "insert newline"
+            return nil
+        }
+        if event.keyCode == 9, mods.contains(.control), mods.isDisjoint(with: [.command, .option]),
+           let png = clipboardImagePNG() {   // ⌃V of an image
+            conn.handleImagePaste(png)
+            return nil
+        }
+        return event
+    }
+
     // MARK: Find + scroll (operate on the visible terminal)
     @discardableResult func findNext(_ term: String) -> Bool {
         guard !term.isEmpty, let v = visible?.view else { return false }
@@ -301,6 +396,16 @@ final class TerminalController: ObservableObject {
         return count
     }
     func scrollToBottom() { visible?.view.scroll(toPosition: 1.0); atBottom = true }
+
+    /// ⌘V: if the clipboard holds an image, bridge it to the visible session's host;
+    /// otherwise do a normal text paste into the terminal.
+    func pasteFromClipboard() {
+        if let png = clipboardImagePNG(), let conn = visible {
+            conn.handleImagePaste(png)
+        } else {
+            NSApplication.shared.sendAction(Selector(("paste:")), to: nil, from: nil)
+        }
+    }
 
     /// Clears the visible terminal's screen + scrollback (Warp-style ⌘K), then
     /// re-applies the theme (reset wipes the palette) and re-sends geometry.
@@ -435,4 +540,19 @@ struct TerminalHostView: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         controller.show(ref: ref, url: url)
     }
+}
+
+/// A PNG of the current clipboard image, or nil if the clipboard isn't an image.
+/// (Screenshots usually land on the pasteboard as TIFF, so convert when needed.)
+func clipboardImagePNG() -> Data? {
+    let pb = NSPasteboard.general
+    if let png = pb.data(forType: .png) { return png }
+    if let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
+        return rep.representation(using: .png, properties: [:])
+    }
+    if let img = NSImage(pasteboard: pb), let tiff = img.tiffRepresentation,
+       let rep = NSBitmapImageRep(data: tiff) {
+        return rep.representation(using: .png, properties: [:])
+    }
+    return nil
 }
