@@ -45,9 +45,11 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows)
   over a binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect,
   create / rename / kill, find-in-terminal, and a cross-machine command palette.
-- **Attention model** — a sidebar of *machines → folders → sessions* with a live state dot
-  per session (`working` / `waiting` / `idle`), detected broker-side from pane content so it
-  works even with nothing attached.
+- **Attention model** — a sidebar of *machines → folders → sessions* with a live state dot per
+  session, **running** (blue) vs **idle** (green). The broker reads it passively from the session
+  screen (`tmux capture-pane` on Unix, the ConPTY output ring on Windows): running = the agent's
+  `esc to interrupt` footer is on screen — Claude Code and Codex both print it only during a turn.
+  No input is sent to the agent, so it works even with nothing attached.
 - **Files** — a cross-host file explorer with a CodeMirror 6 viewer/editor (syntax
   highlighting for dozens of languages), image / PDF / media preview, upload & download with
   progress, and *reveal-from-session* to jump straight to a session's working directory.

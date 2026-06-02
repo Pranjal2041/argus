@@ -20,7 +20,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,54 +56,47 @@ func (p *Provider) Dial(ctx context.Context, name string) (session.Session, erro
 	return c, nil
 }
 
-// waitingPatterns match the last visible line of a pane that indicates an agent
-// (or any program) is BLOCKED on the user — the signal worth routing attention to.
-// Conservative on purpose: ambiguous prompts fall through to "idle" so we don't cry wolf.
-var waitingPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\((y/n|yes/no|y/N|Y/n)\)`),
-	regexp.MustCompile(`(?i)\[(y/n|yes/no|y/N|Y/n)\]`),
-	regexp.MustCompile(`(?i)\b(do you want|are you sure|continue\?|overwrite\?|proceed\?)`),
-	regexp.MustCompile(`(?i)press (enter|return|any key)`),
-	regexp.MustCompile(`(?i)\b(approve|allow|reject|accept)\b.*\?`),
-	regexp.MustCompile(`❯\s*\d`),       // numbered selection (Claude/CLI menus)
-	regexp.MustCompile(`\b1\.\s+\w.*\b2\.\s+\w`), // inline numbered choices
-}
+// interruptHint is the footer string both Claude Code and Codex show while a turn is
+// actively running — Claude: "… · esc to interrupt"; Codex: "Working (… • esc to
+// interrupt)". Its presence on the visible screen is the agent-agnostic "working"
+// signal; its absence means idle. It survives a noisy pane: a server logging in the
+// same window never prints it, so output-activity false positives disappear.
+const interruptHint = "esc to interrupt"
 
-// DetectState classifies a session: "working" if it produced output very
-// recently, else "waiting" if its pane tail looks like a blocking prompt, else
-// "idle". Computed entirely server-side so it works with no client attached.
-func DetectState(socket, name string, activity, now int64) string {
-	if now-activity <= 4 {
-		return "working"
-	}
+// interruptScanLines bounds the scan to the last few non-blank lines — the hint lives
+// in the footer, so checking only the bottom avoids matching the phrase in chat text.
+const interruptScanLines = 6
+
+// DetectState reports "working" if the session's visible screen shows the agent's
+// "esc to interrupt" hint, else "idle". A passive, point-in-time capture-pane read:
+// no history, no background sampler — computed on demand when /sessions is requested.
+func DetectState(socket, name string) string {
 	out, err := exec.Command("tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
 	if err != nil {
 		return "idle"
 	}
-	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
+	if screenHasInterrupt(out) {
+		return "working"
+	}
+	return "idle"
+}
+
+// screenHasInterrupt reports whether interruptHint appears in the last few non-blank
+// lines of a captured screen.
+func screenHasInterrupt(screen []byte) bool {
+	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
+	checked := 0
+	for i := len(lines) - 1; i >= 0 && checked < interruptScanLines; i-- {
 		l := strings.TrimSpace(lines[i])
 		if l == "" {
 			continue
 		}
-		// Examine the last couple of non-empty lines for a blocking prompt.
-		for _, re := range waitingPatterns {
-			if re.MatchString(l) {
-				return "waiting"
-			}
+		checked++
+		if strings.Contains(strings.ToLower(l), interruptHint) {
+			return true
 		}
-		if i > 0 {
-			if prev := strings.TrimSpace(lines[i-1]); prev != "" {
-				for _, re := range waitingPatterns {
-					if re.MatchString(prev) {
-						return "waiting"
-					}
-				}
-			}
-		}
-		break
 	}
-	return "idle"
+	return false
 }
 
 // internalSessionPrefix marks tmux sessions that are ut's own infrastructure
@@ -125,12 +117,11 @@ func ListSessions(socket string) []SessionInfo {
 		return []SessionInfo{}
 	}
 	sessions := []SessionInfo{}
-	now := time.Now().Unix()
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		f := strings.Split(line, "\t")
+		f := strings.SplitN(line, "\t", 5)
 		if len(f) < 4 {
 			continue
 		}
@@ -139,14 +130,14 @@ func ListSessions(socket string) []SessionInfo {
 		}
 		windows, _ := strconv.Atoi(f[1])
 		attached, _ := strconv.Atoi(f[2])
-		activity, _ := strconv.ParseInt(f[3], 10, 64)
+		act, _ := strconv.ParseInt(f[3], 10, 64)
 		path := ""
 		if len(f) >= 5 {
 			path = f[4]
 		}
 		sessions = append(sessions, SessionInfo{
-			Name: f[0], Windows: windows, Attached: attached > 0, Activity: activity, Path: path,
-			State: DetectState(socket, f[0], activity, now),
+			Name: f[0], Windows: windows, Attached: attached > 0, Activity: act, Path: path,
+			State: DetectState(socket, f[0]),
 		})
 	}
 	return sessions

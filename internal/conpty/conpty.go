@@ -234,46 +234,37 @@ func (p *Provider) Dial(_ context.Context, name string) (session.Session, error)
 }
 
 // --- attention-state detection (no capture-pane on Windows) -----------------
+//
+// Same signal as the tmux backend: the agent's "esc to interrupt" footer (Claude:
+// "… · esc to interrupt"; Codex: "Working (… • esc to interrupt)") means a turn is
+// running. But ConPTY hands us the raw output STREAM, not a rendered screen, so we
+// can't snapshot the current footer the way tmux capture-pane does. Instead we gate on
+// recency (an idle agent stops repainting its footer) and then look for the hint in the
+// recent output tail: working = produced output within the window AND that tail shows
+// the hint. The recency gate stops a stale hint left in the ring from reading as
+// working once the agent goes quiet; the hint check stops a noisy server (which never
+// prints it) from reading as working.
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]`)
 
-var waitingRe = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\((y/n|yes/no|y/N|Y/n)\)`),
-	regexp.MustCompile(`(?i)\[(y/n|yes/no|y/N|Y/n)\]`),
-	regexp.MustCompile(`(?i)\b(do you want|are you sure|continue\?|overwrite\?|proceed\?)`),
-	regexp.MustCompile(`(?i)press (enter|return|any key)`),
-	regexp.MustCompile(`(?i)\b(approve|allow|reject|accept)\b.*\?`),
-	regexp.MustCompile(`❯\s*\d`),
-}
+const (
+	interruptHint      = "esc to interrupt"
+	workingQuietWindow = 4    // seconds since last output to still treat the screen as live
+	ringTailScan       = 8192 // bytes of recent output to scan for the hint
+)
 
-// detectState mirrors tmux.DetectState for ConPTY: "working" on very recent
-// output, else "waiting" if the last non-empty line(s) look like a blocking
-// prompt, else "idle". Operates on the (ANSI-stripped) ring tail.
+// detectState classifies a ConPTY session as "working" or "idle".
 func detectState(ring []byte, lastOut, now int64) string {
-	if now-lastOut <= 4 {
-		return "working"
-	}
-	if len(ring) == 0 {
-		return "idle"
+	if now-lastOut > workingQuietWindow {
+		return "idle" // no recent repaint → the agent isn't running
 	}
 	tail := ring
-	if len(tail) > 8192 {
-		tail = tail[len(tail)-8192:]
+	if len(tail) > ringTailScan {
+		tail = tail[len(tail)-ringTailScan:]
 	}
-	text := ansiRe.ReplaceAllString(string(tail), "")
-	lines := strings.Split(strings.TrimRight(text, "\r\n"), "\n")
-	checked := 0
-	for i := len(lines) - 1; i >= 0 && checked < 2; i-- {
-		l := strings.TrimSpace(strings.TrimRight(lines[i], "\r"))
-		if l == "" {
-			continue
-		}
-		checked++
-		for _, re := range waitingRe {
-			if re.MatchString(l) {
-				return "waiting"
-			}
-		}
+	text := strings.ToLower(ansiRe.ReplaceAllString(string(tail), ""))
+	if strings.Contains(text, interruptHint) {
+		return "working"
 	}
 	return "idle"
 }

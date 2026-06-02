@@ -28,6 +28,8 @@ One binary **WebSocket** (gRPC-web and WebTransport rejected: no browser bidi / 
 
 Flow control: `refresh-client -f pause-after=N` so a streaming pane can't back up and trip tmux's slow-control-client disconnect (`%pause`/`%continue`; confirmed working on tmux 3.2a).
 
+**Agent state** travels on the same `/sessions` list as a per-session `state` (`working`/`idle`). The broker computes it **passively** — it reads the visible screen (`tmux capture-pane` on Unix; the ConPTY output ring on Windows, which has no `capture-pane`) and scans the last few non-blank lines for the agent's `esc to interrupt` footer, which both Claude Code and Codex print only during an active turn. Footer present → `working`, else `idle`. No keys are ever sent to the agent, so it classifies sessions with nothing attached and a noisy co-tenant in the pane can't false-positive.
+
 ## Cluster (and any scheduler) specifics
 
 The cluster is **not a special case** — it is just a machine where you run `ut` inside an allocation. Nothing reads `$SLURM_JOB_ID` or any scheduler variable.
