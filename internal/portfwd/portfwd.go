@@ -32,11 +32,27 @@ func ValidPort(s string) bool {
 	return err == nil && n > 0 && n < 65536
 }
 
-// Forward bridges an accepted WebSocket to 127.0.0.1:port on this host: bytes
+// dialLoopback connects to a port on THIS host's loopback, trying IPv4 then IPv6:
+// a dashboard may bind only `::1` (e.g. when its `localhost` resolved to IPv6), and
+// a plain 127.0.0.1 dial would miss it. Stays loopback-only so the broker never
+// becomes an open proxy. (A service bound to a non-loopback interface like the
+// node's internal IP is intentionally not reachable.)
+func dialLoopback(port string) (net.Conn, error) {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 10*time.Second)
+	if err == nil {
+		return c, nil
+	}
+	if c6, err6 := net.DialTimeout("tcp", net.JoinHostPort("::1", port), 10*time.Second); err6 == nil {
+		return c6, nil
+	}
+	return nil, err
+}
+
+// Forward bridges an accepted WebSocket to the loopback port on this host: bytes
 // flow both ways until either side closes. The WS is wrapped as a net.Conn so
 // io.Copy handles the byte stream and half-close cleanly.
 func Forward(ctx context.Context, c *websocket.Conn, port string) {
-	target, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 10*time.Second)
+	target, err := dialLoopback(port)
 	if err != nil {
 		_ = c.Close(websocket.StatusInternalError, "dial failed")
 		return

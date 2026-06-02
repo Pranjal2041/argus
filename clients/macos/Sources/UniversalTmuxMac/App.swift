@@ -6,6 +6,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var state = AppState()
     @StateObject private var terminals = TerminalController()
     @StateObject private var files = FilesModel()   // shared so "Reveal in Files" + the window use one instance
+    @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
 
     var body: some Scene {
         WindowGroup {
@@ -13,6 +14,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(state)
                 .environmentObject(terminals)
                 .environmentObject(files)
+                .environmentObject(dashboards)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -74,20 +76,29 @@ struct UniversalTmuxApp: App {
             PortsView()
                 .environmentObject(state)
                 .preferredColorScheme(.dark)
+                .allowsFullScreen()
         }
         .defaultSize(width: 780, height: 860)
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentMinSize)
 
         Window("Files", id: "files") {
             FilesView()
                 .environmentObject(state)
                 .environmentObject(files)
                 .preferredColorScheme(.dark)
+                .allowsFullScreen()
         }
         .defaultSize(width: 1000, height: 680)
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentMinSize)
+
+        Window("Dashboards", id: "dashboards") {
+            DashboardsView()
+                .environmentObject(dashboards)
+                .preferredColorScheme(.dark)
+                .allowsFullScreen()
+        }
+        .defaultSize(width: 1100, height: 760)
+        .windowStyle(.hiddenTitleBar)
 
         Settings {
             SettingsView(terminals: terminals)
@@ -177,6 +188,7 @@ struct RootView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var terminals: TerminalController
     @EnvironmentObject var files: FilesModel
+    @EnvironmentObject var dashboards: DashboardsModel
     @Environment(\.displayScale) private var displayScale
     @Environment(\.openWindow) private var openWindow
     @State private var newName = ""
@@ -331,6 +343,7 @@ struct RootView: View {
             IconButton(system: "plus", help: "New session (⌘N)") { openNew() }
             IconButton(system: "cable.connector", help: "Port forwards") { openWindow(id: "ports") }
             IconButton(system: "folder", help: "Files") { openWindow(id: "files") }
+            IconButton(system: "rectangle.on.rectangle.angled", help: "Dashboards") { openWindow(id: "dashboards") }
         }
         .frame(height: 34)
         .padding(.horizontal, 12)
@@ -502,6 +515,13 @@ struct RootView: View {
                 let cwd = state.session(for: ref)?.path ?? ""
                 files.openTerminalPath(m, rawPath: path, base: cwd, line: line)
                 openWindow(id: "files")
+            }
+            // Route a terminal ⌘-click on a localhost URL to the Dashboards window for
+            // the visible session's host (auto-forwarding the port if it's remote).
+            terminals.openLocalhostHandler = { port, path, scheme in
+                guard let ref = state.selection, let m = state.machine(for: ref) else { return }
+                dashboards.openLocalhost(on: m, port: port, path: path, scheme: scheme)
+                openWindow(id: "dashboards")
             }
         }
         .overlay(alignment: .leading) {

@@ -117,12 +117,13 @@ struct PortsView: View {
                     }
                     .padding(.horizontal, S(16)).padding(.vertical, S(14))
                     .glassCard(glow: Glass.live)
-                    .transition(.asymmetric(insertion: .scale(scale: 0.96).combined(with: .opacity),
-                                            removal: .opacity.combined(with: .scale(scale: 0.96))))
+                    // Plain opacity — a `.scale` transition here could render the row
+                    // momentarily mirror-flipped (a SwiftUI/CoreAnimation glitch).
+                    .transition(.opacity)
                 }
             }
         }
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: model.active.map(\.id))
+        .animation(.easeInOut(duration: 0.25), value: model.active.map(\.id))
     }
 
     private var emptyActive: some View {
