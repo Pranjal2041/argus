@@ -3,8 +3,9 @@ import SwiftUI
 // MARK: - Agent state
 
 /// The agent-state classification a broker reports per session in `/sessions`.
-/// `working` = the agent is producing output; `waiting` = blocked on the user
-/// (needs attention); `idle` = quiescent. Unknown/older brokers → `.idle`.
+/// The current detector emits only `working` (the agent's "esc to interrupt" footer is
+/// on screen) and `idle`. `waiting` is reserved/vestigial — still decoded so an older
+/// broker that sends it doesn't break, but never emitted now. Unknown → `.idle`.
 enum AgentState: String {
     case working
     case waiting
@@ -13,12 +14,9 @@ enum AgentState: String {
     init(raw: String) { self = AgentState(rawValue: raw.lowercased()) ?? .idle }
 }
 
-/// How a session's indicator should render. Resolves the broker's agent state
-/// together with tmux's `attached` flag into a single visual treatment so the
-/// row needs no branching of its own.
-///
-/// Precedence (most attention-worthy first):
-///   waiting → working → attached-idle (green) → idle (hollow ring).
+/// How a session's indicator should render. Two states only: the broker reports
+/// `working` (its agent shows "esc to interrupt") → a pulsing BLUE dot; anything else
+/// → a solid GREEN dot. (`attached` is no longer used here.)
 struct AgentIndicatorStyle {
     let color: SwiftUI.Color
     let filled: Bool   // false = hollow ring (idle)
@@ -27,22 +25,15 @@ struct AgentIndicatorStyle {
 
     static func resolve(state: AgentState, attached: Bool) -> AgentIndicatorStyle {
         switch state {
-        case .waiting:
-            return AgentIndicatorStyle(
-                color: Theme.waiting, filled: true, pulses: true,
-                help: "Waiting on you")
         case .working:
+            // Agent is actively running (its "esc to interrupt" footer is on screen).
             return AgentIndicatorStyle(
-                color: Theme.accent, filled: true, pulses: true,
-                help: "Working")
-        case .idle:
-            if attached {
-                return AgentIndicatorStyle(
-                    color: Theme.attached, filled: true, pulses: false,
-                    help: "Attached")
-            }
+                color: Theme.running, filled: true, pulses: true,
+                help: "Running")
+        case .waiting, .idle:
+            // Anything not actively running reads the same: a solid green dot.
             return AgentIndicatorStyle(
-                color: Theme.textTertiary, filled: false, pulses: false,
+                color: Theme.attached, filled: true, pulses: false,
                 help: "Idle")
         }
     }

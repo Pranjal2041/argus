@@ -50,6 +50,17 @@ One binary **WebSocket** per client, with a 1-byte opcode framing two lanes on t
 Flow control uses `refresh-client -f pause-after=N` so a streaming pane can't back up and trip
 tmux's slow-control-client disconnect (`%pause` / `%continue`, confirmed on tmux 3.2a).
 
+## Agent state — a passive footer read
+
+Each session carries a `state` the broker computes **passively**, with no input ever sent to the
+agent. On Unix it reads the visible screen with `tmux capture-pane`; on Windows it reads the
+session's recent ConPTY output ring (there is no `capture-pane`). It scans the last few non-blank
+lines for the agent's `esc to interrupt` footer — both **Claude Code** and **Codex** print that
+only while a turn is active — and reports `working` if present, else `idle`. The check is
+agent-agnostic and needs no config: a noisy pane (a server logging in the same window) never prints
+the footer, so output activity alone can't false-positive. The macOS client polls `/sessions` (~2s)
+and renders a pulsing blue dot for `working`, a solid green one otherwise.
+
 ## Clusters are not a special case
 
 A cluster is just a machine where you run `ut` inside an allocation. Nothing reads

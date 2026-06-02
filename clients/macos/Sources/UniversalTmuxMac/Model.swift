@@ -131,7 +131,7 @@ final class AppState: ObservableObject {
     }
 
     /// Mark a session acknowledged and push the new waiting total to the Dock badge
-    /// immediately (the badge was previously only updated on the 12s poll).
+    /// immediately (the badge was previously only updated on the periodic poll).
     private func acknowledge(_ ref: SessionRef) {
         acknowledged.insert(ref.id)
         AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount)
@@ -164,7 +164,7 @@ final class AppState: ObservableObject {
     /// clock so activity labels age without a tailnet re-discovery each time.
     func startAutoRefresh() {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.clock = Date()

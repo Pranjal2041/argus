@@ -20,7 +20,8 @@ enum Theme {
     static let textPrimary       = SwiftUI.Color(hex: "#F2F2EC") // warm white
     static let textSecondary     = SwiftUI.Color(hex: "#A8AAB2")
     static let textTertiary      = SwiftUI.Color(hex: "#777983")
-    static let attached          = SwiftUI.Color(hex: "#5FD07A") // green status dot
+    static let attached          = SwiftUI.Color(hex: "#5FD07A") // green status dot — agent idle
+    static let running           = SwiftUI.Color(hex: "#4F9BFF") // blue status dot — agent working
     static let waiting           = SwiftUI.Color(hex: "#E0A36B") // amber — agent blocked on the user
     static let unreachable       = SwiftUI.Color(hex: "#D36C4D") // Warp orange-red
 

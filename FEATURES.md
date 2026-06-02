@@ -14,13 +14,13 @@ Legend — effort: S/M/L/XL · where: `client` (Swift) / `broker` (Go) / `both`.
 - **Session lifecycle**: create / rename / kill (broker `/control` + context menu + sheet).
 - **Find in terminal** (⌘F), **scroll-to-bottom** pill, **command palette** (⌘K) across machines.
 - Copy / paste / select-all; large scrollback (100k); auto-refresh poll.
-- **Agent-state detection (broker)**: `/sessions` reports `working|waiting|idle`; `waiting` detected from pane content so it works with nothing attached.
+- **Agent-state detection (broker)**: `/sessions` reports `working|idle`, read **passively** from the session screen (`tmux capture-pane` on Unix, the ConPTY output ring on Windows) — `working` when the agent's `esc to interrupt` footer is visible (Claude Code and Codex both print it only during a turn), else `idle`. No input is sent to the agent, so it works with nothing attached. Surfaced as a pulsing blue / solid green **state dot per session** in the sidebar.
 
 ## Now — basics that are still missing (fixing immediately)
 - [ ] **Thick top margin** above the terminal header — remove the unneeded 28pt reserve on the detail side. `S · client`
 - [ ] **Font-size control that works + persists** (terminal pane) + a **Settings window (⌘,)**. `S · client`
 - [ ] **UI element / chrome text scaling** (independent of terminal font). `M · client`
-- [ ] Surface agent state in the UI: **state dot per session**, a cross-machine **"Needs attention" list**, **notification + Dock badge** when an agent starts waiting. `M · both`
+- [ ] Cross-machine **"Needs attention" list** + **notification / Dock badge** — needs a "waiting for input" signal; the shipped detector is running/idle only, so this path is currently dormant. `M · both`
 
 ## Terminal emulator (table stakes)
 - [ ] Themes / color schemes (catalog + import iTerm/Alacritty), per-machine accent. `M · client`
