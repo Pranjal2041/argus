@@ -58,6 +58,11 @@ struct WebTabView: NSViewRepresentable {
             if (e as NSError).code != NSURLErrorCancelled { tab.status = e.localizedDescription }
             sync(wv)
         }
+        // Web content process jettisoned (memory pressure / crash) — the surface goes
+        // blank. WKWebView does NOT auto-recover; reload to repaint.
+        func webViewWebContentProcessDidTerminate(_ wv: WKWebView) {
+            if let u = wv.url ?? tab.url { wv.load(URLRequest(url: u)) }
+        }
         // target=_blank / window.open → load in the same view instead of dropping it.
         func webView(_ wv: WKWebView, createWebViewWith cfg: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {

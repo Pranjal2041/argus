@@ -52,6 +52,7 @@ final class DashboardTab: ObservableObject, Identifiable {
 // MARK: - the window's model (a set of tabs)
 
 private struct DashForwardsResp: Codable { let forwards: [PortForward]? }
+private struct JupyterResp: Decodable { let port: Int; let token: String }
 
 @MainActor
 final class DashboardsModel: ObservableObject {
@@ -146,6 +147,40 @@ final class DashboardsModel: ObservableObject {
                 t.load("http://127.0.0.1:\(local)\(path)")
             } else {
                 t.status = "couldn't forward \(name):\(port)"
+            }
+        }
+    }
+
+    /// Start (or re-adopt) JupyterLab on a machine's host and open its `/lab` in a tab —
+    /// directly for the local Mac, over a port-forward for a remote host. Same value as
+    /// the terminal path: the kernel runs on that host (GPU node, right env), zero SSH.
+    func openJupyter(on machine: Machine) {
+        let t = DashboardTab(title: "\(machine.name) · Jupyter", host: machine.name, url: nil,
+                             status: "starting JupyterLab on \(machine.name)…")
+        add(t)
+        let httpBase = machine.httpBase, isLocal = machine.isLocal
+        let fwHost = machine.fwHost, name = machine.name, fwScheme = machine.fwScheme
+        Task { @MainActor in
+            guard let u = URL(string: httpBase + "/jupyter") else { t.status = "bad broker URL"; return }
+            var req = URLRequest(url: u)
+            req.timeoutInterval = 130   // cold start on a loaded SLURM node can be ~60–90s
+            guard let (d, resp) = try? await URLSession.shared.data(for: req),
+                  (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let info = try? JSONDecoder().decode(JupyterResp.self, from: d) else {
+                t.status = "couldn't start JupyterLab on \(name)"
+                return
+            }
+            let path = "/lab?token=\(info.token)"
+            if isLocal {
+                t.load("http://127.0.0.1:\(info.port)\(path)")
+                return
+            }
+            t.status = "forwarding JupyterLab from \(name)…"
+            t.forwardKey = "\(fwHost):\(info.port)"
+            if let local = await ensureForward(brokerHost: fwHost, name: name, scheme: fwScheme, remotePort: info.port) {
+                t.load("http://127.0.0.1:\(local)\(path)")
+            } else {
+                t.status = "couldn't forward JupyterLab from \(name)"
             }
         }
     }

@@ -35,3 +35,6 @@ brand/icons/
 brand/icons_v1_peacock/
 brand/icons_v2_palettes/
 brand/__pycache__/
+
+# Jupyter checkpoint cache
+.ipynb_checkpoints/
