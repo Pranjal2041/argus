@@ -7,6 +7,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var terminals = TerminalController()
     @StateObject private var files = FilesModel()   // shared so "Reveal in Files" + the window use one instance
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
+    @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +16,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(terminals)
                 .environmentObject(files)
                 .environmentObject(dashboards)
+                .environmentObject(notebooks)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -189,10 +191,13 @@ struct RootView: View {
     @EnvironmentObject var terminals: TerminalController
     @EnvironmentObject var files: FilesModel
     @EnvironmentObject var dashboards: DashboardsModel
+    @EnvironmentObject var notebooks: NotebooksModel
     @Environment(\.displayScale) private var displayScale
     @Environment(\.openWindow) private var openWindow
     @State private var newName = ""
     @State private var newMachine = "local"
+    @State private var newIsNotebook = false
+    @State private var newFolder = ""
     @State private var query = ""
     @State private var isFullscreen = false
     @FocusState private var searchFocused: Bool
@@ -241,6 +246,7 @@ struct RootView: View {
             state.refreshAll(); state.startAutoRefresh()
         }
         .onChange(of: state.searchFocusToken) { _ in searchFocused = true }
+        .onChange(of: state.selection) { _ in notebooks.activeID = nil }   // selecting a terminal leaves the notebook view
         .sheet(isPresented: $state.showNew) { newSessionSheet }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
             TextField("name", text: $state.renameText)
@@ -408,6 +414,13 @@ struct RootView: View {
         .frame(height: 30)
         .frame(maxWidth: .infinity)
         .background(Theme.sidebarBackground.opacity(0.96))
+        .contextMenu {
+            Button {
+                dashboards.openJupyter(on: m)
+                openWindow(id: "dashboards")
+            } label: { Label("Open JupyterLab", systemImage: "book.closed") }
+            .disabled(!reachable)
+        }
     }
 
     private func countBadge(_ m: Machine, reachable: Bool, loading: Bool) -> some View {
@@ -430,13 +443,17 @@ struct RootView: View {
     }
 
     @ViewBuilder private func machineBody(_ m: Machine) -> some View {
+        let nbs = notebooks.forMachine(m.id)
         let groups = filteredGroups(m)
+        ForEach(nbs) { nb in notebookRow(nb) }
         if groups.isEmpty {
-            Text(emptyLabel(m))
-                .font(cf(11))
-                .foregroundStyle(Theme.textTertiary)
-                .padding(.leading, 12)
-                .padding(.vertical, 6)
+            if nbs.isEmpty {
+                Text(emptyLabel(m))
+                    .font(cf(11))
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.leading, 12)
+                    .padding(.vertical, 6)
+            }
         } else {
             ForEach(groups) { group in
                 if group.folder != "—" {
@@ -469,6 +486,24 @@ struct RootView: View {
         }
     }
 
+    private func notebookRow(_ nb: NotebookSession) -> some View {
+        let selected = notebooks.activeID == nb.id
+        return HStack(spacing: 7) {
+            Image(systemName: "book.closed").font(cf(10))
+                .foregroundStyle(selected ? Theme.accent : Theme.textTertiary)
+            Text(nb.name).font(cf(12)).lineLimit(1)
+                .foregroundStyle(selected ? Theme.textPrimary : Theme.textSecondary)
+            Spacer(minLength: 4)
+            Button { notebooks.close(nb.id) } label: {
+                Image(systemName: "xmark").font(cf(8.5, .bold)).foregroundStyle(Theme.textTertiary)
+            }.buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Theme.accent.opacity(0.16) : Color.clear))
+        .contentShape(Rectangle())
+        .onTapGesture { notebooks.select(nb.id) }
+    }
+
     private func folderLabel(_ text: String) -> some View {
         Text(text)
             .font(cf(10.5, .medium))
@@ -497,7 +532,9 @@ struct RootView: View {
     private var detail: some View {
         VStack(spacing: 0) {
             detailHeader
-            if let ref = state.selection {
+            if let nb = notebooks.active {
+                NotebookPaneView(tab: nb.tab)
+            } else if let ref = state.selection {
                 TerminalHostView(controller: terminals, ref: ref, url: state.wsURL(for: ref))
                     .padding(EdgeInsets(top: 8, leading: Theme.contentInset, bottom: 8, trailing: Theme.contentInset))
             } else {
@@ -689,14 +726,23 @@ struct RootView: View {
     private func openNew() {
         newName = ""
         newMachine = state.selection?.machineID ?? "local"
+        newIsNotebook = false
+        newFolder = state.selection.flatMap { state.session(for: $0)?.path } ?? ""
         state.showNew = true
     }
 
     private var newSessionSheet: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("New session")
+            Text(newIsNotebook ? "New notebook" : "New session")
                 .font(cf(18, .semibold))
                 .foregroundStyle(Theme.textPrimary)
+
+            Picker("", selection: $newIsNotebook) {
+                Text("Terminal").tag(false)
+                Text("Notebook").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("Machine").font(cf(13, .medium)).foregroundStyle(Theme.textSecondary)
@@ -719,7 +765,7 @@ struct RootView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("Name").font(cf(13, .medium)).foregroundStyle(Theme.textSecondary)
-                TextField("session name", text: $newName)
+                TextField(newIsNotebook ? "notebook name" : "session name", text: $newName)
                     .textFieldStyle(.plain)
                     .font(cf(14))
                     .foregroundStyle(Theme.textPrimary)
@@ -727,6 +773,21 @@ struct RootView: View {
                     .background(fieldChrome)
                     .focused($newNameFocused)
                     .onSubmit { createSession() }
+            }
+
+            if newIsNotebook {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Folder").font(cf(13, .medium)).foregroundStyle(Theme.textSecondary)
+                    TextField("/absolute/path/to/folder", text: $newFolder)
+                        .textFieldStyle(.plain)
+                        .font(cf(14))
+                        .foregroundStyle(Theme.textPrimary)
+                        .padding(.horizontal, 12).frame(height: 36)
+                        .background(fieldChrome)
+                        .onSubmit { createSession() }
+                    Text("The .ipynb is created here on the machine; its kernel runs there.")
+                        .font(cf(10.5)).foregroundStyle(Theme.textTertiary)
+                }
             }
 
             HStack(spacing: 10) {
@@ -737,7 +798,8 @@ struct RootView: View {
                 Button("Create") { createSession() }
                     .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
-                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty
+                              || (newIsNotebook && newFolder.trimmingCharacters(in: .whitespaces).isEmpty))
             }
             .font(cf(14))
         }
@@ -757,8 +819,15 @@ struct RootView: View {
     private func createSession() {
         let name = newName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
-        state.showNew = false
-        state.createSession(on: newMachine, name: name)
+        if newIsNotebook {
+            let dir = newFolder.trimmingCharacters(in: .whitespaces)
+            guard !dir.isEmpty, let m = state.machines.first(where: { $0.id == newMachine }) else { return }
+            state.showNew = false
+            notebooks.newNotebook(on: m, dir: dir, name: name)
+        } else {
+            state.showNew = false
+            state.createSession(on: newMachine, name: name)
+        }
     }
 }
 

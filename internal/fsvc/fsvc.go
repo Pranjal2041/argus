@@ -204,6 +204,9 @@ func Rename(from, to string) error { return os.Rename(from, to) }
 // reader never sees a half-written file. Used for new files and editor saves.
 func Write(path string, data []byte) error {
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil { // create parent dirs (e.g. a new notebook folder)
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".ut-write-*")
 	if err != nil {
 		return err

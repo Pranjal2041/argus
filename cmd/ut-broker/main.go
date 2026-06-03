@@ -25,6 +25,7 @@ import (
 	"universal-tmux/internal/broker"
 	"universal-tmux/internal/forward"
 	"universal-tmux/internal/fsvc"
+	"universal-tmux/internal/jupyter"
 	"universal-tmux/internal/portfwd"
 	webassets "universal-tmux/web"
 )
@@ -53,6 +54,7 @@ func main() {
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
 	fwdMgr := forward.NewManager()                                 // port-hub agent (used when this broker is the local agent)
+	jupyterMgr := jupyter.NewManager()                             // ensures a JupyterLab on this host for the notebook feature
 	mgr.SetHistoryLimit(100000) // large scrollback for new sessions
 	if *session != "" {
 		if err := mgr.Ensure(*session); err != nil {
@@ -164,6 +166,19 @@ func main() {
 		default:
 			_ = json.NewEncoder(w).Encode(map[string]any{"forwards": fwdMgr.List()})
 		}
+	})
+	// Notebook (Exp 0): ensure a JupyterLab is running on THIS host and return its
+	// loopback {port, token}; the client reaches it over a port-forward + webview.
+	mux.HandleFunc("/jupyter", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		info, err := jupyterMgr.Ensure()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(info)
 	})
 	// File service: browse this host's filesystem (as the broker's user) and
 	// stream file contents. /fs/home → starting points, /fs/list → a directory,
