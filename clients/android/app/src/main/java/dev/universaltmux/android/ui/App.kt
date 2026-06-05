@@ -28,6 +28,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val ink = Color(0xFF1A1B26)
@@ -46,6 +50,23 @@ fun App(vm: AppViewModel) {
         var newSessionFor by remember { mutableStateOf<Broker?>(null) }
         var showAbout by remember { mutableStateOf(false) }
         var screen by remember { mutableStateOf(0) }   // 0 = terminal, 1 = files, 2 = ports
+
+        // Continuously refresh sessions WHILE THE APP IS IN THE FOREGROUND so a missed or
+        // slow poll self-heals instead of leaving the list frozen/missing (the previous
+        // behavior — refresh only on launch + the manual button). repeatOnLifecycle stops
+        // the loop when backgrounded, so it doesn't drain battery. Known brokers are
+        // refreshed every 3s; a full re-discovery runs roughly every 15s.
+        val lifecycleOwner = LocalLifecycleOwner.current
+        LaunchedEffect(Unit) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                var tick = 0
+                while (true) {
+                    if (TsnetCore.isUp && tick % 5 == 0) vm.refreshAll() else vm.pollKnown()
+                    tick++
+                    delay(3000)
+                }
+            }
+        }
 
         ModalNavigationDrawer(
             drawerState = drawerState,

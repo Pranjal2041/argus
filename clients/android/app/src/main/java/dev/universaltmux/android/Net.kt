@@ -56,9 +56,13 @@ data class PortInfo(val port: Int, val address: String, val process: String, val
 
 /** HTTP + WebSocket to brokers. All traffic rides the encrypted tailnet. */
 object Net {
+    // Timeouts tuned for the phone's tailnet path, which is often DERP-RELAYED (no
+    // direct route on mobile) and slower to set up than the Mac's direct path. The
+    // connect timeout is the one that bit us — a cold relayed connection can take a
+    // while. (The broker now serves /sessions from a cache, so the read is quick.)
     val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
 

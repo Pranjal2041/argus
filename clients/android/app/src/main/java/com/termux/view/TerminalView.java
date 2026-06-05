@@ -311,14 +311,13 @@ public final class TerminalView extends View {
         // and the alternate view was the one selected the last time.
         if (mClient.isTerminalViewSelected()) {
             if (mClient.shouldEnforceCharBasedInput()) {
-                // Some keyboards seems do not reset the internal state on TYPE_NULL.
-                // Affects mostly Samsung stock keyboards.
-                // https://github.com/termux/termux-app/issues/686
-                // However, this is not a valid value as per AOSP since `InputType.TYPE_CLASS_*` is
-                // not set and it logs a warning:
-                // W/InputAttributes: Unexpected input class: inputType=0x00080090 imeOptions=0x02000000
-                // https://cs.android.com/android/platform/superproject/+/android-11.0.0_r40:packages/inputmethods/LatinIME/java/src/com/android/inputmethod/latin/InputAttributes.java;l=79
-                outAttrs.inputType = InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+                // Argus change: a NORMAL text field, NOT the password variation termux used.
+                // Voice-typing apps (Wispr Flow, Gboard voice, …) deliberately suppress
+                // themselves on password fields, so the password variation silently killed
+                // voice input over the terminal. TYPE_TEXT_FLAG_NO_SUGGESTIONS still disables
+                // autocorrect/predictions (the only reason termux wanted the password type),
+                // and TYPE_CLASS_TEXT is a valid input class (no "Unexpected input class" warn).
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             } else {
                 // Using InputType.NULL is the most correct input type and avoids issues with other hacks.
                 //
