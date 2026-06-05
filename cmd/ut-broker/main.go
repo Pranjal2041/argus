@@ -39,6 +39,7 @@ func main() {
 	tsDir := flag.String("tsnet-dir", "", "tsnet state dir (default: tsnet's own under $HOME)")
 	name := flag.String("name", "", "display name reported to clients via /whoami (default: hostname)")
 	shell := flag.String("shell", "", "shell to host for new sessions (Windows ConPTY only; default cmd.exe)")
+	extraListen := flag.String("extra-listen", "", "additional best-effort host:port to ALSO serve the same mux on (e.g. this host's tailnet IP, so remote tailnet clients can reach a loopback-bound broker). A bind failure here is logged and ignored — it never stops the primary --listen.")
 	flag.Parse()
 
 	// Display name the client shows for this broker's device.
@@ -242,6 +243,19 @@ func main() {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
+	// Optional ADDITIONAL listener (e.g. the host's tailnet IP) so remote tailnet
+	// clients — the Android app — can reach an otherwise loopback-bound broker,
+	// WITHOUT exposing it on the LAN (bind a specific tailnet IP, never 0.0.0.0)
+	// and WITHOUT disturbing the primary listener the local app/forward-hub use.
+	// Best-effort: a bind failure here (e.g. Tailscale not up yet) is logged, not fatal.
+	if *extraListen != "" && *extraListen != *listen {
+		if l2, e := net.Listen("tcp", *extraListen); e == nil {
+			log.Printf("also serving on http://%s", *extraListen)
+			go func() { _ = srv.Serve(l2) }()
+		} else {
+			log.Printf("warn: extra-listen %s failed (primary listener unaffected): %v", *extraListen, e)
+		}
+	}
 	log.Printf("universal_tmux broker → %s  (tmux -L %s, default session %q)", where, *tmuxSock, *session)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
