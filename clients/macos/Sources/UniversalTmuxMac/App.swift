@@ -477,7 +477,7 @@ struct RootView: View {
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
                             : nil,
                         onRevealFiles: (s.path?.isEmpty == false)
-                            ? { files.addTab(m, startPath: s.path); openWindow(id: "files") }
+                            ? { files.addTab(m, startPath: state.resolveBase(for: ref)); openWindow(id: "files") }
                             : nil
                     )
                 }
@@ -549,7 +549,7 @@ struct RootView: View {
             // VISIBLE session's host (paths live on the node, not the Mac).
             terminals.openPathHandler = { path, line in
                 guard let ref = state.selection, let m = state.machine(for: ref) else { return }
-                let cwd = state.session(for: ref)?.path ?? ""
+                let cwd = state.resolveBase(for: ref)   // honor a user-pinned working dir
                 files.openTerminalPath(m, rawPath: path, base: cwd, line: line)
                 openWindow(id: "files")
             }
@@ -640,12 +640,9 @@ struct RootView: View {
                 meta("·"); meta(machineName(ref.machineID))
                 if let s {
                     meta("·"); meta("\(s.windows) win")
-                    if let p = s.path, !p.isEmpty {
-                        meta("·")
-                        Text(state.folderDisplay(p, isLocal: machineIsLocal(ref.machineID)))
-                            .font(cf(11)).foregroundStyle(Theme.textTertiary)
-                            .lineLimit(1).truncationMode(.head).frame(maxWidth: 240, alignment: .leading)
-                    }
+                    meta("·")
+                    SessionPathField(ref: ref, brokerPath: s.path ?? "",
+                                     isLocal: machineIsLocal(ref.machineID), font: cf(11))
                     meta("·"); meta(relativeShort(s.activity))
                 }
                 if let s, s.isWaiting {
@@ -831,6 +828,56 @@ struct RootView: View {
     }
 }
 
+
+/// The selected session's working directory in the detail header. Click to PIN a
+/// manual override used as the resolve base for terminal cmd+click — the Windows
+/// ConPTY backend can't yet track `cd`, so the broker's reported cwd goes stale.
+/// Clearing the field unpins it (falls back to the broker's cwd). A pin glyph marks
+/// an active override.
+private struct SessionPathField: View {
+    @EnvironmentObject var state: AppState
+    let ref: SessionRef
+    let brokerPath: String
+    let isLocal: Bool
+    let font: Font
+    @State private var editing = false
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let override = state.pathOverride(for: ref)
+        let effective = override ?? brokerPath
+        return Group {
+            if editing {
+                TextField("working dir", text: $text)
+                    .textFieldStyle(.plain)
+                    .font(font)
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(maxWidth: 240, alignment: .leading)
+                    .focused($focused)
+                    .onAppear { focused = true }
+                    .onSubmit { state.setPathOverride(text, for: ref); editing = false }
+                    .onExitCommand { editing = false }   // Esc cancels without changing the pin
+            } else {
+                HStack(spacing: 4) {
+                    if override != nil {
+                        Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(Theme.accent)
+                    }
+                    Text(effective.isEmpty ? "set working dir…" : state.folderDisplay(effective, isLocal: isLocal))
+                        .font(font)
+                        .foregroundStyle(override != nil ? Theme.textSecondary : Theme.textTertiary)
+                        .lineLimit(1).truncationMode(.head)
+                }
+                .frame(maxWidth: 240, alignment: .leading)
+                .contentShape(Rectangle())
+                .help(override != nil
+                      ? "Pinned working dir for file clicks — click to edit, clear to unpin"
+                      : "Click to pin this session's working dir for terminal file clicks")
+                .onTapGesture { text = effective; editing = true }
+            }
+        }
+    }
+}
 
 /// Shared status dot: filled when attached/live, hollow ring (equal weight) when not.
 struct StatusDot: View {

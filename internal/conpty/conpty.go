@@ -137,14 +137,13 @@ func (p *Provider) SetHistoryLimit(int) {} // n/a: the ring buffer is fixed-size
 func (p *Provider) List() []session.Info {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := time.Now().Unix()
 	out := make([]session.Info, 0, len(p.sessions))
 	for _, s := range p.sessions {
 		s.mu.Lock()
 		info := session.Info{
 			Name: s.name, Windows: 1, Attached: false,
 			Activity: s.lastOut, Path: s.dir,
-			State: detectState(s.ring, s.lastOut, now),
+			State: detectState(s.ring),
 		}
 		s.mu.Unlock()
 		out = append(out, info)
@@ -233,38 +232,36 @@ func (p *Provider) Dial(_ context.Context, name string) (session.Session, error)
 	return s, nil
 }
 
-// --- attention-state detection (no capture-pane on Windows) -----------------
+// --- attention-state detection: the agent's OSC window-title spinner ---------
 //
-// Same signal as the tmux backend: the agent's "esc to interrupt" footer (Claude:
-// "… · esc to interrupt"; Codex: "Working (… • esc to interrupt)") means a turn is
-// running. But ConPTY hands us the raw output STREAM, not a rendered screen, so we
-// can't snapshot the current footer the way tmux capture-pane does. Instead we gate on
-// recency (an idle agent stops repainting its footer) and then look for the hint in the
-// recent output tail: working = produced output within the window AND that tail shows
-// the hint. The recency gate stops a stale hint left in the ring from reading as
-// working once the agent goes quiet; the hint check stops a noisy server (which never
-// prints it) from reading as working.
+// A running turn animates a braille spinner in the WINDOW TITLE via OSC 0/2 — e.g.
+// `ESC]0;⠴ research BEL`, re-emitted ~10x/s — and the agent emits one final
+// non-spinner title (`ESC]0;research BEL`) the instant the turn ends. Unlike the
+// "esc to interrupt" footer (which the TUI cell-diffs and almost never re-emits, so
+// it's effectively absent from the byte stream), the title is an explicit escape
+// sequence the agent SENDS every frame, so it's reliably in the raw ConPTY output —
+// a DETERMINISTIC signal we can read without a rendered screen (ConPTY has no
+// capture-pane). Verified on both Codex and Claude on Windows: working titles carry
+// a braille glyph; the idle title does not. No recency gate, no screen-scraping.
+var titleRe = regexp.MustCompile(`\x1b\][012];([^\x07\x1b]*)(?:\x07|\x1b\\)`)
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]`)
+const titleTailScan = 8192 // bytes of recent output to find the latest window title in
 
-const (
-	interruptHint      = "esc to interrupt"
-	workingQuietWindow = 4    // seconds since last output to still treat the screen as live
-	ringTailScan       = 8192 // bytes of recent output to scan for the hint
-)
-
-// detectState classifies a ConPTY session as "working" or "idle".
-func detectState(ring []byte, lastOut, now int64) string {
-	if now-lastOut > workingQuietWindow {
-		return "idle" // no recent repaint → the agent isn't running
-	}
+// detectState classifies a ConPTY session from its MOST RECENT OSC window title:
+// a braille glyph (U+2800–U+28FF, the animated spinner) means a turn is running.
+func detectState(ring []byte) string {
 	tail := ring
-	if len(tail) > ringTailScan {
-		tail = tail[len(tail)-ringTailScan:]
+	if len(tail) > titleTailScan {
+		tail = tail[len(tail)-titleTailScan:]
 	}
-	text := strings.ToLower(ansiRe.ReplaceAllString(string(tail), ""))
-	if strings.Contains(text, interruptHint) {
-		return "working"
+	m := titleRe.FindAllSubmatch(tail, -1)
+	if len(m) == 0 {
+		return "idle" // no recent window title → no working signal
+	}
+	for _, r := range string(m[len(m)-1][1]) { // the latest title's text
+		if r >= 0x2800 && r <= 0x28FF {
+			return "working"
+		}
 	}
 	return "idle"
 }

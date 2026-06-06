@@ -93,6 +93,13 @@ final class AppState: ObservableObject {
     @Published var isRefreshing = false
     @Published var clock = Date()          // bumped periodically so relative times re-render
 
+    /// User-pinned working directory per session (`ref.id` → absolute path on the
+    /// host). Used as the resolve base for a terminal cmd+click when the broker's
+    /// reported cwd is stale — notably the Windows ConPTY backend, which can't yet
+    /// track `cd`. Persisted across launches.
+    @Published var pathOverrides: [String: String] =
+        (UserDefaults.standard.dictionary(forKey: "ut.pathOverrides") as? [String: String]) ?? [:]
+
     /// All sessions flattened across machines (for the command palette).
     var allSessions: [SessionRef] {
         machines.flatMap { m in (sessionsByMachine[m.id] ?? []).map { SessionRef(machineID: m.id, session: $0.name) } }
@@ -105,6 +112,25 @@ final class AppState: ObservableObject {
     /// The session info (incl. its cwd in `.path`) for a ref.
     func session(for ref: SessionRef) -> SessionInfo? {
         (sessionsByMachine[ref.machineID] ?? []).first { $0.name == ref.session }
+    }
+
+    /// The user's pinned working dir for a session, if set (nil/blank → not pinned).
+    func pathOverride(for ref: SessionRef) -> String? {
+        let v = pathOverrides[ref.id]?.trimmingCharacters(in: .whitespaces)
+        return (v?.isEmpty == false) ? v : nil
+    }
+
+    /// Pin (non-blank) or unpin (blank) a session's working dir; persisted immediately.
+    func setPathOverride(_ path: String?, for ref: SessionRef) {
+        let v = (path ?? "").trimmingCharacters(in: .whitespaces)
+        if v.isEmpty { pathOverrides.removeValue(forKey: ref.id) } else { pathOverrides[ref.id] = v }
+        UserDefaults.standard.set(pathOverrides, forKey: "ut.pathOverrides")
+    }
+
+    /// The directory a terminal cmd+click resolves against: the user's pin if set,
+    /// else the broker's reported session cwd.
+    func resolveBase(for ref: SessionRef) -> String {
+        pathOverride(for: ref) ?? session(for: ref)?.path ?? ""
     }
 
     /// Every session across ALL machines whose broker state == "waiting"
@@ -160,15 +186,35 @@ final class AppState: ObservableObject {
 
     func focusSearch() { searchFocusToken &+= 1 }
 
-    /// Light periodic poll: re-fetch sessions for known machines and tick the
-    /// clock so activity labels age without a tailnet re-discovery each time.
+    /// Light periodic poll: re-fetch sessions for known machines and tick the clock so
+    /// activity labels age. Every ~12s it ALSO re-discovers, so a broker that comes
+    /// online after launch (e.g. a Babel job landing on a fresh node) appears on its
+    /// own instead of only on a manual refresh.
     func startAutoRefresh() {
         pollTimer?.invalidate()
+        var tick = 0
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.clock = Date()
                 for m in self.machines { self.refresh(m) }
+                tick += 1
+                if tick % 6 == 0 { self.discoverNewBrokers() }
+            }
+        }
+    }
+
+    /// Pick up brokers that came online AFTER launch — MERGE only (never drops an
+    /// existing machine on a transient probe miss; a full re-discovery still runs on
+    /// manual refresh, which also prunes dead ones).
+    func discoverNewBrokers() {
+        DispatchQueue.global(qos: .utility).async {
+            let found = discoverMachines()
+            DispatchQueue.main.async {
+                for m in found where !self.machines.contains(where: { $0.id == m.id }) {
+                    self.machines.append(m)
+                    self.refresh(m)
+                }
             }
         }
     }

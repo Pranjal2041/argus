@@ -100,6 +100,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (TsnetCore.isUp) discoverViaTailnet()
     }
 
+    /** Refresh sessions for KNOWN brokers without re-running discovery — the cheap
+     *  path for the continuous poll loop (discovery is comparatively expensive). */
+    fun pollKnown() { brokers.toList().forEach { refresh(it) } }
+
     fun refresh(b: Broker) {
         viewModelScope.launch {
             val list = withContext(Dispatchers.IO) { Net.sessions(b) }

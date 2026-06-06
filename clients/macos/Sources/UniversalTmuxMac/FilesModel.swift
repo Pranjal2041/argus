@@ -95,6 +95,11 @@ final class FileTab: ObservableObject, Identifiable {
     @Published var title: String
     @Published var rootPath: String = ""
     @Published var roots: [FileNode] = []
+    /// Bumped whenever the tree's *shape* changes (expand/collapse/children load) so the
+    /// flattened visible-row list recomputes — expansion lives on each FileNode, which the
+    /// flattener reads but the view can't individually observe.
+    @Published private(set) var treeRevision = 0
+    private func bumpTree() { treeRevision &+= 1 }
     @Published var selection: String? = nil
     @Published var content: FileContent = .empty
     @Published var sep: String = "/"
@@ -250,6 +255,7 @@ final class FileTab: ObservableObject, Identifiable {
         } else {
             roots = (await list(rootPath)) ?? []
         }
+        bumpTree()
     }
     private func findNode(_ path: String, _ nodes: [FileNode]) -> FileNode? {
         for n in nodes {
@@ -264,13 +270,24 @@ final class FileTab: ObservableObject, Identifiable {
     func parentOf(_ path: String) -> String { parentPath(path) }
     func setRootPath(_ path: String) { Task { await setRoot(path) } }
 
+    /// Toggle a directory open/closed (loading children on first open) and select it.
+    /// Bumps `treeRevision` so the flattened visible-row list recomputes.
+    func toggleExpand(_ node: FileNode) {
+        node.expanded.toggle()
+        selection = node.entry.path
+        if node.expanded { loadChildren(node) }
+        bumpTree()
+    }
+
     func loadChildren(_ node: FileNode) {
         guard node.children == nil, !node.loading else { return }
         node.loading = true
+        bumpTree()
         Task {
             let kids = await list(node.entry.path)
             node.children = kids ?? []
             node.loading = false
+            bumpTree()
         }
     }
 

@@ -101,6 +101,46 @@ private struct TabPane: View {
         return q.isEmpty ? tab.roots : tab.roots.filter { $0.entry.name.lowercased().contains(q) }
     }
 
+    /// One flat row of the tree: a node at an indent depth, or a "loading…" stub shown
+    /// under a directory whose children are still being fetched.
+    private struct FlatRow: Identifiable {
+        let node: FileNode
+        let depth: Int
+        let isLoading: Bool
+        var id: String { isLoading ? node.entry.path + "\u{1}loading" : node.entry.path }
+    }
+
+    /// The tree flattened to exactly the rows that should be visible — a pre-order walk
+    /// that descends into a directory only when it's expanded. Rendering this single list
+    /// in a LazyVStack virtualizes the whole tree (only on-screen rows are built) instead
+    /// of eagerly nesting every expanded subtree as one monolithic, animated view — the
+    /// cause of the beachball hang on large folders.
+    private var visibleRows: [FlatRow] {
+        _ = tab.treeRevision   // dependency: recompute when a node expands/collapses/loads
+        var rows: [FlatRow] = []
+        func walk(_ nodes: [FileNode], _ depth: Int) {
+            for n in nodes {
+                rows.append(FlatRow(node: n, depth: depth, isLoading: false))
+                guard n.entry.isDir, n.expanded else { continue }
+                if let kids = n.children {
+                    walk(kids, depth + 1)
+                } else if n.loading {
+                    rows.append(FlatRow(node: n, depth: depth + 1, isLoading: true))
+                }
+            }
+        }
+        walk(filteredRoots, 0)
+        return rows
+    }
+
+    private func loadingRow(depth: Int) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini).scaleEffect(0.6)
+            Text("loading…").font(.system(size: s(10))).foregroundStyle(Flat.faint)
+        }
+        .padding(.leading, CGFloat(depth) * s(14) + 14).padding(.vertical, 2)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             pathBar
@@ -113,8 +153,18 @@ private struct TabPane: View {
                     Divider().overlay(Flat.hairline)
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(filteredRoots) { FileRow(node: $0, tab: tab, depth: 0) }
-                        }.padding(.vertical, 4)
+                            ForEach(visibleRows) { row in
+                                if row.isLoading {
+                                    loadingRow(depth: row.depth)
+                                } else {
+                                    FileRow(node: row.node, tab: tab, depth: row.depth)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        // Expand/collapse must never animate a placement pass over the list —
+                        // that animated nested layout was the hang on large folders.
+                        .transaction { $0.animation = nil }
                     }
                 }
                 .background(Flat.sidebar)
@@ -253,27 +303,15 @@ private struct FileRow: View {
 
     var body: some View {
         let sel = tab.selection == node.entry.path
-        VStack(spacing: 0) {
-            rowLabel(sel: sel)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    if node.entry.isDir { tab.setRootPath(node.entry.path) } else { tab.open(node) }
-                }
-                .onTapGesture(count: 1) { tapped() }
-                .contextMenu { menu }
-
-            if node.entry.isDir, node.expanded {
-                if let kids = node.children {
-                    ForEach(kids) { FileRow(node: $0, tab: tab, depth: depth + 1) }
-                } else if node.loading {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.mini).scaleEffect(0.6)
-                        Text("loading…").font(.system(size: s(10))).foregroundStyle(Flat.faint)
-                    }
-                    .padding(.leading, CGFloat(depth + 1) * s(14) + 14).padding(.vertical, 2)
-                }
+        // Only this row's own label — children are flattened into the parent LazyVStack
+        // (TabPane.visibleRows), so the tree never nests eager subviews.
+        rowLabel(sel: sel)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                if node.entry.isDir { tab.setRootPath(node.entry.path) } else { tab.open(node) }
             }
-        }
+            .onTapGesture(count: 1) { tapped() }
+            .contextMenu { menu }
     }
 
     private func rowLabel(sel: Bool) -> some View {
@@ -323,13 +361,7 @@ private struct FileRow: View {
     }
 
     private func tapped() {
-        if node.entry.isDir {
-            node.expanded.toggle()
-            if node.expanded { tab.loadChildren(node) }
-            tab.selection = node.entry.path
-        } else {
-            tab.open(node)
-        }
+        if node.entry.isDir { tab.toggleExpand(node) } else { tab.open(node) }
     }
 
     private func openInNewTab() {

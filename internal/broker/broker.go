@@ -185,17 +185,59 @@ type Manager struct {
 	prov session.Provider
 	mu   sync.Mutex
 	hubs map[string]*sessionHub
+
+	// /sessions is served from this cache, refreshed in the background, so the HTTP
+	// handler NEVER blocks on prov.List() — which on the tmux backend forks tmux +
+	// capture-pane per session and, on a loaded node, can take many seconds (making
+	// the broker look "unreachable" to a client with a request timeout).
+	sessMu    sync.Mutex
+	sessCache []session.Info
 }
 
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
-	return &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub)}
+	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub)}
+	go m.sessionRefreshLoop(2 * time.Second)
+	return m
 }
 
 // SetHistoryLimit raises the backend's scrollback limit for new sessions.
 func (m *Manager) SetHistoryLimit(lines int) { m.prov.SetHistoryLimit(lines) }
 
-// Sessions lists the sessions on this host.
-func (m *Manager) Sessions() []session.Info { return m.prov.List() }
+// Sessions returns the cached session list (refreshed in the background). Always
+// fast — it never calls the provider on the request path.
+func (m *Manager) Sessions() []session.Info {
+	m.sessMu.Lock()
+	defer m.sessMu.Unlock()
+	return m.sessCache
+}
+
+// refreshSessions recomputes the cache from the provider. May be slow under load;
+// always runs OFF the /sessions request path.
+func (m *Manager) refreshSessions() {
+	list := m.prov.List()
+	if list == nil {
+		list = []session.Info{}
+	}
+	m.sessMu.Lock()
+	m.sessCache = list
+	m.sessMu.Unlock()
+}
+
+// sessionRefreshLoop primes the cache, then refreshes it on an interval until ctx
+// is done. Ticks arriving during a slow refresh are coalesced (Ticker drops them).
+func (m *Manager) sessionRefreshLoop(interval time.Duration) {
+	m.refreshSessions()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-t.C:
+			m.refreshSessions()
+		}
+	}
+}
 
 // Ensure pre-creates/attaches a session hub (used to warm a default session).
 func (m *Manager) Ensure(name string) error {
@@ -243,13 +285,44 @@ func (m *Manager) Serve(ctx context.Context, c *websocket.Conn, name string) err
 
 // Create makes a new detached session (optionally rooted at startDir).
 func (m *Manager) Create(name, startDir string) error {
-	return m.prov.Create(name, startDir)
+	err := m.prov.Create(name, startDir)
+	if err == nil {
+		// Optimistically add to the cache so a client's refresh-after-create sees the
+		// new session immediately; the background refresh fills in the real details.
+		m.sessMu.Lock()
+		seen := false
+		for _, s := range m.sessCache {
+			if s.Name == name {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			c := append([]session.Info(nil), m.sessCache...)
+			c = append(c, session.Info{Name: name, Windows: 1, Path: startDir, State: "idle"})
+			m.sessCache = c
+		}
+		m.sessMu.Unlock()
+	}
+	go m.refreshSessions()
+	return err
 }
 
 // Kill terminates a session and evicts its connected clients.
 func (m *Manager) Kill(name string) error {
 	m.dropHub(name)
-	return m.prov.Kill(name)
+	err := m.prov.Kill(name)
+	m.sessMu.Lock() // drop it from the cache immediately
+	c := make([]session.Info, 0, len(m.sessCache))
+	for _, s := range m.sessCache {
+		if s.Name != name {
+			c = append(c, s)
+		}
+	}
+	m.sessCache = c
+	m.sessMu.Unlock()
+	go m.refreshSessions()
+	return err
 }
 
 // Rename renames a session in place and RE-KEYS its live hub from old→new
@@ -266,6 +339,16 @@ func (m *Manager) Rename(from, to string) error {
 		m.hubs[to] = h
 	}
 	m.mu.Unlock()
+	m.sessMu.Lock() // re-key the cached entry so the new name shows immediately
+	c := append([]session.Info(nil), m.sessCache...)
+	for i := range c {
+		if c[i].Name == from {
+			c[i].Name = to
+		}
+	}
+	m.sessCache = c
+	m.sessMu.Unlock()
+	go m.refreshSessions()
 	return nil
 }
 
