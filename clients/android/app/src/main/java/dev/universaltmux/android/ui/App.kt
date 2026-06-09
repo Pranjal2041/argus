@@ -38,6 +38,7 @@ private val ink = Color(0xFF1A1B26)
 private val panel = Color(0xFF16161E)
 private val accent = Color(0xFF7AA2F7)
 private val waiting = Color(0xFFE0AF68)
+private val unseenDot = Color(0xFFFF9F40)   // orange — agent finished a turn, not yet viewed
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -248,7 +249,12 @@ private fun Sidebar(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box(Modifier.size(8.dp).background(
-                                if (s.state == "waiting") waiting else if (s.state == "working") accent else Color(0xFF565F89),
+                                when {
+                                    s.state == "working" -> accent
+                                    vm.unseen.contains("${b.id} ${s.name}") -> unseenDot
+                                    s.state == "waiting" -> waiting
+                                    else -> Color(0xFF565F89)
+                                },
                                 RoundedCornerShape(4.dp),
                             ))
                             Spacer(Modifier.width(10.dp))

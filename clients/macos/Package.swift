@@ -5,7 +5,9 @@ let package = Package(
     name: "UniversalTmuxMac",
     platforms: [.macOS(.v13)],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.0.0"),
+        // Vendored locally (clients/macos/vendor/SwiftTerm) with a perf patch to
+        // synchronized-output buffer snapshotting — see that package's Package.swift.
+        .package(path: "vendor/SwiftTerm"),
     ],
     targets: [
         .executableTarget(

@@ -95,8 +95,13 @@ while true; do
     TS_AUTHKEY="\$KEY" '$BROKER' --tmux-socket '$socket' --session '$name' \\
       --listen ':${PORT}' --tsnet-host '$host' --tsnet-dir '$LOCAL/tsnet-$socket' &
   else
-    # local mode: your Mac is already on the tailnet, so serve on loopback.
-    '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${PORT}' &
+    # local mode: serve on loopback AND (best-effort) this host's own tailnet IP, so
+    # other tailnet devices (phone, laptops) can reach it — a loopback-only bind is
+    # invisible from the tailnet. Never 0.0.0.0 (LAN exposure); a failed tailnet bind
+    # is logged and ignored by the broker, so this can't break local mode.
+    TSIP="\$(PATH=/opt/homebrew/bin:\$PATH tailscale ip -4 2>/dev/null | head -1 || true)"
+    EXTRA=""; [ -n "\$TSIP" ] && EXTRA="--extra-listen \$TSIP:${PORT}"
+    '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${PORT}' \$EXTRA &
   fi
   BPID=\$!
   echo "\$BPID" > '$PIDFILE'
