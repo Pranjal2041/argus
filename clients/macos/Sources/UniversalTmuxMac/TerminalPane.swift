@@ -166,26 +166,64 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         scheduleSnapshotRedraw()
     }
 
-    /// Frame the view inside its container: exactly the pinned grid (letterbox)
-    /// when pinned, else fill the container (legacy broker). Called from the
-    /// container's layout pass, on pin changes, and after font changes.
-    func applyLayout() {
-        guard let sv = view.superview else { return }
-        if pinnedCols > 0 && pinnedRows > 0 {
-            view.frame = CGRect(origin: .zero, size: view.frameSize(forCols: pinnedCols, rows: pinnedRows))
-        } else {
-            view.frame = sv.bounds
-        }
-    }
+    /// The user's chosen font — the MAXIMUM the pane renders at. When a wider
+    /// client owns the window (pin > what fits here), the DISPLAY font shrinks
+    /// just enough that the whole pane stays visible (fit-to-pane, VNC-style);
+    /// it snaps back to this the moment the pin fits again. Clipping instead
+    /// would hide live content (e.g. the prompt at the bottom) with no way to
+    /// reach it.
+    private var preferredFont: NSFont = NSFont.monospacedSystemFont(ofSize: 13.5, weight: .regular)
 
-    /// Re-pin after a cell-metric change (font size/family): same grid, new pixels.
-    func fontDidChange() {
+    func setPreferredFont(_ f: NSFont) {
+        preferredFont = f
+        view.font = f          // start at the max; applyLayout shrinks if the pin demands
         applyLayout()
         sendCurrentGeometry()
     }
 
+    /// Frame the view inside its container: exactly the pinned grid when pinned
+    /// (letterboxed, font shrunk to fit if needed), else fill the container
+    /// (legacy broker). Called from the container's layout pass, on pin changes,
+    /// and after font changes.
+    func applyLayout() {
+        guard let sv = view.superview else { return }
+        let bounds = sv.bounds
+        if pinnedCols > 0 && pinnedRows > 0 {
+            if bounds.width > 1, bounds.height > 1 {
+                // Fit-to-pane: largest display size ≤ preferred where the whole
+                // pinned grid is visible. Cell metrics scale ~linearly with point
+                // size; the recompute below corrects any snapping drift, and the
+                // 0.25pt hysteresis stops micro-oscillation.
+                let needed = view.frameSize(forCols: pinnedCols, rows: pinnedRows)
+                let scale = min(bounds.width / needed.width, bounds.height / needed.height)
+                let current = view.font.pointSize
+                let target = min(preferredFont.pointSize, max(6, current * scale))
+                if abs(target - current) > 0.25 {
+                    view.font = NSFont(descriptor: preferredFont.fontDescriptor, size: target) ?? preferredFont
+                }
+            }
+            view.frame = CGRect(origin: .zero, size: view.frameSize(forCols: pinnedCols, rows: pinnedRows))
+        } else {
+            if view.font.pointSize != preferredFont.pointSize {
+                view.font = preferredFont
+            }
+            view.frame = bounds
+        }
+    }
+
+    /// The grid that would fill the container at the PREFERRED font — what we
+    /// ask tmux for. Never computed from a shrunken display font: more columns
+    /// fit at a smaller font, so asking from those metrics would request an
+    /// ever-wider window (feedback loop).
+    private func naturalGrid(in size: CGSize) -> (cols: Int, rows: Int) {
+        let g = view.gridSize(for: size)
+        let ratio = view.font.pointSize / preferredFont.pointSize
+        guard ratio < 0.999 else { return g }
+        return (cols: max(2, Int(Double(g.cols) * ratio)), rows: max(2, Int(Double(g.rows) * ratio)))
+    }
+
     /// Ask the broker for this pane's preferred size: the grid that would fill
-    /// the CONTAINER (not the pinned view) at current cell metrics. Immediate
+    /// the CONTAINER (not the pinned view) at preferred-font metrics. Immediate
     /// (non-debounced) — used on connect, show, and clear.
     ///
     /// Gated on a real, laid-out container: a zero/degenerate frame yields a
@@ -193,14 +231,14 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// prime the snapshot at 2 columns wide (the blank/garbled new pane).
     func sendCurrentGeometry() {
         guard let sv = view.superview, sv.bounds.width > 1, sv.bounds.height > 1 else { return }
-        let g = view.gridSize(for: sv.bounds.size)
+        let g = naturalGrid(in: sv.bounds.size)
         sendResize(cols: g.cols, rows: g.rows)
     }
 
     /// Debounced variant for the container's live resize stream.
     func containerDidResize() {
         guard let sv = view.superview, sv.bounds.width > 1, sv.bounds.height > 1 else { return }
-        let g = view.gridSize(for: sv.bounds.size)
+        let g = naturalGrid(in: sv.bounds.size)
         guard g.cols >= 2, g.cols <= 1000, g.rows >= 2, g.rows <= 1000 else { return }
         pendingCols = g.cols
         pendingRows = g.rows
@@ -558,8 +596,7 @@ final class TerminalController: ObservableObject {
     private func applyFont() {
         let f = currentFont()
         for c in conns.values {
-            c.view.font = f
-            c.fontDidChange() // new cell metrics: re-frame the pinned grid + re-ask
+            c.setPreferredFont(f) // re-frames the pinned grid (fit-to-pane) + re-asks
         }
     }
 
@@ -569,10 +606,9 @@ final class TerminalController: ObservableObject {
         let f = currentFont()
         let cursor = currentCursor()
         for c in conns.values {
-            c.view.font = f
             c.view.getTerminal().setCursorStyle(cursor)
             c.styleScroller()
-            c.fontDidChange() // new cell metrics: re-frame the pinned grid + re-ask
+            c.setPreferredFont(f) // re-frames the pinned grid (fit-to-pane) + re-asks
         }
     }
 
@@ -595,7 +631,7 @@ final class TerminalController: ObservableObject {
                 let bottom = pos >= 0.999
                 if bottom != self.atBottom { self.atBottom = bottom }
             }
-            conn.view.font = currentFont()
+            conn.setPreferredFont(currentFont())
             // No autoresizing: frames are managed by applyLayout (pinned grid or
             // container fill) from the container's resize hook.
             conn.view.autoresizingMask = []
