@@ -251,7 +251,7 @@ private fun Sidebar(
                             Box(Modifier.size(8.dp).background(
                                 when {
                                     s.state == "working" -> accent
-                                    vm.unseen.contains("${b.id} ${s.name}") -> unseenDot
+                                    vm.isUnseen(b, s.name) -> unseenDot
                                     s.state == "waiting" -> waiting
                                     else -> Color(0xFF565F89)
                                 },
