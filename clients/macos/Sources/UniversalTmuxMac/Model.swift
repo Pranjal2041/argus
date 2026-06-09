@@ -68,6 +68,8 @@ final class AppState: ObservableObject {
     @Published var selection: SessionRef? {
         didSet {
             guard let ref = selection else { return }
+            // Visiting a panel clears its orange "done, unseen" flag → back to green.
+            unseen.remove(ref.id)
             // Viewing a waiting session acknowledges it → clears it from the inbox AND
             // the Dock badge immediately (and durably: a plain state-flip used to be
             // reverted by the very next poll, since the broker still reports "waiting").
@@ -168,6 +170,9 @@ final class AppState: ObservableObject {
 
     private var pollTimer: Timer?
     private var prevState: [String: String] = [:]  // ref.id -> last agent state (for waiting-transition notifications)
+    /// ref.ids whose agent just finished a turn (working → idle) while NOT the active
+    /// selection — rendered as an ORANGE "done, unseen" dot until you open the pane.
+    @Published var unseen: Set<String> = []
 
     init() {
         // Local (loopback) is fixed; cluster brokers are discovered from the tailnet.
@@ -255,7 +260,16 @@ final class AppState: ObservableObject {
                     var entered: [(ref: SessionRef, machine: String)] = []
                     for s in list {
                         let ref = SessionRef(machineID: m.id, session: s.name)
-                        if s.state == "waiting" && (self.prevState[ref.id] ?? "idle") != "waiting" {
+                        let prev = self.prevState[ref.id]
+                        // Orange "done, unseen": a turn just finished (working → not-working)
+                        // while this wasn't the pane you're looking at. Cleared when working
+                        // resumes (→ blue) or when you select it (see `selection`).
+                        if s.state == "working" {
+                            self.unseen.remove(ref.id)
+                        } else if prev == "working" && self.selection != ref {
+                            self.unseen.insert(ref.id)
+                        }
+                        if s.state == "waiting" && (prev ?? "idle") != "waiting" {
                             entered.append((ref: ref, machine: m.name))
                         }
                         // Re-arm: once a session leaves "waiting", a future prompt should
@@ -269,6 +283,7 @@ final class AppState: ObservableObject {
                     let onThisMachine: (String) -> Bool = { $0.hasPrefix(m.id + "/") }
                     self.prevState = self.prevState.filter { !onThisMachine($0.key) || live.contains($0.key) }
                     self.acknowledged = self.acknowledged.filter { !onThisMachine($0) || live.contains($0) }
+                    self.unseen = self.unseen.filter { !onThisMachine($0) || live.contains($0) }
                     // Badge from waitingCount (excludes acknowledged) so the optimistic clear
                     // on view/steer is NOT reverted by this very poll.
                     AttentionNotifier.shared.update(enteredWaiting: entered, totalWaiting: self.waitingCount)

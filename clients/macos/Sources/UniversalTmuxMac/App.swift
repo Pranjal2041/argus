@@ -464,6 +464,7 @@ struct RootView: View {
                     let ref = SessionRef(machineID: m.id, session: s.name)
                     SessionRow(
                         session: s,
+                        unseen: state.unseen.contains(ref.id),
                         folderText: state.folderDisplay((s.path?.isEmpty == false) ? s.path! : "—", isLocal: m.isLocal),
                         selected: state.selection == ref,
                         onTap: { state.selection = ref },

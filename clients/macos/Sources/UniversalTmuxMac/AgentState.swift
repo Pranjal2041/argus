@@ -23,7 +23,7 @@ struct AgentIndicatorStyle {
     let pulses: Bool   // animated breathing dot
     let help: String   // tooltip / accessibility label
 
-    static func resolve(state: AgentState, attached: Bool) -> AgentIndicatorStyle {
+    static func resolve(state: AgentState, attached: Bool, unseen: Bool = false) -> AgentIndicatorStyle {
         switch state {
         case .working:
             // Agent is actively running (its "esc to interrupt" footer is on screen).
@@ -31,7 +31,13 @@ struct AgentIndicatorStyle {
                 color: Theme.running, filled: true, pulses: true,
                 help: "Running")
         case .waiting, .idle:
-            // Anything not actively running reads the same: a solid green dot.
+            // A turn that just finished while you weren't looking at this pane reads
+            // ORANGE ("done, unseen") until you open it; otherwise a solid green dot.
+            if unseen {
+                return AgentIndicatorStyle(
+                    color: Theme.unseen, filled: true, pulses: false,
+                    help: "Done — not yet viewed")
+            }
             return AgentIndicatorStyle(
                 color: Theme.attached, filled: true, pulses: false,
                 help: "Idle")
@@ -104,6 +110,7 @@ struct AgentIndicator: View {
 /// context menu keeps rename / copy / reveal / kill.
 struct SessionRow: View {
     let session: SessionInfo
+    var unseen: Bool = false       // agent finished a turn you haven't opened yet → orange dot
     let folderText: String        // pre-resolved cwd label (state.folderDisplay)
     let selected: Bool
     let onTap: () -> Void
@@ -124,7 +131,7 @@ struct SessionRow: View {
     private var isKey: Bool { controlActive != .inactive }
 
     private var indicator: AgentIndicatorStyle {
-        .resolve(state: AgentState(raw: session.state), attached: session.attached)
+        .resolve(state: AgentState(raw: session.state), attached: session.attached, unseen: unseen)
     }
 
     var body: some View {
