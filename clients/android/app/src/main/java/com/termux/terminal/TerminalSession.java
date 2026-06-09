@@ -95,6 +95,25 @@ public class TerminalSession extends TerminalOutput {
     }
     private RemoteBridge mRemote;
 
+    /** Remote mode: the pane's AUTHORITATIVE size pushed by the broker (opPaneSize).
+     *  While set, the emulator stays pinned to it — the remote byte stream is
+     *  formatted for exactly this grid, and emulating at the view's own size shears
+     *  every full-width line. The view's natural size remains the ASK we report. */
+    private int mPinnedColumns = -1, mPinnedRows = -1;
+    /** Last cell pixel metrics from the view, reused when a remote pin resizes the emulator. */
+    private int mCellWidthPixels = 12, mCellHeightPixels = 24;
+
+    /** Pin the emulator to the broker-pushed authoritative pane size (remote mode). */
+    public void setRemoteSize(int columns, int rows) {
+        if (mRemote == null || columns < 2 || rows < 2) return;
+        mPinnedColumns = columns;
+        mPinnedRows = rows;
+        if (mEmulator != null) {
+            mEmulator.resize(columns, rows, mCellWidthPixels, mCellHeightPixels);
+            notifyScreenUpdate();
+        }
+    }
+
     /** Construct a session whose I/O is bridged to a remote broker instead of a local process. */
     public TerminalSession(Integer transcriptRows, TerminalSessionClient client, RemoteBridge remote) {
         this.mShellPath = "";
@@ -136,7 +155,13 @@ public class TerminalSession extends TerminalOutput {
         if (mEmulator == null) {
             initializeEmulator(columns, rows, cellWidthPixels, cellHeightPixels);
         } else if (mRemote != null) {
-            mEmulator.resize(columns, rows, cellWidthPixels, cellHeightPixels);
+            // Remote mode: the view's natural size is only an ASK (the broker's
+            // pushed pane size is authoritative) — keep the emulator at the pin.
+            mCellWidthPixels = cellWidthPixels;
+            mCellHeightPixels = cellHeightPixels;
+            int c = (mPinnedColumns > 0) ? mPinnedColumns : columns;
+            int r = (mPinnedRows > 0) ? mPinnedRows : rows;
+            mEmulator.resize(c, r, cellWidthPixels, cellHeightPixels);
             mRemote.onResize(columns, rows);
         } else {
             JNI.setPtyWindowSize(mTerminalFileDescriptor, rows, columns, cellWidthPixels, cellHeightPixels);
@@ -161,6 +186,10 @@ public class TerminalSession extends TerminalOutput {
         if (mRemote != null) {
             mShellPid = 1; // mark running so write() works and isRunning() is true
             mClient.setTerminalShellPid(this, mShellPid);
+            mCellWidthPixels = cellWidthPixels;
+            mCellHeightPixels = cellHeightPixels;
+            if (mPinnedColumns > 0 && mPinnedRows > 0) // pin arrived before the first layout
+                mEmulator.resize(mPinnedColumns, mPinnedRows, cellWidthPixels, cellHeightPixels);
             mRemote.onResize(columns, rows);
             return;
         }

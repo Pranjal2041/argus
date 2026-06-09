@@ -49,6 +49,13 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         client.onOutput = { [weak self] bytes in
             DispatchQueue.main.async { self?.view.feed(byteArray: bytes[...]) }
         }
+        // The pane's AUTHORITATIVE size (connect + every remote resize): pin the
+        // grid to exactly this and ask for a clean repaint. Arrives in stream
+        // order relative to output, so the re-pin lands precisely between bytes
+        // formatted for the old width and bytes formatted for the new.
+        client.onPaneSize = { [weak self] cols, rows in
+            DispatchQueue.main.async { self?.setPin(cols: cols, rows: rows) }
+        }
         client.onStatus = { [weak self] st in DispatchQueue.main.async { self?.onState?(st) } }
         // On every (re)connect, push the current geometry so the remote pane
         // adopts the live window size instead of tmux's default.
@@ -132,19 +139,78 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         }
     }
 
-    /// Read the terminal's current grid and send it immediately (non-debounced).
-    /// Called on connect and on show() so a freshly attached session reflows.
+    // MARK: authoritative pane size (the anti-shear pin)
+    //
+    // A tmux pane has exactly ONE width at a time, negotiated across ALL of its
+    // clients (a real `tmux attach` terminal, this app, the phone — any of them
+    // can win). The %output bytes are formatted for that width, so this view must
+    // render at EXACTLY that grid or every full-width line shears. The broker
+    // pushes that size (opPaneSize) on connect and on every change; we pin the
+    // grid to it by sizing the view's frame to exactly that many cells inside the
+    // container (spare pixels letterbox in the matching background color). Our own
+    // size wishes (opResize) are asks computed from the CONTAINER's bounds —
+    // whatever tmux decides comes back as the next opPaneSize.
+    private(set) var pinnedCols = 0  // 0 = unpinned (old broker): view just fills the container
+    private(set) var pinnedRows = 0
+
+    private func setPin(cols: Int, rows: Int) {
+        guard cols >= 2, cols <= 1000, rows >= 2, rows <= 1000 else { return }
+        guard cols != pinnedCols || rows != pinnedRows else { return }
+        pinnedCols = cols
+        pinnedRows = rows
+        applyLayout()
+        // The pin event IS tmux's confirmation that the reflow happened, so a
+        // snapshot captured now is at the confirmed width — the deterministic
+        // redraw the old timed-guess approach couldn't provide. Debounced so a
+        // drag-resize storm coalesces into one repaint of the settled size.
+        scheduleSnapshotRedraw()
+    }
+
+    /// Frame the view inside its container: exactly the pinned grid (letterbox)
+    /// when pinned, else fill the container (legacy broker). Called from the
+    /// container's layout pass, on pin changes, and after font changes.
+    func applyLayout() {
+        guard let sv = view.superview else { return }
+        if pinnedCols > 0 && pinnedRows > 0 {
+            view.frame = CGRect(origin: .zero, size: view.frameSize(forCols: pinnedCols, rows: pinnedRows))
+        } else {
+            view.frame = sv.bounds
+        }
+    }
+
+    /// Re-pin after a cell-metric change (font size/family): same grid, new pixels.
+    func fontDidChange() {
+        applyLayout()
+        sendCurrentGeometry()
+    }
+
+    /// Ask the broker for this pane's preferred size: the grid that would fill
+    /// the CONTAINER (not the pinned view) at current cell metrics. Immediate
+    /// (non-debounced) — used on connect, show, and clear.
     ///
-    /// Gated on a real, laid-out frame: a zero/degenerate frame makes SwiftTerm
-    /// report a 2-column floor, and that bogus size — as the broker's FIRST resize
-    /// — would prime the snapshot at 2 columns wide (the blank/garbled new pane).
-    /// When the frame isn't ready, the debounced `sizeChanged` (which fires once
-    /// layout settles) sends the first real geometry instead.
+    /// Gated on a real, laid-out container: a zero/degenerate frame yields a
+    /// bogus 1–2 column grid, and that — as the broker's FIRST resize — would
+    /// prime the snapshot at 2 columns wide (the blank/garbled new pane).
     func sendCurrentGeometry() {
-        guard view.frame.width > 1, view.frame.height > 1 else { return }
-        let t = view.getTerminal()
-        guard t.cols > 2, t.rows > 2 else { return }
-        sendResize(cols: t.cols, rows: t.rows)
+        guard let sv = view.superview, sv.bounds.width > 1, sv.bounds.height > 1 else { return }
+        let g = view.gridSize(for: sv.bounds.size)
+        sendResize(cols: g.cols, rows: g.rows)
+    }
+
+    /// Debounced variant for the container's live resize stream.
+    func containerDidResize() {
+        guard let sv = view.superview, sv.bounds.width > 1, sv.bounds.height > 1 else { return }
+        let g = view.gridSize(for: sv.bounds.size)
+        guard g.cols >= 2, g.cols <= 1000, g.rows >= 2, g.rows <= 1000 else { return }
+        pendingCols = g.cols
+        pendingRows = g.rows
+        resizeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.sendResize(cols: self.pendingCols, rows: self.pendingRows)
+        }
+        resizeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
 
     // MARK: TerminalViewDelegate
@@ -154,22 +220,14 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     private var pendingCols = 0
     private var pendingRows = 0
     private var resizeWork: DispatchWorkItem?
+    private var snapshotWork: DispatchWorkItem?
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        // SwiftTerm emits transient/degenerate sizes during layout (e.g. 2x1,
-        // -2x0, or huge values before font metrics settle). Reject the absurd
-        // ones and debounce, so tmux only ever receives the final valid size —
-        // a bogus size makes tmux render onto nonsense lines (garbled output).
-        guard newCols >= 2, newCols <= 1000, newRows >= 2, newRows <= 1000 else { return }
-        pendingCols = newCols
-        pendingRows = newRows
-        resizeWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.sendResize(cols: self.pendingCols, rows: self.pendingRows)
-        }
-        resizeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        // Intentionally NOT an ask: the view's grid now echoes either the pin we
+        // applied or the container fill — asks flow from the container's bounds
+        // (containerDidResize / sendCurrentGeometry). Echoing the pinned size
+        // back as an ask would make a foreign client's size sticky even after
+        // that client detaches.
     }
 
     private func sendResize(cols: Int, rows: Int) {
@@ -181,14 +239,19 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         client.send(op: Op.resize, pane: lastPane, payload: p)
     }
 
-    // NOTE: on-resize snapshot redraw (opReqSnapshot) was backed out — injecting a
-    // captured full-screen snapshot into a LIVE stream interleaves with the agent's
-    // ongoing output and leaves residual characters (a captured copy wedged between
-    // the live cells). A correct resize redraw needs the broker to capture only
-    // AFTER tmux confirms the new width (deterministic reflow-sync), not a timed
-    // guess mid-stream. Until then we keep the safe geometry-gating above and the
-    // broker's one-shot connect snapshot. The broker's opReqSnapshot handler simply
-    // goes unused.
+    /// One clean repaint shortly after the pin settles. The broker's snapshot is
+    /// idempotent (clears screen+scrollback before painting), so this never
+    /// duplicates history; capturing AFTER the confirmed reflow is what the old
+    /// backed-out on-resize redraw was missing.
+    private func scheduleSnapshotRedraw() {
+        snapshotWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.client.send(op: Op.requestSnapshot, pane: self.lastPane, payload: [])
+        }
+        snapshotWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
 
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
@@ -298,11 +361,23 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
 }
 
+/// The terminal pane's container: flipped so a pinned (letterboxed) terminal
+/// anchors to the TOP-left like tmux does, with a resize hook so every hosted
+/// view re-frames (pin or fill) and re-asks when the pane area changes.
+final class TermContainerView: NSView {
+    var onResize: (() -> Void)?
+    override var isFlipped: Bool { true }
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        onResize?()
+    }
+}
+
 /// Owns one container NSView and a cache of live PaneConns keyed by session.
 /// Showing a session reveals its (warm) view and hides the rest.
 final class TerminalController: ObservableObject {
-    let container: NSView = {
-        let v = NSView()
+    let container: TermContainerView = {
+        let v = TermContainerView()
         v.wantsLayer = true
         v.layer?.backgroundColor = Theme.nsAppBackground.cgColor
         return v
@@ -333,6 +408,15 @@ final class TerminalController: ObservableObject {
 
     private var keyMonitor: Any?
     init() {
+        // Container resize → every pane re-frames (pinned grid or fill) and
+        // re-asks for its natural size from the new bounds.
+        container.onResize = { [weak self] in
+            guard let self else { return }
+            for c in self.conns.values {
+                c.applyLayout()
+                c.containerDidResize()
+            }
+        }
         // SwiftTerm's keyDown isn't `open`, so we can't subclass it. A local key
         // monitor (runs before the view sees the key) lets us add: Shift+Enter →
         // newline, and ⌃V of a clipboard image → bridge it to the session's host.
@@ -473,7 +557,10 @@ final class TerminalController: ObservableObject {
 
     private func applyFont() {
         let f = currentFont()
-        for c in conns.values { c.view.font = f }
+        for c in conns.values {
+            c.view.font = f
+            c.fontDidChange() // new cell metrics: re-frame the pinned grid + re-ask
+        }
     }
 
     /// Re-apply the persisted font family + cursor style to every live pane.
@@ -485,6 +572,7 @@ final class TerminalController: ObservableObject {
             c.view.font = f
             c.view.getTerminal().setCursorStyle(cursor)
             c.styleScroller()
+            c.fontDidChange() // new cell metrics: re-frame the pinned grid + re-ask
         }
     }
 
@@ -508,8 +596,11 @@ final class TerminalController: ObservableObject {
                 if bottom != self.atBottom { self.atBottom = bottom }
             }
             conn.view.font = currentFont()
-            conn.view.autoresizingMask = [.width, .height]
+            // No autoresizing: frames are managed by applyLayout (pinned grid or
+            // container fill) from the container's resize hook.
+            conn.view.autoresizingMask = []
             container.addSubview(conn.view)
+            conn.applyLayout()
             conns[ref.id] = conn
         }
         for (id, c) in conns { c.view.isHidden = (id != ref.id) }
@@ -520,7 +611,7 @@ final class TerminalController: ObservableObject {
         guard lastShownID != ref.id else { return }
         lastShownID = ref.id
         atBottom = true
-        conn.view.frame = container.bounds
+        conn.applyLayout()
         conn.view.layoutSubtreeIfNeeded()
         conn.sendCurrentGeometry()
         DispatchQueue.main.async {

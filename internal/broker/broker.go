@@ -21,7 +21,17 @@ const (
 	opInput       = 0x02 // client -> server: keystrokes
 	opResize      = 0x03 // client -> server: payload = cols u16, rows u16 (big-endian)
 	opReqSnapshot = 0x04 // client -> server: send a fresh snapshot now (deterministic redraw)
+	opPaneSize    = 0x05 // server -> client: payload = cols u16, rows u16 — the pane's
+	// AUTHORITATIVE size. Sent on connect and whenever the pane is resized (by any
+	// tmux client or another viewer). Viewers must render at exactly this grid
+	// (letterboxing spare pixels): %output bytes are formatted for this width, and
+	// rendering at any other width shears the screen. opResize remains an ask.
 )
+
+// sizePayload encodes cols/rows the same way clients encode opResize.
+func sizePayload(cols, rows int) []byte {
+	return []byte{byte(cols >> 8), byte(cols), byte(rows >> 8), byte(rows)}
+}
 
 type subscriber struct {
 	ch     chan []byte
@@ -47,7 +57,15 @@ func newSessionHub(tm session.Session) *sessionHub {
 func (h *sessionHub) pump() {
 	defer close(h.dead)
 	for out := range h.tm.Output() {
-		frame := encodeFrame(opOutput, out.Pane, out.Data)
+		var frame []byte
+		if out.Cols > 0 && out.Rows > 0 {
+			// In-band size event: broadcast the authoritative pane size in stream
+			// order, so each client re-pins its grid exactly between the bytes
+			// formatted for the old width and those formatted for the new.
+			frame = encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))
+		} else {
+			frame = encodeFrame(opOutput, out.Pane, out.Data)
+		}
 		h.mu.Lock()
 		h.lastPane = out.Pane
 		subs := make([]*subscriber, 0, len(h.subs))
@@ -80,6 +98,11 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
+	// Tell this client the pane's current authoritative size FIRST — before the
+	// snapshot and any live output — so it renders everything at the right width.
+	if cols, rows := h.tm.Size(); cols > 0 && rows > 0 {
+		sub.ch <- encodeFrame(opPaneSize, h.tm.Pane(), sizePayload(cols, rows))
+	}
 	defer func() {
 		h.mu.Lock()
 		delete(h.subs, sub)
