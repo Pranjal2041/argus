@@ -239,11 +239,6 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea() // fill the entire window; columns space their own top edge
         .overlay {
-            if state.showPalette {
-                CommandPalette(machineName: machineName).environmentObject(state).environmentObject(terminals)
-            }
-        }
-        .overlay {
             if let md = state.renderText {
                 RenderPanel(text: md).environmentObject(state)
             }
@@ -263,7 +258,29 @@ struct RootView: View {
         // (e.g. "Find in Terminal" from the palette must keep the find field).
         .onChange(of: state.showFind) { open in if !open { terminals.focusTerminal() } }
         .onChange(of: state.showPalette) { open in
-            if !open && !state.showFind && state.renderText == nil { terminals.focusTerminal() }
+            if open {
+                // The palette is a real KEY WINDOW (NSPanel), not an overlay:
+                // while it is up the main window cannot receive keystrokes, so
+                // typing can never leak into the sidebar filter or a terminal.
+                PaletteWindow.shared.show(
+                    over: NSApp.keyWindow ?? NSApp.mainWindow,
+                    onDismiss: { if state.showPalette { state.showPalette = false } }
+                ) {
+                    CommandPalette(machineName: machineName)
+                        .environmentObject(state)
+                        .environmentObject(terminals)
+                }
+            } else {
+                PaletteWindow.shared.hide()
+                if !state.showFind && state.renderText == nil { terminals.focusTerminal() }
+            }
+        }
+        .onChange(of: state.openWindowRequest) { id in
+            // Palette actions can't reach SwiftUI's openWindow from inside the
+            // AppKit panel — they route the request through state instead.
+            guard let id else { return }
+            openWindow(id: id)
+            state.openWindowRequest = nil
         }
         .onChange(of: state.renderText) { v in if v == nil { terminals.focusTerminal() } }
         .sheet(isPresented: $state.showNew) { newSessionSheet }
@@ -971,9 +988,11 @@ private struct CommandPalette: View {
             ("arrow.clockwise", "Refresh Sessions", "⌘R", { state.refreshAll() }),
             ("line.3.horizontal.decrease.circle", "Filter Sessions", "⌘L", { state.focusSearch() }),
             ("sidebar.leading", "Toggle Sidebar", "⌃⌘S", { state.toggleSidebar() }),
-            ("folder", "Open Files", "", { openWindow(id: "files") }),
-            ("chart.line.uptrend.xyaxis", "Open Dashboards", "", { openWindow(id: "dashboards") }),
-            ("network", "Open Port Forwards", "", { openWindow(id: "ports") }),
+            // Window opens route through state: SwiftUI's openWindow action is
+            // not available inside the AppKit palette panel's hosting view.
+            ("folder", "Open Files", "", { state.openWindowRequest = "files" }),
+            ("chart.line.uptrend.xyaxis", "Open Dashboards", "", { state.openWindowRequest = "dashboards" }),
+            ("network", "Open Port Forwards", "", { state.openWindowRequest = "ports" }),
         ]
         for (ic, t, hint, a) in actions where match(t) {
             out.append(Item(id: "a:" + t, icon: ic, title: t, subtitle: hint, run: a))
@@ -982,56 +1001,57 @@ private struct CommandPalette: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { close() }
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass").font(.system(size: 14)).foregroundStyle(Theme.textTertiary)
-                    TextField("Jump to a session or run a command…", text: $query)
-                        .textFieldStyle(.plain).font(.system(size: 15)).foregroundStyle(Theme.textPrimary)
-                        .focused($focused)
-                        .onSubmit(run)
-                }
-                .padding(.horizontal, 14).frame(height: 46)
-                Rectangle().fill(Theme.border).frame(height: 1)
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 2) {
-                            ForEach(Array(items.enumerated()), id: \.element.id) { i, it in
-                                HStack(spacing: 10) {
-                                    Image(systemName: it.icon).font(.system(size: 12))
-                                        .foregroundStyle(i == sel ? Theme.accent : Theme.textTertiary).frame(width: 16)
-                                    Text(it.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                                    Spacer()
-                                    Text(it.subtitle).font(.system(size: 11)).foregroundStyle(Theme.textTertiary).lineLimit(1)
-                                }
-                                .padding(.horizontal, 12).frame(height: 34)
-                                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(i == sel ? Theme.accent.opacity(0.16) : .clear))
-                                .contentShape(Rectangle())
-                                .id(i)
-                                .onTapGesture { sel = i; run() }
-                            }
-                        }
-                        .padding(8)
-                    }
-                    .frame(maxHeight: 360)
-                    .onChange(of: sel) { i in withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(i) } }
-                }
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").font(.system(size: 14)).foregroundStyle(Theme.textTertiary)
+                TextField("Jump to a session or run a command…", text: $query)
+                    .textFieldStyle(.plain).font(.system(size: 15)).foregroundStyle(Theme.textPrimary)
+                    .focused($focused)
+                    .onSubmit(run)
             }
-            .frame(width: 560)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.sidebarBackground))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
-            .shadow(color: .black.opacity(0.45), radius: 26, y: 10)
-            .padding(.top, 96)
+            .padding(.horizontal, 14).frame(height: 46)
+            Rectangle().fill(Theme.border).frame(height: 1)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { i, it in
+                            HStack(spacing: 10) {
+                                Image(systemName: it.icon).font(.system(size: 12))
+                                    .foregroundStyle(i == sel ? Theme.accent : Theme.textTertiary).frame(width: 16)
+                                Text(it.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                                Spacer()
+                                Text(it.subtitle).font(.system(size: 11)).foregroundStyle(Theme.textTertiary).lineLimit(1)
+                            }
+                            .padding(.horizontal, 12).frame(height: 34)
+                            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(i == sel ? Theme.accent.opacity(0.16) : .clear))
+                            .contentShape(Rectangle())
+                            .id(i)
+                            .onTapGesture { sel = i; run() }
+                        }
+                    }
+                    .padding(8)
+                }
+                .frame(height: 360)
+                .onChange(of: sel) { i in withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(i) } }
+            }
         }
-        // Arrow keys via a LOCAL KEY MONITOR: the focused query field consumes
-        // arrows (caret movement), so .onMoveCommand never fires while typing.
-        // The monitor sees the event first and swallows it.
-        .onAppear { focused = true; sel = 0; installKeys() }
+        .frame(width: 560)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.sidebarBackground))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+        // The palette lives in its OWN key window (PaletteWindow): the query
+        // field is the only focusable view there, so typing cannot reach the
+        // main window. Arrows/Esc still need the key monitor — the focused
+        // field consumes arrows for caret movement.
+        .onAppear { sel = 0; installKeys(); focusSoon() }
         .onDisappear { removeKeys() }
         .onChange(of: query) { _ in sel = 0 }
         .onExitCommand { close() }
+    }
+
+    private func focusSoon() {
+        focused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true }
     }
 
     @State private var keyMonitor: Any?
@@ -1041,6 +1061,7 @@ private struct CommandPalette: View {
             switch e.keyCode {
             case 125: if n > 0 { sel = (sel + 1) % n }; return nil          // ↓
             case 126: if n > 0 { sel = (sel - 1 + n) % n }; return nil      // ↑
+            case 36, 76: run(); return nil                                  // ↩ / keypad-enter
             case 53: close(); return nil                                    // Esc
             default: return e
             }
@@ -1057,6 +1078,57 @@ private struct CommandPalette: View {
         close()
     }
     private func close() { state.showPalette = false; query = "" }
+}
+
+// MARK: - Palette panel host (a real key window)
+
+/// A borderless panel that CAN become key — while it is up, the main window
+/// cannot receive keystrokes, so palette typing can never leak into the
+/// sidebar filter or a terminal. This is how Spotlight-style palettes work.
+private final class PalettePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+final class PaletteWindow: NSObject, NSWindowDelegate {
+    static let shared = PaletteWindow()
+    private var panel: PalettePanel?
+    private var onDismiss: (() -> Void)?
+
+    func show<V: View>(over main: NSWindow?, onDismiss: @escaping () -> Void, @ViewBuilder content: () -> V) {
+        hide()
+        self.onDismiss = onDismiss
+        let p = PalettePanel(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.isReleasedWhenClosed = false
+        p.delegate = self
+        let host = NSHostingView(rootView: content())
+        p.contentView = host
+        let size = NSSize(width: 560, height: 407) // card: 46 input + 1 divider + 360 list
+        let mf = main?.frame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        p.setFrame(NSRect(x: mf.midX - size.width / 2, y: mf.maxY - 110 - size.height,
+                          width: size.width, height: size.height), display: false)
+        main?.addChildWindow(p, ordered: .above)   // rides along if the window moves
+        p.makeKeyAndOrderFront(nil)
+        panel = p
+    }
+
+    func hide() {
+        guard let p = panel else { return }
+        panel = nil
+        onDismiss = nil
+        p.delegate = nil
+        p.parent?.removeChildWindow(p)
+        p.orderOut(nil)
+        p.contentView = nil   // tears down the hosting view → onDisappear → key monitor removed
+    }
+
+    /// Clicking anywhere else (or switching apps) dismisses — standard palette UX.
+    func windowDidResignKey(_ notification: Notification) {
+        onDismiss?()
+    }
 }
 
 // MARK: - AppKit bridges
