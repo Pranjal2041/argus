@@ -56,12 +56,13 @@ func (p *Provider) Dial(ctx context.Context, name string) (session.Session, erro
 	return c, nil
 }
 
-// interruptHint is the footer string both Claude Code and Codex show while a turn is
-// actively running — Claude: "… · esc to interrupt"; Codex: "Working (… • esc to
-// interrupt)". Its presence on the visible screen is the agent-agnostic "working"
-// signal; its absence means idle. It survives a noisy pane: a server logging in the
-// same window never prints it, so output-activity false positives disappear.
-const interruptHint = "esc to interrupt"
+// interruptHints are the footer strings agents show while a turn is actively
+// running — Claude: "… · esc to interrupt"; Codex: "Working (… • esc to
+// interrupt)"; some agent modes instead print "/stop to interrupt". Any of them
+// on the visible screen is the agent-agnostic "working" signal; their absence
+// means idle. This survives a noisy pane: a server logging in the same window
+// never prints these, so output-activity false positives disappear.
+var interruptHints = []string{"esc to interrupt", "/stop to interrupt"}
 
 // interruptScanLines bounds the scan to the last few non-blank lines — the hint lives
 // in the footer, so checking only the bottom avoids matching the phrase in chat text.
@@ -81,8 +82,8 @@ func DetectState(socket, name string) string {
 	return "idle"
 }
 
-// screenHasInterrupt reports whether interruptHint appears in the last few non-blank
-// lines of a captured screen.
+// screenHasInterrupt reports whether any interrupt hint appears in the last few
+// non-blank lines of a captured screen.
 func screenHasInterrupt(screen []byte) bool {
 	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
 	checked := 0
@@ -92,8 +93,11 @@ func screenHasInterrupt(screen []byte) bool {
 			continue
 		}
 		checked++
-		if strings.Contains(strings.ToLower(l), interruptHint) {
-			return true
+		low := strings.ToLower(l)
+		for _, hint := range interruptHints {
+			if strings.Contains(low, hint) {
+				return true
+			}
 		}
 	}
 	return false

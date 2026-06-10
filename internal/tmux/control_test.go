@@ -2,6 +2,28 @@ package tmux
 
 import "testing"
 
+// The "working" signal is any known agent footer hint in the last few
+// non-blank screen lines — "esc to interrupt" (Claude/Codex) OR
+// "/stop to interrupt" (some agent modes).
+func TestScreenHasInterrupt(t *testing.T) {
+	cases := []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{"esc hint", "output\n\n✶ Cogitating… (12s · esc to interrupt)\n", true},
+		{"stop hint", "output\n\nRunning task… (/stop to interrupt)\n", true},
+		{"case-insensitive", "…(ESC TO INTERRUPT)\n", true},
+		{"idle prompt", "$ ls\nfoo bar\n$ \n", false},
+		{"hint scrolled out of footer", "esc to interrupt\n1\n2\n3\n4\n5\n6\n7\n", false},
+	}
+	for _, c := range cases {
+		if got := screenHasInterrupt([]byte(c.screen)); got != c.want {
+			t.Errorf("%s: screenHasInterrupt = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // layoutSize parses the WxH out of tmux layout strings as emitted by
 // %layout-change — the authoritative pane size all viewers must render at.
 func TestLayoutSize(t *testing.T) {
