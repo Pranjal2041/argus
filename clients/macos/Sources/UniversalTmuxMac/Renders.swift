@@ -23,6 +23,11 @@ enum RenderExtract {
     /// Strip agent chrome from extracted terminal text, preserving everything
     /// else verbatim (markdown indentation matters — only KNOWN gutters go).
     static func clean(_ raw: String) -> String {
+        // Never-written terminal cells extract as literal U+0000, which HTML
+        // silently drops — gluing words together. Belt-and-braces here (the
+        // buffer extractor already maps them) because the SELECTION path goes
+        // through SwiftTerm's own machinery, which does not.
+        let raw = raw.replacingOccurrences(of: "\u{0}", with: " ")
         var out: [String] = []
         for var line in raw.components(separatedBy: "\n") {
             let ws = line.prefix(while: { $0 == " " })
