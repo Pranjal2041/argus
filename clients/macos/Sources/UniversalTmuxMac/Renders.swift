@@ -13,45 +13,23 @@ import WebKit
 // dismisses, the live terminal underneath is never touched.
 
 enum RenderExtract {
-    /// Lines that are pure TUI decoration (box-drawing borders, rules, blanks
-    /// between them). Kept deliberately dumb and deterministic: stray glyphs in
-    /// a render cost one Esc keypress; clever heuristics cost trust.
-    private static let chromeOnly: CharacterSet = {
-        var s = CharacterSet.whitespaces
-        s.insert(charactersIn: "─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰╱╲╳▔▁▏▕")
-        return s
-    }()
+    /// Per-line leading gutters that are unambiguously AGENT chrome (claude's
+    /// `⏺` turn marker and `⎿` tool-result elbow). Box-drawing characters are
+    /// deliberately NOT touched here anymore: they may be content the terminal
+    /// already typeset (tables, rules) — the renderer's segmenter preserves
+    /// those runs verbatim instead. Stripping them destroyed real tables.
+    private static let gutterPrefixes = ["⏺ ", "⎿ "]
 
-    /// Per-line leading gutters agents draw before content (claude's `⏺` turn
-    /// marker, `⎿` tool-result elbow, `│`/`┃` quote bars/box edges).
-    private static let gutterPrefixes = ["⏺ ", "⎿ ", "│ ", "┃ ", "▌ ", "▐ "]
-
-    /// Strip TUI chrome from extracted terminal text, preserving everything else
-    /// verbatim (markdown indentation matters — only KNOWN gutters are removed).
+    /// Strip agent chrome from extracted terminal text, preserving everything
+    /// else verbatim (markdown indentation matters — only KNOWN gutters go).
     static func clean(_ raw: String) -> String {
         var out: [String] = []
         for var line in raw.components(separatedBy: "\n") {
-            // Drop decoration-only lines (pane borders, rules).
-            if !line.isEmpty, line.unicodeScalars.allSatisfy({ chromeOnly.contains($0) }) {
-                continue
-            }
-            // Peel leading gutters (possibly nested, e.g. "│ ⏺ text"), each
-            // optionally preceded by indentation.
-            var peeled = true
-            while peeled {
-                peeled = false
-                let ws = line.prefix(while: { $0 == " " })
-                let body = line.dropFirst(ws.count)
-                for g in gutterPrefixes where body.hasPrefix(g) {
-                    line = String(body.dropFirst(g.count))
-                    peeled = true
-                    break
-                }
-                // A bare trailing gutter char (empty content after it).
-                if !peeled, gutterPrefixes.map({ String($0.first!) }).contains(String(body)) {
-                    line = ""
-                    peeled = true
-                }
+            let ws = line.prefix(while: { $0 == " " })
+            let body = line.dropFirst(ws.count)
+            for g in gutterPrefixes where body.hasPrefix(g) {
+                line = String(body.dropFirst(g.count))
+                break
             }
             out.append(line)
         }

@@ -42,6 +42,13 @@
   .katex { font-size: 1.06em; }
   .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 1em 0; }
   #empty { color: #8B949E; text-align: center; margin-top: 80px; font-size: 13px; }
+  /* Verbatim terminal segments (tables, rules, aligned columns): exactly as
+     the terminal typeset them — monospace, no wrap, quiet background. */
+  pre.term {
+    background: #FAFAF8; border: 1px solid #ECECEA; border-radius: 8px;
+    padding: 10px 14px; overflow-x: auto;
+    font: 12px/1.45 "SF Mono", Menlo, monospace; color: #24292F;
+  }
   .jblock { position: relative; margin: .9em 0; }
   .jblock pre { margin: 0; }
   .jtoggle {
@@ -62,17 +69,16 @@
 (function () {
   marked.setOptions({ gfm: true, breaks: false });
 
-  // Math must be extracted BEFORE markdown parsing: marked treats \! \_ \{ \, as
-  // escapes and _x_ as emphasis, mangling any TeX it touches. So: (1) shield
-  // code fences/spans so a $ inside code is never taken as math, (2) pull math
-  // spans out into placeholder tokens, (3) un-shield code and run marked,
-  // (4) replace each token with katex.renderToString of the RAW TeX.
-  //
-  // Inline $…$ tolerates single newlines: agent TUIs hard-wrap their output at
-  // the pane width, so a span often straddles a line break. Markdown renders a
-  // single newline inside a paragraph as a space anyway, so joining is exactly
-  // its semantics. A blank line (paragraph break) still terminates the span,
-  // and a length cap stops a stray $ from pairing across half the document.
+  // GROUND RULE: terminal content is a MIX of (a) markdown/TeX SOURCE shown as
+  // raw text — worth rendering, (b) content the terminal ALREADY typeset
+  // (box-drawn tables, aligned columns, rules) — must be preserved verbatim,
+  // and (c) data (JSON), possibly line-broken mid-token by the TUI's own
+  // wrapping. Markdown is therefore OPT-IN PER SEGMENT, never global: lines
+  // with box-drawing/block characters form verbatim segments rendered exactly
+  // as the terminal had them; only the prose runs between them get the
+  // markdown/math/JSON pipeline. The cost asymmetry drives the bias: prose
+  // accidentally shown monospace is mildly ugly, a table run through markdown
+  // is destroyed.
   function render(md) {
     const out = document.getElementById("out");
     if (!md || !md.trim()) {
@@ -80,33 +86,76 @@
       return;
     }
 
-    // (1) shield code regions (fences, then inline spans)
+    // Code fences are explicit author intent — shield them before segmentation
+    // so a fence containing box art isn't split into a verbatim segment.
     const code = [];
-    let text = md.replace(/^(```|~~~)[\s\S]*?^\1[ \t]*$/gm, (m) => {
-      code.push(m); return "⟦UTCODE" + (code.length - 1) + "⟧";
-    });
-    text = text.replace(/`[^`\n]+`/g, (m) => {
+    const text = md.replace(/^(```|~~~)[\s\S]*?^\1[ \t]*$/gm, (m) => {
       code.push(m); return "⟦UTCODE" + (code.length - 1) + "⟧";
     });
 
-    // (1b) lift embedded JSON objects into their own blocks. Detection is
-    // deterministic: a balanced {…}/[…] span (string-aware brace matching)
-    // must JSON.parse — no fuzzy repair, Python reprs etc. stay as text.
-    // Complexity floor (≥2 keys or ≥80 chars) keeps small inline coordinate
-    // arrays in the prose where they belong.
     jsonBlocks = [];
+    const html = segment(text)
+      .map((s) => s.verbatim
+        ? '<pre class="term">' + escapeHtml(s.text) + "</pre>"
+        : renderProse(s.text, code))
+      .join("\n");
+
+    out.innerHTML = html;
+    out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+  }
+
+  // Box-drawing, block elements, and legacy +---+ rules mark a line as
+  // "already typeset by the terminal". GFM pipe tables (ASCII |) stay prose so
+  // real markdown tables keep rendering as HTML tables.
+  const ARTY = /[─-╿▀-▟]/;
+  const ASCII_RULE = /^[ \t]*\+[-+=]{4,}\+?[ \t]*$/;
+
+  function segment(text) {
+    const segs = [];
+    let cur = null, curVerbatim = false;
+    const push = () => {
+      if (cur) segs.push({ verbatim: curVerbatim, text: cur.join("\n").replace(/\n+$/, "") });
+      cur = null;
+    };
+    for (const ln of text.split("\n")) {
+      const arty = ARTY.test(ln) || ASCII_RULE.test(ln);
+      const blank = ln.trim() === "";
+      if (!cur) { cur = [ln]; curVerbatim = arty; continue; }
+      if (blank || arty === curVerbatim) { cur.push(ln); continue; }
+      push();
+      cur = [ln];
+      curVerbatim = arty;
+    }
+    push();
+    return segs;
+  }
+
+  // The markdown/math/JSON pipeline, applied to ONE prose segment:
+  // (1) shield inline code, (2) lift JSON objects into blocks, (3) extract
+  // math into placeholders BEFORE marked (it mangles raw TeX: \! \_ escapes,
+  // _emphasis_), (4) un-shield code + marked, (5) restore math via
+  // katex.renderToString and JSON via styled blocks.
+  //
+  // Inline $…$ tolerates single newlines: agent TUIs hard-wrap their output at
+  // the pane width, so a span often straddles a line break. Markdown renders a
+  // single newline inside a paragraph as a space anyway, so joining is exactly
+  // its semantics. A blank line still terminates, and a length cap stops a
+  // stray $ from pairing across half the document.
+  function renderProse(seg, code) {
+    let text = seg.replace(/`[^`\n]+`/g, (m) => {
+      code.push(m); return "⟦UTCODE" + (code.length - 1) + "⟧";
+    });
+
     {
       const spans = findJSONSpans(text);
       for (let k = spans.length - 1; k >= 0; k--) {
-        const [a, b] = spans[k];
-        const raw = text.slice(a, b);
+        const [a, b, parsed] = spans[k];
         const idx = jsonBlocks.length;
-        jsonBlocks.push({ raw, pretty: prettyJSON(JSON.parse(raw)), pretty_on: true });
+        jsonBlocks.push({ raw: text.slice(a, b), pretty: prettyJSON(parsed), pretty_on: true });
         text = text.slice(0, a) + "\n\n⟦UTJSON" + idx + "⟧\n\n" + text.slice(b);
       }
     }
 
-    // (2) extract math: display forms first, then inline
     const math = [];
     const stash = (tex, display) => {
       math.push({ tex, display });
@@ -119,11 +168,9 @@
       .replace(/\\\(([\s\S]+?)\\\)/g, (m, t) => sane(t) ? stash(t, false) : m)
       .replace(/\$([^\s$][^$]{0,400}?[^\s$]|\S)\$/g, (m, t) => sane(t) ? stash(t.replace(/\s*\n\s*/g, " "), false) : m);
 
-    // (3) un-shield code, parse markdown
     text = text.replace(/⟦UTCODE(\d+)⟧/g, (_, i) => code[+i]);
     let html = marked.parse(text);
 
-    // (4) restore math as KaTeX output (raw TeX, untouched by marked)
     html = html.replace(/⟦UTMATH(\d+)⟧/g, (_, i) => {
       const m = math[+i];
       try {
@@ -133,19 +180,28 @@
       }
     });
 
-    // (5) restore JSON blocks: pretty by default, a per-block Raw toggle
     html = html.replace(/⟦UTJSON(\d+)⟧/g, (_, i) =>
       '<div class="jblock"><button class="jtoggle" data-i="' + i + '">Raw</button>' +
       '<pre><code class="language-json">' + escapeHtml(jsonBlocks[+i].pretty) + "</code></pre></div>");
 
-    out.innerHTML = html;
-    out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+    return html;
   }
 
   let jsonBlocks = [];
 
-  // String-aware balanced-brace scan; a span qualifies only if JSON.parse
-  // accepts it verbatim.
+  // A balanced span must parse as JSON to qualify — but the TUI may have
+  // hard-wrapped it MID-TOKEN at the pane width ("inplan\ne": 1.8), which puts
+  // raw newlines inside strings/numbers. Retry order: verbatim, then newlines
+  // removed (mid-token wrap), then newlines as spaces. No other repair —
+  // Python reprs etc. stay text.
+  function parseJSONish(cand) {
+    for (const s of [cand, cand.replace(/[ \t]*\n[ \t]*/g, ""), cand.replace(/[ \t]*\n[ \t]*/g, " ")]) {
+      try { return JSON.parse(s); } catch (e) { /* next */ }
+    }
+    return undefined;
+  }
+
+  // String-aware balanced-brace scan; a span qualifies only if it parses.
   function findJSONSpans(text) {
     const spans = [];
     let i = 0;
@@ -156,15 +212,13 @@
         if (end > i) {
           const cand = text.slice(i, end + 1);
           if (cand.length >= 40) {
-            try {
-              const v = JSON.parse(cand);
-              if (v && typeof v === "object" &&
-                  (Array.isArray(v) ? cand.length >= 80 : Object.keys(v).length >= 2)) {
-                spans.push([i, end + 1]);
-                i = end + 1;
-                continue;
-              }
-            } catch (e) { /* not JSON — leave as prose */ }
+            const v = parseJSONish(cand);
+            if (v && typeof v === "object" &&
+                (Array.isArray(v) ? cand.length >= 80 : Object.keys(v).length >= 2)) {
+              spans.push([i, end + 1, v]);
+              i = end + 1;
+              continue;
+            }
           }
         }
       }
