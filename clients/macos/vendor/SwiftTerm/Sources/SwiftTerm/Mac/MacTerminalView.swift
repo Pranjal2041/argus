@@ -571,6 +571,27 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
     }
 
+    /// LOCAL PATCH (Argus): the frame size that makes this view's own
+    /// frame-driven sizing (`processSizeChange`, which floors size/cell) resolve
+    /// to EXACTLY the given grid. Used to pin the view to a remote pane's
+    /// authoritative cols×rows. The extra half cell absorbs float error in both
+    /// directions: floor(cols + 0.5) == cols, and it can never reach cols+1.
+    public func frameSize (forCols cols: Int, rows: Int) -> CGSize
+    {
+        return CGSize (width: cellDimension.width * (CGFloat(cols) + 0.5) + scrollerWidth,
+                       height: cellDimension.height * (CGFloat(rows) + 0.5))
+    }
+
+    /// LOCAL PATCH (Argus): the grid this view's frame-driven sizing would
+    /// resolve for a given frame size — the same floor math as
+    /// `processSizeChange`, exposed so a host can compute its NATURAL grid from
+    /// a container's bounds (e.g. to ask a remote pane for that size).
+    public func gridSize (for size: CGSize) -> (cols: Int, rows: Int)
+    {
+        return (cols: max (1, Int (getEffectiveWidth (size: size) / cellDimension.width)),
+                rows: max (1, Int (size.height / cellDimension.height)))
+    }
+
     func getEffectiveWidth (size: CGSize) -> CGFloat
     {
         return (size.width - scrollerWidth)

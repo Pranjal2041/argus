@@ -35,6 +35,11 @@ class RemoteTerminal(
     private var closed = false
     private var backoff = 500L
 
+    /** Coalesced "repaint at the settled size" request after pane-size pins. */
+    private val snapshotRequest = Runnable {
+        ws?.send(frame(Op.REQ_SNAPSHOT, "", ByteArray(0)).toByteString())
+    }
+
     private val bridge = object : TerminalSession.RemoteBridge {
         override fun onInput(data: ByteArray, offset: Int, count: Int) {
             ws?.send(frame(Op.INPUT, "", data.copyOfRange(offset, offset + count)).toByteString())
@@ -72,10 +77,29 @@ class RemoteTerminal(
             }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val d = decodeFrame(bytes.toByteArray()) ?: return
-                if (d.first == Op.OUTPUT) {
-                    val payload = d.third
-                    Log.d(TAG, "output ${payload.size}B")
-                    main.post { session.feedOutput(payload, 0, payload.size) }
+                when (d.first) {
+                    Op.OUTPUT -> {
+                        val payload = d.third
+                        main.post { session.feedOutput(payload, 0, payload.size) }
+                    }
+                    Op.PANE_SIZE -> {
+                        // The pane's authoritative size (any tmux client may have set
+                        // it): pin the emulator to exactly this grid, then ask for one
+                        // clean repaint of the settled size (coalesced; the snapshot is
+                        // idempotent server-side).
+                        val p = d.third
+                        if (p.size >= 4) {
+                            val cols = ((p[0].toInt() and 0xff) shl 8) or (p[1].toInt() and 0xff)
+                            val rows = ((p[2].toInt() and 0xff) shl 8) or (p[3].toInt() and 0xff)
+                            Log.d(TAG, "paneSize ${cols}x$rows")
+                            main.post {
+                                session.setRemoteSize(cols, rows)
+                                view.onScreenUpdated()
+                                main.removeCallbacks(snapshotRequest)
+                                main.postDelayed(snapshotRequest, 250)
+                            }
+                        }
+                    }
                 }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {

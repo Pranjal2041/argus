@@ -152,6 +152,8 @@ type Client struct {
 	primary string // pane id of the session's first pane
 	outCh   chan Output
 	writeMu sync.Mutex
+	lastW   int // last size emitted from %layout-change (readLoop goroutine only)
+	lastH   int
 }
 
 // Dial starts a control-mode client attached to (creating if absent) the named
@@ -273,11 +275,28 @@ func (c *Client) SendKeys(pane string, data []byte) error {
 
 // Resize sizes the window to the client's terminal. Safe because we own this
 // session (DESIGN.md: never refresh-client -C against a foreign session).
+//
+// This is an ASK, not a command: the window's actual size is negotiated by tmux
+// across ALL attached clients (window-size policy) — e.g. a real `tmux attach`
+// terminal can win. Whatever tmux decides comes back as a %layout-change size
+// event, which is the AUTHORITATIVE size viewers must render at.
 func (c *Client) Resize(cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
 		return nil
 	}
 	return c.send(fmt.Sprintf("refresh-client -C %dx%d", cols, rows))
+}
+
+// Size reports the session's active window size — the width every byte of
+// %output is formatted for. Queried once per client connect; live changes
+// arrive as in-band size events from %layout-change.
+func (c *Client) Size() (int, int) {
+	out := c.paneFlag("#{window_width} #{window_height}")
+	var w, h int
+	if _, err := fmt.Sscanf(out, "%d %d", &w, &h); err != nil {
+		return 0, 0
+	}
+	return w, h
 }
 
 // paneFlag reads a single tmux format value for the session's active pane,
@@ -339,8 +358,24 @@ func (c *Client) readLoop(r io.Reader) {
 	}
 }
 
-// handleLine processes one control-mode line. Slice 0 only needs %output.
+// handleLine processes one control-mode line: %output (pane bytes) and
+// %layout-change (the window was resized — by anyone — so emit an in-band size
+// event). Everything else (guard blocks, other notifications) is ignored.
 func (c *Client) handleLine(line string) {
+	if strings.HasPrefix(line, "%layout-change ") {
+		// %layout-change @id window-layout window-visible-layout flags
+		// The layout's second field is the window size, e.g. "ac1d,139x53,0,0,0".
+		// Emitting it IN-BAND (same channel as %output) is essential: output
+		// produced before the reflow renders at the old size, after at the new.
+		f := strings.Fields(line)
+		if len(f) >= 3 {
+			if w, h, ok := layoutSize(f[2]); ok && (w != c.lastW || h != c.lastH) {
+				c.lastW, c.lastH = w, h
+				c.outCh <- Output{Pane: c.primary, Cols: w, Rows: h}
+			}
+		}
+		return
+	}
 	if !strings.HasPrefix(line, "%output ") {
 		return // ignore guard blocks, topology notifications, echoed commands
 	}
@@ -352,6 +387,18 @@ func (c *Client) handleLine(line string) {
 	pane := rest[:sp]
 	data := stripWindowName(unescapeOutput(rest[sp+1:]))
 	c.outCh <- Output{Pane: pane, Data: data} // block for backpressure; broker always drains
+}
+
+// layoutSize extracts WxH from a tmux layout string ("ac1d,139x53,0,0,0").
+func layoutSize(layout string) (w, h int, ok bool) {
+	parts := strings.SplitN(layout, ",", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(parts[1], "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // discoverPane asks tmux (via a plain subprocess on the same server) for the

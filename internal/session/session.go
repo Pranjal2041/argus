@@ -7,10 +7,16 @@ package session
 
 import "context"
 
-// Output is a chunk of raw bytes produced by a session's pane.
+// Output is a chunk of raw bytes produced by a session's pane — or, when
+// Cols/Rows are non-zero, an in-band SIZE EVENT: the pane was resized (by any
+// tmux client, this broker, or another viewer) and all output after this event
+// is formatted for the new width. In-band ordering matters: bytes generated
+// before the resize must be rendered at the old size, bytes after at the new.
 type Output struct {
 	Pane string // backend pane id (tmux "%0"); a constant for single-pane backends
 	Data []byte
+	Cols int // >0 with Rows: size event (Data is empty)
+	Rows int
 }
 
 // Info describes one session for the client's sidebar (JSON shape is the wire
@@ -26,9 +32,10 @@ type Info struct {
 
 // Session is one live session the broker streams to/from clients.
 type Session interface {
-	Output() <-chan Output             // raw pane bytes (closed when the session ends)
+	Output() <-chan Output             // raw pane bytes + in-band size events (closed when the session ends)
 	SendKeys(pane string, data []byte) error
 	Resize(cols, rows int) error
+	Size() (cols, rows int)            // the pane's CURRENT size (0,0 if unknown)
 	Snapshot() []byte                  // current screen to prime a freshly-connected client
 	Pane() string                      // default pane id for input routing
 	Close()                            // detach this control client (session itself persists)

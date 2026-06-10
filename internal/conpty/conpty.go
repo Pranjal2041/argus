@@ -44,6 +44,8 @@ type winSession struct {
 	mu      sync.Mutex
 	ring    []byte
 	lastOut int64
+	cols    int // current ConPTY size (the width all output is formatted for)
+	rows    int
 }
 
 func (s *winSession) Output() <-chan session.Output { return s.outCh }
@@ -58,7 +60,29 @@ func (s *winSession) Resize(cols, rows int) error {
 	if cols <= 0 || rows <= 0 || cols > 1000 || rows > 1000 {
 		return nil
 	}
-	return s.cpty.Resize(cols, rows)
+	if err := s.cpty.Resize(cols, rows); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	changed := cols != s.cols || rows != s.rows
+	s.cols, s.rows = cols, rows
+	s.mu.Unlock()
+	if changed {
+		// In-band size event so EVERY viewer (not just the one that asked) re-pins
+		// its grid to the ConPTY's new size — mirrors the tmux %layout-change path.
+		select {
+		case s.outCh <- session.Output{Pane: "%0", Cols: cols, Rows: rows}:
+		default: // no/slow consumer; the connect-time Size() push covers it
+		}
+	}
+	return nil
+}
+
+// Size reports the ConPTY's current dimensions.
+func (s *winSession) Size() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cols, s.rows
 }
 
 // Snapshot replays the recent raw output; the client's terminal reconstructs the
@@ -178,6 +202,7 @@ func (p *Provider) Create(name, dir string) error {
 	s := &winSession{
 		name: name, dir: dir, cpty: cpty,
 		outCh: make(chan session.Output, 256), lastOut: time.Now().Unix(),
+		cols: defCols, rows: defRows,
 	}
 	p.mu.Lock()
 	p.sessions[name] = s

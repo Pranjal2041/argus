@@ -2,9 +2,12 @@ package dev.universaltmux.android
 
 /** Binary wire protocol shared with the broker: [op u8][paneLen u8][pane][payload]. */
 object Op {
-    const val OUTPUT = 1   // server -> client: pane bytes
-    const val INPUT = 2    // client -> server: keystrokes
-    const val RESIZE = 3   // client -> server: payload = cols u16, rows u16 (big-endian)
+    const val OUTPUT = 1        // server -> client: pane bytes
+    const val INPUT = 2         // client -> server: keystrokes
+    const val RESIZE = 3        // client -> server: payload = cols u16, rows u16 (big-endian) — an ASK
+    const val REQ_SNAPSHOT = 4  // client -> server: send a fresh idempotent snapshot (clean repaint)
+    const val PANE_SIZE = 5     // server -> client: the pane's AUTHORITATIVE cols×rows; output is
+    // formatted for exactly this grid, so the emulator must pin to it or full-width lines shear
 }
 
 fun frame(op: Int, pane: String, payload: ByteArray): ByteArray {

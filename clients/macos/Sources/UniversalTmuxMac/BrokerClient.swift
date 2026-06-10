@@ -5,6 +5,9 @@ enum Op {
     static let input: UInt8 = 2
     static let resize: UInt8 = 3
     static let requestSnapshot: UInt8 = 4 // ask the broker for a fresh authoritative redraw
+    static let paneSize: UInt8 = 5 // broker → us: the pane's AUTHORITATIVE cols×rows.
+    // %output bytes are formatted for exactly this grid; rendering at any other
+    // width shears the screen, so the terminal pins to it (opResize is only an ask).
 }
 
 /// Live state of a broker socket, surfaced to the UI (header status chip).
@@ -24,6 +27,7 @@ final class BrokerClient {
     private var backoff: TimeInterval = 0.5
 
     var onOutput: (([UInt8]) -> Void)?
+    var onPaneSize: ((_ cols: Int, _ rows: Int) -> Void)?  // authoritative pane size (op 5)
     var onStatus: ((ConnState) -> Void)?
     var onConnect: (() -> Void)?      // each (re)connect — used to re-send geometry
 
@@ -89,7 +93,19 @@ final class BrokerClient {
         let op = b[0]
         let paneLen = Int(b[1])
         guard b.count >= 2 + paneLen else { return }
-        if op == Op.output { onOutput?(Array(b[(2 + paneLen)...])) }
+        let payload = b[(2 + paneLen)...]
+        switch op {
+        case Op.output:
+            onOutput?(Array(payload))
+        case Op.paneSize:
+            guard payload.count >= 4 else { return }
+            let i = payload.startIndex
+            let cols = Int(payload[i]) << 8 | Int(payload[i + 1])
+            let rows = Int(payload[i + 2]) << 8 | Int(payload[i + 3])
+            onPaneSize?(cols, rows)
+        default:
+            break
+        }
     }
 
     func send(op: UInt8, pane: String, payload: [UInt8]) {
