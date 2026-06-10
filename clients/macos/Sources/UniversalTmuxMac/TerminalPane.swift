@@ -661,9 +661,22 @@ final class TerminalController: ObservableObject {
         conn.applyLayout()
         conn.view.layoutSubtreeIfNeeded()
         conn.sendCurrentGeometry()
+        // Switching panes ALWAYS hands the keyboard to that pane's terminal —
+        // even from the sidebar filter (an NSText): picking a session IS the
+        // end of filtering. The lastShownID guard above already prevents the
+        // repeated-updateNSView focus theft this used to defend against.
         DispatchQueue.main.async {
-            guard let w = conn.view.window else { return }
-            if !(w.firstResponder is NSText) { w.makeFirstResponder(conn.view) }
+            conn.view.window?.makeFirstResponder(conn.view)
+        }
+    }
+
+    /// Hand the keyboard back to the visible terminal — used by overlays
+    /// (find, palette, render) when they dismiss, so focus never strands on
+    /// whatever AppKit picks next (usually the sidebar filter).
+    func focusTerminal() {
+        guard let v = visible?.view else { return }
+        DispatchQueue.main.async {
+            v.window?.makeFirstResponder(v)
         }
     }
 }

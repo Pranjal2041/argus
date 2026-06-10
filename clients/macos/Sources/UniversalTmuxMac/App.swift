@@ -256,6 +256,12 @@ struct RootView: View {
         }
         .onChange(of: state.searchFocusToken) { _ in searchFocused = true }
         .onChange(of: state.selection) { _ in notebooks.activeID = nil }   // selecting a terminal leaves the notebook view
+        // When an overlay dismisses, the keyboard goes back to the visible
+        // TERMINAL — never stranded on whatever AppKit picks next (the
+        // sidebar filter). One central place so every close path is covered.
+        .onChange(of: state.showFind) { open in if !open { terminals.focusTerminal() } }
+        .onChange(of: state.showPalette) { open in if !open { terminals.focusTerminal() } }
+        .onChange(of: state.renderText) { v in if v == nil { terminals.focusTerminal() } }
         .sheet(isPresented: $state.showNew) { newSessionSheet }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
             TextField("name", text: $state.renameText)
@@ -375,7 +381,7 @@ struct RootView: View {
                 .font(cf(12))
                 .foregroundStyle(Theme.textPrimary)
                 .focused($searchFocused)
-                .onExitCommand { query = ""; searchFocused = false }
+                .onExitCommand { query = ""; searchFocused = false; terminals.focusTerminal() }
             if !query.isEmpty {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 11))
