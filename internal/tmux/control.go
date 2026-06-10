@@ -299,11 +299,16 @@ func (c *Client) Size() (int, int) {
 	return w, h
 }
 
-// paneFlag reads a single tmux format value for the session's active pane,
-// e.g. "#{alternate_on}" → "1" when a full-screen (TUI) app is on the alternate
+// paneFlag reads a single tmux format value for the pane we stream, e.g.
+// "#{alternate_on}" → "1" when a full-screen (TUI) app is on the alternate
 // screen. Returns "" on error.
+//
+// Targeted by PANE ID, never by session name: the session can be renamed out
+// from under a live client (Manager.Rename keeps hubs streaming across a
+// rename), and a stale name made every name-targeted command fail silently —
+// no snapshot, no size, a freshly-attached viewer stuck on "connecting".
 func (c *Client) paneFlag(format string) string {
-	out, err := exec.Command("tmux", tmuxArgs(c.socket, "display-message", "-p", "-t", c.session, format)...).Output()
+	out, err := exec.Command("tmux", tmuxArgs(c.socket, "display-message", "-p", "-t", c.primary, format)...).Output()
 	if err != nil {
 		return ""
 	}
@@ -330,10 +335,10 @@ func (c *Client) Snapshot() []byte {
 	// snapshot repeatedly (e.g. a redraw on every settled resize) without ever
 	// duplicating history — the snapshot is an idempotent "here is the truth now".
 	if alt {
-		args = []string{"capture-pane", "-p", "-e", "-t", c.session}                  // visible screen only
+		args = []string{"capture-pane", "-p", "-e", "-t", c.primary}                  // visible screen only
 		prefix = esc + "[?1049h" + esc + "[2J" + esc + "[3J" + esc + "[H"              // enter alt, clear, clear scrollback, home
 	} else {
-		args = []string{"capture-pane", "-p", "-e", "-S", "-10000", "-t", c.session}  // + scrollback
+		args = []string{"capture-pane", "-p", "-e", "-S", "-10000", "-t", c.primary}  // + scrollback
 		prefix = esc + "[?1049l" + esc + "[2J" + esc + "[3J" + esc + "[H"              // ensure main, clear, clear scrollback, home
 	}
 	out, err := exec.Command("tmux", tmuxArgs(c.socket, args...)...).Output()
