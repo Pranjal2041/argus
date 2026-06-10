@@ -519,6 +519,17 @@ final class TerminalController: ObservableObject {
     }
     func scrollToBottom() { visible?.view.scroll(toPosition: 1.0); atBottom = true }
 
+    /// Text for the Renders panel (⇧⌘P): the user's selection if there is one,
+    /// else the recent output (screen + scrollback tail) with soft-wrapped grid
+    /// rows rejoined into logical lines, then stripped of TUI chrome.
+    func renderableText() -> String? {
+        guard let v = visible?.view else { return nil }
+        if let sel = v.getSelection(), !sel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return RenderExtract.clean(sel)
+        }
+        return RenderExtract.clean(v.getTerminal().getTextJoiningWraps(maxVisualLines: 400))
+    }
+
     /// ⌘V: if the clipboard holds an image, bridge it to the visible session's host;
     /// otherwise do a normal text paste into the terminal.
     func pasteFromClipboard() {
