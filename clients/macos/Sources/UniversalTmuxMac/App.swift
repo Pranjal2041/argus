@@ -60,6 +60,10 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("g", modifiers: [.command, .shift])
             }
             CommandMenu("Terminal") {
+                // ⇧⌘M (markdown/math) — ⇧⌘P belongs to Claude Code inside the terminal.
+                Button("Render Output…") { state.renderText = terminals.renderableText() }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                Divider()
                 Button("Increase Font Size") { terminals.adjustFont(1) }
                     .keyboardShortcut("=", modifiers: .command)
                 Button("Decrease Font Size") { terminals.adjustFont(-1) }
@@ -237,6 +241,11 @@ struct RootView: View {
         .overlay {
             if state.showPalette {
                 CommandPalette(machineName: machineName).environmentObject(state).environmentObject(terminals)
+            }
+        }
+        .overlay {
+            if let md = state.renderText {
+                RenderPanel(text: md).environmentObject(state)
             }
         }
         .background(WindowAccessor(onFullscreen: { isFullscreen = $0 }))
@@ -931,6 +940,7 @@ private struct CommandPalette: View {
             ("arrow.clockwise", "Refresh Sessions", { state.refreshAll() }),
             ("sidebar.leading", "Toggle Sidebar", { state.toggleSidebar() }),
             ("magnifyingglass", "Find in Terminal", { state.showFind = true; state.findFocusToken &+= 1 }),
+            ("sparkles", "Render Output (Markdown / LaTeX)", { state.renderText = terminals.renderableText() }),
         ]
         for (ic, t, a) in actions where match(t) {
             out.append(Item(id: "a:" + t, icon: ic, title: t, subtitle: "Action", run: a))

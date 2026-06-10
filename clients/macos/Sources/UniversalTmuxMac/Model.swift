@@ -91,6 +91,7 @@ final class AppState: ObservableObject {
     @Published var findText = ""
     @Published var findFocusToken = 0     // bumped to (re)focus the find field
     @Published var showPalette = false
+    @Published var renderText: String?    // non-nil → the Renders panel is up with this snapshot
     @Published var searchFocusToken = 0   // bumped to request focusing the filter field
     @Published var isRefreshing = false
     @Published var clock = Date()          // bumped periodically so relative times re-render

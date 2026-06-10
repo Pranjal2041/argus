@@ -13,6 +13,7 @@ cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/Argus.icns "$APP/Contents/Resources/" 2>/dev/null || true
 cp Resources/fonts/*.ttf "$APP/Contents/Resources/" 2>/dev/null || true
 cp -R Resources/codemirror "$APP/Contents/Resources/" 2>/dev/null || true  # CM6 bundle for the Files editor/viewer
+cp -R Resources/render "$APP/Contents/Resources/" 2>/dev/null || true      # offline marked+KaTeX+hljs bundle for Renders (⇧⌘P)
 
 echo "Built $(pwd)/$APP"
 echo "Run it with:  open Argus.app    (or double-click in Finder)"

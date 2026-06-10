@@ -5882,6 +5882,32 @@ open class Terminal {
         getText(start: start, end: end, buffer: buffer)
     }
 
+    /// LOCAL PATCH (Argus): plain text of the last `maxVisualLines` buffer rows
+    /// (scrollback + screen), with soft-wrapped rows REJOINED into their logical
+    /// lines. The grid hard-wraps long lines at the pane width; exporting those
+    /// breaks literally would chop paragraphs/equations, so rows flagged
+    /// `isWrapped` are concatenated onto the row above instead of starting a
+    /// new line. Trailing blank lines are dropped.
+    public func getTextJoiningWraps (maxVisualLines: Int = 400) -> String
+    {
+        let total = buffer.lines.count
+        let start = max (0, total - maxVisualLines)
+        var lines: [String] = []
+        for i in start..<total {
+            let line = buffer.lines [i]
+            let text = line.translateToString (trimRight: true)
+            if line.isWrapped && !lines.isEmpty && i > start {
+                lines [lines.count - 1] += text
+            } else {
+                lines.append (text)
+            }
+        }
+        while let last = lines.last, last.isEmpty {
+            lines.removeLast ()
+        }
+        return lines.joined (separator: "\n")
+    }
+
     /// Returns a hyperlink or implicit link at the provided location.
     public func link(at location: LinkLookupLocation, mode: LinkLookupMode) -> String?
     {
