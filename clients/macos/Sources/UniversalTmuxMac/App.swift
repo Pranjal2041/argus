@@ -60,8 +60,9 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("g", modifiers: [.command, .shift])
             }
             CommandMenu("Terminal") {
+                // ⇧⌘M (markdown/math) — ⇧⌘P belongs to Claude Code inside the terminal.
                 Button("Render Output…") { state.renderText = terminals.renderableText() }
-                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
                 Divider()
                 Button("Increase Font Size") { terminals.adjustFont(1) }
                     .keyboardShortcut("=", modifiers: .command)

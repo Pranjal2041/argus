@@ -42,6 +42,15 @@
   .katex { font-size: 1.06em; }
   .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 1em 0; }
   #empty { color: #8B949E; text-align: center; margin-top: 80px; font-size: 13px; }
+  .jblock { position: relative; margin: .9em 0; }
+  .jblock pre { margin: 0; }
+  .jtoggle {
+    position: absolute; top: 7px; right: 8px; z-index: 1;
+    font: 10.5px -apple-system, sans-serif; color: #57606A;
+    background: #FFFFFFD8; border: 1px solid #DDDDD8; border-radius: 5px;
+    padding: 2px 8px; cursor: pointer;
+  }
+  .jtoggle:hover { color: #1F2328; background: #FFF; }
 </style>
 <script src="marked.min.js"></script>
 <script src="katex/katex.min.js"></script>
@@ -80,6 +89,23 @@
       code.push(m); return "⟦UTCODE" + (code.length - 1) + "⟧";
     });
 
+    // (1b) lift embedded JSON objects into their own blocks. Detection is
+    // deterministic: a balanced {…}/[…] span (string-aware brace matching)
+    // must JSON.parse — no fuzzy repair, Python reprs etc. stay as text.
+    // Complexity floor (≥2 keys or ≥80 chars) keeps small inline coordinate
+    // arrays in the prose where they belong.
+    jsonBlocks = [];
+    {
+      const spans = findJSONSpans(text);
+      for (let k = spans.length - 1; k >= 0; k--) {
+        const [a, b] = spans[k];
+        const raw = text.slice(a, b);
+        const idx = jsonBlocks.length;
+        jsonBlocks.push({ raw, pretty: prettyJSON(JSON.parse(raw)), pretty_on: true });
+        text = text.slice(0, a) + "\n\n⟦UTJSON" + idx + "⟧\n\n" + text.slice(b);
+      }
+    }
+
     // (2) extract math: display forms first, then inline
     const math = [];
     const stash = (tex, display) => {
@@ -107,9 +133,99 @@
       }
     });
 
+    // (5) restore JSON blocks: pretty by default, a per-block Raw toggle
+    html = html.replace(/⟦UTJSON(\d+)⟧/g, (_, i) =>
+      '<div class="jblock"><button class="jtoggle" data-i="' + i + '">Raw</button>' +
+      '<pre><code class="language-json">' + escapeHtml(jsonBlocks[+i].pretty) + "</code></pre></div>");
+
     out.innerHTML = html;
     out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
   }
+
+  let jsonBlocks = [];
+
+  // String-aware balanced-brace scan; a span qualifies only if JSON.parse
+  // accepts it verbatim.
+  function findJSONSpans(text) {
+    const spans = [];
+    let i = 0;
+    while (i < text.length) {
+      const c = text[i];
+      if (c === "{" || c === "[") {
+        const end = matchBracket(text, i);
+        if (end > i) {
+          const cand = text.slice(i, end + 1);
+          if (cand.length >= 40) {
+            try {
+              const v = JSON.parse(cand);
+              if (v && typeof v === "object" &&
+                  (Array.isArray(v) ? cand.length >= 80 : Object.keys(v).length >= 2)) {
+                spans.push([i, end + 1]);
+                i = end + 1;
+                continue;
+              }
+            } catch (e) { /* not JSON — leave as prose */ }
+          }
+        }
+      }
+      i++;
+    }
+    return spans;
+  }
+
+  function matchBracket(text, start) {
+    let depth = 0, inStr = false;
+    const limit = Math.min(text.length, start + 50000);
+    for (let i = start; i < limit; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (ch === "\\") i++;
+        else if (ch === '"') inStr = false;
+      } else if (ch === '"') inStr = true;
+      else if (ch === "{" || ch === "[") depth++;
+      else if (ch === "}" || ch === "]") {
+        depth--;
+        if (depth === 0) return i;
+        if (depth < 0) return -1;
+      }
+    }
+    return -1;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // Compact pretty-printer: anything that fits in ~64 chars stays on one line
+  // (coordinate arrays, small tuples), bigger structures break per entry —
+  // far denser than JSON.stringify(v, null, 2) for data-heavy objects.
+  function prettyJSON(v, ind = "") {
+    const one = JSON.stringify(v);
+    if (one.length <= 64) return one;
+    const ind2 = ind + "  ";
+    if (Array.isArray(v)) {
+      return "[\n" + v.map((x) => ind2 + prettyJSON(x, ind2)).join(",\n") + "\n" + ind + "]";
+    }
+    if (v && typeof v === "object") {
+      return "{\n" + Object.entries(v).map(([k, x]) =>
+        ind2 + JSON.stringify(k) + ": " + prettyJSON(x, ind2)).join(",\n") + "\n" + ind + "}";
+    }
+    return one;
+  }
+
+  // Per-block Format/Raw toggle (event delegation survives re-renders).
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".jtoggle");
+    if (!btn) return;
+    const b = jsonBlocks[+btn.dataset.i];
+    if (!b) return;
+    b.pretty_on = !b.pretty_on;
+    btn.textContent = b.pretty_on ? "Raw" : "Format";
+    const codeEl = btn.parentElement.querySelector("code");
+    codeEl.textContent = b.pretty_on ? b.pretty : b.raw;
+    delete codeEl.dataset.highlighted;   // hljs 11 refuses to re-highlight otherwise
+    hljs.highlightElement(codeEl);
+  });
 
   window.UTRender = {
     set(md, px) { if (px) this.setZoom(px); render(md); },

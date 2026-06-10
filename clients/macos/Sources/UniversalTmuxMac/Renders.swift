@@ -59,6 +59,33 @@ enum RenderExtract {
     }
 }
 
+/// Bridge for panel-header actions that must reach the hosted WKWebView
+/// (PDF export needs the live web view, not SwiftUI state).
+final class RenderWebProxy: ObservableObject {
+    weak var webView: WKWebView?
+
+    /// Snapshot the FULL rendered document (not just the viewport) into a
+    /// one-page PDF via WebKit's native renderer, then ask where to save it.
+    func exportPDF(suggestedName: String) {
+        guard let wv = webView else { return }
+        wv.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { h, _ in
+            let height = (h as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.height
+            let cfg = WKPDFConfiguration()
+            cfg.rect = CGRect(x: 0, y: 0, width: wv.bounds.width, height: max(height, wv.bounds.height))
+            wv.createPDF(configuration: cfg) { result in
+                guard case .success(let data) = result else { NSSound.beep(); return }
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = suggestedName
+                if #available(macOS 12.0, *) { panel.allowedContentTypes = [.pdf] }
+                panel.begin { resp in
+                    guard resp == .OK, let url = panel.url else { return }
+                    try? data.write(to: url)
+                }
+            }
+        }
+    }
+}
+
 /// The overlay panel: header (source hint, zoom, close) + the render webview.
 /// Esc and ⌘+/−/0 are handled by a local key monitor while the panel is up.
 struct RenderPanel: View {
@@ -67,6 +94,7 @@ struct RenderPanel: View {
 
     @AppStorage("ut.renderFontSize") private var fontSize = 16.0
     @State private var copied = false
+    @StateObject private var web = RenderWebProxy()
 
     // Light chrome to match the light document below it — the panel reads as a
     // "page" floating over the dark app, not more dark UI.
@@ -94,6 +122,14 @@ struct RenderPanel: View {
                     }
                     .buttonStyle(.plain)
                     .help("Copy the extracted text the renderer received (handy for debugging a bad render)")
+                    Button {
+                        web.exportPDF(suggestedName: "\(state.selection?.session ?? "render").pdf")
+                    } label: {
+                        Label("PDF", systemImage: "arrow.down.doc")
+                            .font(.system(size: 11)).foregroundStyle(inkDim)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Save the rendered document as a PDF")
                     HStack(spacing: 2) {
                         zoomButton("minus") { adjustZoom(-1) }
                         Text("\(Int(fontSize))").font(.system(size: 11, design: .monospaced))
@@ -110,7 +146,7 @@ struct RenderPanel: View {
                 .padding(.horizontal, 14).frame(height: 40)
                 .background(paper)
                 Rectangle().fill(Color(hex: "#E4E4E0")).frame(height: 1)
-                RenderWebView(markdown: text, fontSize: fontSize)
+                RenderWebView(markdown: text, fontSize: fontSize, proxy: web)
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.black.opacity(0.25), lineWidth: 1))
@@ -162,11 +198,13 @@ struct RenderPanel: View {
 private struct RenderWebView: NSViewRepresentable {
     let markdown: String
     let fontSize: Double
+    let proxy: RenderWebProxy
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
         let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        proxy.webView = wv
         wv.navigationDelegate = context.coordinator
         if #available(macOS 12.0, *) { wv.underPageBackgroundColor = NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1) }
         wv.setValue(false, forKey: "drawsBackground")   // panel paper shows through while loading
