@@ -259,8 +259,12 @@ struct RootView: View {
         // When an overlay dismisses, the keyboard goes back to the visible
         // TERMINAL — never stranded on whatever AppKit picks next (the
         // sidebar filter). One central place so every close path is covered.
+        // The palette close defers to find/render if it just LAUNCHED one
+        // (e.g. "Find in Terminal" from the palette must keep the find field).
         .onChange(of: state.showFind) { open in if !open { terminals.focusTerminal() } }
-        .onChange(of: state.showPalette) { open in if !open { terminals.focusTerminal() } }
+        .onChange(of: state.showPalette) { open in
+            if !open && !state.showFind && state.renderText == nil { terminals.focusTerminal() }
+        }
         .onChange(of: state.renderText) { v in if v == nil { terminals.focusTerminal() } }
         .sheet(isPresented: $state.showNew) { newSessionSheet }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
@@ -632,8 +636,17 @@ struct RootView: View {
                 .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
         )
         .onExitCommand { closeFind() }
-        .onChange(of: state.findFocusToken) { _ in findFocused = true }
-        .onAppear { findFocused = true; if !state.findText.isEmpty { matchCount = terminals.matchCount(state.findText) } }
+        .onChange(of: state.findFocusToken) { _ in focusFindSoon() }
+        .onAppear { focusFindSoon(); if !state.findText.isEmpty { matchCount = terminals.matchCount(state.findText) } }
+    }
+
+    /// Focus the find field RELIABLY: setting @FocusState synchronously while
+    /// the bar is being inserted silently fails on macOS, and focus then falls
+    /// to the first key view — the sidebar filter. Set it now (bar already
+    /// mounted) AND after a beat (fresh insert).
+    private func focusFindSoon() {
+        findFocused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { findFocused = true }
     }
 
     private func closeFind() {
@@ -917,6 +930,7 @@ private struct CommandPalette: View {
     let machineName: (String) -> String
     @EnvironmentObject var state: AppState
     @EnvironmentObject var terminals: TerminalController
+    @Environment(\.openWindow) private var openWindow
     @State private var query = ""
     @State private var sel = 0
     @FocusState private var focused: Bool
@@ -941,15 +955,28 @@ private struct CommandPalette: View {
                 })
             }
         }
-        let actions: [(String, String, () -> Void)] = [
-            ("plus", "New Session", { state.showNew = true }),
-            ("arrow.clockwise", "Refresh Sessions", { state.refreshAll() }),
-            ("sidebar.leading", "Toggle Sidebar", { state.toggleSidebar() }),
-            ("magnifyingglass", "Find in Terminal", { state.showFind = true; state.findFocusToken &+= 1 }),
-            ("sparkles", "Render Output (Markdown / LaTeX)", { state.renderText = terminals.renderableText() }),
+        // Every app command, with its shortcut as the trailing hint.
+        let actions: [(String, String, String, () -> Void)] = [
+            ("plus", "New Session…", "⌘N", { state.showNew = true }),
+            ("magnifyingglass", "Find in Terminal", "⌘F", { state.showFind = true; state.findFocusToken &+= 1 }),
+            ("sparkles", "Render Output (Markdown / LaTeX)", "⇧⌘M", { state.renderText = terminals.renderableText() }),
+            ("pencil", "Rename Current Session…", "⇧⌘R",
+             { if let s = state.selection { state.renameText = s.session; state.renameTarget = s } }),
+            ("trash", "Kill Current Session…", "⌘⌫", { if let s = state.selection { state.killTarget = s } }),
+            ("xmark.square", "Clear Terminal Buffer", "⌘K", { terminals.clearBuffer() }),
+            ("arrow.down.to.line", "Scroll to Bottom", "⌘↓", { terminals.scrollToBottom() }),
+            ("textformat.size.larger", "Increase Font Size", "⌘+", { terminals.adjustFont(1) }),
+            ("textformat.size.smaller", "Decrease Font Size", "⌘−", { terminals.adjustFont(-1) }),
+            ("textformat.size", "Reset Font Size", "⌘0", { terminals.resetFontSize() }),
+            ("arrow.clockwise", "Refresh Sessions", "⌘R", { state.refreshAll() }),
+            ("line.3.horizontal.decrease.circle", "Filter Sessions", "⌘L", { state.focusSearch() }),
+            ("sidebar.leading", "Toggle Sidebar", "⌃⌘S", { state.toggleSidebar() }),
+            ("folder", "Open Files", "", { openWindow(id: "files") }),
+            ("chart.line.uptrend.xyaxis", "Open Dashboards", "", { openWindow(id: "dashboards") }),
+            ("network", "Open Port Forwards", "", { openWindow(id: "ports") }),
         ]
-        for (ic, t, a) in actions where match(t) {
-            out.append(Item(id: "a:" + t, icon: ic, title: t, subtitle: "Action", run: a))
+        for (ic, t, hint, a) in actions where match(t) {
+            out.append(Item(id: "a:" + t, icon: ic, title: t, subtitle: hint, run: a))
         }
         return out
     }
@@ -997,16 +1024,30 @@ private struct CommandPalette: View {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
             .shadow(color: .black.opacity(0.45), radius: 26, y: 10)
             .padding(.top, 96)
-            .onMoveCommand { dir in
-                let n = items.count
-                guard n > 0 else { return }
-                if dir == .down { sel = (sel + 1) % n }
-                else if dir == .up { sel = (sel - 1 + n) % n }
-            }
         }
-        .onAppear { focused = true; sel = 0 }
+        // Arrow keys via a LOCAL KEY MONITOR: the focused query field consumes
+        // arrows (caret movement), so .onMoveCommand never fires while typing.
+        // The monitor sees the event first and swallows it.
+        .onAppear { focused = true; sel = 0; installKeys() }
+        .onDisappear { removeKeys() }
         .onChange(of: query) { _ in sel = 0 }
         .onExitCommand { close() }
+    }
+
+    @State private var keyMonitor: Any?
+    private func installKeys() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            let n = items.count
+            switch e.keyCode {
+            case 125: if n > 0 { sel = (sel + 1) % n }; return nil          // ↓
+            case 126: if n > 0 { sel = (sel - 1 + n) % n }; return nil      // ↑
+            case 53: close(); return nil                                    // Esc
+            default: return e
+            }
+        }
+    }
+    private func removeKeys() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
     }
 
     private func run() {
