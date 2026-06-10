@@ -1,42 +1,47 @@
 <!doctype html>
 <!-- Argus "Renders": offline markdown + LaTeX + code view of terminal content.
-     Loaded from the app bundle (no network). Driven via window.UTRender. -->
+     Loaded from the app bundle (no network). Driven via window.UTRender.
+     LIGHT theme on purpose: this is a reading surface (a "document"), distinct
+     from the dark terminal it lifts text out of. -->
 <html>
 <head>
 <meta charset="utf-8">
 <link rel="stylesheet" href="katex/katex.min.css">
-<link rel="stylesheet" href="hljs/github-dark.min.css">
+<link rel="stylesheet" href="hljs/github.min.css">
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin: 0; padding: 0; background: #0D0E12; }
+  :root { color-scheme: light; }
+  html, body { margin: 0; padding: 0; background: #FBFBFA; }
   body {
-    color: #C8CCDC;
-    font: 14px/1.65 -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: #1F2328;
+    font: 16px/1.7 -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
     -webkit-font-smoothing: antialiased;
-    padding: 22px 28px 40px;
-    max-width: 860px;
+    padding: 30px 40px 56px;
+    max-width: 740px;
     margin: 0 auto;
     word-wrap: break-word;
   }
-  h1, h2, h3, h4 { color: #E6E9F2; line-height: 1.3; margin: 1.2em 0 0.5em; }
-  h1 { font-size: 1.6em; border-bottom: 1px solid #23263A; padding-bottom: .25em; }
-  h2 { font-size: 1.35em; }
-  h3 { font-size: 1.15em; }
-  a { color: #7AA2F7; }
-  hr { border: none; border-top: 1px solid #23263A; margin: 1.4em 0; }
-  blockquote { margin: .8em 0; padding: .1em 1em; border-left: 3px solid #3B4261; color: #9AA5CE; }
-  code { font: 12.5px/1.5 "SF Mono", Menlo, monospace; background: #1A1D29; border-radius: 4px; padding: .12em .35em; }
-  pre { background: #13151F; border: 1px solid #23263A; border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
-  pre code { background: none; padding: 0; display: block; }
-  table { border-collapse: collapse; margin: .9em 0; display: block; overflow-x: auto; }
-  th, td { border: 1px solid #2A2D40; padding: 5px 11px; }
-  th { background: #181B27; color: #E6E9F2; }
-  tr:nth-child(2n) td { background: #11131C; }
-  ul, ol { padding-left: 1.5em; }
-  li { margin: .15em 0; }
-  .katex { font-size: 1.08em; }
-  .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
-  #empty { color: #565F89; text-align: center; margin-top: 80px; font-size: 13px; }
+  h1, h2, h3, h4 { color: #111418; line-height: 1.3; margin: 1.4em 0 0.55em; font-weight: 650; }
+  h1 { font-size: 1.55em; border-bottom: 1px solid #E4E4E0; padding-bottom: .3em; }
+  h2 { font-size: 1.3em; }
+  h3 { font-size: 1.12em; }
+  p { margin: .65em 0; }
+  a { color: #0B62D6; }
+  hr { border: none; border-top: 1px solid #E4E4E0; margin: 1.6em 0; }
+  blockquote { margin: .9em 0; padding: .05em 1.1em; border-left: 3px solid #D4D4CF; color: #57606A; }
+  code { font: 13.5px/1.55 "SF Mono", Menlo, monospace; background: #F0F0EE; border-radius: 4px; padding: .1em .35em; color: #24292F; }
+  pre { background: #F6F6F4; border: 1px solid #E4E4E0; border-radius: 8px; padding: 13px 16px; overflow-x: auto; }
+  pre code { background: none; padding: 0; display: block; font-size: 13px; }
+  table { border-collapse: collapse; margin: 1em 0; display: block; overflow-x: auto; }
+  th, td { border: 1px solid #DDDDD8; padding: 6px 13px; }
+  th { background: #F2F2EF; color: #111418; }
+  tr:nth-child(2n) td { background: #FAFAF8; }
+  ul, ol { padding-left: 1.55em; margin: .65em 0; }
+  li { margin: .3em 0; }
+  li > p { margin: .3em 0; }
+  strong { font-weight: 650; color: #111418; }
+  .katex { font-size: 1.06em; }
+  .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 1em 0; }
+  #empty { color: #8B949E; text-align: center; margin-top: 80px; font-size: 13px; }
 </style>
 <script src="marked.min.js"></script>
 <script src="katex/katex.min.js"></script>
@@ -48,11 +53,17 @@
 (function () {
   marked.setOptions({ gfm: true, breaks: false });
 
-  // Math must be extracted BEFORE markdown parsing: marked treats \! \_ \{ as
+  // Math must be extracted BEFORE markdown parsing: marked treats \! \_ \{ \, as
   // escapes and _x_ as emphasis, mangling any TeX it touches. So: (1) shield
   // code fences/spans so a $ inside code is never taken as math, (2) pull math
   // spans out into placeholder tokens, (3) un-shield code and run marked,
   // (4) replace each token with katex.renderToString of the RAW TeX.
+  //
+  // Inline $…$ tolerates single newlines: agent TUIs hard-wrap their output at
+  // the pane width, so a span often straddles a line break. Markdown renders a
+  // single newline inside a paragraph as a space anyway, so joining is exactly
+  // its semantics. A blank line (paragraph break) still terminates the span,
+  // and a length cap stops a stray $ from pairing across half the document.
   function render(md) {
     const out = document.getElementById("out");
     if (!md || !md.trim()) {
@@ -75,14 +86,12 @@
       math.push({ tex, display });
       return "⟦UTMATH" + (math.length - 1) + "⟧";
     };
+    const sane = (t) => !/\n[ \t]*\n/.test(t) && /[\\^_{}]|[a-zA-Z]/.test(t);
     text = text
       .replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => stash(t, true))
       .replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => stash(t, true))
-      .replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => stash(t, false))
-      // inline $…$: single line, non-empty, no spaces hugging the delimiters,
-      // and not a bare number range like "$5-$10" (require a TeX-ish char).
-      .replace(/\$([^\s$][^$\n]*?[^\s$]|\S)\$/g, (m, t) =>
-        /[\\^_{}]|[a-zA-Z]/.test(t) ? stash(t, false) : m);
+      .replace(/\\\(([\s\S]+?)\\\)/g, (m, t) => sane(t) ? stash(t, false) : m)
+      .replace(/\$([^\s$][^$]{0,400}?[^\s$]|\S)\$/g, (m, t) => sane(t) ? stash(t.replace(/\s*\n\s*/g, " "), false) : m);
 
     // (3) un-shield code, parse markdown
     text = text.replace(/⟦UTCODE(\d+)⟧/g, (_, i) => code[+i]);

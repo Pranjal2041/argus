@@ -65,46 +65,58 @@ struct RenderPanel: View {
     @EnvironmentObject var state: AppState
     let text: String
 
-    @AppStorage("ut.renderFontSize") private var fontSize = 14.0
+    @AppStorage("ut.renderFontSize") private var fontSize = 16.0
+    @State private var copied = false
+
+    // Light chrome to match the light document below it — the panel reads as a
+    // "page" floating over the dark app, not more dark UI.
+    private let paper = Color(hex: "#FBFBFA")
+    private let inkDim = Color(hex: "#6E7681")
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { close() }
+            Color.black.opacity(0.45).ignoresSafeArea().onTapGesture { close() }
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
-                    Image(systemName: "sparkles").font(.system(size: 13)).foregroundStyle(Theme.accent)
-                    Text("Render").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                    Text("markdown · LaTeX · code").font(.system(size: 11)).foregroundStyle(Theme.textTertiary)
+                    Image(systemName: "sparkles").font(.system(size: 13)).foregroundStyle(Color(hex: "#B58A00"))
+                    Text("Render").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(hex: "#1F2328"))
+                    Text("markdown · LaTeX · code").font(.system(size: 11)).foregroundStyle(inkDim)
                     Spacer()
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(text, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+                    } label: {
+                        Label(copied ? "Copied" : "Copy Source", systemImage: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 11)).foregroundStyle(inkDim)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy the extracted text the renderer received (handy for debugging a bad render)")
                     HStack(spacing: 2) {
                         zoomButton("minus") { adjustZoom(-1) }
                         Text("\(Int(fontSize))").font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Theme.textTertiary).frame(width: 22)
+                            .foregroundStyle(inkDim).frame(width: 22)
                         zoomButton("plus") { adjustZoom(1) }
                     }
                     Button { close() } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 15))
-                            .foregroundStyle(Theme.textTertiary)
+                            .foregroundStyle(inkDim)
                     }
                     .buttonStyle(.plain)
                     .help("Close (Esc)")
                 }
                 .padding(.horizontal, 14).frame(height: 40)
-                Rectangle().fill(Theme.border).frame(height: 1)
+                .background(paper)
+                Rectangle().fill(Color(hex: "#E4E4E0")).frame(height: 1)
                 RenderWebView(markdown: text, fontSize: fontSize)
             }
-            .frame(minWidth: 480, idealWidth: 760, maxWidth: 900)
-            .frame(maxHeight: .infinity)
-            .padding(.vertical, 36)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(hex: "#0D0E12"))
-                    .padding(.vertical, 36)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1)
-                    .padding(.vertical, 36)
-            )
-            .shadow(color: .black.opacity(0.45), radius: 26, y: 10)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.black.opacity(0.25), lineWidth: 1))
+            .shadow(color: .black.opacity(0.5), radius: 30, y: 12)
+            .padding(.horizontal, 56)   // big: nearly the window, with a visible rim of app
+            .padding(.vertical, 28)
         }
         .onAppear { installMonitor() }
         .onDisappear { removeMonitor() }
@@ -112,9 +124,9 @@ struct RenderPanel: View {
 
     private func zoomButton(_ icon: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.textSecondary)
+            Image(systemName: icon).font(.system(size: 10, weight: .bold)).foregroundStyle(Color(hex: "#57606A"))
                 .frame(width: 20, height: 20)
-                .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.06)))
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.05)))
         }
         .buttonStyle(.plain)
     }
@@ -133,7 +145,7 @@ struct RenderPanel: View {
                 switch e.charactersIgnoringModifiers {
                 case "=", "+": adjustZoom(1); return nil
                 case "-": adjustZoom(-1); return nil
-                case "0": fontSize = 14; return nil
+                case "0": fontSize = 16; return nil
                 default: break
                 }
             }
@@ -156,8 +168,8 @@ private struct RenderWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         wv.navigationDelegate = context.coordinator
-        if #available(macOS 12.0, *) { wv.underPageBackgroundColor = NSColor(red: 0.051, green: 0.055, blue: 0.071, alpha: 1) }
-        wv.setValue(false, forKey: "drawsBackground")   // no white flash while loading
+        if #available(macOS 12.0, *) { wv.underPageBackgroundColor = NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1) }
+        wv.setValue(false, forKey: "drawsBackground")   // panel paper shows through while loading
         context.coordinator.pending = (markdown, fontSize)
         let dir = Bundle.main.resourceURL!.appendingPathComponent("render")
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
