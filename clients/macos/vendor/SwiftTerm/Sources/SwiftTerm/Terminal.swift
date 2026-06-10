@@ -5895,7 +5895,16 @@ open class Terminal {
         var lines: [String] = []
         for i in start..<total {
             let line = buffer.lines [i]
-            let text = line.translateToString (trimRight: true)
+            // Never-written cells hold code 0, and getCharacter() turns those
+            // into literal U+0000 — which downstream renderers silently DROP,
+            // gluing words together. TUIs leave such cells everywhere: a
+            // cell-diff repaint writes only the words and cursor-jumps the
+            // gaps. The terminal DRAWS null cells as blanks, so extraction
+            // must read them as spaces too (skipNullCellsFollowingWide keeps
+            // the width-2 follower cells of CJK/emoji from inflating).
+            let text = line.translateToString (trimRight: true, skipNullCellsFollowingWide: true) { cd in
+                cd.code == 0 ? " " : cd.getCharacter ()
+            }
             if line.isWrapped && !lines.isEmpty && i > start {
                 lines [lines.count - 1] += text
             } else {
