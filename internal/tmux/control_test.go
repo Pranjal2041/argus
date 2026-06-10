@@ -15,7 +15,12 @@ func TestScreenHasInterrupt(t *testing.T) {
 		{"stop hint", "output\n\nRunning task… (/stop to interrupt)\n", true},
 		{"case-insensitive", "…(ESC TO INTERRUPT)\n", true},
 		{"idle prompt", "$ ls\nfoo bar\n$ \n", false},
-		{"hint scrolled out of footer", "esc to interrupt\n1\n2\n3\n4\n5\n6\n7\n", false},
+		{"hint scrolled out of footer", "esc to interrupt\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", false},
+		// the footer grew suffixes and the pane width wrapped it MID-PHRASE —
+		// adjacent lines must be checked joined
+		{"wrapped mid-phrase", "out\n\n• Working (1m 42s • esc to inte\nrrupt) · 1 background terminal running\n\n› \n  model · ~/dir\n", true},
+		// a blank line is never a wrap: fragments across it must NOT join
+		{"blank breaks join", "esc to inte\n\nrrupt\n", false},
 	}
 	for _, c := range cases {
 		if got := screenHasInterrupt([]byte(c.screen)); got != c.want {

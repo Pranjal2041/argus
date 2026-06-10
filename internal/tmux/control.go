@@ -66,7 +66,9 @@ var interruptHints = []string{"esc to interrupt", "/stop to interrupt"}
 
 // interruptScanLines bounds the scan to the last few non-blank lines — the hint lives
 // in the footer, so checking only the bottom avoids matching the phrase in chat text.
-const interruptScanLines = 6
+// 8 (was 6) absorbs footers that grow suffixes ("· 1 background terminal running ·
+// /ps to view · /stop to close") and wrap to an extra line.
+const interruptScanLines = 8
 
 // DetectState reports "working" if the session's visible screen shows the agent's
 // "esc to interrupt" hint, else "idle". A passive, point-in-time capture-pane read:
@@ -84,23 +86,47 @@ func DetectState(socket, name string) string {
 
 // screenHasInterrupt reports whether any interrupt hint appears in the last few
 // non-blank lines of a captured screen.
+//
+// ADJACENT lines are checked JOINED (no separator): the footer grows suffixes
+// and wraps at the pane width, and the wrap point — which shifts as the
+// elapsed-time text ticks ("8s" → "1m 42s") — can land INSIDE the phrase
+// ("…esc to inte" / "rrupt) · 1 background…"), so no single captured line
+// contains it. A wrapped line is always immediately followed by its
+// continuation, so joining adjacent lines reconstructs the phrase; a blank
+// line is never a wrap and breaks the join.
 func screenHasInterrupt(screen []byte) bool {
 	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
 	checked := 0
-	for i := len(lines) - 1; i >= 0 && checked < interruptScanLines; i-- {
-		l := strings.TrimSpace(lines[i])
-		if l == "" {
-			continue
+	var run []string // current run of ADJACENT non-blank lines, gathered bottom-up
+	runHasHint := func() bool {
+		if len(run) == 0 {
+			return false
 		}
-		checked++
-		low := strings.ToLower(l)
+		var b strings.Builder
+		for i := len(run) - 1; i >= 0; i-- { // back to screen order
+			b.WriteString(run[i])
+		}
+		joined := strings.ToLower(b.String())
 		for _, hint := range interruptHints {
-			if strings.Contains(low, hint) {
+			if strings.Contains(joined, hint) {
 				return true
 			}
 		}
+		return false
 	}
-	return false
+	for i := len(lines) - 1; i >= 0 && checked < interruptScanLines; i-- {
+		l := strings.TrimRight(lines[i], " \t")
+		if strings.TrimSpace(l) == "" {
+			if runHasHint() {
+				return true
+			}
+			run = run[:0]
+			continue
+		}
+		checked++
+		run = append(run, l)
+	}
+	return runHasHint()
 }
 
 // internalSessionPrefix marks tmux sessions that are ut's own infrastructure
