@@ -5,7 +5,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -48,58 +47,23 @@ object AttentionNotifier {
         val openPI = PendingIntent.getActivity(ctx, notifId(broker, session), open,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        fun steerAction(label: String, text: String, reqCode: Int): Notification.Action {
-            val i = Intent(ctx, SteerReceiver::class.java).apply {
-                action = "dev.universaltmux.STEER"
-                putExtra("host", broker.host)
-                putExtra("scheme", broker.scheme)
-                putExtra("session", session)
-                putExtra("text", text)
-                putExtra("notifId", notifId(broker, session))
-            }
-            val pi = PendingIntent.getBroadcast(ctx, notifId(broker, session) * 10 + reqCode, i,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            return Notification.Action.Builder(null, label, pi).build()
-        }
-
+        // Awareness only — tap to open the session and navigate it yourself. No
+        // quick-answer actions: they were Yes/No-shaped and meaningless for the
+        // numbered/option menus most agents actually show.
         val n = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(session)
             .setContentText("Agent is waiting on you — ${broker.name}")
             .setContentIntent(openPI)
             .setAutoCancel(true)
-            .addAction(steerAction("Yes", "y\n", 1))
-            .addAction(steerAction("No", "n\n", 2))
-            .addAction(steerAction("↵", "\r", 3))
             .build()
         val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.notify(notifId(broker, session), n)
     }
 
-    /** Drop the notification once the session leaves "waiting" (or is answered). */
+    /** Drop the notification once the session leaves "waiting" (or is viewed). */
     fun clear(ctx: Context, broker: Broker, session: String) {
         val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.cancel(notifId(broker, session))
-    }
-}
-
-/** Handles the notification's Yes / No / ↵ actions: one-shot input, no app open. */
-class SteerReceiver : BroadcastReceiver() {
-    override fun onReceive(ctx: Context, intent: Intent) {
-        val host = intent.getStringExtra("host") ?: return
-        val scheme = intent.getStringExtra("scheme") ?: "http"
-        val session = intent.getStringExtra("session") ?: return
-        val text = intent.getStringExtra("text") ?: return
-        val notifId = intent.getIntExtra("notifId", 0)
-        val pending = goAsync()
-        Thread {
-            try {
-                Net.oneShotInput(Broker(host, scheme, host), session, text)
-                val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                mgr.cancel(notifId)
-            } finally {
-                pending.finish()
-            }
-        }.start()
     }
 }

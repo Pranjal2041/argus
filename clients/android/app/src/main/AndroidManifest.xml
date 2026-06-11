@@ -23,7 +23,5 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- Yes / No / ↵ actions on "agent is waiting" notifications -->
-        <receiver android:name=".SteerReceiver" android:exported="false" />
     </application>
 </manifest>
