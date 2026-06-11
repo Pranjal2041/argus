@@ -259,6 +259,16 @@ func (p *Provider) Dial(_ context.Context, name string) (session.Session, error)
 	return s, nil
 }
 
+// Spawn creates a session, then writes the command into its shell. (A future
+// pass can start the ConPTY with the command directly, like the tmux backend.)
+func (p *Provider) Spawn(name, dir, cmd string) error {
+	if err := p.Create(name, dir); err != nil {
+		return err
+	}
+	time.Sleep(400 * time.Millisecond) // let the shell come up before typing
+	return p.SendText(name, cmd, true)
+}
+
 // SendText writes text (and optionally a carriage return) into a session's
 // ConPTY — fire-and-forget input for `ut spawn` / `ut send`.
 func (p *Provider) SendText(name, text string, enter bool) error {

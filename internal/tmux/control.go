@@ -45,6 +45,7 @@ func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
 func (p *Provider) List() []SessionInfo                  { return ListSessions(p.socket) }
 func (p *Provider) Create(name, dir string) error       { return CreateSession(p.socket, name, dir) }
+func (p *Provider) Spawn(name, dir, cmd string) error    { return SpawnSession(p.socket, name, dir, cmd) }
 func (p *Provider) Kill(name string) error              { return KillSession(p.socket, name) }
 func (p *Provider) Rename(from, to string) error        { return RenameSession(p.socket, from, to) }
 func (p *Provider) Has(name string) bool                { return HasSession(p.socket, name) }
@@ -279,6 +280,25 @@ func CreateSession(socket, name, startDir string) error {
 	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create %q: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// SpawnSession creates a detached session that RUNS cmd directly as its process
+// — no send-keys, so there is no race against a still-starting shell (the bug
+// that left `ut spawn` commands typed-but-unsubmitted on a loaded node). After
+// cmd finishes it drops into an interactive shell so the session persists with
+// the output visible (for `ut tail` / attach). cmd is passed as one argv to
+// `sh -c`, so arbitrary content is safe (no shell re-quoting by us).
+func SpawnSession(socket, name, startDir, cmd string) error {
+	args := []string{"new-session", "-d", "-s", name}
+	if startDir != "" {
+		args = append(args, "-c", startDir)
+	}
+	args = append(args, "sh", "-c", cmd+"\nexec \"${SHELL:-sh}\" -i")
+	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("spawn %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

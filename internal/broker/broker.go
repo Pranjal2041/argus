@@ -281,6 +281,16 @@ func (m *Manager) SendText(name, text string, enter bool) error {
 	return m.prov.SendText(name, text, enter)
 }
 
+// Spawn creates a session that runs cmd directly (no keystroke race) and adds
+// it to the cache so it shows up immediately.
+func (m *Manager) Spawn(name, dir, cmd string) error {
+	if err := m.prov.Spawn(name, dir, cmd); err != nil {
+		return err
+	}
+	go m.refreshSessions()
+	return nil
+}
+
 // Stream feeds a session's snapshot + live output to w (the read-only `ut tail`
 // feed). It never creates a session — tailing a missing one is an error.
 func (m *Manager) Stream(ctx context.Context, w io.Writer, flush func(), name string) error {

@@ -106,6 +106,9 @@ func main() {
 		switch q.Get("action") {
 		case "create":
 			err = mgr.Create(q.Get("session"), q.Get("dir"))
+		case "spawn": // create a session RUNNING the POST-body command (no keystroke race)
+			body, _ := io.ReadAll(r.Body)
+			err = mgr.Spawn(q.Get("session"), q.Get("dir"), string(body))
 		case "kill":
 			err = mgr.Kill(q.Get("session"))
 		case "rename":

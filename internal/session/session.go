@@ -71,4 +71,5 @@ type Provider interface {
 	Dial(ctx context.Context, name string) (Session, error) // attach (creating the control client)
 	Exec(req ExecRequest) ExecResult                        // run a command on this host (mesh primitive)
 	SendText(session, text string, enter bool) error        // type text into a session (fire-and-forget)
+	Spawn(name, dir, cmd string) error                      // create a session RUNNING cmd (no keystroke race)
 }

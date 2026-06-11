@@ -285,13 +285,11 @@ func cmdSpawn(args []string) int {
 		name = "job-" + time.Now().Format("150405")
 	}
 	cmd := strings.Join(args[1:], " ")
-	q := url.Values{"action": {"create"}, "session": {name}}
-	if _, code, err := httpPost(peerURL(host, "/control", q), nil, 15*time.Second); err != nil || code != 200 {
-		fmt.Fprintf(os.Stderr, "ut spawn: create failed (%v)\n", err)
-		return 1
-	}
-	if _, code, err := httpPost(peerURL(host, "/send", url.Values{"session": {name}}), []byte(cmd), 15*time.Second); err != nil || code != 200 {
-		fmt.Fprintf(os.Stderr, "ut spawn: send failed (%v)\n", err)
+	// One call: the broker creates the session RUNNING the command directly, so
+	// there's no race against a still-starting shell swallowing the Enter.
+	q := url.Values{"action": {"spawn"}, "session": {name}}
+	if _, code, err := httpPost(peerURL(host, "/control", q), []byte(cmd), 20*time.Second); err != nil || code != 200 {
+		fmt.Fprintf(os.Stderr, "ut spawn: failed (%v)\n", err)
 		return 1
 	}
 	fmt.Printf("spawned %q on %s — follow it with:  ut tail %s:%s\n", name, host, host, name)
@@ -414,9 +412,7 @@ USAGE
   ut sh    @<machine>                   list a machine's shells
   ut run   @<machine>:<shell> <cmd...>  run a command INSIDE a shell (state persists)
   ut spawn @<machine>[:name] <cmd...>   start a long job in a session (returns its name)
-  ut tail  @<machine>:<session>         stream a session's output (Ctrl-C to stop)
-                                        — for a reliable snapshot of a remote job's
-                                        recent output, prefer: ut run @m:<job> 'tail -n 40 log'
+  ut tail  @<machine>:<session>         stream a session's live output (Ctrl-C to stop)
   ut send  @<machine>:<shell> <text...> type text into a shell (no output captured)
   ut cp    <src> <dst>                  copy a file; either side may be <machine>:<path>
 
