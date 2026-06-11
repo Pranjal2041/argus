@@ -116,6 +116,34 @@ object Net {
         }
     }
 
+    fun rename(b: Broker, from: String, to: String) {
+        try {
+            val u = "${b.httpBase}/control?action=rename&session=${enc(from)}&to=${enc(to)}"
+            val req = Request.Builder().url(u).post(RequestBody.create(null, ByteArray(0))).build()
+            client.newCall(req).execute().close()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Send input to a session over a ONE-SHOT WebSocket — steering (Yes/No/↵)
+     *  for any session without opening (or disturbing) a terminal view for it.
+     *  Mirrors the Mac's AppState.sendInput. */
+    fun oneShotInput(b: Broker, session: String, text: String) {
+        try {
+            val url = "${b.wsBase}/ws?session=${enc(session)}"
+            val ws = client.newWebSocket(
+                Request.Builder().url(url).build(),
+                object : okhttp3.WebSocketListener() {
+                    override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
+                        webSocket.send(okio.ByteString.of(*frame(Op.INPUT, "", text.toByteArray())))
+                    }
+                })
+            // Give the frame a moment to flush, then drop the socket.
+            Thread { Thread.sleep(800); ws.cancel() }.start()
+        } catch (_: Exception) {
+        }
+    }
+
     /** This host's listening TCP ports (for the port hub). */
     fun ports(b: Broker): List<PortInfo>? = try {
         val req = Request.Builder().url("${b.httpBase}/ports").build()

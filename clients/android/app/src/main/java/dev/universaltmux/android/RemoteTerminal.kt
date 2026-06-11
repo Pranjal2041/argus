@@ -123,6 +123,39 @@ class RemoteTerminal(
     /** Send raw bytes (accessory keys) straight to the session. */
     fun sendBytes(b: ByteArray) = session.write(b, 0, b.size)
 
+    /** Text for the Renders screen: the whole transcript with soft-wrapped rows
+     *  REJOINED (Termux's joinBackLines), tail-limited, agent gutters peeled —
+     *  the same extraction contract as the Mac's renderableText(). */
+    fun renderableText(maxLines: Int = 400): String {
+        val screen = session.emulator?.screen ?: return ""
+        val lines = screen.transcriptText.replace('\u0000', ' ').split("\n")
+        return lines.takeLast(maxLines).joinToString("\n") { line ->
+            val body = line.trimStart(' ')
+            when {
+                body.startsWith("⏺ ") || body.startsWith("⎿ ") -> body.substring(2)
+                else -> line
+            }
+        }
+    }
+
+    /** Buffer rows (negative = scrollback) whose text contains `q` (case-insensitive). */
+    fun findRows(q: String): List<Int> {
+        val em = session.emulator ?: return emptyList()
+        if (q.isBlank()) return emptyList()
+        val screen = em.screen
+        val out = ArrayList<Int>()
+        for (r in -screen.activeTranscriptRows until em.mRows) {
+            val text = screen.getSelectedText(0, r, em.mColumns, r, false)
+            if (text.contains(q, ignoreCase = true)) out.add(r)
+        }
+        return out
+    }
+
+    fun scrollToBufferRow(row: Int) {
+        view.scrollToBufferRow(row)
+        view.onScreenUpdated()
+    }
+
     fun showKeyboard() {
         view.isFocusableInTouchMode = true
         view.requestFocus()

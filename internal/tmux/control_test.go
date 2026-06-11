@@ -1,6 +1,9 @@
 package tmux
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The "working" signal is any known agent footer hint in the last few
 // non-blank screen lines — "esc to interrupt" (Claude/Codex) OR
@@ -25,6 +28,38 @@ func TestScreenHasInterrupt(t *testing.T) {
 	for _, c := range cases {
 		if got := screenHasInterrupt([]byte(c.screen)); got != c.want {
 			t.Errorf("%s: screenHasInterrupt = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// "waiting" = a numbered option dialog at the bottom of the screen: the
+// selected row ("❯ 1. Yes") PLUS at least one more numbered option. The bare
+// "❯" composer prompt and a typed numbered draft must NOT count.
+func TestScreenHasWaitingPrompt(t *testing.T) {
+	dialog := `tool call output
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again this session
+   3. No, and tell Claude what to do differently
+
+`
+	boxed := "│ Do you want to make this edit?\n│ ❯ 1. Yes\n│   2. No\n"
+	cases := []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{"claude permission dialog", dialog, true},
+		{"boxed dialog", boxed, true},
+		{"idle composer prompt", "some output\n\n❯ \n", false},
+		{"typed numbered draft", "output\n\n❯ 1. fix the bug first\n", false},
+		{"numbered list in chat", " 1. step one\n 2. step two\n\n❯ \n", false},
+		{"dialog scrolled away", dialog + strings.Repeat("filler line\n", 16), false},
+	}
+	for _, c := range cases {
+		if got := screenHasWaitingPrompt([]byte(c.screen)); got != c.want {
+			t.Errorf("%s: screenHasWaitingPrompt = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

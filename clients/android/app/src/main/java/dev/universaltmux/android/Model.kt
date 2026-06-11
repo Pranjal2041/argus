@@ -36,7 +36,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         get() = _selected.value
         set(value) {
             _selected.value = value
-            if (value != null) unseen.remove(unseenKey(value.first, value.second)) // visiting clears orange
+            if (value != null) {
+                val k = unseenKey(value.first, value.second)
+                unseen.remove(k)                  // visiting clears orange
+                if (k !in acknowledged) acknowledged.add(k) // viewing a prompt acknowledges it
+                AttentionNotifier.clear(getApplication(), value.first, value.second)
+            }
         }
     var busy by mutableStateOf(false)
     var lastError by mutableStateOf<String?>(null)
@@ -127,21 +132,64 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (list != null) {
                 // Orange "done, unseen": a turn just finished (working → not-working) on a
                 // pane you weren't viewing; cleared when working resumes or you open it.
+                // working → WAITING is "needs attention" (amber + notification), not
+                // "done unseen" — orange would mask the amber.
                 for (s in list) {
                     val k = unseenKey(b, s.name)
                     val prev = prevState[k]
                     val isSel = selected?.first?.id == b.id && selected?.second == s.name
                     if (s.state == "working") unseen.remove(k)
-                    else if (prev == "working" && !isSel && k !in unseen) unseen.add(k)
+                    else if (prev == "working" && s.state != "waiting" && !isSel && k !in unseen) unseen.add(k)
+                    // Attention loop: notify on ENTERING waiting; clear + re-arm on leaving.
+                    if (s.state == "waiting" && prev != "waiting") {
+                        if (!isSel) AttentionNotifier.post(getApplication(), b, s.name)
+                    } else if (s.state != "waiting" && prev == "waiting") {
+                        AttentionNotifier.clear(getApplication(), b, s.name)
+                        acknowledged.remove(k)
+                    }
                     prevState[k] = s.state
                 }
                 val prefix = "${b.id} "
                 val live = list.mapTo(HashSet()) { unseenKey(b, it.name) }
                 unseen.removeAll { it.startsWith(prefix) && it !in live }
+                acknowledged.removeAll { it.startsWith(prefix) && it !in live }
                 sessions[b.id] = list
             }
         }
     }
+
+    fun rename(b: Broker, from: String, to: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { Net.rename(b, from, to) }
+            if (selected?.first?.id == b.id && selected?.second == from) selected = b to to
+            refresh(b)
+        }
+    }
+
+    /** One-tap steering (Yes / No / ↵) for a blocked session: one-shot WS input,
+     *  acknowledge locally, then re-poll to converge with the broker. */
+    fun steer(b: Broker, name: String, text: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { Net.oneShotInput(b, name, text) }
+            acknowledged.add(unseenKey(b, name))
+            AttentionNotifier.clear(getApplication(), b, name)
+            kotlinx.coroutines.delay(800)
+            refresh(b)
+        }
+    }
+
+    /** Sessions blocked on the user, minus ones already viewed/answered —
+     *  drives the pinned "Needs attention" section. */
+    val attention: List<Pair<Broker, SessionInfo>>
+        get() = brokers.flatMap { b ->
+            (sessions[b.id] ?: emptyList())
+                .filter { it.state == "waiting" && unseenKey(b, it.name) !in acknowledged }
+                .map { b to it }
+        }
+
+    /** Viewed-or-answered waiting sessions (suppressed from the inbox until the
+     *  broker reports them leaving "waiting", which re-arms them). */
+    private val acknowledged = mutableStateListOf<String>()
 
     fun create(b: Broker, name: String, dir: String?) {
         viewModelScope.launch {

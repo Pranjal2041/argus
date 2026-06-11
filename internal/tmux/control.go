@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,9 +71,14 @@ var interruptHints = []string{"esc to interrupt", "/stop to interrupt"}
 // /ps to view · /stop to close") and wrap to an extra line.
 const interruptScanLines = 8
 
-// DetectState reports "working" if the session's visible screen shows the agent's
-// "esc to interrupt" hint, else "idle". A passive, point-in-time capture-pane read:
-// no history, no background sampler — computed on demand when /sessions is requested.
+// DetectState classifies a session's visible screen:
+//   - "working": the agent's "esc to interrupt" footer is showing;
+//   - "waiting": the agent is BLOCKED on the user — a numbered option dialog
+//     ("Do you want to proceed?  ❯ 1. Yes / 2. No…") is on screen;
+//   - "idle": neither.
+//
+// A passive, point-in-time capture-pane read: no history, no background
+// sampler — computed on demand when /sessions is requested.
 func DetectState(socket, name string) string {
 	out, err := exec.Command("tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
 	if err != nil {
@@ -81,7 +87,44 @@ func DetectState(socket, name string) string {
 	if screenHasInterrupt(out) {
 		return "working"
 	}
+	if screenHasWaitingPrompt(out) {
+		return "waiting"
+	}
 	return "idle"
+}
+
+// waitingScanLines bounds the dialog scan: option dialogs render at the bottom
+// of the screen, just above the composer/footer.
+const waitingScanLines = 15
+
+var (
+	// The SELECTED row of a numbered option dialog: "❯ 1. Yes". The bare "❯" is
+	// just the composer prompt (always on screen), so the digit is required.
+	waitingSelectorRe = regexp.MustCompile(`^\s*│?\s*❯\s*\d+\.\s`)
+	// Any other (unselected) option row: "  2. No, and tell Claude…".
+	waitingOptionRe = regexp.MustCompile(`^\s*│?\s*\d+\.\s`)
+)
+
+// screenHasWaitingPrompt reports whether the screen tail shows a numbered
+// option dialog. Requires the selector row PLUS at least one other numbered
+// option row — a user merely typing a draft like "❯ 1. fix the bug" into the
+// composer is a single line and can never satisfy both.
+func screenHasWaitingPrompt(screen []byte) bool {
+	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
+	start := len(lines) - waitingScanLines
+	if start < 0 {
+		start = 0
+	}
+	selector, options := false, 0
+	for _, l := range lines[start:] {
+		if waitingSelectorRe.MatchString(l) {
+			selector = true
+			options++
+		} else if waitingOptionRe.MatchString(l) {
+			options++
+		}
+	}
+	return selector && options >= 2
 }
 
 // screenHasInterrupt reports whether any interrupt hint appears in the last few
