@@ -39,6 +39,7 @@ data class SessionInfo(
     val attached: Boolean,
     val path: String,
     val state: String,
+    val agent: Boolean = false,   // created by the mesh (ut spawn): hidden unless "Show agent sessions"
 )
 
 data class FileEntry(
@@ -98,6 +99,7 @@ object Net {
                     s.optBoolean("attached"),
                     s.optString("path", ""),
                     s.optString("state", ""),
+                    s.optBoolean("agent", false),
                 )
             }
         }

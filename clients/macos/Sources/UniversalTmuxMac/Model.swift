@@ -18,13 +18,14 @@ struct SessionInfo: Identifiable, Hashable, Codable {
     var activity: Int64
     var path: String?    // optional: older brokers don't send it
     var state: String = "idle"  // broker agent-state: "working" | "waiting" | "idle"
+    var agent: Bool = false      // created by the mesh (ut spawn): hidden unless "Show agent sessions"
     var id: String { name }
 
     /// True when the broker reports the agent as blocked on the user.
     var isWaiting: Bool { state == "waiting" }
 
     enum CodingKeys: String, CodingKey {
-        case name, windows, attached, activity, path, state
+        case name, windows, attached, activity, path, state, agent
     }
 
     // Custom decoder: Swift's synthesized `Decodable` does NOT apply the
@@ -40,6 +41,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         activity = try c.decode(Int64.self, forKey: .activity)
         path = try c.decodeIfPresent(String.self, forKey: .path)
         state = try c.decodeIfPresent(String.self, forKey: .state) ?? "idle"
+        agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? false
     }
 }
 
@@ -104,9 +106,21 @@ final class AppState: ObservableObject {
     @Published var pathOverrides: [String: String] =
         (UserDefaults.standard.dictionary(forKey: "ut.pathOverrides") as? [String: String]) ?? [:]
 
-    /// All sessions flattened across machines (for the command palette).
+    /// Whether agent-spawned (`ut spawn`) sessions appear in the sidebar. They are
+    /// background work — hidden by default, revealed by the Settings toggle.
+    /// Persisted across launches.
+    @Published var showAgentSessions: Bool = UserDefaults.standard.bool(forKey: "ut.showAgentSessions") {
+        didSet { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") }
+    }
+
+    /// All sessions flattened across machines (for the command palette). Honors the
+    /// agent-visibility toggle so hidden background sessions don't surface in ⌘P.
     var allSessions: [SessionRef] {
-        machines.flatMap { m in (sessionsByMachine[m.id] ?? []).map { SessionRef(machineID: m.id, session: $0.name) } }
+        machines.flatMap { m in
+            (sessionsByMachine[m.id] ?? [])
+                .filter { showAgentSessions || !$0.agent }
+                .map { SessionRef(machineID: m.id, session: $0.name) }
+        }
     }
 
     /// The machine that owns a session ref (for routing a terminal path-click to
@@ -142,7 +156,7 @@ final class AppState: ObservableObject {
     /// most-recently-active first. Drives the pinned "Needs attention" inbox.
     var waitingSessions: [WaitingSession] {
         machines.flatMap { m -> [WaitingSession] in
-            (sessionsByMachine[m.id] ?? []).filter(\.isWaiting).compactMap { s in
+            (sessionsByMachine[m.id] ?? []).filter { $0.isWaiting && (showAgentSessions || !$0.agent) }.compactMap { s in
                 let ref = SessionRef(machineID: m.id, session: s.name)
                 if acknowledged.contains(ref.id) { return nil } // user already saw/answered it
                 return WaitingSession(ref: ref, machineName: m.name, activity: s.activity)
@@ -372,6 +386,9 @@ final class AppState: ObservableObject {
     /// `query` filters by a case-insensitive substring of the name or path.
     func folderGroups(for machineID: String, matching query: String = "") -> [FolderGroup] {
         var sessions = sessionsByMachine[machineID] ?? []
+        if !showAgentSessions { // agent (ut spawn) sessions are background work — hidden unless toggled on
+            sessions = sessions.filter { !$0.agent }
+        }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
             sessions = sessions.filter {

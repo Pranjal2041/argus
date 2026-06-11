@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -171,6 +172,7 @@ func cmdLs() int {
 		var sr struct {
 			Sessions []struct {
 				Name, State, Path string
+				Agent             bool
 			}
 		}
 		_ = json.Unmarshal(b, &sr)
@@ -182,7 +184,11 @@ func cmdLs() int {
 			if st == "" {
 				st = "idle"
 			}
-			fmt.Printf("    %-22s %-8s %s\n", s.Name, st, s.Path)
+			tag := ""
+			if s.Agent { // hidden from the app UI; shown here so the agent sees its own spawns
+				tag = " [agent]"
+			}
+			fmt.Printf("    %-22s %-8s %s%s\n", s.Name, st, s.Path, tag)
 		}
 	}
 	return 0
@@ -276,8 +282,13 @@ func cmdSh(args []string) int {
 // --- spawn: fire a long job into a fresh session ----------------------------
 
 func cmdSpawn(args []string) int {
+	idleSec, idleSet, args, err := extractIdleFlag(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ut spawn:", err)
+		return 2
+	}
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ut spawn <@machine[:name]> <command...>")
+		fmt.Fprintln(os.Stderr, "usage: ut spawn [--idle <dur>] <@machine[:name]> <command...>")
 		return 2
 	}
 	host, name := parseTarget(args[0])
@@ -288,12 +299,61 @@ func cmdSpawn(args []string) int {
 	// One call: the broker creates the session RUNNING the command directly, so
 	// there's no race against a still-starting shell swallowing the Enter.
 	q := url.Values{"action": {"spawn"}, "session": {name}}
+	if idleSet {
+		q.Set("idle", strconv.Itoa(idleSec))
+	}
 	if _, code, err := httpPost(peerURL(host, "/control", q), []byte(cmd), 20*time.Second); err != nil || code != 200 {
 		fmt.Fprintf(os.Stderr, "ut spawn: failed (%v)\n", err)
 		return 1
 	}
 	fmt.Printf("spawned %q on %s — follow it with:  ut tail %s:%s\n", name, host, host, name)
 	return 0
+}
+
+// extractIdleFlag pulls an optional `--idle <dur>` / `--idle=<dur>` out of the
+// spawn args and returns its value in SECONDS. <dur> accepts a Go duration
+// (6h, 30m, 90s), a plain number of seconds (3600), or 0/never/off (never reap).
+// idleSet is false when the flag is absent (the broker then applies its 6h
+// default). The flag is consumed; remaining args are returned in order.
+func extractIdleFlag(args []string) (idleSec int, idleSet bool, rest []string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val := ""
+		switch {
+		case a == "--idle":
+			if i+1 >= len(args) {
+				return 0, false, nil, fmt.Errorf("--idle needs a value (e.g. --idle 12h, --idle 0 = never)")
+			}
+			val = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--idle="):
+			val = strings.TrimPrefix(a, "--idle=")
+		default:
+			rest = append(rest, a)
+			continue
+		}
+		sec, e := parseIdleDur(val)
+		if e != nil {
+			return 0, false, nil, e
+		}
+		idleSec, idleSet = sec, true
+	}
+	return idleSec, idleSet, rest, nil
+}
+
+// parseIdleDur converts an --idle value to seconds. 0/never/off/none → 0 (never).
+func parseIdleDur(s string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "0", "never", "off", "none":
+		return 0, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil { // 6h, 30m, 90s
+		return int(d.Seconds()), nil
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 { // bare seconds
+		return n, nil
+	}
+	return 0, fmt.Errorf("bad --idle value %q (use 6h, 30m, 3600, or 0/never)", s)
 }
 
 // --- send: type into a shell (no capture) -----------------------------------
@@ -412,6 +472,7 @@ USAGE
   ut sh    @<machine>                   list a machine's shells
   ut run   @<machine>:<shell> <cmd...>  run a command INSIDE a shell (state persists)
   ut spawn @<machine>[:name] <cmd...>   start a long job in a session (returns its name)
+       [--idle <dur>]                   idle leash before auto-cleanup (default 6h; 0 = never)
   ut tail  @<machine>:<session>         stream a session's live output (Ctrl-C to stop)
   ut send  @<machine>:<shell> <text...> type text into a shell (no output captured)
   ut cp    <src> <dst>                  copy a file; either side may be <machine>:<path>
@@ -435,5 +496,11 @@ NOTES
     so it behaves like running locally.
   • A "shell" persists state (cwd, exports, activated venv) across run/send calls;
     one-shot exec runs a fresh process each time.
+  • Spawned sessions are AGENT sessions: hidden from the desktop/phone app by default
+    (shown there only behind a "Show agent sessions" toggle), and marked [agent] in 'ut ls'.
+    They auto-clean when left IDLE at a shell prompt for their idle leash (default 6h) —
+    a still-running job is NEVER reaped, only a finished one sitting idle. Use
+    '--idle <dur>' to lengthen/shorten the leash (e.g. --idle 24h) or '--idle 0' to keep
+    it until you 'ut' kill it. Prefer spawn for jobs you'll come back to; it keeps the UI clean.
   • Run 'ut ls' first to see the exact machine names.
 `

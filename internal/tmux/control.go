@@ -45,7 +45,10 @@ func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
 func (p *Provider) List() []SessionInfo                  { return ListSessions(p.socket) }
 func (p *Provider) Create(name, dir string) error       { return CreateSession(p.socket, name, dir) }
-func (p *Provider) Spawn(name, dir, cmd string) error    { return SpawnSession(p.socket, name, dir, cmd) }
+func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
+	return SpawnSession(p.socket, name, dir, cmd, idleSec)
+}
+func (p *Provider) ReapAgents() []string                { return ReapIdleAgentSessions(p.socket) }
 func (p *Provider) Kill(name string) error              { return KillSession(p.socket, name) }
 func (p *Provider) Rename(from, to string) error        { return RenameSession(p.socket, from, to) }
 func (p *Provider) Has(name string) bool                { return HasSession(p.socket, name) }
@@ -202,8 +205,10 @@ func isInternalSession(name string) bool { return strings.HasPrefix(name, intern
 // ListSessions returns the sessions on the given tmux server (-L socket).
 // A missing server / no sessions yields an empty list, not an error.
 func ListSessions(socket string) []SessionInfo {
+	// @ut_agent LAST so a tab inside pane_current_path can't shift it (paths can
+	// contain odd chars but the agent flag is a fixed trailing field).
 	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}")...).Output()
+		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{@ut_agent}")...).Output()
 	if err != nil {
 		return []SessionInfo{}
 	}
@@ -212,7 +217,7 @@ func ListSessions(socket string) []SessionInfo {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 5)
+		f := strings.SplitN(line, "\t", 6)
 		if len(f) < 4 {
 			continue
 		}
@@ -226,9 +231,10 @@ func ListSessions(socket string) []SessionInfo {
 		if len(f) >= 5 {
 			path = f[4]
 		}
+		agent := len(f) >= 6 && f[5] == "1"
 		sessions = append(sessions, SessionInfo{
 			Name: f[0], Windows: windows, Attached: attached > 0, Activity: act, Path: path,
-			State: DetectState(socket, f[0]),
+			State: DetectState(socket, f[0]), Agent: agent,
 		})
 	}
 	return sessions
@@ -284,23 +290,109 @@ func CreateSession(socket, name, startDir string) error {
 	return nil
 }
 
+// tmux user-options that mark a session as agent-created (via `ut spawn`) and
+// record its idle leash. @ut_agent hides it from the app UI (shown only behind a
+// toggle) and makes it eligible for the idle reaper; @ut_reap_idle is the
+// per-session idle budget in seconds (0 = never reap).
+const (
+	optAgent    = "@ut_agent"
+	optReapIdle = "@ut_reap_idle"
+	optDone     = "@ut_done" // set by the wrapper the instant cmd returns — the deterministic "job finished" signal
+)
+
 // SpawnSession creates a detached session that RUNS cmd directly as its process
 // — no send-keys, so there is no race against a still-starting shell (the bug
 // that left `ut spawn` commands typed-but-unsubmitted on a loaded node). After
 // cmd finishes it drops into an interactive shell so the session persists with
 // the output visible (for `ut tail` / attach). cmd is passed as one argv to
 // `sh -c`, so arbitrary content is safe (no shell re-quoting by us).
-func SpawnSession(socket, name, startDir, cmd string) error {
+//
+// It is tagged as an agent session (hidden from the UI, idle-reaped) with the
+// given idle leash in seconds (0 = never reap). Because that trailing
+// interactive shell loads the user's full rc (e.g. p10k + gitstatus → ~3
+// processes per shell), dozens of finished spawns would otherwise pile up; the
+// reaper clears the idle ones.
+func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
 	args := []string{"new-session", "-d", "-s", name}
 	if startDir != "" {
 		args = append(args, "-c", startDir)
 	}
-	args = append(args, "sh", "-c", cmd+"\nexec \"${SHELL:-sh}\" -i")
+	// When cmd returns, mark the session done (a tmux option, set from inside the
+	// pane via $TMUX) BEFORE dropping into the interactive shell. This is the
+	// reaper's deterministic "the job finished" signal — far more robust than
+	// guessing from the foreground command name (on macOS `/bin/sh` is bash, so a
+	// still-running `sh -c` wrapper looks like an interactive bash).
+	wrapper := cmd + "\ntmux set-option " + optDone + " 1 2>/dev/null\nexec \"${SHELL:-sh}\" -i"
+	args = append(args, "sh", "-c", wrapper)
 	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("spawn %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
+	// Tag it (best-effort): the reaper and UI filter key off these options.
+	_ = exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", name, optAgent, "1")...).Run()
+	_ = exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", name, optReapIdle, strconv.Itoa(idleSec))...).Run()
 	return nil
+}
+
+// reapableShells are the interactive shells a spawned session drops into once
+// its command finishes (the `exec "${SHELL:-sh}" -i` tail). After @ut_done is
+// set, the wrapper is gone, so the foreground is either this idle shell (safe to
+// reap) or a NEW job the user started in the post-job shell (foreground = that
+// job → not a shell → keep). This guard is only consulted once @ut_done==1, so
+// the macOS "sh==bash wrapper" false positive can't occur here.
+var reapableShells = map[string]bool{
+	"zsh": true, "bash": true, "fish": true, "ksh": true, "tcsh": true, "csh": true, "sh": true, "dash": true,
+}
+
+// ReapIdleAgentSessions kills agent (@ut_agent) sessions whose command has
+// finished (@ut_done) and which have since sat idle longer than their
+// @ut_reap_idle leash, returning the reaped names. Deterministic and
+// conservative — a session is removed ONLY when ALL hold:
+//   - it is tagged agent (@ut_agent==1),
+//   - its job has finished (@ut_done==1) — a still-running job, even a silent
+//     one, never sets this, so live work is never touched,
+//   - its leash is non-zero and its idle time exceeds it,
+//   - its foreground is an interactive shell (guards the rare case of a new job
+//     started by hand in the post-job shell).
+//
+// Called periodically by the broker.
+func ReapIdleAgentSessions(socket string) []string {
+	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
+		fmt.Sprintf("#{session_name}\t#{%s}\t#{%s}\t#{%s}\t#{session_activity}", optAgent, optDone, optReapIdle))...).Output()
+	if err != nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	var reaped []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		f := strings.SplitN(line, "\t", 5)
+		if len(f) < 5 || f[1] != "1" || f[2] != "1" { // not agent, or job not finished
+			continue
+		}
+		name := f[0]
+		leash := session.DefaultReapIdleSec
+		if f[3] != "" {
+			if n, e := strconv.Atoi(f[3]); e == nil {
+				leash = n
+			}
+		}
+		if leash <= 0 { // 0 = never reap
+			continue
+		}
+		act, _ := strconv.ParseInt(f[4], 10, 64)
+		if now-act <= int64(leash) { // still within its idle budget
+			continue
+		}
+		// Finished + idle past the leash — reap unless a NEW job is now running.
+		fg, e := exec.Command("tmux", tmuxArgs(socket, "display-message", "-p", "-t", name, "#{pane_current_command}")...).Output()
+		if e != nil || !reapableShells[strings.TrimSpace(string(fg))] {
+			continue
+		}
+		if KillSession(socket, name) == nil {
+			reaped = append(reaped, name)
+		}
+	}
+	return reaped
 }
 
 // KillSession terminates a session and everything running in it.

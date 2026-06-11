@@ -43,6 +43,9 @@ type winSession struct {
 	outCh   chan session.Output
 	once    sync.Once
 
+	agent    bool  // created by the mesh (ut spawn): hidden from the UI, idle-reaped
+	reapIdle int   // idle seconds before the reaper removes it (0 = never)
+
 	mu      sync.Mutex
 	ring    []byte
 	lastOut int64
@@ -169,7 +172,7 @@ func (p *Provider) List() []session.Info {
 		info := session.Info{
 			Name: s.name, Windows: 1, Attached: false,
 			Activity: s.lastOut, Path: s.dir,
-			State: detectState(s.ring),
+			State: detectState(s.ring), Agent: s.agent,
 		}
 		s.mu.Unlock()
 		out = append(out, info)
@@ -261,12 +264,46 @@ func (p *Provider) Dial(_ context.Context, name string) (session.Session, error)
 
 // Spawn creates a session, then writes the command into its shell. (A future
 // pass can start the ConPTY with the command directly, like the tmux backend.)
-func (p *Provider) Spawn(name, dir, cmd string) error {
+// It is tagged as an agent session (hidden from the UI, idle-reaped after
+// idleSec seconds of no activity; 0 = never).
+func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
 	if err := p.Create(name, dir); err != nil {
 		return err
 	}
+	p.mu.Lock()
+	if s := p.sessions[name]; s != nil {
+		s.mu.Lock()
+		s.agent = true
+		s.reapIdle = idleSec
+		s.mu.Unlock()
+	}
+	p.mu.Unlock()
 	time.Sleep(400 * time.Millisecond) // let the shell come up before typing
 	return p.SendText(name, cmd, true)
+}
+
+// ReapAgents removes agent sessions idle (no output/input) past their leash,
+// unless a turn is actively running (the OSC-title spinner says "working"). On
+// ConPTY there is no pane_current_command, so idleness is activity-based; the
+// "working" guard keeps a live agent turn from being killed. Returns reaped
+// names. Called periodically by the broker.
+func (p *Provider) ReapAgents() []string {
+	now := time.Now().Unix()
+	var stale []string
+	p.mu.Lock()
+	for name, s := range p.sessions {
+		s.mu.Lock()
+		idle := s.agent && s.reapIdle > 0 && now-s.lastOut > int64(s.reapIdle) && detectState(s.ring) != "working"
+		s.mu.Unlock()
+		if idle {
+			stale = append(stale, name)
+		}
+	}
+	p.mu.Unlock()
+	for _, name := range stale {
+		p.remove(name)
+	}
+	return stale
 }
 
 // SendText writes text (and optionally a carriage return) into a session's

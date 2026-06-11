@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -267,6 +269,13 @@ type Manager struct {
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
 	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub)}
 	go m.sessionRefreshLoop(2 * time.Second)
+	// Reap idle agent sessions on an interval; UT_REAP_INTERVAL_SEC overrides the
+	// 5-min default (operational knob; also makes the reaper testable).
+	reapEvery := 5 * time.Minute
+	if v, err := strconv.Atoi(os.Getenv("UT_REAP_INTERVAL_SEC")); err == nil && v > 0 {
+		reapEvery = time.Duration(v) * time.Second
+	}
+	go m.reapLoop(reapEvery)
 	return m
 }
 
@@ -281,14 +290,44 @@ func (m *Manager) SendText(name, text string, enter bool) error {
 	return m.prov.SendText(name, text, enter)
 }
 
-// Spawn creates a session that runs cmd directly (no keystroke race) and adds
-// it to the cache so it shows up immediately.
-func (m *Manager) Spawn(name, dir, cmd string) error {
-	if err := m.prov.Spawn(name, dir, cmd); err != nil {
+// Spawn creates an agent session that runs cmd directly (no keystroke race) and
+// adds it to the cache so it shows up immediately. idleSec is its idle-reap
+// leash in seconds (0 = never).
+func (m *Manager) Spawn(name, dir, cmd string, idleSec int) error {
+	if err := m.prov.Spawn(name, dir, cmd, idleSec); err != nil {
 		return err
 	}
 	go m.refreshSessions()
 	return nil
+}
+
+// reapLoop periodically asks the provider to remove idle agent sessions (created
+// by `ut spawn`), then tears down each reaped session's hub and refreshes the
+// cache so the change is reflected immediately. Without this, every finished
+// spawn would linger as a heavyweight interactive shell (rc + p10k/gitstatus),
+// piling up dozens of processes on a busy node.
+func (m *Manager) reapLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-t.C:
+			for _, name := range m.prov.ReapAgents() {
+				m.dropHub(name)
+				m.sessMu.Lock()
+				c := make([]session.Info, 0, len(m.sessCache))
+				for _, s := range m.sessCache {
+					if s.Name != name {
+						c = append(c, s)
+					}
+				}
+				m.sessCache = c
+				m.sessMu.Unlock()
+			}
+		}
+	}
 }
 
 // Stream feeds a session's snapshot + live output to w (the read-only `ut tail`

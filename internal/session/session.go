@@ -28,6 +28,7 @@ type Info struct {
 	Activity int64  `json:"activity"` // unix seconds of last activity
 	Path     string `json:"path"`     // active pane cwd (folder grouping)
 	State    string `json:"state"`    // attention: working | waiting | idle
+	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn): hidden from the app UI by default, auto-reaped when idle
 }
 
 // Session is one live session the broker streams to/from clients.
@@ -71,5 +72,11 @@ type Provider interface {
 	Dial(ctx context.Context, name string) (Session, error) // attach (creating the control client)
 	Exec(req ExecRequest) ExecResult                        // run a command on this host (mesh primitive)
 	SendText(session, text string, enter bool) error        // type text into a session (fire-and-forget)
-	Spawn(name, dir, cmd string) error                      // create a session RUNNING cmd (no keystroke race)
+	Spawn(name, dir, cmd string, idleSec int) error         // create an agent session RUNNING cmd; reap when idle > idleSec (0 = never)
+	ReapAgents() []string                                   // kill agent sessions idle past their leash (only when idle at a shell); returns reaped names
 }
+
+// DefaultReapIdleSec is how long an agent (ut spawn) session may sit idle at a
+// shell prompt before the reaper removes it — overridable per spawn with
+// `ut spawn --idle`. 0 means never reap.
+const DefaultReapIdleSec = 6 * 3600

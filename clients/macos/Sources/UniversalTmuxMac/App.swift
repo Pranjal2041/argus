@@ -107,7 +107,7 @@ struct UniversalTmuxApp: App {
         .windowStyle(.hiddenTitleBar)
 
         Settings {
-            SettingsView(terminals: terminals)
+            SettingsView(terminals: terminals, state: state)
         }
     }
 }
@@ -115,6 +115,7 @@ struct UniversalTmuxApp: App {
 /// Preferences window (⌘,). Live font-size control for the terminal pane.
 struct SettingsView: View {
     @ObservedObject var terminals: TerminalController
+    @ObservedObject var state: AppState
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
 
     var body: some View {
@@ -157,9 +158,18 @@ struct SettingsView: View {
             }
 
             TerminalAppearanceSection(terminals: terminals)
+
+            Section {
+                Toggle("Show agent sessions", isOn: $state.showAgentSessions)
+            } header: {
+                Text("Sessions")
+            } footer: {
+                Text("Agent sessions are started by `ut spawn` (the mesh) as background jobs. They're hidden from the sidebar by default and auto-clean when left idle. Turn this on to see and open them here.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 320)
+        .frame(width: 440, height: 400)
         .tint(Theme.accent)
     }
 }

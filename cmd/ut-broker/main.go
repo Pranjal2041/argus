@@ -108,7 +108,11 @@ func main() {
 			err = mgr.Create(q.Get("session"), q.Get("dir"))
 		case "spawn": // create a session RUNNING the POST-body command (no keystroke race)
 			body, _ := io.ReadAll(r.Body)
-			err = mgr.Spawn(q.Get("session"), q.Get("dir"), string(body))
+			idleSec := sess.DefaultReapIdleSec // idle leash; ?idle=SEC overrides (0 = never reap)
+			if v := q.Get("idle"); v != "" {
+				idleSec, _ = strconv.Atoi(v)
+			}
+			err = mgr.Spawn(q.Get("session"), q.Get("dir"), string(body), idleSec)
 		case "kill":
 			err = mgr.Kill(q.Get("session"))
 		case "rename":
