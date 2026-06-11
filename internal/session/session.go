@@ -41,6 +41,25 @@ type Session interface {
 	Close()                            // detach this control client (session itself persists)
 }
 
+// ExecRequest runs a command on this host (the mesh's remote-exec primitive).
+// With Session set, the command runs INSIDE that persistent shell — preserving
+// its env, cwd, and any activated venv — instead of a fresh process.
+type ExecRequest struct {
+	Cmd        string // the command line(s) to run; arbitrary content (may be multi-line)
+	Session    string // run inside this persistent session's shell; "" = one-shot fresh process
+	Dir        string // working dir for a one-shot exec (ignored when Session is set)
+	TimeoutSec int    // 0 → a sane default
+}
+
+// ExecResult is the captured outcome of an ExecRequest.
+type ExecResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	Exit     int    `json:"exit"`
+	TimedOut bool   `json:"timedOut"`
+	Error    string `json:"error,omitempty"` // setup failure (couldn't run at all)
+}
+
 // Provider owns all sessions on one host (a tmux server, or the ConPTY set).
 type Provider interface {
 	List() []Info
@@ -50,4 +69,6 @@ type Provider interface {
 	Has(name string) bool
 	SetHistoryLimit(lines int)
 	Dial(ctx context.Context, name string) (Session, error) // attach (creating the control client)
+	Exec(req ExecRequest) ExecResult                        // run a command on this host (mesh primitive)
+	SendText(session, text string, enter bool) error        // type text into a session (fire-and-forget)
 }

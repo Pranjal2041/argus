@@ -11,9 +11,11 @@
 package conpty
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -255,6 +257,67 @@ func (p *Provider) Dial(_ context.Context, name string) (session.Session, error)
 		return nil, fmt.Errorf("no such session %q", name)
 	}
 	return s, nil
+}
+
+// SendText writes text (and optionally a carriage return) into a session's
+// ConPTY — fire-and-forget input for `ut spawn` / `ut send`.
+func (p *Provider) SendText(name, text string, enter bool) error {
+	p.mu.Lock()
+	s, ok := p.sessions[name]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no such session %q", name)
+	}
+	data := text
+	if enter {
+		data += "\r"
+	}
+	_, err := s.cpty.Write([]byte(data))
+	return err
+}
+
+// Exec runs a command on this Windows host. One-shot only for now (fresh
+// process via the shell); in-session exec (capturing output from a live ConPTY
+// shell while preserving its env) is a follow-up.
+func (p *Provider) Exec(req session.ExecRequest) session.ExecResult {
+	if req.Session != "" {
+		return session.ExecResult{Error: "in-session exec not yet supported on Windows; use a one-shot exec or attach the session", Exit: -1}
+	}
+	timeout := time.Duration(req.TimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	shell := p.shell
+	if strings.TrimSpace(shell) == "" {
+		shell = defaultShell
+	}
+	c := exec.CommandContext(ctx, "cmd", "/c", req.Cmd)
+	if strings.Contains(strings.ToLower(shell), "powershell") {
+		c = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", req.Cmd)
+	}
+	if req.Dir != "" {
+		c.Dir = req.Dir
+	}
+	var so, se bytes.Buffer
+	c.Stdout = &so
+	c.Stderr = &se
+	err := c.Run()
+	res := session.ExecResult{Stdout: so.String(), Stderr: se.String()}
+	if ctx.Err() == context.DeadlineExceeded {
+		res.TimedOut = true
+		res.Exit = 124
+		return res
+	}
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			res.Exit = ee.ExitCode()
+		} else {
+			res.Exit = 1
+		}
+	}
+	return res
 }
 
 // --- attention-state detection: the agent's OSC window-title spinner ---------
