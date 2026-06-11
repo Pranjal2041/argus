@@ -93,9 +93,10 @@ func DetectState(socket, name string) string {
 	return "idle"
 }
 
-// waitingScanLines bounds the dialog scan: option dialogs render at the bottom
-// of the screen, just above the composer/footer.
-const waitingScanLines = 15
+// waitingScanLines bounds the dialog scan: a selection menu renders near the
+// bottom — but some agent TUIs draw a status block BELOW it, so the window is
+// generous enough to still reach the menu's footer.
+const waitingScanLines = 22
 
 var (
 	// The SELECTED row of a numbered option dialog: "❯ 1. Yes". The bare "❯" is
@@ -103,20 +104,36 @@ var (
 	waitingSelectorRe = regexp.MustCompile(`^\s*│?\s*❯\s*\d+\.\s`)
 	// Any other (unselected) option row: "  2. No, and tell Claude…".
 	waitingOptionRe = regexp.MustCompile(`^\s*│?\s*\d+\.\s`)
+	// The footer an interactive selection menu prints WHILE blocked on a choice
+	// — e.g. "Enter to select · ↑/↓ to navigate · Esc to cancel". The most
+	// robust "waiting for you to pick" signal: an explicit string the TUI emits,
+	// independent of any selector GLYPH (custom agents mark the selected row with
+	// COLOR, not a "❯", so the glyph heuristic alone misses them). Anchored on
+	// the up/down navigation cue so ordinary prose can't trip it.
+	waitingFooterRe = regexp.MustCompile(`(?i)(↑/↓|↑ ↓|↑↓|up/?down|arrow keys|use arrows).{0,40}(navigate|select|choose|move)`)
 )
 
-// screenHasWaitingPrompt reports whether the screen tail shows a numbered
-// option dialog. Requires the selector row PLUS at least one other numbered
-// option row — a user merely typing a draft like "❯ 1. fix the bug" into the
-// composer is a single line and can never satisfy both.
+// screenHasWaitingPrompt reports whether the screen tail shows an interactive
+// selection menu blocked on the user. True if EITHER:
+//   - a menu footer hint is present ("↑/↓ to navigate" etc.) — robust across
+//     custom TUIs that don't draw a "❯" selector; or
+//   - a "❯ N." selected row PLUS another numbered option row (Claude-style
+//     permission dialogs) — a single typed draft like "❯ 1. fix it" can't
+//     satisfy both.
 func screenHasWaitingPrompt(screen []byte) bool {
 	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
 	start := len(lines) - waitingScanLines
 	if start < 0 {
 		start = 0
 	}
+	tail := lines[start:]
+	for _, l := range tail {
+		if waitingFooterRe.MatchString(l) {
+			return true
+		}
+	}
 	selector, options := false, 0
-	for _, l := range lines[start:] {
+	for _, l := range tail {
 		if waitingSelectorRe.MatchString(l) {
 			selector = true
 			options++
