@@ -20,6 +20,19 @@ PORT="${UT_PORT:-8722}"
 USERNAME="$(id -un 2>/dev/null || echo user)"
 LOCAL="${UT_LOCAL_DIR:-/tmp/ut-$USERNAME}"             # NODE-LOCAL: identity/state/pidfiles (never NFS)
 
+# --- mesh: reach every machine by name -------------------------------------
+# `ut ls / exec / run / sh / spawn / tail / send / cp / help` are FABRIC
+# commands handled by the broker binary in client mode (it talks to the local
+# broker on loopback and relays across the tailnet). Everything else below is
+# the tmux/session behavior. Tell an agent: run `ut help`.
+case "${1:-}" in
+  ls|exec|run|sh|spawn|tail|send|cp|help|--help|-h)
+    [ -x "$BROKER" ] || { echo "ut: broker not found at $BROKER (set UT_BROKER)" >&2; exit 1; }
+    export UT_PORT="$PORT"
+    exec "$BROKER" "$@"
+    ;;
+esac
+
 # --- args: optional `-L <socket>`, then optional session name --------------
 socket="ut"
 if [ "${1:-}" = "-L" ]; then

@@ -50,6 +50,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var engineStatus by mutableStateOf("off")
 
+    /** Whether agent-spawned (`ut spawn`) sessions show in the list. They're
+     *  background jobs — hidden by default, revealed by the settings toggle.
+     *  Persisted; flipping it re-filters the list and the attention inbox. */
+    private var _showAgent by mutableStateOf(prefs.getBoolean("showAgent", false))
+    var showAgentSessions: Boolean
+        get() = _showAgent
+        set(v) {
+            _showAgent = v
+            prefs.edit().putBoolean("showAgent", v).apply()
+            recomputeAttention()
+        }
+
+    /** Sessions for a broker as shown in the UI: agent sessions filtered out unless
+     *  [showAgentSessions] is on. The list and attention surfaces both use this. */
+    fun visibleSessions(b: Broker): List<SessionInfo> =
+        (sessions[b.id] ?: emptyList()).filter { showAgentSessions || !it.agent }
+
     init {
         loadBrokers()
         refreshAll()
@@ -177,7 +194,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun recomputeAttention() {
         val next = brokers.flatMap { b ->
-            (sessions[b.id] ?: emptyList())
+            visibleSessions(b)
                 .filter { it.state == "waiting" && unseenKey(b, it.name) !in acknowledged }
                 .map { b to it }
         }

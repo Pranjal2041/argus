@@ -28,6 +28,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -287,7 +288,27 @@ private fun Sidebar(
             Divider(color = Color(0xFF2A2B3C))
         }
 
+        // Agent (ut spawn) sessions are background jobs — hidden by default, with this
+        // toggle to reveal them. They auto-clean when left idle.
+        Row(
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 4.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Show agent sessions", color = Color(0xFF9AA5CE), fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Switch(
+                checked = vm.showAgentSessions,
+                onCheckedChange = { vm.showAgentSessions = it },
+                modifier = Modifier.scale(0.8f),
+            )
+        }
         val brokerList = vm.brokers.toList()
+        // Read sessions + the agent-visibility toggle HERE (composable body) and pass
+        // the builder a plain pre-filtered map: reading these transitively inside the
+        // LazyColumn item builder did not reliably re-run it (same lesson as attention).
+        val showAgent = vm.showAgentSessions
+        val visibleByBroker = brokerList.associate { brk ->
+            brk.id to vm.sessions[brk.id].orEmpty().filter { showAgent || !it.agent }
+        }
         LazyColumn(Modifier.weight(1f)) {
             items(brokerList, key = { it.id }) { b ->
                 Row(
@@ -298,7 +319,7 @@ private fun Sidebar(
                     IconButton(onClick = { onNewSession(b) }) { Icon(Icons.Filled.Add, "New session", tint = Color(0xFF9AA5CE)) }
                     IconButton(onClick = { vm.removeBroker(b) }) { Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFF565F89)) }
                 }
-                val list = vm.sessions[b.id].orEmpty()
+                val list = visibleByBroker[b.id].orEmpty()
                 if (list.isEmpty()) {
                     Text("no sessions", color = Color(0xFF565F89), fontSize = 12.sp,
                         modifier = Modifier.padding(start = 24.dp, bottom = 6.dp))

@@ -28,6 +28,7 @@ type Info struct {
 	Activity int64  `json:"activity"` // unix seconds of last activity
 	Path     string `json:"path"`     // active pane cwd (folder grouping)
 	State    string `json:"state"`    // attention: working | waiting | idle
+	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn): hidden from the app UI by default, auto-reaped when idle
 }
 
 // Session is one live session the broker streams to/from clients.
@@ -41,6 +42,25 @@ type Session interface {
 	Close()                            // detach this control client (session itself persists)
 }
 
+// ExecRequest runs a command on this host (the mesh's remote-exec primitive).
+// With Session set, the command runs INSIDE that persistent shell — preserving
+// its env, cwd, and any activated venv — instead of a fresh process.
+type ExecRequest struct {
+	Cmd        string // the command line(s) to run; arbitrary content (may be multi-line)
+	Session    string // run inside this persistent session's shell; "" = one-shot fresh process
+	Dir        string // working dir for a one-shot exec (ignored when Session is set)
+	TimeoutSec int    // 0 → a sane default
+}
+
+// ExecResult is the captured outcome of an ExecRequest.
+type ExecResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	Exit     int    `json:"exit"`
+	TimedOut bool   `json:"timedOut"`
+	Error    string `json:"error,omitempty"` // setup failure (couldn't run at all)
+}
+
 // Provider owns all sessions on one host (a tmux server, or the ConPTY set).
 type Provider interface {
 	List() []Info
@@ -50,4 +70,13 @@ type Provider interface {
 	Has(name string) bool
 	SetHistoryLimit(lines int)
 	Dial(ctx context.Context, name string) (Session, error) // attach (creating the control client)
+	Exec(req ExecRequest) ExecResult                        // run a command on this host (mesh primitive)
+	SendText(session, text string, enter bool) error        // type text into a session (fire-and-forget)
+	Spawn(name, dir, cmd string, idleSec int) error         // create an agent session RUNNING cmd; reap when idle > idleSec (0 = never)
+	ReapAgents() []string                                   // kill agent sessions idle past their leash (only when idle at a shell); returns reaped names
 }
+
+// DefaultReapIdleSec is how long an agent (ut spawn) session may sit idle at a
+// shell prompt before the reaper removes it — overridable per spawn with
+// `ut spawn --idle`. 0 means never reap.
+const DefaultReapIdleSec = 6 * 3600

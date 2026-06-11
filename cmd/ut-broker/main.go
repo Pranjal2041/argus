@@ -26,11 +26,19 @@ import (
 	"universal-tmux/internal/forward"
 	"universal-tmux/internal/fsvc"
 	"universal-tmux/internal/jupyter"
+	"universal-tmux/internal/mesh"
 	"universal-tmux/internal/portfwd"
+	sess "universal-tmux/internal/session" // aliased: the `session` flag var below shadows the package name
 	webassets "universal-tmux/web"
 )
 
 func main() {
+	// Mesh CLIENT mode: `ut-broker <verb> ...` (wrapped by the `ut` script) is a
+	// fabric command, not the server. Dispatch before any server setup.
+	if len(os.Args) > 1 && isMeshVerb(os.Args[1]) {
+		os.Exit(runClient(os.Args[1:]))
+	}
+
 	listen := flag.String("listen", "127.0.0.1:8722", "local host:port (the port is reused on the tailnet when --tsnet-host is set)")
 	session := flag.String("session", "ut-demo", "default session to warm + attach when none is requested")
 	tmuxSock := flag.String("tmux-socket", "ut", "dedicated tmux server socket (-L); isolates our sessions from any other tmux")
@@ -98,6 +106,13 @@ func main() {
 		switch q.Get("action") {
 		case "create":
 			err = mgr.Create(q.Get("session"), q.Get("dir"))
+		case "spawn": // create a session RUNNING the POST-body command (no keystroke race)
+			body, _ := io.ReadAll(r.Body)
+			idleSec := sess.DefaultReapIdleSec // idle leash; ?idle=SEC overrides (0 = never reap)
+			if v := q.Get("idle"); v != "" {
+				idleSec, _ = strconv.Atoi(v)
+			}
+			err = mgr.Spawn(q.Get("session"), q.Get("dir"), string(body), idleSec)
 		case "kill":
 			err = mgr.Kill(q.Get("session"))
 		case "rename":
@@ -123,6 +138,72 @@ func main() {
 		}
 		defer c.CloseNow()
 		_ = mgr.Serve(r.Context(), c, name) // err is normal on client disconnect
+	})
+	// /exec — the mesh's remote-exec primitive: run a command on THIS host and
+	// return its captured output + exit code. With ?session=NAME it runs inside
+	// that persistent shell (env/cwd/venv preserved); otherwise a fresh process.
+	// POST body = the command; query: session, dir, timeout(sec). Reached from
+	// another machine through the local broker's /mesh/proxy.
+	mux.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		q := r.URL.Query()
+		cmd := q.Get("cmd")
+		if cmd == "" {
+			if body, _ := io.ReadAll(r.Body); len(body) > 0 {
+				cmd = string(body)
+			}
+		}
+		if strings.TrimSpace(cmd) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "empty command"})
+			return
+		}
+		timeout, _ := strconv.Atoi(q.Get("timeout"))
+		res := mgr.Exec(sess.ExecRequest{
+			Cmd: cmd, Session: q.Get("session"), Dir: q.Get("dir"), TimeoutSec: timeout,
+		})
+		_ = json.NewEncoder(w).Encode(res)
+	})
+	// /stream — read-only live feed of a session (snapshot + output) as a flushing
+	// HTTP response. Behind `ut tail`; plain HTTP so it relays cleanly through the
+	// mesh proxy without a WebSocket double-hop.
+	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("session")
+		if name == "" {
+			name = *session
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("X-Accel-Buffering", "no")
+		flush := func() {
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		flush()
+		_ = mgr.Stream(r.Context(), w, flush, name)
+	})
+	// /send — type text into a session's shell and return immediately (no capture).
+	// Used by `ut spawn` (fire a long job into a fresh session) and `ut send`.
+	mux.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		q := r.URL.Query()
+		text := q.Get("text")
+		if text == "" {
+			if body, _ := io.ReadAll(r.Body); len(body) > 0 {
+				text = string(body)
+			}
+		}
+		enter := q.Get("enter") != "0" // append Enter unless ?enter=0
+		if err := mgr.SendText(q.Get("session"), text, enter); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 	// Port hub: list this host's listening ports, and tunnel one to a tailnet
 	// client (WebSocket <-> 127.0.0.1:port). localhost-only target.
@@ -232,13 +313,33 @@ func main() {
 		fsResult(w, fsvc.Write(r.URL.Query().Get("path"), data))
 	})
 
-	ln, where, err := listener(ctx, *listen, *tsHost, *tsDir)
+	ln, where, ts, err := listener(ctx, *listen, *tsHost, *tsDir)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
 
+	// Mesh: this broker can reach peer brokers over the tailnet (through its own
+	// tsnet node, or — local mode — the host's Tailscale), so an agent talks only
+	// to its LOCAL broker and we relay to any machine. /mesh/peers lists the
+	// fabric; /mesh/proxy forwards any request (HTTP + WS) to a named peer.
+	meshRouter := mesh.New(ts, displayName)
+	mux.HandleFunc("/mesh/peers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_ = json.NewEncoder(w).Encode(map[string]any{"peers": meshRouter.Peers(r.Context())})
+	})
+	mux.HandleFunc("/mesh/proxy", func(w http.ResponseWriter, r *http.Request) {
+		meshRouter.Proxy(w, r)
+	})
+
 	srv := &http.Server{Handler: mux}
+	// Disable HTTP/2: over the tsnet TLS listener the server would otherwise
+	// negotiate h2, whose flow control BUFFERS flushed chunks — so a live feed
+	// (/stream behind `ut tail`) arrives in batches instead of line-by-line. An
+	// empty non-nil TLSNextProto turns h2 off; everything here is h1-friendly
+	// (WebSocket already needs an h1 upgrade).
+	srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
@@ -256,10 +357,30 @@ func main() {
 			log.Printf("warn: extra-listen %s failed (primary listener unaffected): %v", *extraListen, e)
 		}
 	}
+	// ALWAYS serve on loopback too, so a CLI/agent running ON THIS HOST can reach
+	// its local broker (and relay out through the mesh). In tsnet mode the primary
+	// listener is the tailnet interface only — without this, the `ut` mesh client
+	// on a cluster compute node couldn't talk to its own broker.
+	if loopback := "127.0.0.1:" + portOf(*listen); loopback != *listen && loopback != *extraListen {
+		if l3, e := net.Listen("tcp", loopback); e == nil {
+			log.Printf("also serving on http://%s (local mesh client)", loopback)
+			go func() { _ = srv.Serve(l3) }()
+		} else {
+			log.Printf("warn: loopback listener %s failed: %v", loopback, e)
+		}
+	}
 	log.Printf("universal_tmux broker → %s  (tmux -L %s, default session %q)", where, *tmuxSock, *session)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// portOf returns the port of a host:port (or the string itself if it has no host).
+func portOf(hostport string) string {
+	if _, p, err := net.SplitHostPort(hostport); err == nil && p != "" {
+		return p
+	}
+	return strings.TrimPrefix(hostport, ":")
 }
 
 // fsResult writes {"ok":true} or a 400 with {"error":...} for an /fs mutation.
@@ -275,10 +396,12 @@ func fsResult(w http.ResponseWriter, err error) {
 
 // listener returns a local TCP listener, or a tailnet (tsnet) listener when
 // tsHost is set — the rootless, no-TUN inbound path for owned/cluster nodes.
-func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, string, error) {
+// The returned *tsnet.Server (nil in local mode) lets the mesh dial peer
+// brokers over the tailnet.
+func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, string, *tsnet.Server, error) {
 	if tsHost == "" {
 		ln, err := net.Listen("tcp", listen)
-		return ln, "http://" + listen, err
+		return ln, "http://" + listen, nil, err
 	}
 	port := "8722"
 	if _, p, err := net.SplitHostPort(listen); err == nil && p != "" {
@@ -292,19 +415,19 @@ func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, 
 		s.AuthKey = k
 	}
 	if err := s.Start(); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	status, err := s.Up(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	lc, err := s.LocalClient()
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	ln, err := s.Listen("tcp", ":"+port)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	// Real *.ts.net certificate (requires Tailscale HTTPS enabled on the tailnet).
 	// A valid chain is what macOS ATS demands for a remote host — no client hacks.
@@ -313,5 +436,5 @@ func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, 
 	if status != nil && status.Self != nil && status.Self.DNSName != "" {
 		name = strings.TrimSuffix(status.Self.DNSName, ".")
 	}
-	return ln, "https://" + name + ":" + port + "  (tailnet, TLS)", nil
+	return ln, "https://" + name + ":" + port + "  (tailnet, TLS)", s, nil
 }

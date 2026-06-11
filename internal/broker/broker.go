@@ -8,6 +8,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -184,6 +187,52 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	}
 }
 
+// stream writes the session's snapshot + live output (raw terminal bytes) to w
+// as a flushing HTTP response — the read-only feed behind `ut tail`. Plain HTTP
+// so it relays through the mesh's HTTP proxy with no WebSocket double-hop.
+func (h *sessionHub) stream(parent context.Context, w io.Writer, flush func()) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel}
+	h.mu.Lock()
+	h.subs[sub] = struct{}{}
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.subs, sub)
+		h.mu.Unlock()
+		close(sub.done)
+	}()
+	// Size the control client so tmux STREAMS %output: control mode only emits a
+	// pane's output once a client has given the window a size (refresh-client -C).
+	// The /ws path gets this from the client's first resize; /stream must prime
+	// it itself, or no live output flows (only the snapshot).
+	_ = h.tm.Resize(200, 50)
+	if snap := h.tm.Snapshot(); len(snap) > 0 {
+		if _, err := w.Write(snap); err != nil {
+			return
+		}
+		flush()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-h.dead:
+			return
+		case frame := <-sub.ch:
+			op, _, payload, ok := decodeFrame(frame)
+			if !ok || op != opOutput {
+				continue
+			}
+			if _, err := w.Write(payload); err != nil {
+				return
+			}
+			flush()
+		}
+	}
+}
+
 // close evicts every connected client (cancelling each serve ctx closes its
 // WebSocket) and detaches the control-mode client. Used on kill/rename.
 func (h *sessionHub) close() {
@@ -220,11 +269,80 @@ type Manager struct {
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
 	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub)}
 	go m.sessionRefreshLoop(2 * time.Second)
+	// Reap idle agent sessions on an interval; UT_REAP_INTERVAL_SEC overrides the
+	// 5-min default (operational knob; also makes the reaper testable).
+	reapEvery := 5 * time.Minute
+	if v, err := strconv.Atoi(os.Getenv("UT_REAP_INTERVAL_SEC")); err == nil && v > 0 {
+		reapEvery = time.Duration(v) * time.Second
+	}
+	go m.reapLoop(reapEvery)
 	return m
 }
 
 // SetHistoryLimit raises the backend's scrollback limit for new sessions.
 func (m *Manager) SetHistoryLimit(lines int) { m.prov.SetHistoryLimit(lines) }
+
+// Exec runs a command on this host (the mesh remote-exec primitive).
+func (m *Manager) Exec(req session.ExecRequest) session.ExecResult { return m.prov.Exec(req) }
+
+// SendText types text into a session's shell (fire-and-forget; no capture).
+func (m *Manager) SendText(name, text string, enter bool) error {
+	return m.prov.SendText(name, text, enter)
+}
+
+// Spawn creates an agent session that runs cmd directly (no keystroke race) and
+// adds it to the cache so it shows up immediately. idleSec is its idle-reap
+// leash in seconds (0 = never).
+func (m *Manager) Spawn(name, dir, cmd string, idleSec int) error {
+	if err := m.prov.Spawn(name, dir, cmd, idleSec); err != nil {
+		return err
+	}
+	go m.refreshSessions()
+	return nil
+}
+
+// reapLoop periodically asks the provider to remove idle agent sessions (created
+// by `ut spawn`), then tears down each reaped session's hub and refreshes the
+// cache so the change is reflected immediately. Without this, every finished
+// spawn would linger as a heavyweight interactive shell (rc + p10k/gitstatus),
+// piling up dozens of processes on a busy node.
+func (m *Manager) reapLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-t.C:
+			for _, name := range m.prov.ReapAgents() {
+				m.dropHub(name)
+				m.sessMu.Lock()
+				c := make([]session.Info, 0, len(m.sessCache))
+				for _, s := range m.sessCache {
+					if s.Name != name {
+						c = append(c, s)
+					}
+				}
+				m.sessCache = c
+				m.sessMu.Unlock()
+			}
+		}
+	}
+}
+
+// Stream feeds a session's snapshot + live output to w (the read-only `ut tail`
+// feed). It never creates a session — tailing a missing one is an error.
+func (m *Manager) Stream(ctx context.Context, w io.Writer, flush func(), name string) error {
+	if !m.prov.Has(name) {
+		return fmt.Errorf("no such session: %q", name)
+	}
+	h, err := m.hub(name)
+	if err != nil {
+		return err
+	}
+	h.stream(ctx, w, flush)
+	return nil
+}
 
 // Sessions returns the cached session list (refreshed in the background). Always
 // fast — it never calls the provider on the request path.
