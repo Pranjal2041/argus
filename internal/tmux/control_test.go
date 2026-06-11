@@ -55,7 +55,13 @@ func TestScreenHasWaitingPrompt(t *testing.T) {
 		{"idle composer prompt", "some output\n\n❯ \n", false},
 		{"typed numbered draft", "output\n\n❯ 1. fix the bug first\n", false},
 		{"numbered list in chat", " 1. step one\n 2. step two\n\n❯ \n", false},
-		{"dialog scrolled away", dialog + strings.Repeat("filler line\n", 16), false},
+		{"dialog scrolled away", dialog + strings.Repeat("filler line\n", 24), false},
+		// custom agent TUI: colored selection (no ❯ glyph), explicit footer, and
+		// a status block rendered BELOW the menu.
+		{"custom menu footer", "  1. Relight floor\n  2. Counter clutter\n  3. Ship it\n" +
+			"Enter to select · ↑/↓ to navigate · Esc to cancel\n\n" +
+			"  4 tasks (3 done, 1 in progress)\n  ✔ a\n  ✔ b\n  ◼ c\n", true},
+		{"plain numbered list, no nav footer", " 1. one\n 2. two\n 3. three\n\noutput continues\n", false},
 	}
 	for _, c := range cases {
 		if got := screenHasWaitingPrompt([]byte(c.screen)); got != c.want {
