@@ -127,19 +127,31 @@ object Net {
 
     /** Send input to a session over a ONE-SHOT WebSocket — steering (Yes/No/↵)
      *  for any session without opening (or disturbing) a terminal view for it.
-     *  Mirrors the Mac's AppState.sendInput. */
+     *  Mirrors the Mac's AppState.sendInput.
+     *
+     *  The socket is dropped only AFTER the open+send — a phone's relayed
+     *  tailnet path can take seconds just to connect, so a timer started at
+     *  creation would kill the connection before the frame ever left. */
     fun oneShotInput(b: Broker, session: String, text: String) {
+        // BLOCKS until the frame is sent (or failure/timeout): callers run on a
+        // background thread, and the notification-action path (SteerReceiver)
+        // lives in a short-lived process that dies the moment we return — an
+        // async send would be killed mid-connect on a slow relayed path.
+        val done = java.util.concurrent.CountDownLatch(1)
         try {
             val url = "${b.wsBase}/ws?session=${enc(session)}"
-            val ws = client.newWebSocket(
+            client.newWebSocket(
                 Request.Builder().url(url).build(),
                 object : okhttp3.WebSocketListener() {
                     override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
                         webSocket.send(okio.ByteString.of(*frame(Op.INPUT, "", text.toByteArray())))
+                        Thread { Thread.sleep(400); webSocket.cancel(); done.countDown() }.start()
+                    }
+                    override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: okhttp3.Response?) {
+                        done.countDown()
                     }
                 })
-            // Give the frame a moment to flush, then drop the socket.
-            Thread { Thread.sleep(800); ws.cancel() }.start()
+            done.await(12, TimeUnit.SECONDS)
         } catch (_: Exception) {
         }
     }

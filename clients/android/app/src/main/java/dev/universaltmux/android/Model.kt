@@ -41,6 +41,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 unseen.remove(k)                  // visiting clears orange
                 if (k !in acknowledged) acknowledged.add(k) // viewing a prompt acknowledges it
                 AttentionNotifier.clear(getApplication(), value.first, value.second)
+                recomputeAttention()
             }
         }
     var busy by mutableStateOf(false)
@@ -154,6 +155,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 unseen.removeAll { it.startsWith(prefix) && it !in live }
                 acknowledged.removeAll { it.startsWith(prefix) && it !in live }
                 sessions[b.id] = list
+                recomputeAttention()
             }
         }
     }
@@ -172,20 +174,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { Net.oneShotInput(b, name, text) }
             acknowledged.add(unseenKey(b, name))
+            recomputeAttention()
             AttentionNotifier.clear(getApplication(), b, name)
             kotlinx.coroutines.delay(800)
             refresh(b)
         }
     }
 
-    /** Sessions blocked on the user, minus ones already viewed/answered —
-     *  drives the pinned "Needs attention" section. */
-    val attention: List<Pair<Broker, SessionInfo>>
-        get() = brokers.flatMap { b ->
+    /** Sessions blocked on the user, minus ones already viewed/answered — drives
+     *  the pinned "Needs attention" section. A PUSHED observable list (rebuilt by
+     *  recomputeAttention on every refresh / ack change), NOT a computed getter:
+     *  a getter read transitively through sessions[b.id] inside the LazyColumn
+     *  builder did not reliably re-run the builder, so the section never appeared. */
+    val attention = mutableStateListOf<Pair<Broker, SessionInfo>>()
+
+    private fun recomputeAttention() {
+        val next = brokers.flatMap { b ->
             (sessions[b.id] ?: emptyList())
                 .filter { it.state == "waiting" && unseenKey(b, it.name) !in acknowledged }
                 .map { b to it }
         }
+        if (next != attention.toList()) {
+            attention.clear()
+            attention.addAll(next)
+        }
+    }
 
     /** Viewed-or-answered waiting sessions (suppressed from the inbox until the
      *  broker reports them leaving "waiting", which re-arms them). */
