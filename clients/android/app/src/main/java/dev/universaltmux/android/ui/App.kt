@@ -1,7 +1,9 @@
 package dev.universaltmux.android
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -10,11 +12,14 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VpnKey
@@ -39,6 +44,27 @@ private val panel = Color(0xFF16161E)
 private val accent = Color(0xFF7AA2F7)
 private val waiting = Color(0xFFE0AF68)
 private val unseenDot = Color(0xFFFF9F40)   // orange — agent finished a turn, not yet viewed
+private val good = Color(0xFF9ECE6A)
+private val bad = Color(0xFFF7768E)
+
+/** One-tap steering for a blocked agent: Yes / No / ↵ (mirrors the Mac's SteerButtons). */
+@Composable
+fun SteerChips(vm: AppViewModel, b: Broker, session: String, compact: Boolean = false) {
+    @Composable
+    fun chip(label: String, send: String, color: Color) {
+        Box(
+            Modifier.padding(horizontal = 3.dp)
+                .background(color.copy(alpha = 0.18f), RoundedCornerShape(50))
+                .clickable { vm.steer(b, session, send) }
+                .padding(horizontal = if (compact) 10.dp else 14.dp, vertical = if (compact) 4.dp else 7.dp),
+        ) { Text(label, color = color, fontSize = if (compact) 12.sp else 13.sp) }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        chip("Yes", "y\n", good)
+        chip("No", "n\n", bad)
+        chip("↵", "\r", accent)
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,6 +77,8 @@ fun App(vm: AppViewModel) {
         var newSessionFor by remember { mutableStateOf<Broker?>(null) }
         var showAbout by remember { mutableStateOf(false) }
         var screen by remember { mutableStateOf(0) }   // 0 = terminal, 1 = files, 2 = ports
+        var showFind by remember { mutableStateOf(false) }
+        var renderText by remember { mutableStateOf<String?>(null) }  // non-nil → Renders overlay
 
         // Continuously refresh sessions WHILE THE APP IS IN THE FOREGROUND so a missed or
         // slow poll self-heals instead of leaving the list frozen/missing (the previous
@@ -110,6 +138,14 @@ fun App(vm: AppViewModel) {
                             }
                         },
                         actions = {
+                            if (screen == 0 && vm.selected != null) {
+                                IconButton(onClick = { showFind = !showFind }) {
+                                    Icon(Icons.Filled.Search, "Find", tint = if (showFind) accent else Color.White)
+                                }
+                                IconButton(onClick = { renderText = ActiveTerm.rt?.renderableText() }) {
+                                    Icon(Icons.Filled.AutoAwesome, "Render", tint = Color.White)
+                                }
+                            }
                             IconButton(onClick = { screen = if (screen == 1) 0 else 1 }) {
                                 Icon(if (screen == 1) Icons.Filled.Terminal else Icons.Filled.Folder,
                                     "Files", tint = if (screen == 1) accent else Color.White)
@@ -137,8 +173,26 @@ fun App(vm: AppViewModel) {
                                 modifier = Modifier.align(Alignment.Center).padding(24.dp),
                             )
                         } else {
-                            key(sel.first.id, sel.second) { TerminalScreen(sel.first, sel.second) }
+                            Column(Modifier.fillMaxSize()) {
+                                // Agent blocked on you → steering bar above the terminal.
+                                val info = vm.sessions[sel.first.id]?.firstOrNull { it.name == sel.second }
+                                if (info?.state == "waiting") {
+                                    Row(
+                                        Modifier.fillMaxWidth().background(waiting.copy(alpha = 0.12f))
+                                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text("Waiting on you", color = waiting, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                        SteerChips(vm, sel.first, sel.second)
+                                    }
+                                }
+                                if (showFind) FindBar(onClose = { showFind = false })
+                                Box(Modifier.weight(1f)) {
+                                    key(sel.first.id, sel.second) { TerminalScreen(sel.first, sel.second) }
+                                }
+                            }
                         }
+                        renderText?.let { md -> RenderOverlay(md, onClose = { renderText = null }) }
                     }
                 }
             }
@@ -223,7 +277,42 @@ private fun Sidebar(
             IconButton(onClick = onAddBroker) { Icon(Icons.Filled.Add, "Add broker", tint = accent) }
         }
         Divider(color = Color(0xFF2A2B3C))
+        var menuFor by remember { mutableStateOf<Pair<Broker, SessionInfo>?>(null) }
         LazyColumn(Modifier.weight(1f)) {
+            // Pinned "Needs attention": sessions blocked on you, across all brokers,
+            // each with inline steering — answer without even opening the terminal.
+            val attn = vm.attention
+            if (attn.isNotEmpty()) {
+                item(key = "attn-header") {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("NEEDS ATTENTION", color = waiting, fontSize = 11.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text("${attn.size}", color = ink, fontSize = 11.sp,
+                            modifier = Modifier.background(waiting, RoundedCornerShape(50)).padding(horizontal = 7.dp, vertical = 1.dp))
+                    }
+                }
+                items(attn, key = { "attn ${it.first.id} ${it.second.name}" }) { (b, s) ->
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable { onSelect(b, s.name) }
+                            .background(waiting.copy(alpha = 0.07f))
+                            .padding(start = 16.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.size(8.dp).background(waiting, RoundedCornerShape(4.dp)))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(s.name, color = Color.White, fontSize = 14.sp, maxLines = 1)
+                            Text(b.name, color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
+                        }
+                        SteerChips(vm, b, s.name, compact = true)
+                    }
+                }
+                item(key = "attn-divider") { Divider(color = Color(0xFF2A2B3C)) }
+            }
             items(vm.brokers, key = { it.id }) { b ->
                 Row(
                     Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 2.dp),
@@ -241,9 +330,13 @@ private fun Sidebar(
                     list.forEach { s ->
                         val sel = vm.selected
                         val active = sel?.first?.id == b.id && sel.second == s.name
+                        @OptIn(ExperimentalFoundationApi::class)
                         Row(
                             Modifier.fillMaxWidth()
-                                .clickable { onSelect(b, s.name) }
+                                .combinedClickable(
+                                    onClick = { onSelect(b, s.name) },
+                                    onLongClick = { menuFor = b to s },  // rename / kill
+                                )
                                 .background(if (active) Color(0xFF24283B) else Color.Transparent)
                                 .padding(start = 24.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -277,14 +370,54 @@ private fun Sidebar(
                 }
             }
         }
+        menuFor?.let { (b, s) -> SessionMenuDialog(vm, b, s, onDismiss = { menuFor = null }) }
     }
+}
+
+/** Long-press menu for a session row: rename in place, or kill. */
+@Composable
+private fun SessionMenuDialog(vm: AppViewModel, b: Broker, s: SessionInfo, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf(s.name) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(s.name) },
+        text = {
+            Column {
+                Text("Rename the session, or kill it (ends everything running in it).",
+                    fontSize = 13.sp, color = Color(0xFF9AA5CE))
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("name") })
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val to = name.trim()
+                    if (to.isNotEmpty() && to != s.name) vm.rename(b, s.name, to)
+                    onDismiss()
+                },
+                enabled = name.trim().isNotEmpty(),
+            ) { Text("Rename") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { vm.kill(b, s.name); onDismiss() }) { Text("Kill", color = bad) }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
 }
 
 @Composable
 private fun TerminalScreen(broker: Broker, session: String) {
     val context = LocalContext.current
-    val rt = remember(broker.id, session) { RemoteTerminal(context, broker, session) }
-    DisposableEffect(rt) { onDispose { rt.close() } }
+    val rt = remember(broker.id, session) { RemoteTerminal(context, broker, session).also { ActiveTerm.rt = it } }
+    DisposableEffect(rt) {
+        onDispose {
+            if (ActiveTerm.rt === rt) ActiveTerm.rt = null
+            rt.close()
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         AndroidView(
@@ -292,6 +425,44 @@ private fun TerminalScreen(broker: Broker, session: String) {
             modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
         )
         AccessoryKeys(onBytes = { rt.sendBytes(it) }, onKeyboard = { rt.showKeyboard() })
+    }
+}
+
+/** Find-in-terminal: searches the transcript buffer, jumps between match rows. */
+@Composable
+fun FindBar(onClose: () -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var matches by remember { mutableStateOf(listOf<Int>()) }
+    var cur by remember { mutableStateOf(0) }
+    fun search(q: String) {
+        query = q
+        matches = ActiveTerm.rt?.findRows(q) ?: emptyList()
+        cur = matches.size - 1  // start from the most recent match
+        if (matches.isNotEmpty()) ActiveTerm.rt?.scrollToBufferRow(matches[cur])
+    }
+    fun jump(delta: Int) {
+        if (matches.isEmpty()) return
+        cur = (cur + delta + matches.size) % matches.size
+        ActiveTerm.rt?.scrollToBufferRow(matches[cur])
+    }
+    Row(
+        Modifier.fillMaxWidth().background(panel).padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = query, onValueChange = { search(it) }, singleLine = true,
+            placeholder = { Text("Find", fontSize = 13.sp) },
+            modifier = Modifier.weight(1f).height(52.dp),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, color = Color.White),
+        )
+        Text(
+            if (query.isEmpty()) "" else if (matches.isEmpty()) "0" else "${cur + 1}/${matches.size}",
+            color = if (matches.isEmpty() && query.isNotEmpty()) waiting else Color(0xFF9AA5CE),
+            fontSize = 12.sp, modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        TextButton(onClick = { jump(-1) }) { Text("↑", fontSize = 16.sp) }
+        TextButton(onClick = { jump(1) }) { Text("↓", fontSize = 16.sp) }
+        IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "Close find", tint = Color(0xFF565F89)) }
     }
 }
 

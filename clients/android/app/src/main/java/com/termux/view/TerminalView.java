@@ -449,6 +449,16 @@ public final class TerminalView extends View {
         return mEmulator == null ? 1 : mEmulator.getScreen().getActiveRows() + mTopRow - mEmulator.mRows;
     }
 
+    /** LOCAL PATCH (Argus): scroll so BUFFER row `row` (negative = into the
+     *  scrollback, 0 = top of the live screen) is the first visible row —
+     *  used by find-in-terminal to jump between matches. */
+    public void scrollToBufferRow(int row) {
+        if (mEmulator == null) return;
+        int hist = mEmulator.getScreen().getActiveTranscriptRows();
+        mTopRow = Math.max(-hist, Math.min(0, row));
+        if (!awakenScrollBars()) invalidate();
+    }
+
     public void onScreenUpdated() {
         onScreenUpdated(false);
     }

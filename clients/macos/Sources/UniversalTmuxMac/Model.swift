@@ -266,9 +266,11 @@ final class AppState: ObservableObject {
                         // Orange "done, unseen": a turn just finished (working → not-working)
                         // while this wasn't the pane you're looking at. Cleared when working
                         // resumes (→ blue) or when you select it (see `selection`).
+                        // A working → WAITING transition is "needs attention" (amber inbox +
+                        // notification), not "done unseen" — orange would mask the amber dot.
                         if s.state == "working" {
                             self.unseen.remove(ref.id)
-                        } else if prev == "working" && self.selection != ref {
+                        } else if prev == "working" && s.state != "waiting" && self.selection != ref {
                             self.unseen.insert(ref.id)
                         }
                         if s.state == "waiting" && (prev ?? "idle") != "waiting" {
