@@ -691,9 +691,6 @@ struct RootView: View {
                                      isLocal: machineIsLocal(ref.machineID), font: cf(11))
                     meta("·"); meta(relativeShort(s.activity))
                 }
-                if let s, s.isWaiting {
-                    SteerButtons(ref: ref).environmentObject(state).padding(.leading, 6)
-                }
                 if st == .reconnecting || st == .connecting {
                     Text(st == .connecting ? "connecting…" : "reconnecting…")
                         .font(cf(11, .medium))

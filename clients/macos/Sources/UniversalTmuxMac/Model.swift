@@ -395,31 +395,6 @@ final class AppState: ObservableObject {
         return path
     }
 
-    /// Send input bytes to a session via a one-shot WebSocket (op=2 input,
-    /// empty pane → the broker's active pane). Works for any session without a
-    /// live terminal pane. Used by steering buttons + snippets.
-    func sendInput(text: String, to ref: SessionRef) {
-        guard !text.isEmpty, let url = wsURL(for: ref) else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
-        task.resume()
-        var frame: [UInt8] = [2, 0]            // op=input, paneLen=0
-        frame.append(contentsOf: Array(text.utf8))
-        task.send(.data(Data(frame))) { _ in
-            DispatchQueue.main.async {
-                // Answering a prompt should clear it from the inbox/badge at once, then
-                // reconverge with the broker (which reports it leaving "waiting" shortly).
-                self.acknowledge(ref)
-                if let m = self.machines.first(where: { $0.id == ref.machineID }) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.refresh(m) }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { self.refresh(m) }
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                task.cancel(with: .goingAway, reason: nil)
-            }
-        }
-    }
-
     func wsURL(for ref: SessionRef) -> URL? {
         guard let m = machines.first(where: { $0.id == ref.machineID }) else { return nil }
         let enc = ref.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ref.session

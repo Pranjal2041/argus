@@ -168,19 +168,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** One-tap steering (Yes / No / ↵) for a blocked session: one-shot WS input,
-     *  acknowledge locally, then re-poll to converge with the broker. */
-    fun steer(b: Broker, name: String, text: String) {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { Net.oneShotInput(b, name, text) }
-            acknowledged.add(unseenKey(b, name))
-            recomputeAttention()
-            AttentionNotifier.clear(getApplication(), b, name)
-            kotlinx.coroutines.delay(800)
-            refresh(b)
-        }
-    }
-
     /** Sessions blocked on the user, minus ones already viewed/answered — drives
      *  the pinned "Needs attention" section. A PUSHED observable list (rebuilt by
      *  recomputeAttention on every refresh / ack change), NOT a computed getter:

@@ -45,27 +45,7 @@ private val panel = Color(0xFF16161E)
 private val accent = Color(0xFF7AA2F7)
 private val waiting = Color(0xFFE0AF68)
 private val unseenDot = Color(0xFFFF9F40)   // orange — agent finished a turn, not yet viewed
-private val good = Color(0xFF9ECE6A)
 private val bad = Color(0xFFF7768E)
-
-/** One-tap steering for a blocked agent: Yes / No / ↵ (mirrors the Mac's SteerButtons). */
-@Composable
-fun SteerChips(vm: AppViewModel, b: Broker, session: String, compact: Boolean = false) {
-    @Composable
-    fun chip(label: String, send: String, color: Color) {
-        Box(
-            Modifier.padding(horizontal = 3.dp)
-                .background(color.copy(alpha = 0.18f), RoundedCornerShape(50))
-                .clickable { vm.steer(b, session, send) }
-                .padding(horizontal = if (compact) 10.dp else 14.dp, vertical = if (compact) 4.dp else 7.dp),
-        ) { Text(label, color = color, fontSize = if (compact) 12.sp else 13.sp) }
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        chip("Yes", "y\n", good)
-        chip("No", "n\n", bad)
-        chip("↵", "\r", accent)
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -175,18 +155,6 @@ fun App(vm: AppViewModel) {
                             )
                         } else {
                             Column(Modifier.fillMaxSize()) {
-                                // Agent blocked on you → steering bar above the terminal.
-                                val info = vm.sessions[sel.first.id]?.firstOrNull { it.name == sel.second }
-                                if (info?.state == "waiting") {
-                                    Row(
-                                        Modifier.fillMaxWidth().background(waiting.copy(alpha = 0.12f))
-                                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Text("Waiting on you", color = waiting, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                                        SteerChips(vm, sel.first, sel.second)
-                                    }
-                                }
                                 if (showFind) FindBar(onClose = { showFind = false })
                                 Box(Modifier.weight(1f)) {
                                     key(sel.first.id, sel.second) { TerminalScreen(sel.first, sel.second) }
@@ -313,7 +281,6 @@ private fun Sidebar(
                             Text(s.name, color = Color.White, fontSize = 14.sp, maxLines = 1)
                             Text(b.name, color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
                         }
-                        SteerChips(vm, b, s.name, compact = true)
                     }
                 }
             }
