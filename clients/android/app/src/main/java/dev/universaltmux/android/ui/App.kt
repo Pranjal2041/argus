@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -278,23 +279,27 @@ private fun Sidebar(
         }
         Divider(color = Color(0xFF2A2B3C))
         var menuFor by remember { mutableStateOf<Pair<Broker, SessionInfo>?>(null) }
-        LazyColumn(Modifier.weight(1f)) {
-            // Pinned "Needs attention": sessions blocked on you, across all brokers,
-            // each with inline steering — answer without even opening the terminal.
-            val attn = vm.attention
-            if (attn.isNotEmpty()) {
-                item(key = "attn-header") {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("NEEDS ATTENTION", color = waiting, fontSize = 11.sp)
-                        Spacer(Modifier.weight(1f))
-                        Text("${attn.size}", color = ink, fontSize = 11.sp,
-                            modifier = Modifier.background(waiting, RoundedCornerShape(50)).padding(horizontal = 7.dp, vertical = 1.dp))
-                    }
-                }
-                items(attn, key = { "attn ${it.first.id} ${it.second.name}" }) { (b, s) ->
+
+        // PINNED "Needs attention": sessions blocked on you, across all brokers,
+        // each with inline steering. Lives ABOVE the scrolling list (not as its
+        // first items) so it is ALWAYS visible — it's the whole point of the
+        // phone, and burying it at the top of a scroll defeated that. Capped +
+        // independently scrollable so a flood of prompts can't push the broker
+        // list off-screen. Read in the composable body (restartable scope) so it
+        // appears the instant a session starts waiting.
+        val attn = vm.attention.toList()
+        if (attn.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("NEEDS ATTENTION", color = waiting, fontSize = 11.sp)
+                Spacer(Modifier.weight(1f))
+                Text("${attn.size}", color = ink, fontSize = 11.sp,
+                    modifier = Modifier.background(waiting, RoundedCornerShape(50)).padding(horizontal = 7.dp, vertical = 1.dp))
+            }
+            Column(Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                attn.forEach { (b, s) ->
                     Row(
                         Modifier.fillMaxWidth()
                             .clickable { onSelect(b, s.name) }
@@ -311,9 +316,13 @@ private fun Sidebar(
                         SteerChips(vm, b, s.name, compact = true)
                     }
                 }
-                item(key = "attn-divider") { Divider(color = Color(0xFF2A2B3C)) }
             }
-            items(vm.brokers, key = { it.id }) { b ->
+            Divider(color = Color(0xFF2A2B3C))
+        }
+
+        val brokerList = vm.brokers.toList()
+        LazyColumn(Modifier.weight(1f)) {
+            items(brokerList, key = { it.id }) { b ->
                 Row(
                     Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
