@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Release signing from a LOCAL, git-ignored keystore.properties (never committed —
+// public repo). Absent (fresh clone / CI) → release falls back to debug signing so
+// the build still works; present → release is signed with the real key.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val hasKeystore = keystorePropsFile.exists()
+val keystoreProps = Properties().apply {
+    if (hasKeystore) keystorePropsFile.inputStream().use { load(it) }
 }
 
 android {
@@ -24,8 +35,19 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
+    signingConfigs {
+        if (hasKeystore) create("release") {
+            storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+            storePassword = keystoreProps.getProperty("storePassword")
+            keyAlias = keystoreProps.getProperty("keyAlias")
+            keyPassword = keystoreProps.getProperty("keyPassword")
+        }
+    }
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false // R8 off: the gomobile JNI classes need keep-rules; not worth the risk
+            signingConfig = signingConfigs.getByName(if (hasKeystore) "release" else "debug")
+        }
     }
     packaging { resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}") } }
 }
