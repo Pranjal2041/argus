@@ -5,3 +5,7 @@ build/
 *.iml
 captures/
 app/libs/*.aar
+# Release signing — NEVER commit (public repo)
+*.jks
+*.keystore
+keystore.properties

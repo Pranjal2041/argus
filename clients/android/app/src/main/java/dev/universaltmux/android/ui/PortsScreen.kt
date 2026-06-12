@@ -34,14 +34,26 @@ private val pFaint = Color(0xFF565F89)
 
 /** One active local-port -> remote-broker tunnel running on the phone. */
 class ActiveForward(
-    val brokerHost: String, val brokerName: String,
+    val brokerHost: String, val brokerName: String, val scheme: String,
     val remotePort: Int, val localPort: Int, val label: String,
     val handle: CoreForward,
-) { val id = "$brokerHost#$remotePort#$localPort" }
+) {
+    val id = "$brokerHost#$remotePort#$localPort"
+    /** "connecting" | "live" | "broken" — driven by the service's health poller. */
+    var health by androidx.compose.runtime.mutableStateOf("connecting")
+}
 
-/** App-wide registry of active forwards (persists across screen switches). */
+/**
+ * App-wide registry of active forwards (persists across screen switches). Each
+ * start/stop reconciles [ForwardService] so the process stays alive (foreground
+ * notification) exactly while ≥1 forward is running — the fix for forwards dying
+ * the moment you leave Argus for the browser.
+ */
 object Forwards {
     val active = androidx.compose.runtime.mutableStateListOf<ActiveForward>()
+
+    /** Application context, set once at startup so start/stop can drive the service. */
+    @Volatile var appCtx: android.content.Context? = null
 
     /** Starts a forward; returns null on success or an error string. */
     fun start(b: Broker, remotePort: Int, label: String): String? {
@@ -49,7 +61,8 @@ object Forwards {
         if (active.any { it.brokerHost == b.host && it.remotePort == remotePort }) return null // already forwarding
         return try {
             val f = e.startForward(b.host, b.scheme, remotePort.toLong(), remotePort.toLong())
-            active.add(ActiveForward(b.host, b.name, remotePort, f.localPort().toInt(), label, f))
+            active.add(ActiveForward(b.host, b.name, b.scheme, remotePort, f.localPort().toInt(), label, f))
+            appCtx?.let { ForwardService.sync(it) }
             null
         } catch (t: Throwable) {
             t.message ?: "forward failed"
@@ -59,6 +72,14 @@ object Forwards {
     fun stop(af: ActiveForward) {
         try { af.handle.stop() } catch (_: Throwable) {}
         active.remove(af)
+        appCtx?.let { ForwardService.sync(it) }
+    }
+
+    /** Stop every forward (used by the notification's "Stop all"); no service sync —
+     *  the service stops itself right after calling this. */
+    fun clearAll() {
+        active.toList().forEach { try { it.handle.stop() } catch (_: Throwable) {} }
+        active.clear()
     }
 }
 
@@ -108,11 +129,11 @@ fun PortsScreen(vm: AppViewModel) {
                         Modifier.fillMaxWidth().padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(Modifier.size(8.dp).background(pLive, RoundedCornerShape(4.dp)))
+                        Box(Modifier.size(8.dp).background(healthColor(af.health), RoundedCornerShape(4.dp)))
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(if (af.label.isNotEmpty()) af.label else "${af.brokerName}:${af.remotePort}", color = Color.White, fontSize = 14.sp)
-                            Text("${af.brokerName}:${af.remotePort} → localhost:${af.localPort}",
+                            Text("${af.brokerName}:${af.remotePort} → localhost:${af.localPort}  ·  ${af.health}",
                                 color = pDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         TextButton(onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://localhost:${af.localPort}"))) }) {
@@ -134,6 +155,7 @@ fun PortsScreen(vm: AppViewModel) {
                     val forwarded = Forwards.active.any { it.brokerHost == broker.host && it.remotePort == p.port }
                     Row(
                         Modifier.fillMaxWidth().clickable(enabled = !forwarded) {
+                            BatteryOpt.maybePrompt(ctx) // keep the tunnel alive in the background (esp. Samsung)
                             scope.launch {
                                 val err = withContext(Dispatchers.IO) { Forwards.start(broker, p.port, p.process) }
                                 if (err != null) error = err
@@ -160,6 +182,13 @@ fun PortsScreen(vm: AppViewModel) {
             confirmButton = { TextButton(onClick = { error = null }) { Text("OK") } },
         )
     }
+}
+
+/** Dot color for a forward's live health: green=live, amber=connecting, red=broken. */
+private fun healthColor(h: String) = when (h) {
+    "live" -> pLive
+    "broken" -> Color(0xFFF7768E)
+    else -> Color(0xFFE0AF68)
 }
 
 @Composable
