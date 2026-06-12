@@ -239,6 +239,12 @@ func (f *Forward) Stop() {
 
 // StartForward binds 127.0.0.1:preferred (walking up to +50 if busy) and tunnels
 // every accepted connection to wss://host:8722/forward?port=remotePort over tsnet.
+//
+// Two reliability measures matter on mobile, where the tsnet path is usually
+// DERP-relayed and goes cold quickly: it WARMS the path immediately (so the
+// first browser request isn't racing a cold tunnel) and KEEPS it warm with a
+// periodic probe (so a DERP/WireGuard idle-out doesn't strand an open forward).
+// Both stop when the forward is stopped (ctx cancel).
 func (e *Engine) StartForward(host, scheme string, remotePort, preferred int) (*Forward, error) {
 	ln, localPort, err := listenLocal(preferred)
 	if err != nil {
@@ -251,6 +257,8 @@ func (e *Engine) StartForward(host, scheme string, remotePort, preferred int) (*
 	target := wsScheme + "://" + host + ":8722/forward?port=" + strconv.Itoa(remotePort)
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Forward{localPort: localPort, ln: ln, cancel: cancel}
+	go e.WarmUp(host, scheme) // pre-warm so the first connection isn't cold
+	go e.keepWarm(ctx, host, scheme)
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -263,12 +271,43 @@ func (e *Engine) StartForward(host, scheme string, remotePort, preferred int) (*
 	return f, nil
 }
 
+// keepWarm pings the broker every 15s while the forward lives, keeping the
+// DERP/WireGuard path hot so an idle period doesn't leave the next request to
+// re-establish a cold tunnel (the "works, then stops working" failure).
+func (e *Engine) keepWarm(ctx context.Context, host, scheme string) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			e.WarmUp(host, scheme)
+		}
+	}
+}
+
 func (e *Engine) tunnel(ctx context.Context, target string, local net.Conn) {
 	defer local.Close()
-	dctx, dcancel := context.WithTimeout(ctx, 15*time.Second)
-	c, _, err := websocket.Dial(dctx, target, &websocket.DialOptions{HTTPClient: e.wsHC})
-	dcancel()
-	if err != nil {
+	// Retry the tunnel dial: a browser opens several parallel connections at once
+	// and the first ones can race a still-cold tsnet path; a couple of quick
+	// retries turn "failed on the first try, worked on reload" into just working.
+	var c *websocket.Conn
+	for attempt := 0; attempt < 3; attempt++ {
+		dctx, dcancel := context.WithTimeout(ctx, 12*time.Second)
+		cc, _, err := websocket.Dial(dctx, target, &websocket.DialOptions{HTTPClient: e.wsHC})
+		dcancel()
+		if err == nil {
+			c = cc
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	if c == nil {
 		return
 	}
 	defer c.CloseNow()
@@ -278,6 +317,29 @@ func (e *Engine) tunnel(ctx context.Context, target string, local net.Conn) {
 	go func() { _, _ = io.Copy(nc, local); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(local, nc); done <- struct{}{} }()
 	<-done
+}
+
+// WarmUp brings the tsnet path to a broker up (best-effort) so a subsequent
+// forward connection doesn't pay the cold-tunnel cost. Safe to call repeatedly.
+func (e *Engine) WarmUp(host, scheme string) { _ = e.Reachable(host, scheme) }
+
+// Reachable reports whether the broker answers /whoami over tsnet right now —
+// the phone's live health signal for an active forward.
+func (e *Engine) Reachable(host, scheme string) bool {
+	if e.probeHC == nil {
+		return false
+	}
+	req, err := http.NewRequest("GET", scheme+"://"+host+":8722/whoami", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := e.probeHC.Do(req)
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode == 200
 }
 
 func listenLocal(preferred int) (net.Listener, int, error) {

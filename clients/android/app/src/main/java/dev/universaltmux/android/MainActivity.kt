@@ -12,6 +12,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Forwards.appCtx = applicationContext // lets port-forward start/stop drive the foreground service
         AttentionNotifier.ensureChannel(this)
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
