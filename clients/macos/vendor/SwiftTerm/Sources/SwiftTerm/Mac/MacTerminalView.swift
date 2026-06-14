@@ -596,6 +596,32 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     {
         return (size.width - scrollerWidth)
     }
+
+    /// LOCAL PATCH (Argus): cell size for an ARBITRARY font, using the same
+    /// pixel-snap math as `computeFontDimensions`. Lets a host compute the grid at
+    /// its PREFERRED font independent of the view's CURRENT (fit-to-pane-shrunk)
+    /// display font — the shrunk font is a non-linear (ceil-snapped) step of the
+    /// preferred one, so scaling the shrunk-font grid back by a point-size ratio
+    /// drifts and can collapse to a tiny grid. Computing directly avoids that.
+    public func cellSize (forFont font: NSFont) -> CGSize
+    {
+        let cellHeight = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
+        let glyph = font.glyph(withName: "W")
+        let cellWidth = font.advancement(forGlyph: glyph).width
+        let scale = backingScaleFactor()
+        return CGSize(width: max(1, ceil(cellWidth * scale) / scale),
+                      height: max(1, min(ceil(cellHeight * scale) / scale, 8192)))
+    }
+
+    /// LOCAL PATCH (Argus): the grid that fills `size` at `font` — what a host
+    /// ASKS the remote pane for, computed at the preferred font (not the shrunk
+    /// display font), so a fit-to-pane shrink can never feed back into the ask.
+    public func gridSize (for size: CGSize, font: NSFont) -> (cols: Int, rows: Int)
+    {
+        let cell = cellSize(forFont: font)
+        return (cols: max(1, Int(getEffectiveWidth(size: size) / cell.width)),
+                rows: max(1, Int(size.height / cell.height)))
+    }
     
     open func scrolled(source terminal: Terminal, yDisp: Int) {
         //selectionView.notifyScrolled(source: terminal)

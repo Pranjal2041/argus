@@ -475,13 +475,14 @@ func (c *Client) SendKeys(pane string, data []byte) error {
 	return c.send(b.String())
 }
 
-// Resize sizes the window to the client's terminal. Safe because we own this
-// session (DESIGN.md: never refresh-client -C against a foreign session).
-//
-// This is an ASK, not a command: the window's actual size is negotiated by tmux
-// across ALL attached clients (window-size policy) — e.g. a real `tmux attach`
-// terminal can win. Whatever tmux decides comes back as a %layout-change size
-// event, which is the AUTHORITATIVE size viewers must render at.
+// Resize sizes the window to this client's view. It is an ASK, not a command:
+// tmux's window-size=latest policy gives the window to the client that most
+// recently interacted — so whichever client you're actively USING (this viewer,
+// or a real terminal) drives the size, and the others render that authoritative
+// %layout-change size (shrinking their own font to fit). That is exactly the
+// behavior we want: the pane you're working in fills; an idle co-attached client
+// just follows. (An earlier "stay passive when a terminal is attached" override
+// was wrong — it made Argus defer to an IDLE terminal and letterbox itself.)
 func (c *Client) Resize(cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
 		return nil
