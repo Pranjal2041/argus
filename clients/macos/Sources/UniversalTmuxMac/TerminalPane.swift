@@ -211,15 +211,17 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         }
     }
 
-    /// The grid that would fill the container at the PREFERRED font — what we
-    /// ask tmux for. Never computed from a shrunken display font: more columns
-    /// fit at a smaller font, so asking from those metrics would request an
-    /// ever-wider window (feedback loop).
+    /// The grid that would fill the container at the PREFERRED font — what we ask
+    /// tmux for. Computed DIRECTLY from the preferred font's cell metrics, never
+    /// the current display font: when a wider co-attached client forces a
+    /// fit-to-pane shrink, deriving the ask from the shrunk font (and scaling back
+    /// by a point-size ratio) drifts — cells are ceil-snapped to pixels, so the
+    /// scaling is non-linear — and collapsed the ask to a tiny grid, which then
+    /// became the window and left a huge letterboxed strip. Preferred metrics make
+    /// the ask a pure function of (container, preferred font): no feedback loop.
     private func naturalGrid(in size: CGSize) -> (cols: Int, rows: Int) {
-        let g = view.gridSize(for: size)
-        let ratio = view.font.pointSize / preferredFont.pointSize
-        guard ratio < 0.999 else { return g }
-        return (cols: max(2, Int(Double(g.cols) * ratio)), rows: max(2, Int(Double(g.rows) * ratio)))
+        let g = view.gridSize(for: size, font: preferredFont)
+        return (cols: max(2, g.cols), rows: max(2, g.rows))
     }
 
     /// Ask the broker for this pane's preferred size: the grid that would fill
