@@ -230,8 +230,10 @@ final class CommandCenterModel: ObservableObject {
     private weak var app: AppState?
     private var timer: Timer?
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
+    private var lastDot: [String: String] = [:] // last seen dot state — a flip forces a refresh
     private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
     private var claudeInflight = 0              // concurrent model calls (the expensive part)
+    private var pulseN = 0
     private let maxClaude = 5
     private let storeKey = "ut.ccStatuses.v1"
 
@@ -270,37 +272,45 @@ final class CommandCenterModel: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
-        tick()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
+        pulse()   // immediate first pass (every session is "new" → summarized)
+        // Fast pulse: cheaply watch for dot flips every 5s and force an immediate
+        // re-summary on a flip; do the full content-driven sweep every 6th pulse (~30s).
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pulse() }
         }
     }
 
     func stop() { timer?.invalidate(); timer = nil }
 
-    private func tick() {
+    private func pulse() {
         guard let app else { return }
+        pulseN += 1
+        let fullSweep = (pulseN % 6 == 0)   // content-driven refresh ~every 30s
         var liveKeys = Set<String>()
         for m in app.machines {
             for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent {
                 let ref = SessionRef(machineID: m.id, session: s.name)
                 liveKeys.insert(ref.id)
-                // Re-check EVERY session. update() fetches /recent (cheap) and only spends
-                // a model call when the output actually changed — that's what keeps a status
-                // fresh when an agent finishes / asks / stalls, WITHOUT relying on the dot
-                // (which misclassifies) to decide when to refresh.
-                update(ref: ref, machine: m, name: s.name)
+                let dotChanged = lastDot[ref.id] != s.state   // nil (new session) counts as changed
+                lastDot[ref.id] = s.state
+                // A dot flip forces an immediate refresh (bypassing content-detection AND the
+                // 30s window). Otherwise the 30s sweep re-checks content and refreshes only
+                // if the output actually changed.
+                if dotChanged || fullSweep {
+                    update(ref: ref, machine: m, name: s.name, force: dotChanged)
+                }
             }
         }
+        guard fullSweep else { return }
         // Drop status + continuity for sessions that vanished.
         var pruned = false
         for k in Array(statuses.keys) where !liveKeys.contains(k) {
-            statuses[k] = nil; provider.forget(key: k); lastHash[k] = nil; pruned = true
+            statuses[k] = nil; provider.forget(key: k); lastHash[k] = nil; lastDot[k] = nil; pruned = true
         }
         if pruned { persist() }
     }
 
-    private func update(ref: SessionRef, machine: Machine, name: String) {
+    private func update(ref: SessionRef, machine: Machine, name: String, force: Bool = false) {
         guard !busy.contains(ref.id) else { return }   // one op per session; NO global cap on the cheap fetch
         busy.insert(ref.id)
         let key = ref.id, httpBase = machine.httpBase
@@ -313,8 +323,9 @@ final class CommandCenterModel: ObservableObject {
             }
             // Skip the (paid) model call when the output is unchanged since the last
             // summary — ignoring the ticking working-footer. Saves cost + UI churn.
+            // `force` (a dot flip) bypasses this so the transition refreshes immediately.
             let h = self.contentKey(output)
-            if self.lastHash[key] == h { return }
+            if !force && self.lastHash[key] == h { return }
             // Output changed → needs a model call. Cap concurrent model calls only;
             // if full, bail WITHOUT setting lastHash so this session retries next tick
             // (no starvation — every session keeps getting fetched + a fair shot).
