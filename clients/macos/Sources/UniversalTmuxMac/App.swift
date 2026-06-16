@@ -9,6 +9,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
+    @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
 
     var body: some Scene {
         WindowGroup {
@@ -19,6 +20,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(dashboards)
                 .environmentObject(notebooks)
                 .environmentObject(wandb)
+                .environmentObject(commandCenter)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -46,6 +48,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("p", modifiers: .command)
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
+                Button("Command Center") { state.openWindowRequest = "command-center" }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
@@ -110,6 +114,16 @@ struct UniversalTmuxApp: App {
                 .allowsFullScreen()
         }
         .defaultSize(width: 1100, height: 760)
+        .windowStyle(.hiddenTitleBar)
+
+        Window("Command Center", id: "command-center") {
+            CommandCenterView()
+                .environmentObject(state)
+                .environmentObject(commandCenter)
+                .preferredColorScheme(.dark)
+                .allowsFullScreen()
+        }
+        .defaultSize(width: 920, height: 820)
         .windowStyle(.hiddenTitleBar)
 
         Settings {
