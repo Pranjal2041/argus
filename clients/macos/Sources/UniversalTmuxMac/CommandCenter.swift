@@ -48,6 +48,10 @@ protocol AgentStatusProvider {
     func status(forKey key: String, output: String) async -> AgentStatus?
     /// Forget a session's conversation continuity (session ended).
     func forget(key: String)
+    /// Cumulative spend (USD) + number of status calls, persisted across launches —
+    /// so the cost of running the command center can be assessed.
+    var spendUSD: Double { get }
+    var callCount: Int { get }
 }
 
 /// Generates status updates by shelling out to `claude -p`. Keeps a claude session
@@ -60,7 +64,27 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     private var sessions: [String: (uuid: String, turns: Int)] = [:]
     private let lock = NSLock()
 
-    init(model: String = "haiku") { self.model = model }
+    // Cumulative spend, persisted so cost can be assessed across launches.
+    private var _costUSD: Double = 0
+    private var _calls: Int = 0
+    var spendUSD: Double { lock.lock(); defer { lock.unlock() }; return _costUSD }
+    var callCount: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+
+    init(model: String = "haiku") {
+        self.model = model
+        _costUSD = UserDefaults.standard.double(forKey: "ut.ccCostUSD")
+        _calls = UserDefaults.standard.integer(forKey: "ut.ccCostCalls")
+    }
+
+    private func recordCost(_ usd: Double) {
+        lock.lock(); _costUSD += usd; _calls += 1; let t = _costUSD, n = _calls; lock.unlock()
+        UserDefaults.standard.set(t, forKey: "ut.ccCostUSD")
+        UserDefaults.standard.set(n, forKey: "ut.ccCostCalls")
+        if UserDefaults.standard.object(forKey: "ut.ccCostSince") == nil {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ut.ccCostSince")
+        }
+        NSLog("[cc-cost] +$%.4f  total $%.4f over %d calls", usd, t, n)
+    }
 
     func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
 
@@ -83,9 +107,10 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         args += resuming ? ["--resume", uuid] : ["--session-id", uuid]
 
         guard let out = await Self.runClaude(args: args, stdin: prompt),
-              let result = Self.resultField(out),
-              let status = Self.parseStatus(result)
+              let env = Self.envelope(out),
+              let status = Self.parseStatus(env.result)
         else { return nil }
+        recordCost(env.cost)
         return status
     }
 
@@ -134,13 +159,13 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 
     // MARK: parsing
 
-    /// Pull the `result` string out of `--output-format json`'s envelope.
-    private static func resultField(_ outer: String) -> String? {
-        struct Outer: Decodable { let result: String?; let is_error: Bool? }
+    /// Pull the `result` string + this call's cost out of `--output-format json`.
+    private static func envelope(_ outer: String) -> (result: String, cost: Double)? {
+        struct Outer: Decodable { let result: String?; let is_error: Bool?; let total_cost_usd: Double? }
         guard let d = outer.data(using: .utf8),
               let o = try? JSONDecoder().decode(Outer.self, from: d),
               o.is_error != true, let r = o.result else { return nil }
-        return r
+        return (r, o.total_cost_usd ?? 0)
     }
 
     /// The model wraps the JSON in ```json fences and sometimes adds prose, so strip
@@ -198,11 +223,14 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 final class CommandCenterModel: ObservableObject {
     @Published var statuses: [String: AgentStatus] = [:]   // keyed by SessionRef.id
     @Published var inflight: Set<String> = []              // updates currently running
+    @Published var costUSD: Double = 0                     // cumulative claude -p spend
+    @Published var costCalls: Int = 0
 
     private let provider: AgentStatusProvider = ClaudeStatusProvider()
     private weak var app: AppState?
     private var timer: Timer?
     private var lastState: [String: String] = [:]
+    private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
     private let maxConcurrent = 6
     private let storeKey = "ut.ccStatuses.v1"
 
@@ -213,6 +241,24 @@ final class CommandCenterModel: ObservableObject {
            let saved = try? JSONDecoder().decode([String: AgentStatus].self, from: d) {
             statuses = saved
         }
+        costUSD = provider.spendUSD
+        costCalls = provider.callCount
+    }
+
+    /// Fingerprint of the output IGNORING volatile agent chrome (the ticking
+    /// "esc to interrupt" footer / spinner), so a session that's only animating its
+    /// timer isn't re-summarized. Real new output changes the content lines → new key.
+    private func contentKey(_ s: String) -> Int {
+        var lines: [String] = []
+        for raw in s.split(separator: "\n", omittingEmptySubsequences: false) {
+            let low = raw.lowercased()
+            if low.contains("esc to interrupt") || low.contains("stop to interrupt") {
+                lines.append("·working·")   // collapse the line whose only change is the timer
+            } else {
+                lines.append(String(raw).trimmingCharacters(in: .whitespaces))
+            }
+        }
+        return lines.joined(separator: "\n").hashValue
     }
 
     private func persist() {
@@ -248,7 +294,7 @@ final class CommandCenterModel: ObservableObject {
         // Drop status + continuity for sessions that vanished.
         var pruned = false
         for k in Array(statuses.keys) where !liveKeys.contains(k) {
-            statuses[k] = nil; provider.forget(key: k); lastState[k] = nil; pruned = true
+            statuses[k] = nil; provider.forget(key: k); lastState[k] = nil; lastHash[k] = nil; pruned = true
         }
         if pruned { persist() }
     }
@@ -258,17 +304,25 @@ final class CommandCenterModel: ObservableObject {
         inflight.insert(ref.id)
         let key = ref.id, httpBase = machine.httpBase
         Task { [weak self] in
-            defer { self?.inflight.remove(key) }
+            guard let self else { return }
+            defer { self.inflight.remove(key) }
             guard let output = await Self.fetchRecent(httpBase: httpBase, session: name),
                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 NSLog("[cc] %@ recent empty/failed", key); return
             }
-            guard let status = await self?.provider.status(forKey: key, output: output) else {
+            // Skip the (paid) model call when the output is unchanged since the last
+            // summary — ignoring the ticking working-footer. Saves cost + UI churn.
+            let h = self.contentKey(output)
+            if self.lastHash[key] == h { return }
+            guard let status = await self.provider.status(forKey: key, output: output) else {
                 NSLog("[cc] %@ claude returned nil", key); return
             }
+            self.lastHash[key] = h
+            self.statuses[key] = status
+            self.costUSD = self.provider.spendUSD
+            self.costCalls = self.provider.callCount
+            self.persist()
             NSLog("[cc] %@ -> [%@] %@", key, status.label, status.oneLiner)
-            self?.statuses[key] = status
-            self?.persist()
         }
     }
 
@@ -373,6 +427,11 @@ struct CommandCenterView: View {
                               : "all \(rest) quiet")
                 .font(cf(13)).foregroundStyle(needsYou > 0 ? Theme.waiting : Theme.textTertiary)
             Spacer()
+            if cc.costCalls > 0 {
+                Text(String(format: "$%.2f · %d updates", cc.costUSD, cc.costCalls))
+                    .font(cf(11)).foregroundStyle(Theme.textTertiary)
+                    .help("Cumulative claude -p spend (status updates) since first run")
+            }
         }
     }
 
