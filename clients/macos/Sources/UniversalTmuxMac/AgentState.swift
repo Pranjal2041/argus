@@ -117,6 +117,7 @@ struct SessionRow: View {
     var onRename: () -> Void = {}
     var onKill: () -> Void = {}
     var onCopyName: () -> Void = {}
+    var onHide: () -> Void = {}
     var onReveal: (() -> Void)? = nil
     var onRevealFiles: (() -> Void)? = nil
 
@@ -179,6 +180,7 @@ struct SessionRow: View {
         .onTapGesture(perform: onTap)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
         .contextMenu {
+            Button("Hide Panel") { onHide() }
             Button("Rename…") { onRename() }
             Button("Copy Name") { onCopyName() }
             if let onRevealFiles { Button("Reveal in Files") { onRevealFiles() } }

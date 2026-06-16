@@ -42,6 +42,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("s", modifiers: [.control, .command]) // ⌘\ collides with 1Password's global hotkey
                 Button("Command Palette…") { state.showPalette = true }
                     .keyboardShortcut("p", modifiers: .command)
+                Button("Hidden Panels…") { state.showHiddenPicker = true }
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
@@ -174,6 +176,97 @@ struct SettingsView: View {
     }
 }
 
+/// ⇧⌘B: the backlog of panels you've hidden from the sidebar (right-click →
+/// Hide Panel). They keep running; this just restores them to view. Click one to
+/// bring it back and jump to it; Restore All clears the backlog.
+struct HiddenPanelsView: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        let items = state.hiddenSessionList
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "eye.slash").foregroundStyle(Theme.textSecondary)
+                Text("Hidden Panels").font(.system(size: 15, weight: .semibold))
+                if !items.isEmpty {
+                    Text("\(items.count)").font(.system(size: 11, weight: .medium)).monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.surface))
+                }
+                Spacer()
+                if !items.isEmpty {
+                    Button("Restore All") {
+                        for it in items { state.unhide(it.ref) }
+                        state.showHiddenPicker = false
+                    }
+                }
+                Button("Done") { state.showHiddenPicker = false }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
+            Divider()
+            if items.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tray").font(.system(size: 30)).foregroundStyle(Theme.textTertiary)
+                    Text("No hidden panels").foregroundStyle(Theme.textSecondary)
+                    Text("Right-click a session → Hide Panel to stash it here.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity).padding(40)
+            } else {
+                ScrollView {
+                    VStack(spacing: 3) {
+                        ForEach(items) { it in
+                            HiddenPanelRow(
+                                name: it.info.name,
+                                subtitle: it.machineName + " · " + state.folderDisplay(
+                                    (it.info.path?.isEmpty == false) ? it.info.path! : "—",
+                                    isLocal: state.machine(for: it.ref)?.isLocal ?? false)
+                            ) {
+                                state.unhide(it.ref)
+                                state.selection = it.ref
+                                state.showHiddenPicker = false
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+            }
+        }
+        .frame(width: 460, height: 430)
+        .background(Theme.appBackground)
+    }
+}
+
+private struct HiddenPanelRow: View {
+    let name: String
+    let subtitle: String
+    let restore: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: restore) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                    Text(subtitle).font(.caption).foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "arrow.uturn.backward.circle\(hover ? ".fill" : "")")
+                    .foregroundStyle(hover ? Theme.accent : Theme.textTertiary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(hover ? Theme.selection.opacity(0.6) : Color.clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+    }
+}
+
 /// A sidebar session row identified by MACHINE + name, not name alone. Two nodes
 /// can host sessions with the same name (e.g. both have `scenesmith`); keying the
 /// ForEach on the bare `SessionInfo.id` (= name) collapses them to one SwiftUI
@@ -294,6 +387,7 @@ struct RootView: View {
         }
         .onChange(of: state.renderText) { v in if v == nil { terminals.focusTerminal() } }
         .sheet(isPresented: $state.showNew) { newSessionSheet }
+        .sheet(isPresented: $state.showHiddenPicker) { HiddenPanelsView().environmentObject(state) }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
             TextField("name", text: $state.renameText)
             Button("Rename") {
@@ -520,6 +614,7 @@ struct RootView: View {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(s.name, forType: .string)
                         },
+                        onHide: { state.hide(ref) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
                             : nil,
