@@ -54,6 +54,14 @@ struct SessionRef: Identifiable, Hashable {
     var id: String { machineID + "/" + session }
 }
 
+/// A user-hidden session that still exists, for the ⇧⌘B restore picker.
+struct HiddenPanel: Identifiable {
+    let ref: SessionRef
+    let machineName: String
+    let info: SessionInfo
+    var id: String { ref.id }
+}
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -113,12 +121,55 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") }
     }
 
+    /// Sessions the user has HIDDEN from the sidebar — a personal backlog they don't
+    /// want cluttering the UI. Purely a CLIENT-SIDE view filter (the session keeps
+    /// running; nothing is sent to the broker). Keyed by SessionRef.id, persisted.
+    /// Bring them back via the Hidden Panels picker (⇧⌘B).
+    @Published var hiddenSessions: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "ut.hiddenSessions") ?? []) {
+        didSet { UserDefaults.standard.set(Array(hiddenSessions), forKey: "ut.hiddenSessions") }
+    }
+    /// Drives the ⇧⌘B "Hidden Panels" restore sheet.
+    @Published var showHiddenPicker = false
+
+    func isHidden(_ ref: SessionRef) -> Bool { hiddenSessions.contains(ref.id) }
+
+    /// Hide a session from the sidebar. If it was selected, move selection to the
+    /// first still-visible session so the detail pane never shows a hidden panel.
+    func hide(_ ref: SessionRef) {
+        hiddenSessions.insert(ref.id)
+        if selection == ref { selection = firstVisibleSession() }
+    }
+    func unhide(_ ref: SessionRef) { hiddenSessions.remove(ref.id) }
+
+    /// Hidden sessions that STILL EXIST, with machine label — drives the restore picker.
+    var hiddenSessionList: [HiddenPanel] {
+        machines.flatMap { m -> [HiddenPanel] in
+            (sessionsByMachine[m.id] ?? []).compactMap { s in
+                let r = SessionRef(machineID: m.id, session: s.name)
+                return hiddenSessions.contains(r.id) ? HiddenPanel(ref: r, machineName: m.name, info: s) : nil
+            }
+        }
+    }
+
+    /// First session visible in the sidebar (not hidden, agent-toggle honored) — used
+    /// to re-select after hiding the current one.
+    private func firstVisibleSession() -> SessionRef? {
+        for m in machines {
+            for s in (sessionsByMachine[m.id] ?? []) {
+                let r = SessionRef(machineID: m.id, session: s.name)
+                if !hiddenSessions.contains(r.id), showAgentSessions || !s.agent { return r }
+            }
+        }
+        return nil
+    }
+
     /// All sessions flattened across machines (for the command palette). Honors the
-    /// agent-visibility toggle so hidden background sessions don't surface in ⌘P.
+    /// agent-visibility toggle and hidden set so neither surfaces in ⌘P.
     var allSessions: [SessionRef] {
         machines.flatMap { m in
             (sessionsByMachine[m.id] ?? [])
-                .filter { showAgentSessions || !$0.agent }
+                .filter { (showAgentSessions || !$0.agent) && !hiddenSessions.contains(SessionRef(machineID: m.id, session: $0.name).id) }
                 .map { SessionRef(machineID: m.id, session: $0.name) }
         }
     }
@@ -156,7 +207,7 @@ final class AppState: ObservableObject {
     /// most-recently-active first. Drives the pinned "Needs attention" inbox.
     var waitingSessions: [WaitingSession] {
         machines.flatMap { m -> [WaitingSession] in
-            (sessionsByMachine[m.id] ?? []).filter { $0.isWaiting && (showAgentSessions || !$0.agent) }.compactMap { s in
+            (sessionsByMachine[m.id] ?? []).filter { $0.isWaiting && (showAgentSessions || !$0.agent) && !hiddenSessions.contains(SessionRef(machineID: m.id, session: $0.name).id) }.compactMap { s in
                 let ref = SessionRef(machineID: m.id, session: s.name)
                 if acknowledged.contains(ref.id) { return nil } // user already saw/answered it
                 return WaitingSession(ref: ref, machineName: m.name, activity: s.activity)
@@ -388,6 +439,9 @@ final class AppState: ObservableObject {
         var sessions = sessionsByMachine[machineID] ?? []
         if !showAgentSessions { // agent (ut spawn) sessions are background work — hidden unless toggled on
             sessions = sessions.filter { !$0.agent }
+        }
+        if !hiddenSessions.isEmpty { // user-hidden panels (⇧⌘B to restore)
+            sessions = sessions.filter { !hiddenSessions.contains(SessionRef(machineID: machineID, session: $0.name).id) }
         }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
