@@ -55,20 +55,43 @@ struct AgentIndicator: View {
     let style: AgentIndicatorStyle
     var diameter: CGFloat = 9
 
-    @State private var pulse = false
     @Environment(\.controlActiveState) private var controlActive
-
     private var isKey: Bool { controlActive != .inactive }
 
     var body: some View {
-        ZStack {
-            // Outer glow halo — only for pulsing (attention) states.
+        // The pulse is driven DECLARATIVELY by the timeline — no @State + onAppear/
+        // onChange(restart) animation. That pattern wrote @State during the SwiftUI
+        // update phase, creating an AttributeGraph cycle that severed sidebar rows'
+        // update branch (dots stuck green-while-working, selection stuck highlighted).
+        // A static dot when not pulsing stays cheap (no per-frame timeline).
+        Group {
             if style.pulses {
+                TimelineView(.animation) { ctx in dot(phase: Self.phase(at: ctx.date)) }
+            } else {
+                dot(phase: 0)
+            }
+        }
+        .frame(width: diameter + 7, height: diameter + 7)
+        .opacity(isKey ? 1 : 0.7)
+        .help(style.help)
+    }
+
+    /// Smooth 0→1→0 breathing phase on a ~1.4s cycle, from wall-clock time.
+    private static func phase(at date: Date) -> Double {
+        let period = 1.4
+        let t = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+        return (1 - cos(t * 2 * .pi)) / 2
+    }
+
+    @ViewBuilder private func dot(phase: Double) -> some View {
+        ZStack {
+            if style.pulses {
+                // Expanding, fading glow halo.
                 Circle()
                     .fill(style.color.opacity(0.30))
                     .frame(width: diameter + 7, height: diameter + 7)
-                    .scaleEffect(pulse ? 1.0 : 0.55)
-                    .opacity(pulse ? 0.0 : 0.55)
+                    .scaleEffect(0.55 + 0.45 * phase)
+                    .opacity(0.55 * (1 - phase))
             }
             // Core: solid dot or hollow ring.
             Group {
@@ -79,23 +102,9 @@ struct AgentIndicator: View {
                 }
             }
             .frame(width: diameter, height: diameter)
-            .opacity(style.pulses && pulse ? 0.55 : 1.0)
+            .opacity(style.pulses ? 1.0 - 0.45 * phase : 1.0)
             .shadow(color: style.pulses ? style.color.opacity(0.55) : .clear,
                     radius: style.pulses ? 3 : 0)
-        }
-        .frame(width: diameter + 7, height: diameter + 7)
-        .opacity(isKey ? 1 : 0.7)
-        .help(style.help)
-        .onAppear { restart() }
-        .onChange(of: style.pulses) { _ in restart() }
-        .onChange(of: style.color) { _ in restart() }
-    }
-
-    private func restart() {
-        pulse = false
-        guard style.pulses else { return }
-        withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
-            pulse = true
         }
     }
 }
