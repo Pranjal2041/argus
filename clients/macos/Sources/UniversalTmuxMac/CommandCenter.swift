@@ -65,8 +65,9 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
 
     func status(forKey key: String, output: String) async -> AgentStatus? {
-        // Bound the prompt (cost + avoid a stdin pipe stall): last ~16KB is plenty.
-        let prompt = String(output.suffix(16_000))
+        // Bound the prompt (cost + avoid a stdin pipe stall): the last ~24KB of
+        // scrollback is enough conversation context for a good summary.
+        let prompt = String(output.suffix(24_000))
 
         // Decide create-vs-resume; reset periodically to bound context growth.
         lock.lock()
@@ -148,33 +149,42 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         var t = s.replacingOccurrences(of: "```json", with: "").replacingOccurrences(of: "```", with: "")
         guard let lo = t.firstIndex(of: "{"), let hi = t.lastIndex(of: "}"), lo < hi else { return nil }
         t = String(t[lo...hi])
-        struct Raw: Decodable { let label: String?; let oneLiner: String?; let lookAtThis: String? }
+        struct Raw: Decodable { let label: String?; let summary: String?; let oneLiner: String?; let lookAtThis: String? }
         guard let d = t.data(using: .utf8), let r = try? JSONDecoder().decode(Raw.self, from: d) else { return nil }
         let label = (r.label ?? "working").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var look = r.lookAtThis?.trimmingCharacters(in: .whitespacesAndNewlines)
         if look?.isEmpty == true || look?.lowercased() == "null" { look = nil }
         return AgentStatus(label: label,
-                           oneLiner: (r.oneLiner ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                           oneLiner: (r.summary ?? r.oneLiner ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
                            lookAtThis: look, updatedAt: Date())
     }
 
     private static let systemPrompt = """
-    You monitor one terminal pane running a coding or training agent. You are given its recent visible output. Reply with ONLY a single-line JSON object, nothing else:
-    {"label":"<LABEL>","oneLiner":"<short phrase>","lookAtThis":<string or null>}
+    You are the status monitor for ONE terminal pane in a dashboard of many running agents (Claude Code, Codex, training jobs, shells). You are given that session's recent scrollback — which INCLUDES the user's own messages to the agent, so use it to infer the task the user gave and report where it stands. Across calls you keep seeing this same session, so maintain a running understanding of its trajectory.
 
-    LABEL is exactly one of:
-    - "needs-decision": blocked, asking the user to confirm or choose.
-    - "milestone": just finished something notable (tests passed, run completed, PR opened).
-    - "look": mid-task it produced a result/answer/decision the user would want to see now.
-    - "stuck": repeating, looping, or erroring with no progress.
-    - "drifting": working on something off the apparent task.
+    Reply with ONLY a single-line JSON object, nothing else:
+    {"label":"<LABEL>","summary":"<2 to 4 sentences>","lookAtThis":<string or null>}
+
+    LABEL — exactly one:
+    - "needs-decision": the agent is genuinely BLOCKED on the user — a numbered choice menu ("❯ 1. Yes / 2. No"), an explicit question awaiting an answer, or a permission prompt with options.
+    - "milestone": just finished something notable (tests passed, run/epoch completed, PR opened, task done).
+    - "look": mid-task it produced a result, finding, or decision the user would want to see now.
+    - "stuck": repeating, looping, or hitting the same error with no progress.
+    - "drifting": working on something off the task the user actually asked for.
     - "no-progress": active but spinning with nothing to show.
-    - "working": normal progress.
+    - "working": actively making progress.
     - "idle": nothing happening / sitting at a shell prompt.
 
-    oneLiner: at most ~10 words, plain words, what the agent is doing now. No preamble.
-    lookAtThis: usually null. Set ONLY if a specific line is worth the user's eyes right now (risky/irreversible action, key result, a direct question); quote that line verbatim from the output. Never invent it.
-    Be conservative: unsure -> "working" or "idle" and null. One line of JSON.
+    CRITICAL — agent-UI conventions you MUST NOT misread as blocking:
+    - "esc to interrupt" or "/stop to interrupt" anywhere on screen = the agent is ACTIVELY WORKING. Never label that "needs-decision".
+    - "bypass permissions on (shift+tab to cycle)", "? for shortcuts", a blinking composer prompt, the model name, token/context counters = permanent UI chrome. They are NOT a block and NOT worth surfacing.
+    - Only "needs-decision" when there is a REAL choice or question the agent is waiting on.
+
+    summary: 2–4 plain sentences with real substance — what the agent is working on (the user's task), what it has done or found recently, and what's happening right now. Be concrete: names, numbers, files, errors. If something notable happened earlier in the transcript that the user likely hasn't seen, keep surfacing it until it's clearly resolved — don't only describe the last line.
+
+    lookAtThis: usually null. Set it ONLY for a specific moment the user would want to see right now — a real question to answer, a key result/number, a risky or irreversible action, a blocking error. Quote or tightly paraphrase it. NEVER terminal chrome, footers, or mode indicators. If nothing qualifies, null.
+
+    Be accurate over dramatic. Output one line of JSON.
     """
 }
 
@@ -264,7 +274,7 @@ final class CommandCenterModel: ObservableObject {
 
     private static func fetchRecent(httpBase: String, session: String) async -> String? {
         guard let enc = session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "\(httpBase)/recent?session=\(enc)&lines=300") else { return nil }
+              let url = URL(string: "\(httpBase)/recent?session=\(enc)&lines=500") else { return nil }
         var req = URLRequest(url: url); req.timeoutInterval = 8
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
@@ -303,6 +313,8 @@ func attentionPriority(state: String, status: AgentStatus?) -> Int {
 struct CommandCenterView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var cc: CommandCenterModel
+    @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    private func cf(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s * uiScale, weight: w) }
 
     private struct Tile: Identifiable {
         let ref: SessionRef; let machineName: String; let session: SessionInfo
@@ -356,18 +368,18 @@ struct CommandCenterView: View {
 
     private func glance(needsYou: Int, rest: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text("Command Center").font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.textPrimary)
+            Text("Command Center").font(cf(21, .bold)).foregroundStyle(Theme.textPrimary)
             Text(needsYou > 0 ? "\(needsYou) need\(needsYou == 1 ? "s" : "") you · \(rest) other"
                               : "all \(rest) quiet")
-                .font(.system(size: 12.5)).foregroundStyle(needsYou > 0 ? Theme.waiting : Theme.textTertiary)
+                .font(cf(13)).foregroundStyle(needsYou > 0 ? Theme.waiting : Theme.textTertiary)
             Spacer()
         }
     }
 
     private func header(_ title: String, _ n: Int) -> some View {
         HStack(spacing: 6) {
-            Text(title.uppercased()).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.textTertiary)
-            Text("\(n)").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.textTertiary.opacity(0.6))
+            Text(title.uppercased()).font(cf(11.5, .semibold)).foregroundStyle(Theme.textSecondary)
+            Text("\(n)").font(cf(11, .medium)).foregroundStyle(Theme.textTertiary.opacity(0.7))
         }
     }
 
@@ -397,6 +409,8 @@ struct AgentTileView: View {
     let size: Size
     let onOpen: () -> Void
 
+    @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    private func cf(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s * uiScale, weight: w) }
     private var isLarge: Bool { size == .large }
 
     /// Color from the model's label first; fall back to the dot only when there's no
@@ -434,33 +448,34 @@ struct AgentTileView: View {
     private var summaryMuted: Bool { status?.oneLiner.isEmpty ?? true }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6 * uiScale) {
             HStack(spacing: 7) {
-                Circle().fill(tint).frame(width: 7, height: 7)   // small secondary cue, not the whole signal
-                Text(session.name).font(.system(size: isLarge ? 15 : 13.5, weight: .semibold))
+                Circle().fill(tint).frame(width: 8, height: 8)   // small secondary cue, not the whole signal
+                Text(session.name).font(cf(isLarge ? 16 : 15, .semibold))
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
+                Text(machineName).font(cf(11)).foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1).layoutPriority(-1)
                 Spacer(minLength: 6)
-                if inflight { ProgressView().controlSize(.small).scaleEffect(0.5) }
-                chip
+                if inflight { ProgressView().controlSize(.small).scaleEffect(0.6) }
+                chip.fixedSize().layoutPriority(1)   // never clip the status
             }
             Text(summary)
-                .font(.system(size: isLarge ? 12.5 : 12))
+                .font(cf(isLarge ? 13.5 : 13))
                 .foregroundStyle(summaryMuted ? Theme.textTertiary : Theme.textSecondary)
-                .lineLimit(isLarge ? 3 : 2)
+                .lineLimit(isLarge ? 7 : 5)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if isLarge, let look = status?.lookAtThis, !look.isEmpty {
-                Text(look).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(3).padding(7).frame(maxWidth: .infinity, alignment: .leading)
+                Text(look).font(cf(12.5).monospaced()).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(4).padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(tint.opacity(0.12)))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(tint.opacity(0.4), lineWidth: 1))
             }
-            Text(machineName).font(.system(size: 10)).foregroundStyle(Theme.textTertiary).lineLimit(1)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, minHeight: isLarge ? 104 : 86, alignment: .topLeading)
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: (isLarge ? 88 : 58) * uiScale, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 11).fill(Theme.sidebarBackground.opacity(0.7)))
-        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(tint.opacity(isLarge ? 0.55 : 0.3), lineWidth: isLarge ? 1.6 : 1))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(tint.opacity(isLarge ? 0.55 : 0.32), lineWidth: isLarge ? 1.6 : 1))
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
         .help(status?.oneLiner ?? session.name)
@@ -468,8 +483,8 @@ struct AgentTileView: View {
 
     private var chip: some View {
         HStack(spacing: 3) {
-            Image(systemName: chipGlyph).font(.system(size: 9.5))
-            Text(chipText).font(.system(size: 10.5, weight: .medium))
+            Image(systemName: chipGlyph).font(cf(10))
+            Text(chipText).font(cf(11.5, .medium))
         }
         .foregroundStyle(tint)
         .padding(.horizontal, 7).padding(.vertical, 3)
