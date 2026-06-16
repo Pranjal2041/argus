@@ -5,7 +5,7 @@ import Foundation
 
 /// A status for one agent session, produced by the status updater (claude -p).
 /// This is the inferred layer that sits on top of the deterministic dot.
-struct AgentStatus: Equatable {
+struct AgentStatus: Equatable, Codable {
     var label: String        // model token: working/needs-decision/look/milestone/stuck/drifting/no-progress/idle
     var oneLiner: String     // short plain description of what the agent is doing
     var lookAtThis: String?  // a line worth seeing now, quoted verbatim — or nil
@@ -194,6 +194,20 @@ final class CommandCenterModel: ObservableObject {
     private var timer: Timer?
     private var lastState: [String: String] = [:]
     private let maxConcurrent = 6
+    private let storeKey = "ut.ccStatuses.v1"
+
+    init() {
+        // Show last-known statuses instantly on launch (refreshed within ~30s), so the
+        // grid is never a wall of empty tiles after a relaunch.
+        if let d = UserDefaults.standard.data(forKey: storeKey),
+           let saved = try? JSONDecoder().decode([String: AgentStatus].self, from: d) {
+            statuses = saved
+        }
+    }
+
+    private func persist() {
+        if let d = try? JSONEncoder().encode(statuses) { UserDefaults.standard.set(d, forKey: storeKey) }
+    }
 
     func bind(_ app: AppState) { self.app = app }
 
@@ -222,9 +236,11 @@ final class CommandCenterModel: ObservableObject {
             }
         }
         // Drop status + continuity for sessions that vanished.
+        var pruned = false
         for k in Array(statuses.keys) where !liveKeys.contains(k) {
-            statuses[k] = nil; provider.forget(key: k); lastState[k] = nil
+            statuses[k] = nil; provider.forget(key: k); lastState[k] = nil; pruned = true
         }
+        if pruned { persist() }
     }
 
     private func update(ref: SessionRef, machine: Machine, name: String) {
@@ -242,6 +258,7 @@ final class CommandCenterModel: ObservableObject {
             }
             NSLog("[cc] %@ -> [%@] %@", key, status.label, status.oneLiner)
             self?.statuses[key] = status
+            self?.persist()
         }
     }
 
@@ -257,28 +274,32 @@ final class CommandCenterModel: ObservableObject {
 
 // MARK: - Importance ordering
 
-/// Lower sorts first (more of your attention). Deterministic "waiting" outranks any
-/// inferred label; otherwise the model's label drives it; healthy/idle sink.
+/// Lower sorts first (more of your attention). The model's label is the PRIMARY
+/// signal — the dot is only a fallback when there's no status yet, since the dot
+/// misclassifies often. needs-you items land at priority <= 1 (the top band).
 func attentionPriority(state: String, status: AgentStatus?) -> Int {
-    if state == "waiting" { return 0 }
     switch status?.label {
     case "needs-decision": return 0
     case "look":           return 1
     case "stuck":          return 2
     case "no-progress", "drifting": return 3
     case "milestone":      return 4
-    default: break
+    case "working":        return 5
+    case "idle":           return 8
+    default: break   // no status yet → lean on the dot
     }
-    if state == "working" { return 5 }
+    if state == "waiting" { return 0 }
+    if state == "working" { return 6 }
     return 9
 }
 
 // MARK: - View
 
-/// The command center: a 2-D grid of agent tiles. Most urgent sit top-left and big;
-/// as agents matter less they shrink and dim. Three bands by attention (needs-you /
-/// active / quiet), each its own grid. Lives as a panel in the main window (⇧⌘O);
-/// tap a tile to dive into that session's terminal.
+/// The command center: a grid of agent tiles sorted by attention. Needs-you sit on
+/// top, larger, with the line worth reading; the rest follow as uniform cards. EVERY
+/// tile shows a one-line summary + a status label from the status updater — the dot is
+/// only a small secondary cue (it misclassifies too often to be the whole signal).
+/// A panel in the main window (⇧⌘A); tap a tile to dive into that session.
 struct CommandCenterView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var cc: CommandCenterModel
@@ -307,14 +328,18 @@ struct CommandCenterView: View {
     var body: some View {
         let all = tiles
         let needsYou = all.filter { $0.priority <= 1 }
-        let active   = all.filter { $0.priority > 1 && $0.priority < 9 }
-        let quiet    = all.filter { $0.priority >= 9 }
+        let rest     = all.filter { $0.priority > 1 }
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                glance(needsYou: needsYou.count, active: active.count, quiet: quiet.count)
-                if !needsYou.isEmpty { band("Needs you", needsYou, minWidth: 340, height: 96, size: .large) }
-                if !active.isEmpty   { band("Active",    active,   minWidth: 240, height: 78, size: .medium) }
-                if !quiet.isEmpty    { band("Quiet",     quiet,    minWidth: 165, height: 50, size: .small) }
+            VStack(alignment: .leading, spacing: 16) {
+                glance(needsYou: needsYou.count, rest: rest.count)
+                if !needsYou.isEmpty {
+                    header("Needs you", needsYou.count)
+                    grid(needsYou, minWidth: 360, size: .large)
+                }
+                if !rest.isEmpty {
+                    header("All sessions", rest.count)
+                    grid(rest, minWidth: 270, size: .medium)
+                }
                 if all.isEmpty {
                     Text("No sessions.").foregroundStyle(Theme.textTertiary)
                         .frame(maxWidth: .infinity).padding(.top, 60)
@@ -329,36 +354,33 @@ struct CommandCenterView: View {
         .onDisappear { cc.stop() }
     }
 
-    private func glance(needsYou: Int, active: Int, quiet: Int) -> some View {
-        var parts: [String] = []
-        if needsYou > 0 { parts.append("\(needsYou) need\(needsYou == 1 ? "s" : "") you") }
-        if active > 0 { parts.append("\(active) active") }
-        if quiet > 0 { parts.append("\(quiet) quiet") }
-        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+    private func glance(needsYou: Int, rest: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text("Command Center").font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.textPrimary)
-            Text(parts.isEmpty ? "no sessions" : parts.joined(separator: " · "))
+            Text(needsYou > 0 ? "\(needsYou) need\(needsYou == 1 ? "s" : "") you · \(rest) other"
+                              : "all \(rest) quiet")
                 .font(.system(size: 12.5)).foregroundStyle(needsYou > 0 ? Theme.waiting : Theme.textTertiary)
             Spacer()
         }
     }
 
+    private func header(_ title: String, _ n: Int) -> some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased()).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.textTertiary)
+            Text("\(n)").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.textTertiary.opacity(0.6))
+        }
+    }
+
     @ViewBuilder
-    private func band(_ title: String, _ items: [Tile], minWidth: CGFloat, height: CGFloat,
-                      size: AgentTileView.Size) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 6) {
-                Text(title.uppercased()).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.textTertiary)
-                Text("\(items.count)").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.textTertiary.opacity(0.6))
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 10, alignment: .top)],
-                      alignment: .leading, spacing: 10) {
-                ForEach(items) { t in
-                    AgentTileView(machineName: t.machineName, session: t.session,
-                                  unseen: state.unseen.contains(t.ref.id), status: t.status,
-                                  inflight: t.inflight, size: size, minHeight: height) {
-                        state.selection = t.ref
-                        state.showOverview = false
-                    }
+    private func grid(_ items: [Tile], minWidth: CGFloat, size: AgentTileView.Size) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 10, alignment: .top)],
+                  alignment: .leading, spacing: 10) {
+            ForEach(items) { t in
+                AgentTileView(machineName: t.machineName, session: t.session,
+                              unseen: state.unseen.contains(t.ref.id), status: t.status,
+                              inflight: t.inflight, size: size) {
+                    state.selection = t.ref
+                    state.showOverview = false
                 }
             }
         }
@@ -366,20 +388,20 @@ struct CommandCenterView: View {
 }
 
 struct AgentTileView: View {
-    enum Size { case large, medium, small }
+    enum Size { case large, medium }
     let machineName: String
     let session: SessionInfo
     let unseen: Bool
     let status: AgentStatus?
     let inflight: Bool
     let size: Size
-    let minHeight: CGFloat
     let onOpen: () -> Void
 
-    private var small: Bool { size == .small }
+    private var isLarge: Bool { size == .large }
 
+    /// Color from the model's label first; fall back to the dot only when there's no
+    /// status yet (the dot alone misclassifies, so it never drives content).
     private var tint: SwiftUI.Color {
-        if session.state == "waiting" { return Theme.waiting }
         switch status?.label {
         case "needs-decision": return Theme.waiting
         case "look":           return Theme.accent
@@ -387,55 +409,70 @@ struct AgentTileView: View {
         case "drifting":       return Theme.unseen
         case "milestone":      return Theme.attached
         case "working":        return Theme.running
-        default:               return Theme.textTertiary
+        case "idle":           return Theme.textTertiary
+        default: break
+        }
+        switch session.state {
+        case "waiting": return Theme.waiting
+        case "working": return Theme.running
+        default:        return Theme.textTertiary
         }
     }
 
+    private var chipGlyph: String {
+        if let s = status { return s.glyph }
+        switch session.state { case "working": return "gearshape.fill"; case "waiting": return "questionmark.circle.fill"; default: return "circle" }
+    }
+    private var chipText: String {
+        if let s = status { return s.display }
+        switch session.state { case "working": return "working"; case "waiting": return "needs you"; default: return "idle" }
+    }
+    private var summary: String {
+        if let s = status, !s.oneLiner.isEmpty { return s.oneLiner }
+        return inflight ? "reading output…" : "no status yet"
+    }
+    private var summaryMuted: Bool { status?.oneLiner.isEmpty ?? true }
+
     var body: some View {
-        let style = AgentIndicatorStyle.resolve(state: AgentState(raw: session.state),
-                                                attached: session.attached, unseen: unseen)
-        VStack(alignment: .leading, spacing: small ? 2 : 6) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
-                AgentIndicator(style: style)
-                Text(session.name)
-                    .font(.system(size: small ? 12 : (size == .large ? 15 : 13.5), weight: .semibold))
+                Circle().fill(tint).frame(width: 7, height: 7)   // small secondary cue, not the whole signal
+                Text(session.name).font(.system(size: isLarge ? 15 : 13.5, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Spacer(minLength: 4)
+                Spacer(minLength: 6)
                 if inflight { ProgressView().controlSize(.small).scaleEffect(0.5) }
-                else if let s = status { chip(s, tiny: small) }
+                chip
             }
-            if !small, let s = status, !s.oneLiner.isEmpty {
-                Text(s.oneLiner).font(.system(size: size == .large ? 12.5 : 11.5))
-                    .foregroundStyle(Theme.textSecondary)
-                    .lineLimit(size == .large ? 3 : 2).fixedSize(horizontal: false, vertical: true)
-            }
-            if size == .large, let look = status?.lookAtThis, !look.isEmpty {
+            Text(summary)
+                .font(.system(size: isLarge ? 12.5 : 12))
+                .foregroundStyle(summaryMuted ? Theme.textTertiary : Theme.textSecondary)
+                .lineLimit(isLarge ? 3 : 2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if isLarge, let look = status?.lookAtThis, !look.isEmpty {
                 Text(look).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(2).padding(7).frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(3).padding(7).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(tint.opacity(0.12)))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(tint.opacity(0.4), lineWidth: 1))
             }
-            if !small {
-                Text(machineName).font(.system(size: 10)).foregroundStyle(Theme.textTertiary).lineLimit(1)
-            }
+            Text(machineName).font(.system(size: 10)).foregroundStyle(Theme.textTertiary).lineLimit(1)
         }
-        .padding(small ? 9 : 12)
-        .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.sidebarBackground.opacity(small ? 0.35 : 0.7)))
-        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(tint.opacity(small ? 0.18 : 0.5), lineWidth: small ? 1 : 1.6))
-        .opacity(small ? 0.82 : 1)
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: isLarge ? 104 : 86, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.sidebarBackground.opacity(0.7)))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(tint.opacity(isLarge ? 0.55 : 0.3), lineWidth: isLarge ? 1.6 : 1))
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
         .help(status?.oneLiner ?? session.name)
     }
 
-    private func chip(_ s: AgentStatus, tiny: Bool) -> some View {
+    private var chip: some View {
         HStack(spacing: 3) {
-            Image(systemName: s.glyph).font(.system(size: tiny ? 8.5 : 9.5))
-            if !tiny { Text(s.display).font(.system(size: 10.5, weight: .medium)) }
+            Image(systemName: chipGlyph).font(.system(size: 9.5))
+            Text(chipText).font(.system(size: 10.5, weight: .medium))
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, tiny ? 5 : 7).padding(.vertical, tiny ? 2 : 3)
+        .padding(.horizontal, 7).padding(.vertical, 3)
         .background(Capsule().fill(tint.opacity(0.16)))
     }
 }
