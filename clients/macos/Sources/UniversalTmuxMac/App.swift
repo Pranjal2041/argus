@@ -620,7 +620,7 @@ struct RootView: View {
                             NSPasteboard.general.setString(s.name, forType: .string)
                         },
                         onHide: { state.hide(ref) },
-                        wandbRunsProvider: { terminals.wandbRuns(for: ref) },
+                        wandbRuns: terminals.wandbRuns(for: ref),
                         onOpenWandb: { run in state.selection = ref; terminals.showWandb(ref, run: run) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
