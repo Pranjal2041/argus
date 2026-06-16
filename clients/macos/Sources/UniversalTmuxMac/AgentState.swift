@@ -127,7 +127,12 @@ struct SessionRow: View {
     var onKill: () -> Void = {}
     var onCopyName: () -> Void = {}
     var onHide: () -> Void = {}
-    var wandbRunsProvider: () -> [WandbRun] = { [] }   // evaluated when the menu opens (no row invalidation)
+    // Plain value, NOT a closure reading @Published. SwiftUI evaluates .contextMenu
+    // content during the update phase, so reading an observable here (the old
+    // `wandbRunsProvider` did) subscribed the menu to @Published wandbRuns and
+    // formed an AttributeGraph cycle that froze the row. The parent already
+    // observes `terminals`, so it recomputes + passes this fresh.
+    var wandbRuns: [WandbRun] = []
     var onOpenWandb: (WandbRun?) -> Void = { _ in }
     var onReveal: (() -> Void)? = nil
     var onRevealFiles: (() -> Void)? = nil
@@ -191,7 +196,7 @@ struct SessionRow: View {
         .onTapGesture(perform: onTap)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
         .contextMenu {
-            let runs = wandbRunsProvider()
+            let runs = wandbRuns   // plain value — no observable read during menu build
             if runs.count == 1 {
                 Button("Open W&B") { onOpenWandb(runs.last) }
                 Divider()
