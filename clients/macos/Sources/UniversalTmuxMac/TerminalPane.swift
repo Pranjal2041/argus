@@ -27,12 +27,15 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// the detected set changes — drives the in-place W&B webview.
     var onWandbRuns: (([WandbRun]) -> Void)?
 
-    // Rolling tail of recent output (ANSI intact, decoded lossily on scan) scanned
-    // for W&B run URLs. The raw stream — not the screen — so a URL the terminal
-    // visually wrapped, or one in the connect snapshot's scrollback, is still whole.
-    private var wandbBytes: [UInt8] = []
+    // Output scanned for W&B run URLs — the raw STREAM, not the screen, so a URL the
+    // terminal visually wrapped (or one deep in the connect snapshot's scrollback)
+    // stays whole. We scan ALL output and reset, keeping a small tail to bridge a URL
+    // split across scans — so a URL is NEVER discarded unscanned. (The old code kept a
+    // rolling 48KB tail and scanned only that, so a run sitting earlier than the last
+    // 48KB of a long reconnect snapshot was trimmed away → vanished on reopen.)
+    private var wandbBuf: [UInt8] = []
+    private var wandbTail = ""
     private var wandbScan: DispatchWorkItem?
-    private var wandbLast: [WandbRun] = []
 
     init(url: URL) {
         view = TerminalView(frame: .zero)
@@ -84,8 +87,11 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     // MARK: W&B run detection (off the raw output stream)
 
     private func ingestForWandb(_ bytes: [UInt8]) {
-        wandbBytes.append(contentsOf: bytes)
-        if wandbBytes.count > 64 * 1024 { wandbBytes.removeFirst(wandbBytes.count - 48 * 1024) }
+        wandbBuf.append(contentsOf: bytes)
+        // A big reconnect snapshot can arrive faster than the debounce — scan-and-flush
+        // eagerly so it's neither lost to a cap nor held unbounded; the tail bridges any
+        // URL straddling the flush boundary.
+        if wandbBuf.count >= 512 * 1024 { wandbScan?.cancel(); scanWandb(); return }
         wandbScan?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.scanWandb() }
         wandbScan = work
@@ -93,9 +99,13 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     }
 
     private func scanWandb() {
-        let runs = WandbDetector.runs(in: String(decoding: wandbBytes, as: UTF8.self))
-        guard runs != wandbLast else { return }   // only on a real change (new run / refined label)
-        wandbLast = runs
+        guard !wandbBuf.isEmpty else { return }
+        let text = wandbTail + String(decoding: wandbBuf, as: UTF8.self)
+        wandbBuf.removeAll(keepingCapacity: true)
+        wandbTail = String(text.suffix(8 * 1024))   // overlap so a URL split across scans rejoins
+        let runs = WandbDetector.runs(in: text)
+        // mergeWandb (the receiver) unions + dedups by id and persists only on a real
+        // change, so re-emitting an already-known run each window is cheap/idempotent.
         if !runs.isEmpty { onWandbRuns?(runs) }
     }
 
@@ -547,13 +557,22 @@ final class TerminalController: ObservableObject {
         if changed { wandbRuns[ref.id] = runs; persistWandb() }
     }
 
-    /// Manually forget a session's detected runs (the user's "clear"). Drops back to
-    /// the terminal if the W&B view was showing one.
-    func clearWandb(_ ref: SessionRef) {
-        guard wandbRuns[ref.id] != nil || wandbShown.contains(ref.id) else { return }
-        wandbRuns[ref.id] = nil
-        wandbCurrent[ref.id] = nil
-        wandbShown.remove(ref.id)
+    /// Manually forget ONE detected run for a session (the user's per-run "clear").
+    /// Permanent: it only returns if the detector re-sees the URL (a fresh connect
+    /// snapshot that still contains it, or the job reprinting it). If the cleared run
+    /// was the one being shown, the W&B view re-defaults to the latest remaining run;
+    /// clearing the LAST run drops the session out of W&B entirely (back to terminal).
+    func clearWandb(_ run: WandbRun, for ref: SessionRef) {
+        guard var runs = wandbRuns[ref.id] else { return }
+        runs.removeAll { $0.runId == run.runId }
+        if runs.isEmpty {
+            wandbRuns[ref.id] = nil
+            wandbCurrent[ref.id] = nil
+            wandbShown.remove(ref.id)
+        } else {
+            wandbRuns[ref.id] = runs
+            if wandbCurrent[ref.id] == run.runId { wandbCurrent[ref.id] = runs.last?.runId }
+        }
         persistWandb()
     }
 

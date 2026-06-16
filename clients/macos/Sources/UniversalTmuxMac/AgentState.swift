@@ -134,7 +134,7 @@ struct SessionRow: View {
     // observes `terminals`, so it recomputes + passes this fresh.
     var wandbRuns: [WandbRun] = []
     var onOpenWandb: (WandbRun?) -> Void = { _ in }
-    var onClearWandb: () -> Void = {}
+    var onClearWandb: (WandbRun) -> Void = { _ in }
     var onReveal: (() -> Void)? = nil
     var onRevealFiles: (() -> Void)? = nil
 
@@ -200,13 +200,15 @@ struct SessionRow: View {
             let runs = wandbRuns   // plain value — no observable read during menu build
             if runs.count == 1 {
                 Button("Open W&B") { onOpenWandb(runs.last) }
-                Button("Clear W&B Run") { onClearWandb() }
+                if let r = runs.last { Button("Clear W&B Run") { onClearWandb(r) } }
                 Divider()
             } else if runs.count > 1 {
                 Menu("Open W&B") {
                     ForEach(runs.reversed()) { r in Button(r.label) { onOpenWandb(r) } }
                 }
-                Button("Clear W&B Runs") { onClearWandb() }
+                Menu("Clear W&B Run") {   // per-run — pick exactly which id to forget
+                    ForEach(runs.reversed()) { r in Button(r.label) { onClearWandb(r) } }
+                }
                 Divider()
             }
             Button("Hide Panel") { onHide() }
