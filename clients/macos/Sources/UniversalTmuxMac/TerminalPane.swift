@@ -732,7 +732,6 @@ final class TerminalController: ObservableObject {
         // and refocusing each time steals the keyboard from the filter field.
         guard lastShownID != ref.id else { return }
         lastShownID = ref.id
-        atBottom = true
         conn.applyLayout()
         conn.view.layoutSubtreeIfNeeded()
         conn.sendCurrentGeometry()
@@ -740,7 +739,13 @@ final class TerminalController: ObservableObject {
         // even from the sidebar filter (an NSText): picking a session IS the
         // end of filtering. The lastShownID guard above already prevents the
         // repeated-updateNSView focus theft this used to defend against.
+        // NOTE: `atBottom` (a @Published read by the scroll-to-bottom pill) is
+        // deferred to the next runloop on purpose. show() runs INSIDE
+        // TerminalHostView.updateNSView (the SwiftUI update phase); writing an
+        // observed property there is a write-during-update → AttributeGraph
+        // cycle that froze sidebar rows. Off the update tick, it's a clean write.
         DispatchQueue.main.async {
+            self.atBottom = true
             conn.view.window?.makeFirstResponder(conn.view)
         }
     }
