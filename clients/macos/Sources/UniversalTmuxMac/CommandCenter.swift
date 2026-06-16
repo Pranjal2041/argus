@@ -193,7 +193,7 @@ final class CommandCenterModel: ObservableObject {
     private weak var app: AppState?
     private var timer: Timer?
     private var lastState: [String: String] = [:]
-    private let maxConcurrent = 4
+    private let maxConcurrent = 6
 
     func bind(_ app: AppState) { self.app = app }
 
@@ -275,91 +275,108 @@ func attentionPriority(state: String, status: AgentStatus?) -> Int {
 
 // MARK: - View
 
-/// One agent per row, sorted by attention: the ones that need you sit at the top and
-/// stay full-size; quiet ones drop to a compact, dimmed line. (v1 layout — the
-/// stable-grid + needs-you-zone refinement comes next.)
+/// The command center: a 2-D grid of agent tiles. Most urgent sit top-left and big;
+/// as agents matter less they shrink and dim. Three bands by attention (needs-you /
+/// active / quiet), each its own grid. Lives as a panel in the main window (⇧⌘O);
+/// tap a tile to dive into that session's terminal.
 struct CommandCenterView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var cc: CommandCenterModel
 
-    private struct Row: Identifiable {
+    private struct Tile: Identifiable {
         let ref: SessionRef; let machineName: String; let session: SessionInfo
         let status: AgentStatus?; let inflight: Bool; let priority: Int
         var id: String { ref.id }
     }
 
-    private var rows: [Row] {
-        var out: [Row] = []
+    private var tiles: [Tile] {
+        var out: [Tile] = []
         for m in state.machines {
             for s in (state.sessionsByMachine[m.id] ?? []) where !s.agent {
                 let ref = SessionRef(machineID: m.id, session: s.name)
                 if state.hiddenSessions.contains(ref.id) { continue }
                 let st = cc.statuses[ref.id]
-                out.append(Row(ref: ref, machineName: m.name, session: s, status: st,
-                               inflight: cc.inflight.contains(ref.id),
-                               priority: attentionPriority(state: s.state, status: st)))
+                out.append(Tile(ref: ref, machineName: m.name, session: s, status: st,
+                                inflight: cc.inflight.contains(ref.id),
+                                priority: attentionPriority(state: s.state, status: st)))
             }
         }
         return out.sorted { ($0.priority, $0.session.name) < ($1.priority, $1.session.name) }
     }
 
     var body: some View {
-        let all = rows
+        let all = tiles
         let needsYou = all.filter { $0.priority <= 1 }
-        let active = all.filter { $0.priority > 1 && $0.priority < 9 }
-        let quiet = all.filter { $0.priority >= 9 }
+        let active   = all.filter { $0.priority > 1 && $0.priority < 9 }
+        let quiet    = all.filter { $0.priority >= 9 }
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                if !needsYou.isEmpty {
-                    sectionHeader("Needs you", count: needsYou.count)
-                    ForEach(needsYou) { card($0, compact: false) }
-                }
-                if !active.isEmpty {
-                    sectionHeader("Active", count: active.count)
-                    ForEach(active) { card($0, compact: false) }
-                }
-                if !quiet.isEmpty {
-                    sectionHeader("Quiet", count: quiet.count)
-                    ForEach(quiet) { card($0, compact: true) }
-                }
+            VStack(alignment: .leading, spacing: 20) {
+                glance(needsYou: needsYou.count, active: active.count, quiet: quiet.count)
+                if !needsYou.isEmpty { band("Needs you", needsYou, minWidth: 340, height: 96, size: .large) }
+                if !active.isEmpty   { band("Active",    active,   minWidth: 240, height: 78, size: .medium) }
+                if !quiet.isEmpty    { band("Quiet",     quiet,    minWidth: 165, height: 50, size: .small) }
                 if all.isEmpty {
-                    Text("No sessions.").foregroundStyle(Theme.textTertiary).padding(.top, 40)
+                    Text("No sessions.").foregroundStyle(Theme.textTertiary)
+                        .frame(maxWidth: .infinity).padding(.top, 60)
                 }
             }
-            .padding(16)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 24)
+            .padding(.top, 34)   // clear the window's title/traffic-light zone
         }
-        .background(Theme.appBackground.ignoresSafeArea())
+        .background(Theme.appBackground)
         .onAppear { cc.bind(state); cc.start() }
         .onDisappear { cc.stop() }
     }
 
-    private func sectionHeader(_ title: String, count: Int) -> some View {
-        HStack(spacing: 6) {
-            Text(title.uppercased()).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.textTertiary)
-            Text("\(count)").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.textTertiary.opacity(0.7))
+    private func glance(needsYou: Int, active: Int, quiet: Int) -> some View {
+        var parts: [String] = []
+        if needsYou > 0 { parts.append("\(needsYou) need\(needsYou == 1 ? "s" : "") you") }
+        if active > 0 { parts.append("\(active) active") }
+        if quiet > 0 { parts.append("\(quiet) quiet") }
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text("Command Center").font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.textPrimary)
+            Text(parts.isEmpty ? "no sessions" : parts.joined(separator: " · "))
+                .font(.system(size: 12.5)).foregroundStyle(needsYou > 0 ? Theme.waiting : Theme.textTertiary)
             Spacer()
         }
-        .padding(.top, 6)
     }
 
-    private func card(_ r: Row, compact: Bool) -> some View {
-        AgentCardView(machineName: r.machineName, session: r.session,
-                      unseen: state.unseen.contains(r.ref.id), status: r.status,
-                      inflight: r.inflight, compact: compact) {
-            state.selection = r.ref
-            NSApp.windows.first(where: { $0.title.isEmpty || $0.title == "Argus" })?.makeKeyAndOrderFront(nil)
+    @ViewBuilder
+    private func band(_ title: String, _ items: [Tile], minWidth: CGFloat, height: CGFloat,
+                      size: AgentTileView.Size) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
+                Text(title.uppercased()).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.textTertiary)
+                Text("\(items.count)").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.textTertiary.opacity(0.6))
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 10, alignment: .top)],
+                      alignment: .leading, spacing: 10) {
+                ForEach(items) { t in
+                    AgentTileView(machineName: t.machineName, session: t.session,
+                                  unseen: state.unseen.contains(t.ref.id), status: t.status,
+                                  inflight: t.inflight, size: size, minHeight: height) {
+                        state.selection = t.ref
+                        state.showOverview = false
+                    }
+                }
+            }
         }
     }
 }
 
-struct AgentCardView: View {
+struct AgentTileView: View {
+    enum Size { case large, medium, small }
     let machineName: String
     let session: SessionInfo
     let unseen: Bool
     let status: AgentStatus?
     let inflight: Bool
-    let compact: Bool
+    let size: Size
+    let minHeight: CGFloat
     let onOpen: () -> Void
+
+    private var small: Bool { size == .small }
 
     private var tint: SwiftUI.Color {
         if session.state == "waiting" { return Theme.waiting }
@@ -377,44 +394,48 @@ struct AgentCardView: View {
     var body: some View {
         let style = AgentIndicatorStyle.resolve(state: AgentState(raw: session.state),
                                                 attached: session.attached, unseen: unseen)
-        VStack(alignment: .leading, spacing: compact ? 3 : 8) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: small ? 2 : 6) {
+            HStack(spacing: 7) {
                 AgentIndicator(style: style)
-                Text(session.name).font(.system(size: compact ? 12 : 14, weight: .semibold))
+                Text(session.name)
+                    .font(.system(size: small ? 12 : (size == .large ? 15 : 13.5), weight: .semibold))
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Text(machineName).font(.system(size: 10.5)).foregroundStyle(Theme.textTertiary).lineLimit(1)
-                Spacer(minLength: 6)
-                if inflight { ProgressView().controlSize(.small).scaleEffect(0.6) }
-                if let status { labelChip(status) }
+                Spacer(minLength: 4)
+                if inflight { ProgressView().controlSize(.small).scaleEffect(0.5) }
+                else if let s = status { chip(s, tiny: small) }
             }
-            if !compact, let status, !status.oneLiner.isEmpty {
-                Text(status.oneLiner).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            if !small, let s = status, !s.oneLiner.isEmpty {
+                Text(s.oneLiner).font(.system(size: size == .large ? 12.5 : 11.5))
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(size == .large ? 3 : 2).fixedSize(horizontal: false, vertical: true)
             }
-            if !compact, let look = status?.lookAtThis, !look.isEmpty {
-                Text(look).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.textPrimary)
-                    .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            if size == .large, let look = status?.lookAtThis, !look.isEmpty {
+                Text(look).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(2).padding(7).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(tint.opacity(0.12)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(tint.opacity(0.45), lineWidth: 1))
-                    .lineLimit(3)
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(tint.opacity(0.4), lineWidth: 1))
+            }
+            if !small {
+                Text(machineName).font(.system(size: 10)).foregroundStyle(Theme.textTertiary).lineLimit(1)
             }
         }
-        .padding(compact ? 9 : 13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.sidebarBackground.opacity(compact ? 0.4 : 0.7)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(tint.opacity(compact ? 0.15 : 0.4), lineWidth: 1))
-        .opacity(compact ? 0.8 : 1)
+        .padding(small ? 9 : 12)
+        .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.sidebarBackground.opacity(small ? 0.35 : 0.7)))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(tint.opacity(small ? 0.18 : 0.5), lineWidth: small ? 1 : 1.6))
+        .opacity(small ? 0.82 : 1)
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
+        .help(status?.oneLiner ?? session.name)
     }
 
-    private func labelChip(_ s: AgentStatus) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: s.glyph).font(.system(size: 9.5))
-            Text(s.display).font(.system(size: 10.5, weight: .medium))
+    private func chip(_ s: AgentStatus, tiny: Bool) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: s.glyph).font(.system(size: tiny ? 8.5 : 9.5))
+            if !tiny { Text(s.display).font(.system(size: 10.5, weight: .medium)) }
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 7).padding(.vertical, 3)
-        .background(Capsule().fill(tint.opacity(0.15)))
+        .padding(.horizontal, tiny ? 5 : 7).padding(.vertical, tiny ? 2 : 3)
+        .background(Capsule().fill(tint.opacity(0.16)))
     }
 }

@@ -48,7 +48,7 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("p", modifiers: .command)
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
-                Button("Command Center") { state.openWindowRequest = "command-center" }
+                Button("Command Center") { state.showOverview.toggle() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
@@ -116,15 +116,6 @@ struct UniversalTmuxApp: App {
         .defaultSize(width: 1100, height: 760)
         .windowStyle(.hiddenTitleBar)
 
-        Window("Command Center", id: "command-center") {
-            CommandCenterView()
-                .environmentObject(state)
-                .environmentObject(commandCenter)
-                .preferredColorScheme(.dark)
-                .allowsFullScreen()
-        }
-        .defaultSize(width: 920, height: 820)
-        .windowStyle(.hiddenTitleBar)
 
         Settings {
             SettingsView(terminals: terminals, state: state)
@@ -244,6 +235,7 @@ struct HiddenPanelsView: View {
                             ) {
                                 state.unhide(it.ref)
                                 state.selection = it.ref
+                                state.showOverview = false
                                 state.showHiddenPicker = false
                             }
                         }
@@ -355,8 +347,14 @@ struct RootView: View {
                     .frame(maxHeight: .infinity)
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if state.showOverview {
+                    CommandCenterView()
+                } else {
+                    detail
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea() // fill the entire window; columns space their own top edge
@@ -626,7 +624,7 @@ struct RootView: View {
                         unseen: state.unseen.contains(ref.id),
                         folderText: state.folderDisplay((s.path?.isEmpty == false) ? s.path! : "—", isLocal: m.isLocal),
                         selected: state.selection == ref,
-                        onTap: { state.selection = ref },
+                        onTap: { state.selection = ref; state.showOverview = false },
                         onRename: { state.renameText = s.name; state.renameTarget = ref },
                         onKill: { state.killTarget = ref },
                         onCopyName: {
@@ -635,7 +633,7 @@ struct RootView: View {
                         },
                         onHide: { state.hide(ref) },
                         wandbRuns: terminals.wandbRuns(for: ref),
-                        onOpenWandb: { run in state.selection = ref; terminals.showWandb(ref, run: run) },
+                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; terminals.showWandb(ref, run: run) },
                         onClearWandb: { run in terminals.clearWandb(run, for: ref) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
@@ -1099,6 +1097,7 @@ private struct CommandPalette: View {
             if match(ref.session + " " + mn) {
                 out.append(Item(id: "s:" + ref.id, icon: "terminal", title: ref.session, subtitle: mn) {
                     state.selection = ref
+                    state.showOverview = false
                 })
             }
         }
