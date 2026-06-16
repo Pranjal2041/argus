@@ -23,6 +23,16 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// A clicked `localhost:port` dashboard URL on this pane's host — routed to the
     /// embedded Dashboards window (auto-forwarding the port if the host is remote).
     var onOpenLocalhost: ((_ port: Int, _ path: String, _ scheme: String) -> Void)?
+    /// W&B runs this session has advertised in its output (latest last). Fires when
+    /// the detected set changes — drives the in-place W&B webview.
+    var onWandbRuns: (([WandbRun]) -> Void)?
+
+    // Rolling tail of recent output (ANSI intact, decoded lossily on scan) scanned
+    // for W&B run URLs. The raw stream — not the screen — so a URL the terminal
+    // visually wrapped, or one in the connect snapshot's scrollback, is still whole.
+    private var wandbBytes: [UInt8] = []
+    private var wandbScan: DispatchWorkItem?
+    private var wandbLast: [WandbRun] = []
 
     init(url: URL) {
         view = TerminalView(frame: .zero)
@@ -47,7 +57,11 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         view.caretTextColor = Theme.nsCursorText
         view.selectedTextBackgroundColor = Theme.nsSelection
         client.onOutput = { [weak self] bytes in
-            DispatchQueue.main.async { self?.view.feed(byteArray: bytes[...]) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.view.feed(byteArray: bytes[...])
+                self.ingestForWandb(bytes)
+            }
         }
         // The pane's AUTHORITATIVE size (connect + every remote resize): pin the
         // grid to exactly this and ask for a clean repaint. Arrives in stream
@@ -66,6 +80,24 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     }
 
     func disconnect() { client.stop() }
+
+    // MARK: W&B run detection (off the raw output stream)
+
+    private func ingestForWandb(_ bytes: [UInt8]) {
+        wandbBytes.append(contentsOf: bytes)
+        if wandbBytes.count > 64 * 1024 { wandbBytes.removeFirst(wandbBytes.count - 48 * 1024) }
+        wandbScan?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.scanWandb() }
+        wandbScan = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    private func scanWandb() {
+        let runs = WandbDetector.runs(in: String(decoding: wandbBytes, as: UTF8.self))
+        guard runs != wandbLast else { return }   // only on a real change (new run / refined label)
+        wandbLast = runs
+        if !runs.isEmpty { onWandbRuns?(runs) }
+    }
 
     /// Repoint this live connection at the renamed session's URL. The open socket
     /// is left untouched (the broker keeps streaming across the rename); only a
@@ -424,6 +456,46 @@ final class TerminalController: ObservableObject {
     }()
     private var conns: [String: PaneConn] = [:]
     private var lastShownID: String?
+
+    // MARK: W&B runs — detected per session, shown in-place instead of the terminal
+    /// Runs each session advertised (first-seen order; `.last` = latest), keyed by ref.id.
+    @Published var wandbRuns: [String: [WandbRun]] = [:]
+    /// The run currently shown for a session (defaults to the latest). Keyed by ref.id → runId.
+    @Published var wandbCurrent: [String: String] = [:]
+    /// Sessions whose detail pane is currently showing the W&B webview (not the terminal).
+    @Published var wandbShown: Set<String> = []
+
+    func wandbRuns(for ref: SessionRef) -> [WandbRun] { wandbRuns[ref.id] ?? [] }
+    func hasWandb(_ ref: SessionRef) -> Bool { !(wandbRuns[ref.id] ?? []).isEmpty }
+    func isWandbShown(_ ref: SessionRef) -> Bool { wandbShown.contains(ref.id) }
+
+    /// The run to display for a session: the user's pick, else the latest detected.
+    func currentRun(for ref: SessionRef) -> WandbRun? {
+        let runs = wandbRuns[ref.id] ?? []
+        if let id = wandbCurrent[ref.id], let r = runs.first(where: { $0.runId == id }) { return r }
+        return runs.last
+    }
+
+    func setCurrentRun(_ run: WandbRun, for ref: SessionRef) { wandbCurrent[ref.id] = run.runId }
+
+    /// Show the W&B webview for `ref`. With `run`, pin that specific run; without,
+    /// default to the LATEST (unless the user already picked one that still exists,
+    /// which we keep). No-op if the session has advertised no runs yet.
+    func showWandb(_ ref: SessionRef, run: WandbRun? = nil) {
+        let runs = wandbRuns[ref.id] ?? []
+        if let run {
+            wandbCurrent[ref.id] = run.runId                                   // explicit pick
+        } else if wandbCurrent[ref.id] == nil || !runs.contains(where: { $0.runId == wandbCurrent[ref.id] }) {
+            wandbCurrent[ref.id] = runs.last?.runId                            // default / re-default to latest
+        }                                                                       // else: keep the user's earlier pick
+        guard currentRun(for: ref) != nil else { return }
+        wandbShown.insert(ref.id)
+    }
+    func hideWandb(_ ref: SessionRef) { wandbShown.remove(ref.id) }
+    func toggleWandb(_ ref: SessionRef) {
+        if wandbShown.contains(ref.id) { hideWandb(ref) } else { showWandb(ref) }
+    }
+
     @Published var fontSize: CGFloat = {
         let v = UserDefaults.standard.double(forKey: "ut.termFontSize")
         return v >= 8 ? CGFloat(v) : 13.5
@@ -639,6 +711,7 @@ final class TerminalController: ObservableObject {
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
             conn.onOpenLocalhost = { [weak self] port, path, scheme in self?.openLocalhostHandler?(port, path, scheme) }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }
+            conn.onWandbRuns = { [weak self] runs in self?.wandbRuns[ref.id] = runs }
             conn.onScroll = { [weak self] pos in
                 guard let self, ref.id == self.lastShownID else { return }
                 let bottom = pos >= 0.999

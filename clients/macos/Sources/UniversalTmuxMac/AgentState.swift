@@ -118,6 +118,8 @@ struct SessionRow: View {
     var onKill: () -> Void = {}
     var onCopyName: () -> Void = {}
     var onHide: () -> Void = {}
+    var wandbRunsProvider: () -> [WandbRun] = { [] }   // evaluated when the menu opens (no row invalidation)
+    var onOpenWandb: (WandbRun?) -> Void = { _ in }
     var onReveal: (() -> Void)? = nil
     var onRevealFiles: (() -> Void)? = nil
 
@@ -180,6 +182,16 @@ struct SessionRow: View {
         .onTapGesture(perform: onTap)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
         .contextMenu {
+            let runs = wandbRunsProvider()
+            if runs.count == 1 {
+                Button("Open W&B") { onOpenWandb(runs.last) }
+                Divider()
+            } else if runs.count > 1 {
+                Menu("Open W&B") {
+                    ForEach(runs.reversed()) { r in Button(r.label) { onOpenWandb(r) } }
+                }
+                Divider()
+            }
             Button("Hide Panel") { onHide() }
             Button("Rename…") { onRename() }
             Button("Copy Name") { onCopyName() }
