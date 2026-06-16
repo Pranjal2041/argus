@@ -496,6 +496,67 @@ final class TerminalController: ObservableObject {
         if wandbShown.contains(ref.id) { hideWandb(ref) } else { showWandb(ref) }
     }
 
+    // MARK: W&B persistence — a GROWING list that survives buffer-roll AND restarts.
+    // Once a run id is discovered it STAYS (union, never replace) — so it doesn't
+    // vanish when its URL scrolls out of the ~48KB scan buffer, and it's restored on
+    // reopen even if the URL is no longer anywhere in the connect snapshot. Entries
+    // age out 7 days after first discovery (pruned on load), or on a manual clear.
+    // Keyed by SessionRef.id — the same stable key hidden-panels/path-overrides persist by.
+    private let wandbStoreKey = "ut.wandbRuns.v1"
+    private static let wandbTTL: TimeInterval = 7 * 24 * 3600
+
+    private func loadWandb() {
+        guard let data = UserDefaults.standard.data(forKey: wandbStoreKey),
+              let stored = try? JSONDecoder().decode([String: [WandbRun]].self, from: data)
+        else { return }
+        let cutoff = Date().addingTimeInterval(-Self.wandbTTL)
+        var kept: [String: [WandbRun]] = [:]
+        for (key, runs) in stored {
+            let fresh = runs.filter { $0.discoveredAt >= cutoff }
+            if !fresh.isEmpty { kept[key] = fresh }
+        }
+        wandbRuns = kept
+    }
+
+    private func persistWandb() {
+        if let data = try? JSONEncoder().encode(wandbRuns) {
+            UserDefaults.standard.set(data, forKey: wandbStoreKey)
+        }
+    }
+
+    /// Fold newly-detected runs into the session's growing list. Appends genuinely-new
+    /// ids and upgrades a placeholder label (the bare id) once the run's name is
+    /// captured; NEVER drops a run that scrolled out of the buffer. Preserves the
+    /// original first-seen time so the 7-day clock isn't reset by re-detection.
+    func mergeWandb(_ detected: [WandbRun], for ref: SessionRef) {
+        guard !detected.isEmpty else { return }
+        var runs = wandbRuns[ref.id] ?? []
+        var changed = false
+        for d in detected {
+            if let i = runs.firstIndex(where: { $0.runId == d.runId }) {
+                if runs[i].label == runs[i].runId, d.label != d.runId {   // got a real name now
+                    runs[i] = WandbRun(url: runs[i].url, runId: runs[i].runId,
+                                       label: d.label, discoveredAt: runs[i].discoveredAt)
+                    changed = true
+                }
+            } else {
+                runs.append(d)   // new id — d.discoveredAt == now, starts its 7-day clock
+                changed = true
+            }
+        }
+        if changed { wandbRuns[ref.id] = runs; persistWandb() }
+    }
+
+    /// Manually forget a session's detected runs (the user's "clear"). Drops back to
+    /// the terminal if the W&B view was showing one.
+    func clearWandb(_ ref: SessionRef) {
+        guard wandbRuns[ref.id] != nil || wandbShown.contains(ref.id) else { return }
+        wandbRuns[ref.id] = nil
+        wandbCurrent[ref.id] = nil
+        wandbShown.remove(ref.id)
+        persistWandb()
+    }
+
     @Published var fontSize: CGFloat = {
         let v = UserDefaults.standard.double(forKey: "ut.termFontSize")
         return v >= 8 ? CGFloat(v) : 13.5
@@ -520,6 +581,7 @@ final class TerminalController: ObservableObject {
 
     private var keyMonitor: Any?
     init() {
+        loadWandb()   // restore the growing W&B run list (pruning entries >7 days old)
         // Container resize → every pane re-frames (pinned grid or fill) and
         // re-asks for its natural size from the new bounds.
         container.onResize = { [weak self] in
@@ -711,7 +773,7 @@ final class TerminalController: ObservableObject {
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
             conn.onOpenLocalhost = { [weak self] port, path, scheme in self?.openLocalhostHandler?(port, path, scheme) }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }
-            conn.onWandbRuns = { [weak self] runs in self?.wandbRuns[ref.id] = runs }
+            conn.onWandbRuns = { [weak self] runs in self?.mergeWandb(runs, for: ref) }
             conn.onScroll = { [weak self] pos in
                 guard let self, ref.id == self.lastShownID else { return }
                 let bottom = pos >= 0.999

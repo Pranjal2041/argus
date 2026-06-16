@@ -1,11 +1,21 @@
 import Foundation
 
 /// One detected Weights & Biases run advertised by a session's output.
-struct WandbRun: Identifiable, Hashable {
+struct WandbRun: Identifiable, Hashable, Codable {
     let url: URL        // the full URL to open (kept verbatim, minus trailing punctuation)
     let runId: String   // path segment after `/runs/` — the dedup key
     let label: String   // run name if the output named it, else the run id
+    /// When this run was first stored (drives the 7-day expiry). The detector leaves
+    /// this at "now"; the persistent store preserves the ORIGINAL first-seen time when
+    /// it merges a re-detection. Excluded from ==/hash so re-detecting the same run
+    /// (with a fresh timestamp) doesn't read as a change in the scan loop.
+    var discoveredAt: Date = Date()
     var id: String { runId }
+
+    static func == (l: WandbRun, r: WandbRun) -> Bool {
+        l.url == r.url && l.runId == r.runId && l.label == r.label
+    }
+    func hash(into h: inout Hasher) { h.combine(url); h.combine(runId); h.combine(label) }
 }
 
 /// Parses W&B run references out of terminal text. Deliberately a BATTERY of
