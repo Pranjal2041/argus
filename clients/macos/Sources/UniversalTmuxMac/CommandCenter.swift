@@ -222,16 +222,17 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 @MainActor
 final class CommandCenterModel: ObservableObject {
     @Published var statuses: [String: AgentStatus] = [:]   // keyed by SessionRef.id
-    @Published var inflight: Set<String> = []              // updates currently running
+    @Published var inflight: Set<String> = []              // sessions whose status is being regenerated (drives the spinner)
     @Published var costUSD: Double = 0                     // cumulative claude -p spend
     @Published var costCalls: Int = 0
 
     private let provider: AgentStatusProvider = ClaudeStatusProvider()
     private weak var app: AppState?
     private var timer: Timer?
-    private var lastState: [String: String] = [:]
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
-    private let maxConcurrent = 6
+    private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
+    private var claudeInflight = 0              // concurrent model calls (the expensive part)
+    private let maxClaude = 5
     private let storeKey = "ut.ccStatuses.v1"
 
     init() {
@@ -284,28 +285,28 @@ final class CommandCenterModel: ObservableObject {
             for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent {
                 let ref = SessionRef(machineID: m.id, session: s.name)
                 liveKeys.insert(ref.id)
-                let changed = lastState[ref.id] != nil && lastState[ref.id] != s.state
-                lastState[ref.id] = s.state
-                let active = s.state == "working" || s.state == "waiting"
-                let needFirst = statuses[ref.id] == nil
-                if active || changed || needFirst { update(ref: ref, machine: m, name: s.name) }
+                // Re-check EVERY session. update() fetches /recent (cheap) and only spends
+                // a model call when the output actually changed — that's what keeps a status
+                // fresh when an agent finishes / asks / stalls, WITHOUT relying on the dot
+                // (which misclassifies) to decide when to refresh.
+                update(ref: ref, machine: m, name: s.name)
             }
         }
         // Drop status + continuity for sessions that vanished.
         var pruned = false
         for k in Array(statuses.keys) where !liveKeys.contains(k) {
-            statuses[k] = nil; provider.forget(key: k); lastState[k] = nil; lastHash[k] = nil; pruned = true
+            statuses[k] = nil; provider.forget(key: k); lastHash[k] = nil; pruned = true
         }
         if pruned { persist() }
     }
 
     private func update(ref: SessionRef, machine: Machine, name: String) {
-        guard !inflight.contains(ref.id), inflight.count < maxConcurrent else { return }
-        inflight.insert(ref.id)
+        guard !busy.contains(ref.id) else { return }   // one op per session; NO global cap on the cheap fetch
+        busy.insert(ref.id)
         let key = ref.id, httpBase = machine.httpBase
         Task { [weak self] in
             guard let self else { return }
-            defer { self.inflight.remove(key) }
+            defer { self.busy.remove(key) }
             guard let output = await Self.fetchRecent(httpBase: httpBase, session: name),
                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 NSLog("[cc] %@ recent empty/failed", key); return
@@ -314,9 +315,16 @@ final class CommandCenterModel: ObservableObject {
             // summary — ignoring the ticking working-footer. Saves cost + UI churn.
             let h = self.contentKey(output)
             if self.lastHash[key] == h { return }
-            guard let status = await self.provider.status(forKey: key, output: output) else {
-                NSLog("[cc] %@ claude returned nil", key); return
-            }
+            // Output changed → needs a model call. Cap concurrent model calls only;
+            // if full, bail WITHOUT setting lastHash so this session retries next tick
+            // (no starvation — every session keeps getting fetched + a fair shot).
+            guard self.claudeInflight < self.maxClaude else { return }
+            self.claudeInflight += 1
+            self.inflight.insert(key)
+            let status = await self.provider.status(forKey: key, output: output)
+            self.claudeInflight -= 1
+            self.inflight.remove(key)
+            guard let status else { NSLog("[cc] %@ claude returned nil", key); return }
             self.lastHash[key] = h
             self.statuses[key] = status
             self.costUSD = self.provider.spendUSD
