@@ -344,6 +344,28 @@ func (m *Manager) Stream(ctx context.Context, w io.Writer, flush func(), name st
 	return nil
 }
 
+// capturer is the optional capability a backend implements to return a session's
+// recent scrollback as plain text. tmux implements it; conpty (Windows) does not
+// yet, so /recent is a no-op there until added.
+type capturer interface {
+	Capture(name string, lines int) (string, error)
+}
+
+// Recent returns a session's recent rendered output for the command-center status
+// updater. Errors if the session is gone or the backend can't capture. This DOES
+// fork tmux capture-pane on the request path (unlike /sessions), so the caller
+// must rate-limit it (the client polls per active session on a ~30s cadence).
+func (m *Manager) Recent(name string, lines int) (string, error) {
+	if !m.prov.Has(name) {
+		return "", fmt.Errorf("no such session: %q", name)
+	}
+	c, ok := m.prov.(capturer)
+	if !ok {
+		return "", fmt.Errorf("capture not supported on this backend")
+	}
+	return c.Capture(name, lines)
+}
+
 // Sessions returns the cached session list (refreshed in the background). Always
 // fast — it never calls the provider on the request path.
 func (m *Manager) Sessions() []session.Info {

@@ -98,6 +98,28 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.Sessions()})
 	})
+	// /recent — a session's recent rendered scrollback as plain text, for the
+	// macOS command center's status updater (claude -p reads it). ?session=NAME
+	// &lines=N (default 400). Forks capture-pane per call, so clients must poll
+	// it sparingly (per active session, ~30s).
+	mux.HandleFunc("/recent", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		q := r.URL.Query()
+		name := q.Get("session")
+		if name == "" {
+			name = *session
+		}
+		lines, _ := strconv.Atoi(q.Get("lines"))
+		text, err := mgr.Recent(name, lines)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, text)
+	})
 	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

@@ -44,6 +44,21 @@ type Provider struct{ socket string }
 func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
 func (p *Provider) List() []SessionInfo                  { return ListSessions(p.socket) }
+
+// Capture returns a session's recent scrollback as plain rendered text (no
+// escapes) — `capture-pane -p -S -<lines>`. Feeds the macOS command center's
+// status updater. lines<=0 uses a sane default; the call is bounded and runs
+// off the request path's hot loop (the broker rate-limits it).
+func (p *Provider) Capture(name string, lines int) (string, error) {
+	if lines <= 0 {
+		lines = 400
+	}
+	out, err := exec.Command("tmux", tmuxArgs(p.socket, "capture-pane", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name)...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
 func (p *Provider) Create(name, dir string) error       { return CreateSession(p.socket, name, dir) }
 func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
 	return SpawnSession(p.socket, name, dir, cmd, idleSec)
