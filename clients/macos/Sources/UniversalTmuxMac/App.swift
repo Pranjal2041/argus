@@ -8,6 +8,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var files = FilesModel()   // shared so "Reveal in Files" + the window use one instance
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
+    @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +18,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(files)
                 .environmentObject(dashboards)
                 .environmentObject(notebooks)
+                .environmentObject(wandb)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -65,6 +67,8 @@ struct UniversalTmuxApp: App {
                 // ⇧⌘M (markdown/math) — ⇧⌘P belongs to Claude Code inside the terminal.
                 Button("Render Output…") { state.renderText = terminals.renderableText() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
+                Button("W&B Run ⇄ Terminal") { if let sel = state.selection { terminals.toggleWandb(sel) } }
+                    .keyboardShortcut("w", modifiers: [.control, .command])
                 Divider()
                 Button("Increase Font Size") { terminals.adjustFont(1) }
                     .keyboardShortcut("=", modifiers: .command)
@@ -299,6 +303,7 @@ struct RootView: View {
     @EnvironmentObject var files: FilesModel
     @EnvironmentObject var dashboards: DashboardsModel
     @EnvironmentObject var notebooks: NotebooksModel
+    @EnvironmentObject var wandb: WandbController
     @Environment(\.displayScale) private var displayScale
     @Environment(\.openWindow) private var openWindow
     @State private var newName = ""
@@ -615,6 +620,8 @@ struct RootView: View {
                             NSPasteboard.general.setString(s.name, forType: .string)
                         },
                         onHide: { state.hide(ref) },
+                        wandbRunsProvider: { terminals.wandbRuns(for: ref) },
+                        onOpenWandb: { run in state.selection = ref; terminals.showWandb(ref, run: run) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
                             : nil,
@@ -677,8 +684,14 @@ struct RootView: View {
             if let nb = notebooks.active {
                 NotebookPaneView(tab: nb.tab)
             } else if let ref = state.selection {
-                TerminalHostView(controller: terminals, ref: ref, url: state.wsURL(for: ref))
-                    .padding(EdgeInsets(top: 8, leading: Theme.contentInset, bottom: 8, trailing: Theme.contentInset))
+                if terminals.isWandbShown(ref), terminals.currentRun(for: ref) != nil {
+                    // W&B run, in place of the terminal. The terminal PaneConn stays
+                    // alive (cached) in the background, so output + detection continue.
+                    WandbPaneView(controller: wandb, terminals: terminals, ref: ref)
+                } else {
+                    TerminalHostView(controller: terminals, ref: ref, url: state.wsURL(for: ref))
+                        .padding(EdgeInsets(top: 8, leading: Theme.contentInset, bottom: 8, trailing: Theme.contentInset))
+                }
             } else {
                 emptyGuidance
             }
