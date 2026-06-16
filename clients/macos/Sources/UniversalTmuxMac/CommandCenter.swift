@@ -412,8 +412,10 @@ struct CommandCenterView: View {
 
     var body: some View {
         let all = tiles
-        let needsYou = all.filter { $0.priority <= 1 }
-        let rest     = all.filter { $0.priority > 1 }
+        let backlogged = all.filter { state.backlog.contains($0.ref.id) }
+        let activeT    = all.filter { !state.backlog.contains($0.ref.id) }
+        let needsYou = activeT.filter { $0.priority <= 1 }
+        let rest     = activeT.filter { $0.priority > 1 }
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 glance(needsYou: needsYou.count, rest: rest.count)
@@ -424,6 +426,10 @@ struct CommandCenterView: View {
                 if !rest.isEmpty {
                     header("All sessions", rest.count)
                     grid(rest, minWidth: 270, size: .medium)
+                }
+                if !backlogged.isEmpty {
+                    header("Backlog", backlogged.count)
+                    grid(backlogged, minWidth: 240, size: .medium).opacity(0.6)
                 }
                 if all.isEmpty {
                     Text("No sessions.").foregroundStyle(Theme.textTertiary)
@@ -468,7 +474,9 @@ struct CommandCenterView: View {
             ForEach(items) { t in
                 AgentTileView(machineName: t.machineName, session: t.session,
                               unseen: state.unseen.contains(t.ref.id), status: t.status,
-                              inflight: t.inflight, size: size) {
+                              inflight: t.inflight, size: size,
+                              backlogged: state.backlog.contains(t.ref.id),
+                              onBacklog: { state.toggleBacklog(t.ref) }) {
                     state.selection = t.ref
                     state.showOverview = false
                 }
@@ -485,6 +493,8 @@ struct AgentTileView: View {
     let status: AgentStatus?
     let inflight: Bool
     let size: Size
+    let backlogged: Bool
+    let onBacklog: () -> Void
     let onOpen: () -> Void
 
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
@@ -536,6 +546,13 @@ struct AgentTileView: View {
                 Spacer(minLength: 6)
                 if inflight { ProgressView().controlSize(.small).scaleEffect(0.6) }
                 chip.fixedSize().layoutPriority(1)   // never clip the status
+                Button(action: onBacklog) {
+                    Image(systemName: backlogged ? "checkmark.circle.fill" : "circle")
+                        .font(cf(13))
+                        .foregroundStyle(backlogged ? Theme.attached : Theme.textTertiary.opacity(0.55))
+                }
+                .buttonStyle(.plain)
+                .help(backlogged ? "Remove from backlog" : "Backlog — set aside")
             }
             Text(summary)
                 .font(cf(isLarge ? 13.5 : 13))

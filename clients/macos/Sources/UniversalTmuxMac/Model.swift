@@ -102,7 +102,7 @@ final class AppState: ObservableObject {
     @Published var findFocusToken = 0     // bumped to (re)focus the find field
     @Published var showPalette = false
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
-    @Published var showOverview = true          // command-center panel is the home view (⇧⌘O); set false when diving into a session
+    @Published var showOverview = true          // command-center panel is the home view (⇧⌘A); set false when diving into a session
     @Published var renderText: String?    // non-nil → the Renders panel is up with this snapshot
     @Published var searchFocusToken = 0   // bumped to request focusing the filter field
     @Published var isRefreshing = false
@@ -134,6 +134,18 @@ final class AppState: ObservableObject {
     @Published var showHiddenPicker = false
 
     func isHidden(_ ref: SessionRef) -> Bool { hiddenSessions.contains(ref.id) }
+
+    /// Sessions the user has "ticked" to set aside in the command center — they drop
+    /// out of the attention bands into a separate Backlog group (still visible, unlike
+    /// a full hide). Persisted, keyed by SessionRef.id.
+    @Published var backlog: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "ut.backlog") ?? []) {
+        didSet { UserDefaults.standard.set(Array(backlog), forKey: "ut.backlog") }
+    }
+    func isBacklogged(_ ref: SessionRef) -> Bool { backlog.contains(ref.id) }
+    func toggleBacklog(_ ref: SessionRef) {
+        if backlog.contains(ref.id) { backlog.remove(ref.id) } else { backlog.insert(ref.id) }
+    }
 
     /// Hide a session from the sidebar. If it was selected, move selection to the
     /// first still-visible session so the detail pane never shows a hidden panel.
