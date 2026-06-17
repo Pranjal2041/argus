@@ -26,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -40,11 +41,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private val fInk = Color(0xFF0D0E12)
-private val fPanel = Color(0xFF16161E)
-private val fAccent = Color(0xFF7AA2F7)
-private val fDim = Color(0xFF9AA5CE)
-private val fFaint = Color(0xFF565F89)
+private val fInk: Color @Composable get() = LocalTheme.current.bgDeep
+private val fPanel: Color @Composable get() = LocalTheme.current.panel
+private val fAccent: Color @Composable get() = LocalTheme.current.accent
+private val fDim: Color @Composable get() = LocalTheme.current.dim
+private val fFaint: Color @Composable get() = LocalTheme.current.faint
+private val fText: Color @Composable get() = LocalTheme.current.text
+private val fBorder: Color @Composable get() = LocalTheme.current.border
+private val fBad: Color @Composable get() = LocalTheme.current.bad
+private val fPanelAlt: Color @Composable get() = LocalTheme.current.panelAlt
 
 private enum class Kind { TEXT, IMAGE, PDF, BINARY }
 private class OpenFile(
@@ -201,7 +206,7 @@ fun FilesScreen(vm: AppViewModel) {
                 Row(Modifier.clickable { menuOpen = true }, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Dns, null, tint = fAccent, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(broker.name, color = Color.White, fontSize = 15.sp)
+                    Text(broker.name, color = fText, fontSize = 15.sp)
                     Icon(Icons.Filled.ArrowDropDown, null, tint = fDim)
                 }
                 DropdownMenu(menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -216,7 +221,7 @@ fun FilesScreen(vm: AppViewModel) {
             IconButton(onClick = { showNewFolder = true }) { Icon(Icons.Filled.CreateNewFolder, "New folder", tint = fDim) }
             IconButton(onClick = { scope.launch { ctrl.go(ctrl.path) } }) { Icon(Icons.Filled.Refresh, "Refresh", tint = fDim) }
         }
-        Divider(color = Color(0xFF2A2B3C))
+        Divider(color = fBorder)
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { scope.launch { ctrl.up() } }, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Filled.ArrowUpward, "Up", tint = fDim, modifier = Modifier.size(18.dp))
@@ -225,7 +230,7 @@ fun FilesScreen(vm: AppViewModel) {
             Text(ctrl.path.ifEmpty { "Computer" }, color = fDim, fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Divider(color = Color(0xFF2A2B3C))
+        Divider(color = fBorder)
 
         if (searching) {
             OutlinedTextField(
@@ -252,7 +257,7 @@ fun FilesScreen(vm: AppViewModel) {
                         Icon(if (e.isDir) Icons.Filled.Folder else Icons.Filled.InsertDriveFile, null,
                             tint = if (e.isDir) fAccent else fDim, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(12.dp))
-                        Text(e.name, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp,
+                        Text(e.name, color = fText.copy(alpha = 0.9f), fontSize = 14.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         if (!e.isDir) Text(byteSize(e.size), color = fFaint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                         Box {
@@ -263,11 +268,11 @@ fun FilesScreen(vm: AppViewModel) {
                                 DropdownMenuItem(text = { Text("Open") }, onClick = { rowMenu = false; scope.launch { ctrl.openEntry(e) } })
                                 if (!e.isDir) DropdownMenuItem(text = { Text("Download") }, onClick = { rowMenu = false; download(e.path, e.name) })
                                 DropdownMenuItem(text = { Text("Rename…") }, onClick = { rowMenu = false; renameTarget = e })
-                                DropdownMenuItem(text = { Text("Delete", color = Color(0xFFF7768E)) }, onClick = { rowMenu = false; deleteTarget = e })
+                                DropdownMenuItem(text = { Text("Delete", color = fBad) }, onClick = { rowMenu = false; deleteTarget = e })
                             }
                         }
                     }
-                    Divider(color = Color(0xFF1E1F2B))
+                    Divider(color = fPanelAlt)
                 }
             }
         }
@@ -280,7 +285,7 @@ fun FilesScreen(vm: AppViewModel) {
             onDismissRequest = { deleteTarget = null },
             title = { Text("Delete “${e.name}”?") },
             text = { Text(if (e.isDir) "This folder and everything in it will be permanently deleted." else "This file will be permanently deleted.", color = fDim) },
-            confirmButton = { TextButton(onClick = { scope.launch { ctrl.delete(e) }; deleteTarget = null }) { Text("Delete", color = Color(0xFFF7768E)) } },
+            confirmButton = { TextButton(onClick = { scope.launch { ctrl.delete(e) }; deleteTarget = null }) { Text("Delete", color = fBad) } },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
         )
     }
@@ -297,7 +302,7 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
     Column(Modifier.fillMaxSize().background(fInk)) {
         Row(Modifier.fillMaxWidth().background(fPanel).padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back", tint = fDim) }
-            Text(file.name, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(file.name, color = fText, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             if (file.kind == Kind.TEXT || file.kind == Kind.IMAGE) {
                 IconButton(onClick = { if (file.kind == Kind.TEXT) fontSize = (fontSize - 1).coerceAtLeast(7f) else scale = (scale / 1.25f).coerceAtLeast(0.25f) }) {
                     Icon(Icons.Filled.Remove, "Smaller", tint = fDim)
@@ -322,12 +327,12 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
                 if (editing) {
                     BasicTextField(
                         value = draft, onValueChange = { draft = it },
-                        textStyle = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace, fontSize = fontSize.sp),
+                        textStyle = TextStyle(color = fText, fontFamily = FontFamily.Monospace, fontSize = fontSize.sp),
                         cursorBrush = androidx.compose.ui.graphics.SolidColor(fAccent),
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
                     )
                 } else {
-                    Text(file.text ?: "", color = Color.White.copy(alpha = 0.92f), fontFamily = FontFamily.Monospace, fontSize = fontSize.sp,
+                    Text(file.text ?: "", color = fText.copy(alpha = 0.92f), fontFamily = FontFamily.Monospace, fontSize = fontSize.sp,
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp))
                 }
             }
@@ -350,7 +355,7 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
             Kind.PDF -> {
                 val pages = file.pages.orEmpty()
                 if (pages.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Couldn't render PDF", color = fDim) }
-                else LazyColumn(Modifier.fillMaxSize().background(Color(0xFF202020))) {
+                else LazyColumn(Modifier.fillMaxSize().background(fPanelAlt)) {
                     items(pages) { bmp ->
                         androidx.compose.foundation.Image(
                             bitmap = bmp.asImageBitmap(), contentDescription = null,
@@ -370,7 +375,7 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
 private fun TransferBanner(verb: String, name: String, prog: Float) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
         Text("$verb $name… ${(prog * 100).toInt()}%", color = fDim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Box(Modifier.fillMaxWidth().padding(top = 5.dp).height(3.dp).background(Color(0xFF2A2B3C), RoundedCornerShape(2.dp))) {
+        Box(Modifier.fillMaxWidth().padding(top = 5.dp).height(3.dp).background(fBorder, RoundedCornerShape(2.dp))) {
             Box(Modifier.fillMaxWidth(prog.coerceIn(0f, 1f)).height(3.dp).background(fAccent, RoundedCornerShape(2.dp)))
         }
     }

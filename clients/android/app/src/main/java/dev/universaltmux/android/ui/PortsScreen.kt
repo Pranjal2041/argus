@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -25,12 +26,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val pInk = Color(0xFF0D0E12)
-private val pPanel = Color(0xFF16161E)
-private val pAccent = Color(0xFF7AA2F7)
-private val pLive = Color(0xFF61D6AA)
-private val pDim = Color(0xFF9AA5CE)
-private val pFaint = Color(0xFF565F89)
+private val pInk: Color @Composable get() = LocalTheme.current.bgDeep
+private val pPanel: Color @Composable get() = LocalTheme.current.panel
+private val pAccent: Color @Composable get() = LocalTheme.current.accent
+private val pLive: Color @Composable get() = LocalTheme.current.live
+private val pDim: Color @Composable get() = LocalTheme.current.dim
+private val pFaint: Color @Composable get() = LocalTheme.current.faint
+private val pText: Color @Composable get() = LocalTheme.current.text
+private val pBorder: Color @Composable get() = LocalTheme.current.border
+private val pBad: Color @Composable get() = LocalTheme.current.bad
+private val pPanelAlt: Color @Composable get() = LocalTheme.current.panelAlt
+private val pWaiting: Color @Composable get() = LocalTheme.current.waiting
 
 /** One active local-port -> remote-broker tunnel running on the phone. */
 class ActiveForward(
@@ -109,7 +115,7 @@ fun PortsScreen(vm: AppViewModel) {
                 Row(Modifier.clickable { menuOpen = true }, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Dns, null, tint = pAccent, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(broker.name, color = Color.White, fontSize = 15.sp)
+                    Text(broker.name, color = pText, fontSize = 15.sp)
                     Icon(Icons.Filled.ArrowDropDown, null, tint = pDim)
                 }
                 DropdownMenu(menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -119,7 +125,7 @@ fun PortsScreen(vm: AppViewModel) {
             Spacer(Modifier.weight(1f))
             IconButton(onClick = { scope.launch { reload() } }) { Icon(Icons.Filled.Refresh, "Refresh", tint = pDim) }
         }
-        Divider(color = Color(0xFF2A2B3C))
+        Divider(color = pBorder)
 
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
             if (Forwards.active.isNotEmpty()) {
@@ -132,16 +138,16 @@ fun PortsScreen(vm: AppViewModel) {
                         Box(Modifier.size(8.dp).background(healthColor(af.health), RoundedCornerShape(4.dp)))
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(if (af.label.isNotEmpty()) af.label else "${af.brokerName}:${af.remotePort}", color = Color.White, fontSize = 14.sp)
+                            Text(if (af.label.isNotEmpty()) af.label else "${af.brokerName}:${af.remotePort}", color = pText, fontSize = 14.sp)
                             Text("${af.brokerName}:${af.remotePort} → localhost:${af.localPort}  ·  ${af.health}",
                                 color = pDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         TextButton(onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://localhost:${af.localPort}"))) }) {
                             Text("Open", color = pAccent)
                         }
-                        IconButton(onClick = { Forwards.stop(af) }) { Icon(Icons.Filled.StopCircle, "Stop", tint = Color(0xFFF7768E)) }
+                        IconButton(onClick = { Forwards.stop(af) }) { Icon(Icons.Filled.StopCircle, "Stop", tint = pBad) }
                     }
-                    Divider(color = Color(0xFF1E1F2B))
+                    Divider(color = pPanelAlt)
                 }
             }
 
@@ -163,12 +169,12 @@ fun PortsScreen(vm: AppViewModel) {
                         }.padding(vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("${p.port}", color = Color.White, fontSize = 14.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(64.dp))
+                        Text("${p.port}", color = pText, fontSize = 14.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(64.dp))
                         Text(p.process.ifEmpty { p.address }, color = pDim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         if (forwarded) Text("forwarding", color = pLive, fontSize = 11.sp)
                         else Icon(Icons.Filled.ArrowForward, "Forward", tint = pFaint, modifier = Modifier.size(18.dp))
                     }
-                    Divider(color = Color(0xFF1E1F2B))
+                    Divider(color = pPanelAlt)
                 }
             }
         }
@@ -185,10 +191,11 @@ fun PortsScreen(vm: AppViewModel) {
 }
 
 /** Dot color for a forward's live health: green=live, amber=connecting, red=broken. */
+@Composable
 private fun healthColor(h: String) = when (h) {
     "live" -> pLive
-    "broken" -> Color(0xFFF7768E)
-    else -> Color(0xFFE0AF68)
+    "broken" -> pBad
+    else -> pWaiting
 }
 
 @Composable

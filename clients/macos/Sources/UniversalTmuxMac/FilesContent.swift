@@ -4,7 +4,7 @@ import PDFKit
 import SwiftUI
 import WebKit
 
-private let paneBG = NSColor(red: 0.051, green: 0.055, blue: 0.071, alpha: 1)
+private var paneBG: NSColor { Theme.nsAppBackground }   // themed (was hardcoded #0d0e12)
 private let editorBaseFont: CGFloat = 13   // CM6 base size; preview zoom multiplies it
 
 // MARK: - CodeMirror 6 (text viewer/editor) in a WKWebView

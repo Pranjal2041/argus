@@ -37,6 +37,19 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     private var wandbTail = ""
     private var wandbScan: DispatchWorkItem?
 
+    /// (Re)apply the active theme to this pane's terminal. Called at creation and again
+    /// whenever the user switches themes — recolors in place, no reconnect, scrollback kept.
+    func applyTheme() {
+        view.installColors(Theme.ansi16)
+        view.nativeBackgroundColor = Theme.nsAppBackground
+        view.nativeForegroundColor = Theme.nsForeground
+        view.caretColor = Theme.nsCursor
+        view.caretTextColor = Theme.nsCursorText
+        view.selectedTextBackgroundColor = Theme.nsSelection
+        view.layer?.backgroundColor = Theme.nsAppBackground.cgColor
+        view.needsDisplay = true
+    }
+
     init(url: URL) {
         view = TerminalView(frame: .zero)
         client = BrokerClient(url: url)
@@ -51,14 +64,9 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // still drives the agent fully. (Could become a per-session toggle.)
         view.allowMouseReporting = false
         view.getTerminal().changeScrollback(100_000) // large client-side scrollback (default is 500)
-        // Seamless theme: terminal background == window background (no seam on
-        // switch), Tokyo-Night-ish 16-color ANSI, periwinkle caret.
-        view.installColors(Theme.ansi16)
-        view.nativeBackgroundColor = Theme.nsAppBackground
-        view.nativeForegroundColor = Theme.nsForeground
-        view.caretColor = Theme.nsCursor
-        view.caretTextColor = Theme.nsCursorText
-        view.selectedTextBackgroundColor = Theme.nsSelection
+        // Seamless theme: terminal background == window background. Applied here and
+        // re-applied live on theme switch (see applyTheme + TerminalController).
+        applyTheme()
         client.onOutput = { [weak self] bytes in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -601,6 +609,13 @@ final class TerminalController: ObservableObject {
     private var keyMonitor: Any?
     init() {
         loadWandb()   // restore the growing W&B run list (pruning entries >7 days old)
+        // Live re-theme: when the user picks a theme, recolor every cached pane IN PLACE
+        // (no reconnect, scrollback kept) plus the container background.
+        NotificationCenter.default.addObserver(forName: .utThemeChanged, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.container.layer?.backgroundColor = Theme.nsAppBackground.cgColor
+            self.conns.values.forEach { $0.applyTheme() }
+        }
         // Container resize → every pane re-frames (pinned grid or fill) and
         // re-asks for its natural size from the new bounds.
         container.onResize = { [weak self] in

@@ -50,6 +50,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var engineStatus by mutableStateOf("off")
 
+    /** Selected color theme (default: Argus = exact current look). Persisted; reading
+     *  `theme` in a composable recomposes the UI when it changes. */
+    var themeId by mutableStateOf(prefs.getString("themeId", "argus") ?: "argus")
+        private set
+    val theme: ThemePalette get() = ThemePalette.byId(themeId)
+    fun selectTheme(id: String) {
+        if (id == themeId) return
+        themeId = id
+        prefs.edit().putString("themeId", id).apply()
+    }
+
     /** Whether agent-spawned (`ut spawn`) sessions show in the list. They're
      *  background jobs — hidden by default, revealed by the settings toggle.
      *  Persisted; flipping it re-filters the list and the attention inbox. */

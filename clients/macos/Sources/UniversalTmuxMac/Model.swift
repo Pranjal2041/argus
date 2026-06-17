@@ -132,6 +132,8 @@ final class AppState: ObservableObject {
     }
     /// Drives the ⇧⌘B "Hidden Panels" restore sheet.
     @Published var showHiddenPicker = false
+    /// Drives the ⇧⌘T theme picker sheet.
+    @Published var showThemePicker = false
 
     func isHidden(_ ref: SessionRef) -> Bool { hiddenSessions.contains(ref.id) }
 

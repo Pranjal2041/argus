@@ -7,6 +7,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.inputmethod.InputMethodManager
+import androidx.compose.ui.graphics.toArgb
+import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import okhttp3.Request
@@ -50,8 +52,38 @@ class RemoteTerminal(
         }
     }
 
+    @Volatile private var pendingTheme: ThemePalette = ThemePalette.argus
+    private var appliedThemeId: String? = null
+
+    /** Write the active theme into the emulator's color table. Argus → reset() (the
+     *  Termux defaults = the original look, unchanged); other themes → their ANSI + fg/bg/
+     *  cursor. No-op until the emulator exists; onChanged re-applies once it does. */
+    private fun applyColors() {
+        val em = session.emulator ?: return
+        val p = pendingTheme
+        if (p.id == "argus") {
+            em.mColors.reset()
+        } else {
+            val c = em.mColors.mCurrentColors
+            for (i in 0 until 16) c[i] = p.ansi[i].toArgb()
+            c[TextStyle.COLOR_INDEX_FOREGROUND] = p.termFg.toArgb()
+            c[TextStyle.COLOR_INDEX_BACKGROUND] = p.termBg.toArgb()
+            c[TextStyle.COLOR_INDEX_CURSOR] = p.termCursor.toArgb()
+        }
+        appliedThemeId = p.id
+    }
+
+    /** Switch this terminal to a theme (call on open + when the user picks one). */
+    fun applyTheme(p: ThemePalette) {
+        pendingTheme = p
+        main.post { applyColors(); view.onScreenUpdated() }
+    }
+
     private val sessionClient = makeSessionClient(
-        onChanged = { main.post { view.onScreenUpdated() } },
+        onChanged = { main.post {
+            if (appliedThemeId != pendingTheme.id) applyColors()   // first frame after connect / theme change
+            view.onScreenUpdated()
+        } },
         onCopy = { },
     )
     val session = TerminalSession(10_000, sessionClient, bridge)

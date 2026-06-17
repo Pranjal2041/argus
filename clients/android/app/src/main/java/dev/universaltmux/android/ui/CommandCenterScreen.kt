@@ -21,18 +21,20 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val ccInk = Color(0xFF1A1B26)
-private val ccPanel = Color(0xFF1E1F2B)
-private val ccText = Color(0xFFC0CAF5)
-private val ccDim = Color(0xFF9AA5CE)
-private val ccFaint = Color(0xFF565F89)
-private val cWorking = Color(0xFF7AA2F7)
-private val cWaiting = Color(0xFFE0AF68)
-private val cMilestone = Color(0xFF9ECE6A)
-private val cBad = Color(0xFFF7768E)
-private val cLook = Color(0xFF7DCFFF)
-private val cDrift = Color(0xFFFF9F40)
-private val cIdle = Color(0xFF565F89)
+// Themed colors (default Argus = the original values). @Composable getters so all the
+// existing references resolve against the active theme.
+private val ccInk: Color @Composable get() = LocalTheme.current.bg
+private val ccPanel: Color @Composable get() = LocalTheme.current.panelAlt
+private val ccText: Color @Composable get() = LocalTheme.current.text
+private val ccDim: Color @Composable get() = LocalTheme.current.dim
+private val ccFaint: Color @Composable get() = LocalTheme.current.faint
+private val cWorking: Color @Composable get() = LocalTheme.current.working
+private val cWaiting: Color @Composable get() = LocalTheme.current.waiting
+private val cMilestone: Color @Composable get() = LocalTheme.current.milestone
+private val cBad: Color @Composable get() = LocalTheme.current.bad
+private val cLook: Color @Composable get() = LocalTheme.current.look
+private val cDrift: Color @Composable get() = LocalTheme.current.unseen
+private val cIdle: Color @Composable get() = LocalTheme.current.idle
 
 private data class CCTile(val b: Broker, val s: SessionInfo, val st: AgentCardStatus?)
 
@@ -52,6 +54,7 @@ private fun sectionFor(state: String, label: String?): Int = when (label) {
     else -> when (state) { "waiting" -> SEC_NEEDS; "working" -> SEC_WORKING; else -> SEC_DONE }
 }
 
+@Composable
 private fun ccTint(state: String, label: String?): Color = when (label) {
     "needs-decision" -> cWaiting
     "look" -> cLook
@@ -66,6 +69,7 @@ private fun ccTint(state: String, label: String?): Color = when (label) {
 /** The DETERMINISTIC tmux state dot (mirrors the sidebar): blue=working,
  *  orange=finished-unseen, amber=waiting, grey=idle. Shown next to the model chip so a
  *  mess is visible at a glance even when the summary reads fine. */
+@Composable
 private fun stateDot(state: String, unseen: Boolean): Color = when {
     state == "working" -> cWorking
     unseen -> cDrift

@@ -589,7 +589,7 @@ struct AgentTileView: View {
         switch status?.label {
         case "needs-decision": return Theme.waiting
         case "look":           return Theme.accent
-        case "stuck", "no-progress": return SwiftUI.Color(red: 0.90, green: 0.42, blue: 0.42)
+        case "stuck", "no-progress": return Theme.unreachable
         case "drifting":       return Theme.unseen
         case "milestone":      return Theme.attached
         case "working":        return Theme.running
