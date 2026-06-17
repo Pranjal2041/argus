@@ -264,6 +264,26 @@ type Manager struct {
 	// the broker look "unreachable" to a client with a request timeout).
 	sessMu    sync.Mutex
 	sessCache []session.Info
+
+	// Command-center status blob: opaque JSON the macOS client publishes (the
+	// per-session AI status summaries) and other clients (phone) read back. The
+	// broker is a dumb relay here — it never parses or interprets the blob.
+	ccMu   sync.Mutex
+	ccBlob []byte
+}
+
+// SetCommandCenter stores the latest command-center status blob (from the Mac).
+func (m *Manager) SetCommandCenter(b []byte) {
+	m.ccMu.Lock()
+	m.ccBlob = b
+	m.ccMu.Unlock()
+}
+
+// CommandCenter returns the last published status blob (or nil if none yet).
+func (m *Manager) CommandCenter() []byte {
+	m.ccMu.Lock()
+	defer m.ccMu.Unlock()
+	return m.ccBlob
 }
 
 func NewManager(ctx context.Context, prov session.Provider) *Manager {

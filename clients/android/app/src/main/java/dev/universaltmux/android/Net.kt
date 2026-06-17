@@ -42,6 +42,15 @@ data class SessionInfo(
     val agent: Boolean = false,   // created by the mesh (ut spawn): hidden unless "Show agent sessions"
 )
 
+/** One session's AI status, published by the macOS client and read here. */
+data class AgentCardStatus(
+    val session: String,
+    val label: String,
+    val summary: String,
+    val lookAtThis: String?,
+    val updatedAt: Double,
+)
+
 data class FileEntry(
     val name: String,
     val path: String,       // absolute, platform-native
@@ -106,6 +115,22 @@ object Net {
     } catch (_: Exception) {
         null
     }
+
+    /** Command-center statuses this broker holds (published by the Mac), keyed by
+     *  session name. Returns empty if the broker has none / doesn't support it. */
+    fun ccStatus(b: Broker): List<AgentCardStatus> = try {
+        val req = Request.Builder().url("${b.httpBase}/ccstatus").build()
+        client.newCall(req).execute().use { r ->
+            val arr = JSONObject(r.body!!.string()).optJSONArray("items") ?: return emptyList()
+            (0 until arr.length()).map { i ->
+                val e = arr.getJSONObject(i)
+                AgentCardStatus(
+                    e.optString("session"), e.optString("label"), e.optString("summary"),
+                    e.optString("lookAtThis").ifEmpty { null }, e.optDouble("updatedAt", 0.0),
+                )
+            }
+        }
+    } catch (_: Exception) { emptyList() }
 
     fun control(b: Broker, action: String, session: String, dir: String?) {
         try {

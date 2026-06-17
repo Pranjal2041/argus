@@ -1,0 +1,187 @@
+package dev.universaltmux.android
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.outlined.Circle
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+private val ccInk = Color(0xFF1A1B26)
+private val ccPanel = Color(0xFF1E1F2B)
+private val ccText = Color(0xFFC0CAF5)
+private val ccDim = Color(0xFF9AA5CE)
+private val ccFaint = Color(0xFF565F89)
+private val cWorking = Color(0xFF7AA2F7)
+private val cWaiting = Color(0xFFE0AF68)
+private val cMilestone = Color(0xFF9ECE6A)
+private val cBad = Color(0xFFF7768E)
+private val cLook = Color(0xFF7DCFFF)
+private val cDrift = Color(0xFFFF9F40)
+private val cIdle = Color(0xFF565F89)
+
+private data class CCTile(val b: Broker, val s: SessionInfo, val st: AgentCardStatus?)
+
+// The fixed sections, top to bottom. A card moves between these only when its status
+// genuinely changes category — never from a flapping label or a text update, because
+// the flappy labels (idle/look/milestone) all live in ONE section, and within a section
+// cards are ordered by name (stable). So nothing shuffles ad-hoc while you watch.
+private const val SEC_NEEDS = 0   // needs-decision, stuck — act now
+private const val SEC_DONE = 1    // milestone, look, idle — finished / quiet
+private const val SEC_WORKING = 2 // working, drifting — running on its own
+private const val SEC_BACKLOG = 3 // set aside
+
+private fun sectionFor(state: String, label: String?): Int = when (label) {
+    "needs-decision", "stuck" -> SEC_NEEDS
+    "working", "drifting", "no-progress" -> SEC_WORKING
+    "milestone", "look", "idle" -> SEC_DONE
+    else -> when (state) { "waiting" -> SEC_NEEDS; "working" -> SEC_WORKING; else -> SEC_DONE }
+}
+
+private fun ccTint(state: String, label: String?): Color = when (label) {
+    "needs-decision" -> cWaiting
+    "look" -> cLook
+    "stuck", "no-progress" -> cBad
+    "drifting" -> cDrift
+    "milestone" -> cMilestone
+    "working" -> cWorking
+    "idle" -> cIdle
+    else -> when (state) { "waiting" -> cWaiting; "working" -> cWorking; else -> cIdle }
+}
+
+/** The DETERMINISTIC tmux state dot (mirrors the sidebar): blue=working,
+ *  orange=finished-unseen, amber=waiting, grey=idle. Shown next to the model chip so a
+ *  mess is visible at a glance even when the summary reads fine. */
+private fun stateDot(state: String, unseen: Boolean): Color = when {
+    state == "working" -> cWorking
+    unseen -> cDrift
+    state == "waiting" -> cWaiting
+    else -> cIdle
+}
+
+private fun ccChip(state: String, label: String?): String = when (label) {
+    "needs-decision" -> "needs you"; "look" -> "worth a look"; "milestone" -> "milestone"
+    "stuck" -> "stuck"; "drifting" -> "drifting"; "no-progress" -> "no progress"
+    "working" -> "working"; "idle" -> "idle"
+    else -> when (state) { "waiting" -> "needs you"; "working" -> "working"; else -> "idle" }
+}
+
+@Composable
+fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
+    // Read observable state in the composable body (restartable scope) so the list
+    // rebuilds when sessions / statuses / backlog change.
+    val showAgent = vm.showAgentSessions
+    val tiles = vm.brokers.toList().flatMap { b ->
+        vm.sessions[b.id].orEmpty().filter { showAgent || !it.agent }.map { s -> CCTile(b, s, vm.ccFor(b, s.name)) }
+    }
+    // Group into the fixed sections by CURRENT status; within a section order by name
+    // (stable). A card only moves when its category actually changes — never ad-hoc.
+    fun section(t: CCTile) = if (vm.isBacklogged(t.b, t.s.name)) SEC_BACKLOG else sectionFor(t.s.state, t.st?.label)
+    val grouped = tiles.groupBy { section(it) }
+    val needsCount = grouped[SEC_NEEDS].orEmpty().size
+    val sections = listOf(
+        SEC_NEEDS to "Needs you", SEC_DONE to "Done & idle", SEC_WORKING to "Working", SEC_BACKLOG to "Backlog",
+    )
+
+    LazyColumn(Modifier.fillMaxSize().background(ccInk).padding(horizontal = 12.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Command Center", color = ccText, fontSize = 19.sp)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    if (needsCount == 0) "all ${tiles.size} quiet" else "$needsCount need you · ${tiles.size - needsCount} other",
+                    color = if (needsCount == 0) ccFaint else cWaiting, fontSize = 12.sp,
+                )
+            }
+        }
+        if (tiles.isEmpty()) {
+            item {
+                val engineOff = vm.engineStatus != "up"
+                Text(
+                    if (engineOff)
+                        "Tailnet engine is \"${vm.engineStatus}\" — discovery is off, so there are no sessions.\n\nOpen ☰ (top-left) → Auth Key, paste your tailnet auth key, then tap \"Join & discover\".\n\n(The saved key gets cleared whenever the app is uninstalled/reinstalled — e.g. switching signing keys.)"
+                    else
+                        "No sessions found. Open ☰ to add a broker, or check that your brokers are running.",
+                    color = ccDim, fontSize = 13.sp, modifier = Modifier.padding(24.dp),
+                )
+            }
+        }
+        sections.forEach { (sec, title) ->
+            val cards = grouped[sec].orEmpty().sortedBy { it.s.name }
+            if (cards.isNotEmpty()) {
+                item(key = "hdr-$sec") { CCHeader(title, cards.size) }
+                items(cards, key = { it.b.id + "/" + it.s.name }) {
+                    CCCard(vm, it, large = (sec == SEC_NEEDS), dim = (sec == SEC_BACKLOG), onOpen = onOpen)
+                }
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun CCHeader(title: String, n: Int) {
+    Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title.uppercase(), color = ccDim, fontSize = 11.sp)
+        Spacer(Modifier.width(6.dp))
+        Text("$n", color = ccFaint, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun CCCard(vm: AppViewModel, t: CCTile, large: Boolean, dim: Boolean = false, onOpen: (Broker, String) -> Unit) {
+    val st = t.st
+    val tint = ccTint(t.s.state, st?.label)
+    val backlogged = vm.isBacklogged(t.b, t.s.name)
+    val look = st?.lookAtThis
+    val hasSummary = !st?.summary.isNullOrBlank()
+    val summary = if (hasSummary) st!!.summary else "no status yet"
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            .background(ccPanel, RoundedCornerShape(12.dp))
+            .clickable { onOpen(t.b, t.s.name) }
+            .alpha(if (dim) 0.6f else 1f)
+            .padding(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(9.dp).background(stateDot(t.s.state, vm.isUnseen(t.b, t.s.name)), RoundedCornerShape(5.dp)))
+            Spacer(Modifier.width(8.dp))
+            Text(t.s.name, color = ccText, fontSize = if (large) 16.sp else 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            Text(
+                ccChip(t.s.state, st?.label), color = tint, fontSize = 11.sp,
+                modifier = Modifier.background(tint.copy(alpha = 0.16f), RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 2.dp),
+            )
+            IconButton(onClick = { vm.toggleBacklog(t.b, t.s.name) }, modifier = Modifier.size(30.dp)) {
+                Icon(
+                    if (backlogged) Icons.Filled.CheckCircle else Icons.Outlined.Circle,
+                    contentDescription = "Backlog", tint = if (backlogged) cMilestone else ccFaint,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+        Text(t.b.name, color = ccFaint, fontSize = 11.sp, maxLines = 1, modifier = Modifier.padding(start = 17.dp))
+        Spacer(Modifier.height(6.dp))
+        Text(summary, color = if (hasSummary) ccDim else ccFaint, fontSize = if (large) 13.sp else 12.sp, maxLines = if (large) 6 else 4)
+        if (large && !look.isNullOrBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                look, color = ccText, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 4,
+                modifier = Modifier.fillMaxWidth().background(tint.copy(alpha = 0.12f), RoundedCornerShape(6.dp)).padding(8.dp),
+            )
+        }
+    }
+}

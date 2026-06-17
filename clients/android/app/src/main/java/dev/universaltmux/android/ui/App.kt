@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
@@ -58,7 +59,7 @@ fun App(vm: AppViewModel) {
         var showKey by remember { mutableStateOf(false) }
         var newSessionFor by remember { mutableStateOf<Broker?>(null) }
         var showAbout by remember { mutableStateOf(false) }
-        var screen by remember { mutableStateOf(0) }   // 0 = terminal, 1 = files, 2 = ports
+        var screen by remember { mutableStateOf(3) }   // 0 = terminal, 1 = files, 2 = ports, 3 = command center (home)
         var showFind by remember { mutableStateOf(false) }
         var renderText by remember { mutableStateOf<String?>(null) }  // non-nil → Renders overlay
 
@@ -73,6 +74,7 @@ fun App(vm: AppViewModel) {
                 var tick = 0
                 while (true) {
                     if (TsnetCore.isUp && tick % 5 == 0) vm.refreshAll() else vm.pollKnown()
+                    vm.refreshCC()   // pull the Mac-published statuses for the command center
                     tick++
                     delay(3000)
                 }
@@ -108,6 +110,7 @@ fun App(vm: AppViewModel) {
                                 when {
                                     screen == 1 -> "Files"
                                     screen == 2 -> "Ports"
+                                    screen == 3 -> "Argus"
                                     sel != null -> "${sel.second}  ·  ${sel.first.name}"
                                     else -> "Argus"
                                 },
@@ -128,6 +131,9 @@ fun App(vm: AppViewModel) {
                                     Icon(Icons.Filled.AutoAwesome, "Render", tint = Color.White)
                                 }
                             }
+                            IconButton(onClick = { screen = if (screen == 3) 0 else 3 }) {
+                                Icon(Icons.Filled.GridView, "Command Center", tint = if (screen == 3) accent else Color.White)
+                            }
                             IconButton(onClick = { screen = if (screen == 1) 0 else 1 }) {
                                 Icon(if (screen == 1) Icons.Filled.Terminal else Icons.Filled.Folder,
                                     "Files", tint = if (screen == 1) accent else Color.White)
@@ -146,6 +152,8 @@ fun App(vm: AppViewModel) {
                         FilesScreen(vm)
                     } else if (screen == 2) {
                         PortsScreen(vm)
+                    } else if (screen == 3) {
+                        CommandCenterScreen(vm) { b, s -> vm.selected = b to s; screen = 0 }
                     } else {
                         val sel = vm.selected
                         if (sel == null) {

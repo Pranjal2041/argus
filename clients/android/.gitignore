@@ -9,3 +9,4 @@ app/libs/*.aar
 *.jks
 *.keystore
 keystore.properties
+.kotlin/

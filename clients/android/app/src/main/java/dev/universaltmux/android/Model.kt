@@ -177,6 +177,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --- command center ----------------------------------------------------
+
+    /** AI statuses published by the Mac, read per broker. Key = "<brokerId>/<session>". */
+    val ccStatus = mutableStateMapOf<String, AgentCardStatus>()
+    private fun ccKey(b: Broker, name: String) = "${b.id}/$name"
+    fun ccFor(b: Broker, name: String): AgentCardStatus? = ccStatus[ccKey(b, name)]
+
+    /** Pull each broker's /ccstatus and merge (each broker holds only its own sessions). */
+    fun refreshCC() {
+        brokers.toList().forEach { b ->
+            viewModelScope.launch {
+                val items = withContext(Dispatchers.IO) { Net.ccStatus(b) }
+                val prefix = "${b.id}/"
+                val live = HashSet<String>()
+                items.forEach { val k = ccKey(b, it.session); ccStatus[k] = it; live.add(k) }
+                ccStatus.keys.filter { it.startsWith(prefix) && it !in live }.forEach { ccStatus.remove(it) }
+            }
+        }
+    }
+
+    /** Sessions the user has "ticked" to set aside in the command center. Key = "<id> name". */
+    val backlog = mutableStateListOf<String>().also { it.addAll((prefs.getString("backlog", "") ?: "").split("\n").filter(String::isNotEmpty)) }
+    private fun blKey(b: Broker, name: String) = "${b.id} $name"
+    fun isBacklogged(b: Broker, name: String) = backlog.contains(blKey(b, name))
+    fun toggleBacklog(b: Broker, name: String) {
+        val k = blKey(b, name)
+        if (backlog.contains(k)) backlog.remove(k) else backlog.add(k)
+        prefs.edit().putString("backlog", backlog.joinToString("\n")).apply()
+    }
+
     fun rename(b: Broker, from: String, to: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { Net.rename(b, from, to) }

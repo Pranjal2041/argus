@@ -6,7 +6,7 @@ import Foundation
 /// A status for one agent session, produced by the status updater (claude -p).
 /// This is the inferred layer that sits on top of the deterministic dot.
 struct AgentStatus: Equatable, Codable {
-    var label: String        // model token: working/needs-decision/look/milestone/stuck/drifting/no-progress/idle
+    var label: String        // model token: needs-decision/stuck/drifting/working/look/milestone/idle (no-progress legacy)
     var oneLiner: String     // short plain description of what the agent is doing
     var lookAtThis: String?  // a line worth seeing now, quoted verbatim — or nil
     var updatedAt: Date
@@ -89,9 +89,9 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
 
     func status(forKey key: String, output: String) async -> AgentStatus? {
-        // Bound the prompt (cost + avoid a stdin pipe stall): the last ~24KB of
-        // scrollback is enough conversation context for a good summary.
-        let prompt = String(output.suffix(24_000))
+        // Bound the prompt to the recent tail (cost + focus): the last ~14KB keeps the
+        // model on the CURRENT state rather than diluting it with old scrollback.
+        let prompt = String(output.suffix(14_000))
 
         // Decide create-vs-resume; reset periodically to bound context growth.
         lock.lock()
@@ -103,15 +103,22 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         else { uuid = UUID().uuidString.lowercased(); resuming = false; sessions[key] = (uuid, 1) }
         lock.unlock()
 
-        var args = ["-p", "--model", model, "--output-format", "json", "--system-prompt", Self.systemPrompt]
-        args += resuming ? ["--resume", uuid] : ["--session-id", uuid]
-
-        guard let out = await Self.runClaude(args: args, stdin: prompt),
-              let env = Self.envelope(out),
-              let status = Self.parseStatus(env.result)
-        else { return nil }
-        recordCost(env.cost)
-        return status
+        // Up to 2 attempts: a transient API/connection error (ECONNRESET, overloaded)
+        // shouldn't leave the card stale until the next 30s sweep. After the first
+        // attempt the claude session exists, so the retry --resume's it.
+        for attempt in 0..<2 {
+            var args = ["-p", "--model", model, "--output-format", "json", "--system-prompt", Self.systemPrompt]
+            args += (resuming || attempt > 0) ? ["--resume", uuid] : ["--session-id", uuid]
+            if let out = await Self.runClaude(args: args, stdin: prompt), let env = Self.envelope(out) {
+                recordCost(env.cost)
+                if let status = Self.parseStatus(env.result) { return status }
+            }
+            if attempt == 0 {
+                NSLog("[cc] %@ status attempt failed — retrying in 3s", key)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
+        return nil
     }
 
     // MARK: claude invocation
@@ -185,35 +192,54 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     }
 
     private static let systemPrompt = """
-    You are the status monitor for ONE terminal pane in a dashboard of many running agents (Claude Code, Codex, training jobs, shells). You are given that session's recent scrollback — which INCLUDES the user's own messages to the agent, so use it to infer the task the user gave and report where it stands. Across calls you keep seeing this same session, so maintain a running understanding of its trajectory.
+    You are the at-a-glance status for ONE agent session in a command center where the user runs many coding/research agents and cannot watch them all. In one glance, tell them the ONE thing that matters about THIS agent right now, relative to what they asked it to do — like a sharp collaborator glancing over their shoulder.
 
-    Reply with ONLY a single-line JSON object, nothing else:
-    {"label":"<LABEL>","summary":"<2 to 4 sentences>","lookAtThis":<string or null>}
+    You get the recent scrollback, which includes the USER'S OWN MESSAGES (their instructions) and the agent's work; the bottom is the present. First infer what the user asked this agent to do, then report where it stands ON THAT TASK and what, if anything, the user needs to know or do.
 
-    LABEL — exactly one:
-    - "needs-decision": the agent is genuinely BLOCKED on the user — a numbered choice menu ("❯ 1. Yes / 2. No"), an explicit question awaiting an answer, or a permission prompt with options.
-    - "milestone": just finished something notable (tests passed, run/epoch completed, PR opened, task done).
-    - "look": mid-task it produced a result, finding, or decision the user would want to see now.
-    - "stuck": repeating, looping, or hitting the same error with no progress.
-    - "drifting": working on something off the task the user actually asked for.
-    - "no-progress": active but spinning with nothing to show.
-    - "working": actively making progress.
-    - "idle": nothing happening / sitting at a shell prompt.
+    Reply with ONLY one line of JSON: {"label":"<LABEL>","summary":"<1-3 sentences>","lookAtThis":<string or null>}
 
-    CRITICAL — agent-UI conventions you MUST NOT misread as blocking:
-    - "esc to interrupt" or "/stop to interrupt" anywhere on screen = the agent is ACTIVELY WORKING. Never label that "needs-decision".
-    - "bypass permissions on (shift+tab to cycle)", "? for shortcuts", a blinking composer prompt, the model name, token/context counters = permanent UI chrome. They are NOT a block and NOT worth surfacing.
-    - Only "needs-decision" when there is a REAL choice or question the agent is waiting on.
+    READING THE SCREEN CORRECTLY (this is where mistakes happen):
+    - The bottom-most line that looks like "❯ <some text>" sitting just above the "⏵⏵ bypass permissions…" status bar is the LIVE INPUT BOX. The text in it is very often an AUTO-GENERATED suggestion (ghost text the agent proposes, like "yes go ahead", "continue", "yes please"). It is NOT something the user typed and NOT an approval. NEVER treat that composer line as a user message, an answer, or a go-ahead.
+    - The user's REAL messages are earlier in the transcript, each one followed by the agent actually acting on it. If the agent asked a question and the next thing is just the input box (no agent work after it, no "esc to interrupt"), then the user has NOT answered yet — the agent is WAITING ON THE USER.
+    - "esc to interrupt" / "/stop to interrupt" on screen = the agent is generating right now (working). Its ABSENCE means the agent is not currently generating.
 
-    summary: 2–4 plain sentences with real substance — what the agent is working on (the user's task), what it has done or found recently, and what's happening right now. Be concrete: names, numbers, files, errors. If something notable happened earlier in the transcript that the user likely hasn't seen, keep surfacing it until it's clearly resolved — don't only describe the last line.
+    The summary is INSIGHT, not a recap:
+    - Lead with the meaningful state: the key result/finding it produced, the decision it's waiting on, whether it finished, or where it's stuck — relative to the user's task.
+    - Concrete: real numbers, results, filenames, the actual question. Skip routine steps and tool chatter.
+    - Surface any loose end that needs the user — a pending approval, an unanswered question it asked, a known blocker. That is often the single most useful thing to say.
+    - NO FILLER. Never write "ready for next task", "awaiting command", "ready for you to try", "sitting at the prompt", or restate routine steps.
 
-    lookAtThis: usually null. Set it ONLY for a specific moment the user would want to see right now — a real question to answer, a key result/number, a risky or irreversible action, a blocking error. Quote or tightly paraphrase it. NEVER terminal chrome, footers, or mode indicators. If nothing qualifies, null.
+    BACKGROUND JOBS: a long-running job whose output is VISIBLY PROGRESSING — a training run with a climbing step count, a sweep with a rising %, an rsync with files ticking up, fresh log lines — counts as ACTIVE even when the agent itself is idle at the prompt; report the job's state and progress ("training step 393/400, val healthy"), label working. BUT: a count of shells or processes merely existing ("17 shells still running") is NOT progress and NOT "working" on its own — only count a job as active if its output is actually advancing. And a pending question to the user (see below) ALWAYS takes priority over a running job.
 
-    Be accurate over dramatic. Output one line of JSON.
+    SUB-AGENTS: an agent that spawned its own background sub-agents and is "Waiting for N background agents to finish" (you'll see a list of running sub-tasks / "↓ to manage" / "← for agents") is WORKING — it delegated the work and is waiting on ITS OWN agents, NOT on you. This is NEVER needs-decision. Summarize what the sub-agents are doing.
+
+    LABEL — work down this list IN ORDER and pick the FIRST that applies. Do not skip ahead.
+    1. needs-decision: the agent asked the user a question or asked for approval / a choice, and has NOT yet been answered (no agent work after it, no "esc to interrupt"). The auto-suggested ghost text in the input box does NOT count as an answer — if the agent asked and is sitting there, it is waiting on the user.
+    2. stuck: a visible error or blocker it cannot get past.
+    3. drifting: clearly off-track or churning without making progress (only if obvious).
+    4. working: the agent is generating now ("esc to interrupt" present), OR a background job's output is visibly advancing (see BACKGROUND JOBS).
+    5. look: nothing is running, but a notable or surprising result is on screen the user should see (no decision needed).
+    6. milestone: nothing is running, but a substantial deliverable just landed — an experiment finished with findings, a PR merged, a feature built and tested. NOT a routine one-line commit or minor edit.
+    7. idle: none of the above — at the prompt, nothing running or advancing, last action minor or the task quietly done. Do not invent importance.
+
+    Only labels 1-3 mean "the user should look now"; reserve them for when they genuinely apply. Among 4-7, if unsure, it does not matter much — do not agonize.
+
+    Ignore as chrome: "bypass permissions…", "? for shortcuts", the model name, token/context counters, "/clear to save Xk tokens".
+
+    lookAtThis: usually null. Only set it to the single most important current line — quote it verbatim. Otherwise null.
     """
 }
 
 // MARK: - Controller
+
+/// File logger for diagnosing the command-center sweep — NSLog does not surface to
+/// `log show`/stderr when the app is launched via `open`. Appends to /tmp/argus_cc.log.
+func ccLog(_ s: String) {
+    guard let data = (String(format: "%.0f ", Date().timeIntervalSince1970) + s + "\n").data(using: .utf8) else { return }
+    let url = URL(fileURLWithPath: "/tmp/argus_cc.log")
+    if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(data); try? h.close() }
+    else { try? data.write(to: url) }
+}
 
 /// Drives the command center: every 30s (and for any session whose dot just changed),
 /// pulls recent output from each active session's broker and asks the provider for a
@@ -230,6 +256,7 @@ final class CommandCenterModel: ObservableObject {
     private weak var app: AppState?
     private var timer: Timer?
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
+    private var lastOKAt: [String: Double] = [:] // when each session was last successfully summarized (for fair scheduling)
     private var lastDot: [String: String] = [:] // last seen dot state — a flip forces a refresh
     private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
     private var claudeInflight = 0              // concurrent model calls (the expensive part)
@@ -271,6 +298,7 @@ final class CommandCenterModel: ObservableObject {
     func bind(_ app: AppState) { self.app = app }
 
     func start() {
+        ccLog("start() called (timer already? \(timer != nil))")
         guard timer == nil else { return }
         pulse()   // immediate first pass (every session is "new" → summarized)
         // Fast pulse: cheaply watch for dot flips every 5s and force an immediate
@@ -283,10 +311,15 @@ final class CommandCenterModel: ObservableObject {
     func stop() { timer?.invalidate(); timer = nil }
 
     private func pulse() {
-        guard let app else { return }
+        guard let app else { ccLog("pulse: app nil (not bound)"); return }
         pulseN += 1
         let fullSweep = (pulseN % 6 == 0)   // content-driven refresh ~every 30s
+        if fullSweep {
+            let nonAgent = app.machines.reduce(0) { $0 + (app.sessionsByMachine[$1.id]?.filter { !$0.agent }.count ?? 0) }
+            ccLog("pulse n=\(pulseN) machines=\(app.machines.count) sessions=\(nonAgent)")
+        }
         var liveKeys = Set<String>()
+        var candidates: [(ref: SessionRef, machine: Machine, name: String, force: Bool)] = []
         for m in app.machines {
             for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent {
                 let ref = SessionRef(machineID: m.id, session: s.name)
@@ -297,10 +330,15 @@ final class CommandCenterModel: ObservableObject {
                 // 30s window). Otherwise the 30s sweep re-checks content and refreshes only
                 // if the output actually changed.
                 if dotChanged || fullSweep {
-                    update(ref: ref, machine: m, name: s.name, force: dotChanged)
+                    candidates.append((ref, m, s.name, dotChanged))
                 }
             }
         }
+        // Fair scheduling: only `maxClaude` model calls run concurrently, so issue them
+        // LEAST-RECENTLY-SUMMARIZED first. Machine order put local sessions first, so they
+        // grabbed every slot and remote (babel) sessions were perpetually `gated`/starved.
+        candidates.sort { (lastOKAt[$0.ref.id] ?? 0) < (lastOKAt[$1.ref.id] ?? 0) }
+        for c in candidates { update(ref: c.ref, machine: c.machine, name: c.name, force: c.force) }
         guard fullSweep else { return }
         // Drop status + continuity for sessions that vanished.
         var pruned = false
@@ -308,6 +346,7 @@ final class CommandCenterModel: ObservableObject {
             statuses[k] = nil; provider.forget(key: k); lastHash[k] = nil; lastDot[k] = nil; pruned = true
         }
         if pruned { persist() }
+        publish()   // keep the broker blob fresh for the phone each sweep
     }
 
     private func update(ref: SessionRef, machine: Machine, name: String, force: Bool = false) {
@@ -317,37 +356,70 @@ final class CommandCenterModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             defer { self.busy.remove(key) }
+            ccLog("sweep \(key) base=\(httpBase) force=\(force)")
             guard let output = await Self.fetchRecent(httpBase: httpBase, session: name),
                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                ccLog("FETCH-FAIL \(key) base=\(httpBase)")
                 NSLog("[cc] %@ recent empty/failed", key); return
             }
+            ccLog("fetch-ok \(key) len=\(output.count)")
             // Skip the (paid) model call when the output is unchanged since the last
             // summary — ignoring the ticking working-footer. Saves cost + UI churn.
             // `force` (a dot flip) bypasses this so the transition refreshes immediately.
             let h = self.contentKey(output)
-            if !force && self.lastHash[key] == h { return }
+            if !force && self.lastHash[key] == h { ccLog("skip-unchanged \(key)"); return }
             // Output changed → needs a model call. Cap concurrent model calls only;
             // if full, bail WITHOUT setting lastHash so this session retries next tick
             // (no starvation — every session keeps getting fetched + a fair shot).
-            guard self.claudeInflight < self.maxClaude else { return }
+            guard self.claudeInflight < self.maxClaude else { ccLog("gated \(key)"); return }
             self.claudeInflight += 1
             self.inflight.insert(key)
             let status = await self.provider.status(forKey: key, output: output)
             self.claudeInflight -= 1
             self.inflight.remove(key)
-            guard let status else { NSLog("[cc] %@ claude returned nil", key); return }
+            guard let status else { ccLog("claude-nil \(key)"); NSLog("[cc] %@ claude returned nil", key); return }
+            ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
             self.lastHash[key] = h
+            self.lastOKAt[key] = Date().timeIntervalSince1970
             self.statuses[key] = status
             self.costUSD = self.provider.spendUSD
             self.costCalls = self.provider.callCount
             self.persist()
+            self.publish()
             NSLog("[cc] %@ -> [%@] %@", key, status.label, status.oneLiner)
+        }
+    }
+
+    /// Publish the current status map to the LOCAL broker so other clients (the phone)
+    /// can read it via GET /ccstatus. Keyed by machine name + session so any client can
+    /// match it to its own session list. ("Mac publishes, phone reads.")
+    private func publish() {
+        guard let app else { return }
+        struct Item: Encodable {
+            let session: String; let label: String; let summary: String
+            let lookAtThis: String?; let updatedAt: Double
+        }
+        // Per-broker: each broker stores ITS sessions' statuses, keyed by session name.
+        // The phone reads each broker's /ccstatus and joins by name — no cross-client
+        // machine-name ambiguity (the Mac calls its host "this mac"; the phone sees a
+        // tailnet hostname for the same broker).
+        for m in app.machines {
+            var items: [Item] = []
+            for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent {
+                guard let st = statuses[SessionRef(machineID: m.id, session: s.name).id] else { continue }
+                items.append(Item(session: s.name, label: st.label, summary: st.oneLiner,
+                                  lookAtThis: st.lookAtThis, updatedAt: st.updatedAt.timeIntervalSince1970))
+            }
+            guard let url = URL(string: m.httpBase + "/ccstatus"),
+                  let body = try? JSONEncoder().encode(["items": items]) else { continue }
+            var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 6
+            URLSession.shared.dataTask(with: req).resume()
         }
     }
 
     private static func fetchRecent(httpBase: String, session: String) async -> String? {
         guard let enc = session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "\(httpBase)/recent?session=\(enc)&lines=500") else { return nil }
+              let url = URL(string: "\(httpBase)/recent?session=\(enc)&lines=300") else { return nil }
         var req = URLRequest(url: url); req.timeoutInterval = 8
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
@@ -359,21 +431,24 @@ final class CommandCenterModel: ObservableObject {
 
 /// Lower sorts first (more of your attention). The model's label is the PRIMARY
 /// signal — the dot is only a fallback when there's no status yet, since the dot
-/// misclassifies often. needs-you items land at priority <= 1 (the top band).
-func attentionPriority(state: String, status: AgentStatus?) -> Int {
+/// misclassifies often. Only the must-act labels (needs-decision, stuck) land in the
+/// top band (priority <= 1). The "no action needed" labels (look/milestone/idle) all
+/// share ONE bucket (5) on purpose: the label can wobble between them on the same
+/// unchanged screen, so giving them equal priority keeps a card from jumping around —
+/// only its tint shifts, never its position. working sits just above (active now).
+/// The command-center SECTION a session belongs to (the user-visible grouping):
+/// 0 = needs you, 1 = done/idle, 2 = working. Backlog (3) is a user choice handled by
+/// the view. A card moves between sections only when its category genuinely changes;
+/// the flappy labels (idle/look/milestone) all map to ONE section and within a section
+/// cards are ordered by name, so nothing reshuffles from a label flap or a text update.
+func ccSection(state: String, status: AgentStatus?) -> Int {
     switch status?.label {
-    case "needs-decision": return 0
-    case "look":           return 1
-    case "stuck":          return 2
-    case "no-progress", "drifting": return 3
-    case "milestone":      return 4
-    case "working":        return 5
-    case "idle":           return 8
+    case "needs-decision", "stuck":            return 0   // act now
+    case "working", "drifting", "no-progress": return 2   // running on its own
+    case "milestone", "look", "idle":          return 1   // done / quiet
     default: break   // no status yet → lean on the dot
     }
-    if state == "waiting" { return 0 }
-    if state == "working" { return 6 }
-    return 9
+    switch state { case "waiting": return 0; case "working": return 2; default: return 1 }
 }
 
 // MARK: - View
@@ -391,7 +466,7 @@ struct CommandCenterView: View {
 
     private struct Tile: Identifiable {
         let ref: SessionRef; let machineName: String; let session: SessionInfo
-        let status: AgentStatus?; let inflight: Bool; let priority: Int
+        let status: AgentStatus?; let inflight: Bool; let section: Int
         var id: String { ref.id }
     }
 
@@ -404,33 +479,26 @@ struct CommandCenterView: View {
                 let st = cc.statuses[ref.id]
                 out.append(Tile(ref: ref, machineName: m.name, session: s, status: st,
                                 inflight: cc.inflight.contains(ref.id),
-                                priority: attentionPriority(state: s.state, status: st)))
+                                section: ccSection(state: s.state, status: st)))
             }
         }
-        return out.sorted { ($0.priority, $0.session.name) < ($1.priority, $1.session.name) }
+        // Name-ordered so each section reads stably; section grouping happens in the body.
+        return out.sorted { $0.session.name < $1.session.name }
     }
+
+    /// The section a tile is shown under — backlog (a user choice) overrides its status.
+    private func displaySection(_ t: Tile) -> Int { state.backlog.contains(t.ref.id) ? 3 : t.section }
 
     var body: some View {
         let all = tiles
-        let backlogged = all.filter { state.backlog.contains($0.ref.id) }
-        let activeT    = all.filter { !state.backlog.contains($0.ref.id) }
-        let needsYou = activeT.filter { $0.priority <= 1 }
-        let rest     = activeT.filter { $0.priority > 1 }
+        let needsCount = all.filter { displaySection($0) == 0 }.count
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                glance(needsYou: needsYou.count, rest: rest.count)
-                if !needsYou.isEmpty {
-                    header("Needs you", needsYou.count)
-                    grid(needsYou, minWidth: 360, size: .large)
-                }
-                if !rest.isEmpty {
-                    header("All sessions", rest.count)
-                    grid(rest, minWidth: 270, size: .medium)
-                }
-                if !backlogged.isEmpty {
-                    header("Backlog", backlogged.count)
-                    grid(backlogged, minWidth: 240, size: .medium).opacity(0.6)
-                }
+                glance(needsYou: needsCount, rest: all.count - needsCount)
+                sectionBlock(0, "Needs you",   .large,  360, in: all)
+                sectionBlock(1, "Done & idle", .medium, 270, in: all)
+                sectionBlock(2, "Working",     .medium, 270, in: all)
+                sectionBlock(3, "Backlog",     .medium, 240, in: all)
                 if all.isEmpty {
                     Text("No sessions.").foregroundStyle(Theme.textTertiary)
                         .frame(maxWidth: .infinity).padding(.top, 60)
@@ -441,8 +509,22 @@ struct CommandCenterView: View {
             .padding(.top, 34)   // clear the window's title/traffic-light zone
         }
         .background(Theme.appBackground)
+        // The model is started app-wide (App.swift) so it keeps running when this page is
+        // not visible. start() is idempotent; we deliberately do NOT stop() on disappear.
         .onAppear { cc.bind(state); cc.start() }
-        .onDisappear { cc.stop() }
+    }
+
+    /// One section: header + grid, in fixed position. Cards within are name-ordered (from
+    /// `tiles`), so a status change can move a card to a DIFFERENT section but never
+    /// reshuffles cards within one — no ad-hoc jumping while you watch.
+    private func sectionBlock(_ id: Int, _ title: String, _ size: AgentTileView.Size, _ minW: CGFloat, in all: [Tile]) -> some View {
+        let cards = all.filter { displaySection($0) == id }
+        return Group {
+            if !cards.isEmpty {
+                header(title, cards.count)
+                grid(cards, minWidth: minW, size: size).opacity(id == 3 ? 0.6 : 1)
+            }
+        }
     }
 
     private func glance(needsYou: Int, rest: Int) -> some View {
@@ -521,6 +603,15 @@ struct AgentTileView: View {
         }
     }
 
+    /// The leading dot is the DETERMINISTIC state, resolved with the EXACT SAME logic
+    /// as the sidebar dot so the two always agree — including ORANGE for "done, unseen"
+    /// (a turn finished on a pane you haven't opened). blue = working, orange = done-unseen,
+    /// green = idle/ready.
+    private var stateDot: SwiftUI.Color {
+        AgentIndicatorStyle.resolve(state: AgentState(raw: session.state),
+                                    attached: session.attached, unseen: unseen).color
+    }
+
     private var chipGlyph: String {
         if let s = status { return s.glyph }
         switch session.state { case "working": return "gearshape.fill"; case "waiting": return "questionmark.circle.fill"; default: return "circle" }
@@ -538,7 +629,8 @@ struct AgentTileView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6 * uiScale) {
             HStack(spacing: 7) {
-                Circle().fill(tint).frame(width: 8, height: 8)   // small secondary cue, not the whole signal
+                Circle().fill(stateDot).frame(width: 9, height: 9)   // deterministic tmux state — glanceable next to the model chip
+                    .help("state: \(session.state)")
                 Text(session.name).font(cf(isLarge ? 16 : 15, .semibold))
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Text(machineName).font(cf(11)).foregroundStyle(Theme.textTertiary)

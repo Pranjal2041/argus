@@ -49,7 +49,7 @@ struct UniversalTmuxApp: App {
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Command Center") { state.showOverview.toggle() }
-                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
