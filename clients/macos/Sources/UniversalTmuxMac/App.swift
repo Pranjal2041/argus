@@ -10,10 +10,11 @@ struct UniversalTmuxApp: App {
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
+    @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            ThemedRoot()
                 .environmentObject(state)
                 .environmentObject(terminals)
                 .environmentObject(files)
@@ -21,8 +22,9 @@ struct UniversalTmuxApp: App {
                 .environmentObject(notebooks)
                 .environmentObject(wandb)
                 .environmentObject(commandCenter)
+                .environmentObject(themeStore)
                 .frame(minWidth: 980, minHeight: 600)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
         }
         .defaultSize(width: 1440, height: 900)
         .commands {
@@ -50,6 +52,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Command Center") { state.showOverview.toggle() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                Button("Theme…") { state.showThemePicker = true }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
@@ -301,6 +305,22 @@ private func showAbout() {
         .credits: credits,
     ])
     NSApp.activate(ignoringOtherApps: true)
+}
+
+/// Wraps RootView so the chrome rebuilds on a theme switch (`.id(themeID)` → every
+/// `Theme.X` is re-read) while the theme picker — hosted HERE, outside that `.id` — stays
+/// open so you can flip through themes and watch the app recolor. Terminals recolor
+/// separately via the `.utThemeChanged` notification (their views are cached, not rebuilt).
+struct ThemedRoot: View {
+    @EnvironmentObject var state: AppState
+    @EnvironmentObject var themeStore: ThemeStore
+    var body: some View {
+        RootView()
+            .id(themeStore.themeID)
+            .sheet(isPresented: $state.showThemePicker) {
+                ThemePickerView().environmentObject(themeStore)
+            }
+    }
 }
 
 struct RootView: View {
@@ -1345,7 +1365,7 @@ struct WindowAccessor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
         DispatchQueue.main.async {
-            NSApp.appearance = NSAppearance(named: .darkAqua)
+            NSApp.appearance = NSAppearance(named: Theme.current.isLight ? .aqua : .darkAqua)
             guard let w = v.window else { return }
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden

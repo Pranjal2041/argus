@@ -7,18 +7,21 @@ import SwiftUI
 // Everything sizes off the shared "ut.uiScale" interface-scale (Settings ▸
 // Interface), so the whole kit grows/shrinks with the rest of the app chrome.
 enum Glass {
-    static let base       = Color(red: 0.047, green: 0.051, blue: 0.078)
-    static let accent     = Color(red: 0.478, green: 0.624, blue: 0.984)   // periwinkle
-    static let accent2    = Color(red: 0.737, green: 0.604, blue: 0.969)   // violet
-    static let live       = Color(red: 0.380, green: 0.851, blue: 0.667)   // teal-green
-    static let danger     = Color(red: 0.96, green: 0.49, blue: 0.50)
-    static let warn       = Color(red: 0.98, green: 0.74, blue: 0.42)
+    // All resolve against the active theme so glass surfaces recolor with everything
+    // else (these were hardcoded periwinkle/near-black, which made non-Argus themes
+    // look washed — the theme's accent never reached the glass UI).
+    static var base: Color         { Theme.appBackground }
+    static var accent: Color       { Theme.accent }
+    static var accent2: Color      { Theme.running }
+    static var live: Color         { Theme.attached }
+    static var danger: Color       { Theme.unreachable }
+    static var warn: Color         { Theme.waiting }
 
-    static let textPrimary   = Color.white.opacity(0.93)
-    static let textSecondary = Color.white.opacity(0.52)
-    static let textTertiary  = Color.white.opacity(0.32)
+    static var textPrimary: Color   { Theme.textPrimary }
+    static var textSecondary: Color { Theme.textSecondary }
+    static var textTertiary: Color  { Theme.textTertiary }
 
-    static let accentGradient = LinearGradient(colors: [accent, accent2], startPoint: .leading, endPoint: .trailing)
+    static var accentGradient: LinearGradient { LinearGradient(colors: [accent, accent2], startPoint: .leading, endPoint: .trailing) }
 
     /// The current interface scale (Settings ▸ Interface). Read it where a plain
     /// value (not a font) is needed, e.g. paddings/frames.
@@ -26,7 +29,7 @@ enum Glass {
 
     /// A stable accent color for a process/label name (used for chip dots).
     static func tint(for s: String) -> Color {
-        let palette = [accent, accent2, live, warn, Color(red: 0.95, green: 0.55, blue: 0.66)]
+        let palette = [accent, accent2, live, warn, Theme.unseen]
         if s.isEmpty { return textTertiary }
         var h = 0
         for b in s.utf8 { h = (h &* 31 &+ Int(b)) & 0x7fffffff }
@@ -59,7 +62,7 @@ struct GlassCardModifier: ViewModifier {
         // intercepts clicks meant for the controls inside it.
         return content
             .background(
-                shape.fill(.ultraThinMaterial)
+                shape.fill(Theme.surface)
                     .overlay(shape.fill(.white.opacity(strong ? 0.04 : 0.02)))
             )
             .overlay(

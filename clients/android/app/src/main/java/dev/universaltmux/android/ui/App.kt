@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
@@ -31,6 +33,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -42,23 +46,36 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val ink = Color(0xFF1A1B26)
-private val panel = Color(0xFF16161E)
-private val accent = Color(0xFF7AA2F7)
-private val waiting = Color(0xFFE0AF68)
-private val unseenDot = Color(0xFFFF9F40)   // orange — agent finished a turn, not yet viewed
-private val bad = Color(0xFFF7768E)
+// Chrome colors resolve against the active theme (default Argus = the original look).
+// @Composable getters so every existing `ink`/`panel`/… usage works unchanged and string
+// literals like "waiting" are untouched.
+private val ink: Color @Composable get() = LocalTheme.current.bg
+private val panel: Color @Composable get() = LocalTheme.current.panel
+private val accent: Color @Composable get() = LocalTheme.current.accent
+private val waiting: Color @Composable get() = LocalTheme.current.waiting
+private val unseenDot: Color @Composable get() = LocalTheme.current.unseen
+private val bad: Color @Composable get() = LocalTheme.current.bad
+private val cDim: Color @Composable get() = LocalTheme.current.dim
+private val cFaint: Color @Composable get() = LocalTheme.current.faint
+private val cBorder: Color @Composable get() = LocalTheme.current.border
+private val cSel: Color @Composable get() = LocalTheme.current.selection
+private val cText: Color @Composable get() = LocalTheme.current.text
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(vm: AppViewModel) {
-    MaterialTheme(colorScheme = darkColorScheme(primary = accent, background = ink, surface = panel)) {
+    val th = vm.theme   // reading vm.themeId-backed state → recomposes the whole UI on switch
+    CompositionLocalProvider(LocalTheme provides th) {
+    MaterialTheme(colorScheme = if (th.isLight)
+        lightColorScheme(primary = th.accent, background = th.bg, surface = th.panel)
+    else darkColorScheme(primary = th.accent, background = th.bg, surface = th.panel)) {
         val drawerState = rememberDrawerState(DrawerValue.Open)
         val scope = rememberCoroutineScope()
         var showAdd by remember { mutableStateOf(false) }
         var showKey by remember { mutableStateOf(false) }
         var newSessionFor by remember { mutableStateOf<Broker?>(null) }
         var showAbout by remember { mutableStateOf(false) }
+        var showTheme by remember { mutableStateOf(false) }
         var screen by remember { mutableStateOf(3) }   // 0 = terminal, 1 = files, 2 = ports, 3 = command center (home)
         var showFind by remember { mutableStateOf(false) }
         var renderText by remember { mutableStateOf<String?>(null) }  // non-nil → Renders overlay
@@ -96,6 +113,7 @@ fun App(vm: AppViewModel) {
                         onNewSession = { newSessionFor = it },
                         onAuthKey = { showKey = true },
                         onAbout = { showAbout = true },
+                        onTheme = { showTheme = true },
                     )
                 }
             },
@@ -125,25 +143,25 @@ fun App(vm: AppViewModel) {
                         actions = {
                             if (screen == 0 && vm.selected != null) {
                                 IconButton(onClick = { showFind = !showFind }) {
-                                    Icon(Icons.Filled.Search, "Find", tint = if (showFind) accent else Color.White)
+                                    Icon(Icons.Filled.Search, "Find", tint = if (showFind) accent else cText)
                                 }
                                 IconButton(onClick = { renderText = ActiveTerm.rt?.renderableText() }) {
-                                    Icon(Icons.Filled.AutoAwesome, "Render", tint = Color.White)
+                                    Icon(Icons.Filled.AutoAwesome, "Render", tint = cText)
                                 }
                             }
                             IconButton(onClick = { screen = if (screen == 3) 0 else 3 }) {
-                                Icon(Icons.Filled.GridView, "Command Center", tint = if (screen == 3) accent else Color.White)
+                                Icon(Icons.Filled.GridView, "Command Center", tint = if (screen == 3) accent else cText)
                             }
                             IconButton(onClick = { screen = if (screen == 1) 0 else 1 }) {
                                 Icon(if (screen == 1) Icons.Filled.Terminal else Icons.Filled.Folder,
-                                    "Files", tint = if (screen == 1) accent else Color.White)
+                                    "Files", tint = if (screen == 1) accent else cText)
                             }
                             IconButton(onClick = { screen = if (screen == 2) 0 else 2 }) {
-                                Icon(Icons.Filled.SettingsEthernet, "Ports", tint = if (screen == 2) accent else Color.White)
+                                Icon(Icons.Filled.SettingsEthernet, "Ports", tint = if (screen == 2) accent else cText)
                             }
                             IconButton(onClick = { vm.refreshAll() }) { Icon(Icons.Filled.Refresh, "Refresh") }
                         },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = panel, titleContentColor = Color.White),
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = panel, titleContentColor = cText),
                     )
                 },
             ) { pad ->
@@ -159,7 +177,7 @@ fun App(vm: AppViewModel) {
                         if (sel == null) {
                             Text(
                                 "Open the menu to add a broker and pick a session.",
-                                color = Color(0xFF9AA5CE),
+                                color = cDim,
                                 modifier = Modifier.align(Alignment.Center).padding(24.dp),
                             )
                         } else {
@@ -179,8 +197,48 @@ fun App(vm: AppViewModel) {
         if (showAdd) AddBrokerDialog(vm, onDismiss = { showAdd = false })
         if (showKey) AuthKeyDialog(vm, onDismiss = { showKey = false })
         if (showAbout) AboutDialog(onDismiss = { showAbout = false })
+        if (showTheme) ThemePickerDialog(vm, onDismiss = { showTheme = false })
         newSessionFor?.let { b -> NewSessionDialog(b, vm, onDismiss = { newSessionFor = null }) }
     }
+    }
+}
+
+@Composable
+private fun ThemePickerDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+    val current = vm.themeId   // reading it → the dialog (and the app) recompose on switch
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done", color = accent) } },
+        title = { Text("Theme", color = cText) },
+        containerColor = panel,
+        text = {
+            LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                items(ThemePalette.all, key = { it.id }) { p ->
+                    val selected = p.id == current
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .background(if (selected) accent.copy(alpha = 0.16f) else Color.Transparent, RoundedCornerShape(10.dp))
+                            .clickable { vm.selectTheme(p.id) }
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // swatch rendered in THIS theme's own colors
+                        Row(
+                            Modifier.background(p.bg, RoundedCornerShape(7.dp)).padding(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            listOf(p.accent, p.milestone, p.working, p.waiting, p.unseen, p.bad).forEach {
+                                Box(Modifier.size(9.dp).background(it, RoundedCornerShape(5.dp)))
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Text(p.name, color = cText, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        if (selected) Icon(Icons.Filled.Check, null, tint = accent, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        },
+    )
 }
 
 @Composable
@@ -192,17 +250,17 @@ private fun AboutDialog(onDismiss: () -> Unit) {
             Column {
                 Text(
                     "One watchful eye over every coding agent, on every machine.",
-                    color = Color.White, fontSize = 14.sp,
+                    color = cText, fontSize = 14.sp,
                 )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Reach every claude session across your Mac, clusters, Windows, and phone — terminals, ports, and files — over Tailscale, peer-to-peer. No central server.",
-                    color = Color(0xFF9AA5CE), fontSize = 13.sp,
+                    color = cDim, fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Named for Argus Panoptes, the hundred-eyed watcher.",
-                    color = Color(0xFF565F89), fontSize = 11.sp,
+                    color = cFaint, fontSize = 11.sp,
                 )
             }
         },
@@ -220,11 +278,11 @@ private fun AuthKeyDialog(vm: AppViewModel, onDismiss: () -> Unit) {
             Column {
                 Text(
                     "Paste a Tailscale auth key. The app joins your tailnet itself and auto-discovers brokers — no Tailscale app or manual hostnames needed.",
-                    fontSize = 13.sp, color = Color(0xFF9AA5CE),
+                    fontSize = 13.sp, color = cDim,
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = key, onValueChange = { key = it }, singleLine = true, placeholder = { Text("tskey-auth-…") })
-                Text("status: ${vm.engineStatus}", color = Color(0xFF9AA5CE), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                Text("status: ${vm.engineStatus}", color = cDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         },
         confirmButton = { TextButton(onClick = { vm.joinTailnet(key); onDismiss() }) { Text("Join & discover") } },
@@ -240,6 +298,7 @@ private fun Sidebar(
     onNewSession: (Broker) -> Unit,
     onAuthKey: () -> Unit,
     onAbout: () -> Unit,
+    onTheme: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(top = 12.dp)) {
         Row(
@@ -247,14 +306,15 @@ private fun Sidebar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f).clickable(onClick = onAbout)) {
-                Text("Argus", color = Color.White, fontSize = 18.sp)
-                Text("tailnet: ${vm.engineStatus}", color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
+                Text("Argus", color = cText, fontSize = 18.sp)
+                Text("tailnet: ${vm.engineStatus}", color = cFaint, fontSize = 11.sp, maxLines = 1)
             }
-            IconButton(onClick = onAbout) { Icon(Icons.Filled.Info, "About", tint = Color(0xFF565F89)) }
-            IconButton(onClick = onAuthKey) { Icon(Icons.Filled.VpnKey, "Tailnet key", tint = Color(0xFF9AA5CE)) }
+            IconButton(onClick = onTheme) { Icon(Icons.Filled.Palette, "Theme", tint = cDim) }
+            IconButton(onClick = onAbout) { Icon(Icons.Filled.Info, "About", tint = cFaint) }
+            IconButton(onClick = onAuthKey) { Icon(Icons.Filled.VpnKey, "Tailnet key", tint = cDim) }
             IconButton(onClick = onAddBroker) { Icon(Icons.Filled.Add, "Add broker", tint = accent) }
         }
-        Divider(color = Color(0xFF2A2B3C))
+        Divider(color = cBorder)
         var menuFor by remember { mutableStateOf<Pair<Broker, SessionInfo>?>(null) }
 
         // PINNED "Needs attention": sessions blocked on you, across all brokers,
@@ -287,13 +347,13 @@ private fun Sidebar(
                         Box(Modifier.size(8.dp).background(waiting, RoundedCornerShape(4.dp)))
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(s.name, color = Color.White, fontSize = 14.sp, maxLines = 1)
-                            Text(b.name, color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
+                            Text(s.name, color = cText, fontSize = 14.sp, maxLines = 1)
+                            Text(b.name, color = cFaint, fontSize = 11.sp, maxLines = 1)
                         }
                     }
                 }
             }
-            Divider(color = Color(0xFF2A2B3C))
+            Divider(color = cBorder)
         }
 
         // Agent (ut spawn) sessions are background jobs — hidden by default, with this
@@ -302,7 +362,7 @@ private fun Sidebar(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 4.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Show agent sessions", color = Color(0xFF9AA5CE), fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text("Show agent sessions", color = cDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
             Switch(
                 checked = vm.showAgentSessions,
                 onCheckedChange = { vm.showAgentSessions = it },
@@ -324,12 +384,12 @@ private fun Sidebar(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(b.name, color = accent, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { onNewSession(b) }) { Icon(Icons.Filled.Add, "New session", tint = Color(0xFF9AA5CE)) }
-                    IconButton(onClick = { vm.removeBroker(b) }) { Icon(Icons.Filled.Delete, "Remove", tint = Color(0xFF565F89)) }
+                    IconButton(onClick = { onNewSession(b) }) { Icon(Icons.Filled.Add, "New session", tint = cDim) }
+                    IconButton(onClick = { vm.removeBroker(b) }) { Icon(Icons.Filled.Delete, "Remove", tint = cFaint) }
                 }
                 val list = visibleByBroker[b.id].orEmpty()
                 if (list.isEmpty()) {
-                    Text("no sessions", color = Color(0xFF565F89), fontSize = 12.sp,
+                    Text("no sessions", color = cFaint, fontSize = 12.sp,
                         modifier = Modifier.padding(start = 24.dp, bottom = 6.dp))
                 } else {
                     list.forEach { s ->
@@ -342,7 +402,7 @@ private fun Sidebar(
                                     onClick = { onSelect(b, s.name) },
                                     onLongClick = { menuFor = b to s },  // rename / kill
                                 )
-                                .background(if (active) Color(0xFF24283B) else Color.Transparent)
+                                .background(if (active) cSel else Color.Transparent)
                                 .padding(start = 24.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -351,15 +411,15 @@ private fun Sidebar(
                                     s.state == "working" -> accent
                                     vm.isUnseen(b, s.name) -> unseenDot
                                     s.state == "waiting" -> waiting
-                                    else -> Color(0xFF565F89)
+                                    else -> cFaint
                                 },
                                 RoundedCornerShape(4.dp),
                             ))
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(s.name, color = Color.White, fontSize = 14.sp, maxLines = 1)
+                                Text(s.name, color = cText, fontSize = 14.sp, maxLines = 1)
                                 if (s.path.isNotEmpty())
-                                    Text(s.path, color = Color(0xFF565F89), fontSize = 11.sp, maxLines = 1)
+                                    Text(s.path, color = cFaint, fontSize = 11.sp, maxLines = 1)
                             }
                         }
                     }
@@ -369,7 +429,7 @@ private fun Sidebar(
                 item {
                     Text(
                         "No brokers yet. Tap + to add one by its tailnet hostname.",
-                        color = Color(0xFF9AA5CE), fontSize = 13.sp,
+                        color = cDim, fontSize = 13.sp,
                         modifier = Modifier.padding(16.dp),
                     )
                 }
@@ -389,7 +449,7 @@ private fun SessionMenuDialog(vm: AppViewModel, b: Broker, s: SessionInfo, onDis
         text = {
             Column {
                 Text("Rename the session, or kill it (ends everything running in it).",
-                    fontSize = 13.sp, color = Color(0xFF9AA5CE))
+                    fontSize = 13.sp, color = cDim)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("name") })
             }
@@ -417,6 +477,8 @@ private fun SessionMenuDialog(vm: AppViewModel, b: Broker, s: SessionInfo, onDis
 private fun TerminalScreen(broker: Broker, session: String) {
     val context = LocalContext.current
     val rt = remember(broker.id, session) { RemoteTerminal(context, broker, session).also { ActiveTerm.rt = it } }
+    val theme = LocalTheme.current
+    LaunchedEffect(rt, theme.id) { rt.applyTheme(theme) }   // recolor the terminal on open + theme switch
     DisposableEffect(rt) {
         onDispose {
             if (ActiveTerm.rt === rt) ActiveTerm.rt = null
@@ -458,16 +520,16 @@ fun FindBar(onClose: () -> Unit) {
             value = query, onValueChange = { search(it) }, singleLine = true,
             placeholder = { Text("Find", fontSize = 13.sp) },
             modifier = Modifier.weight(1f).height(52.dp),
-            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, color = Color.White),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, color = cText),
         )
         Text(
             if (query.isEmpty()) "" else if (matches.isEmpty()) "0" else "${cur + 1}/${matches.size}",
-            color = if (matches.isEmpty() && query.isNotEmpty()) waiting else Color(0xFF9AA5CE),
+            color = if (matches.isEmpty() && query.isNotEmpty()) waiting else cDim,
             fontSize = 12.sp, modifier = Modifier.padding(horizontal = 8.dp),
         )
         TextButton(onClick = { jump(-1) }) { Text("↑", fontSize = 16.sp) }
         TextButton(onClick = { jump(1) }) { Text("↓", fontSize = 16.sp) }
-        IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "Close find", tint = Color(0xFF565F89)) }
+        IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "Close find", tint = cFaint) }
     }
 }
 
@@ -496,10 +558,10 @@ private fun AccessoryKeys(onBytes: (ByteArray) -> Unit, onKeyboard: () -> Unit) 
         keys.forEach { (label, bytes) ->
             Box(
                 Modifier.padding(horizontal = 3.dp).size(width = 46.dp, height = 38.dp)
-                    .background(Color(0xFF24283B), RoundedCornerShape(8.dp))
+                    .background(cSel, RoundedCornerShape(8.dp))
                     .clickable { onBytes(bytes) },
                 contentAlignment = Alignment.Center,
-            ) { Text(label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 15.sp) }
+            ) { Text(label, color = cText, fontFamily = FontFamily.Monospace, fontSize = 15.sp) }
         }
     }
 }
@@ -512,14 +574,14 @@ private fun AddBrokerDialog(vm: AppViewModel, onDismiss: () -> Unit) {
         title = { Text("Add broker") },
         text = {
             Column {
-                Text("Tailnet hostname of a node running the broker.", fontSize = 13.sp, color = Color(0xFF9AA5CE))
+                Text("Tailnet hostname of a node running the broker.", fontSize = 13.sp, color = cDim)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = host, onValueChange = { host = it }, singleLine = true,
                     placeholder = { Text("ut-host.your-tailnet.ts.net") },
                 )
-                vm.lastError?.let { Text(it, color = Color(0xFFF7768E), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
-                if (vm.busy) Text("probing…", color = Color(0xFF9AA5CE), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                vm.lastError?.let { Text(it, color = bad, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
+                if (vm.busy) Text("probing…", color = cDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         },
         confirmButton = { TextButton(onClick = { vm.addBroker(host); if (!vm.busy) onDismiss() }) { Text("Add") } },

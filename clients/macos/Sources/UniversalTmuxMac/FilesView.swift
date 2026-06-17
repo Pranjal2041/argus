@@ -3,14 +3,15 @@ import SwiftUI
 
 /// Minimal / Raycast palette for the Files window (flat, sharp — not glass).
 enum Flat {
-    static let bg       = Color(red: 0.051, green: 0.055, blue: 0.071)  // #0d0e12
-    static let sidebar  = Color(red: 0.063, green: 0.068, blue: 0.086)
-    static let hairline = Color.white.opacity(0.08)
-    static let sel      = Color(red: 0.21, green: 0.31, blue: 0.55).opacity(0.55)
-    static let accent   = Color(red: 0.478, green: 0.624, blue: 0.984)
-    static let text     = Color.white.opacity(0.90)
-    static let dim      = Color.white.opacity(0.50)
-    static let faint    = Color.white.opacity(0.32)
+    // Themed (were hardcoded near-black + periwinkle, which ignored the active theme).
+    static var bg: Color       { Theme.appBackground }
+    static var sidebar: Color  { Theme.sidebarBackground }
+    static var hairline: Color { Theme.border }
+    static var sel: Color      { Theme.accent.opacity(0.30) }
+    static var accent: Color   { Theme.accent }
+    static var text: Color     { Theme.textPrimary }
+    static var dim: Color      { Theme.textSecondary }
+    static var faint: Color    { Theme.textTertiary }
 }
 
 struct FilesView: View {

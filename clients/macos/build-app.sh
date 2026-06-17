@@ -16,4 +16,13 @@ cp -R Resources/codemirror "$APP/Contents/Resources/" 2>/dev/null || true  # CM6
 cp -R Resources/render "$APP/Contents/Resources/" 2>/dev/null || true      # offline marked+KaTeX+hljs bundle for Renders (⇧⌘P)
 
 echo "Built $(pwd)/$APP"
-echo "Run it with:  open Argus.app    (or double-click in Finder)"
+
+# Install to /Applications so a normal relaunch (Dock/Spotlight/⌘-Tab) runs THIS build.
+# Both copies share a bundle id, so LaunchServices otherwise keeps running the stale
+# /Applications copy while `open ./Argus.app` only launches the repo one — which looks
+# like "the new build didn't take". Set UT_NO_INSTALL=1 to skip.
+if [ "${UT_NO_INSTALL:-0}" != "1" ]; then
+    rm -rf /Applications/Argus.app
+    ditto "$APP" /Applications/Argus.app && echo "Installed to /Applications/Argus.app"
+fi
+echo "Run it with:  open -a Argus    (launches the /Applications copy)"
