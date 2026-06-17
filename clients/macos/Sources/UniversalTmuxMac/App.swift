@@ -9,6 +9,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
+    @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
 
     var body: some Scene {
         WindowGroup {
@@ -19,6 +20,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(dashboards)
                 .environmentObject(notebooks)
                 .environmentObject(wandb)
+                .environmentObject(commandCenter)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -46,6 +48,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("p", modifiers: .command)
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
+                Button("Command Center") { state.showOverview.toggle() }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
@@ -111,6 +115,7 @@ struct UniversalTmuxApp: App {
         }
         .defaultSize(width: 1100, height: 760)
         .windowStyle(.hiddenTitleBar)
+
 
         Settings {
             SettingsView(terminals: terminals, state: state)
@@ -230,6 +235,7 @@ struct HiddenPanelsView: View {
                             ) {
                                 state.unhide(it.ref)
                                 state.selection = it.ref
+                                state.showOverview = false
                                 state.showHiddenPicker = false
                             }
                         }
@@ -341,8 +347,14 @@ struct RootView: View {
                     .frame(maxHeight: .infinity)
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if state.showOverview {
+                    CommandCenterView()
+                } else {
+                    detail
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea() // fill the entire window; columns space their own top edge
@@ -612,7 +624,7 @@ struct RootView: View {
                         unseen: state.unseen.contains(ref.id),
                         folderText: state.folderDisplay((s.path?.isEmpty == false) ? s.path! : "—", isLocal: m.isLocal),
                         selected: state.selection == ref,
-                        onTap: { state.selection = ref },
+                        onTap: { state.selection = ref; state.showOverview = false },
                         onRename: { state.renameText = s.name; state.renameTarget = ref },
                         onKill: { state.killTarget = ref },
                         onCopyName: {
@@ -621,7 +633,7 @@ struct RootView: View {
                         },
                         onHide: { state.hide(ref) },
                         wandbRuns: terminals.wandbRuns(for: ref),
-                        onOpenWandb: { run in state.selection = ref; terminals.showWandb(ref, run: run) },
+                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; terminals.showWandb(ref, run: run) },
                         onClearWandb: { run in terminals.clearWandb(run, for: ref) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
@@ -1085,6 +1097,7 @@ private struct CommandPalette: View {
             if match(ref.session + " " + mn) {
                 out.append(Item(id: "s:" + ref.id, icon: "terminal", title: ref.session, subtitle: mn) {
                     state.selection = ref
+                    state.showOverview = false
                 })
             }
         }

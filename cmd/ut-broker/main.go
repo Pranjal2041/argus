@@ -98,6 +98,47 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.Sessions()})
 	})
+	// /ccstatus — command-center status relay. POST: the macOS client publishes its
+	// per-session AI status blob (opaque JSON). GET: any client (the phone) reads the
+	// last published blob. The broker only stores+serves bytes; it never parses them.
+	mux.HandleFunc("/ccstatus", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+			mgr.SetCommandCenter(body)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if b := mgr.CommandCenter(); b != nil {
+			_, _ = w.Write(b)
+		} else {
+			_, _ = io.WriteString(w, "{}")
+		}
+	})
+	// /recent — a session's recent rendered scrollback as plain text, for the
+	// macOS command center's status updater (claude -p reads it). ?session=NAME
+	// &lines=N (default 400). Forks capture-pane per call, so clients must poll
+	// it sparingly (per active session, ~30s).
+	mux.HandleFunc("/recent", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		q := r.URL.Query()
+		name := q.Get("session")
+		if name == "" {
+			name = *session
+		}
+		lines, _ := strconv.Atoi(q.Get("lines"))
+		text, err := mgr.Recent(name, lines)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, text)
+	})
 	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

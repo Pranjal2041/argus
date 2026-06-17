@@ -264,6 +264,26 @@ type Manager struct {
 	// the broker look "unreachable" to a client with a request timeout).
 	sessMu    sync.Mutex
 	sessCache []session.Info
+
+	// Command-center status blob: opaque JSON the macOS client publishes (the
+	// per-session AI status summaries) and other clients (phone) read back. The
+	// broker is a dumb relay here — it never parses or interprets the blob.
+	ccMu   sync.Mutex
+	ccBlob []byte
+}
+
+// SetCommandCenter stores the latest command-center status blob (from the Mac).
+func (m *Manager) SetCommandCenter(b []byte) {
+	m.ccMu.Lock()
+	m.ccBlob = b
+	m.ccMu.Unlock()
+}
+
+// CommandCenter returns the last published status blob (or nil if none yet).
+func (m *Manager) CommandCenter() []byte {
+	m.ccMu.Lock()
+	defer m.ccMu.Unlock()
+	return m.ccBlob
 }
 
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
@@ -342,6 +362,28 @@ func (m *Manager) Stream(ctx context.Context, w io.Writer, flush func(), name st
 	}
 	h.stream(ctx, w, flush)
 	return nil
+}
+
+// capturer is the optional capability a backend implements to return a session's
+// recent scrollback as plain text. tmux implements it; conpty (Windows) does not
+// yet, so /recent is a no-op there until added.
+type capturer interface {
+	Capture(name string, lines int) (string, error)
+}
+
+// Recent returns a session's recent rendered output for the command-center status
+// updater. Errors if the session is gone or the backend can't capture. This DOES
+// fork tmux capture-pane on the request path (unlike /sessions), so the caller
+// must rate-limit it (the client polls per active session on a ~30s cadence).
+func (m *Manager) Recent(name string, lines int) (string, error) {
+	if !m.prov.Has(name) {
+		return "", fmt.Errorf("no such session: %q", name)
+	}
+	c, ok := m.prov.(capturer)
+	if !ok {
+		return "", fmt.Errorf("capture not supported on this backend")
+	}
+	return c.Capture(name, lines)
 }
 
 // Sessions returns the cached session list (refreshed in the background). Always

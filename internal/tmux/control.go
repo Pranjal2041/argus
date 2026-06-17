@@ -44,6 +44,63 @@ type Provider struct{ socket string }
 func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
 func (p *Provider) List() []SessionInfo                  { return ListSessions(p.socket) }
+
+// Capture returns a session's recent scrollback as plain rendered text (no
+// escapes) — `capture-pane -p -S -<lines>`. Feeds the macOS command center's
+// status updater. lines<=0 uses a sane default; the call is bounded and runs
+// off the request path's hot loop (the broker rate-limits it).
+func (p *Provider) Capture(name string, lines int) (string, error) {
+	if lines <= 0 {
+		lines = 400
+	}
+	// -e PRESERVES SGR escapes so we can drop Claude Code's empty-prompt autosuggestion,
+	// which it renders FAINT (SGR 2). Plain `-p` discards the color that distinguishes
+	// that suggested next message from real input, and the summarizer was reading the
+	// suggestion as the user's intent. dropDimAndAnsi then returns plain text as before.
+	out, err := exec.Command("tmux", tmuxArgs(p.socket, "capture-pane", "-e", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name)...).Output()
+	if err != nil {
+		return "", err
+	}
+	return dropDimAndAnsi(out), nil
+}
+
+// dropDimAndAnsi removes any text drawn in the ANSI FAINT style (SGR 2) — the agent's
+// dim autosuggestion — then strips all remaining escape sequences, yielding plain text.
+// SGR state is tracked across the stream: 2 turns faint on; 0/22 (and a bare ESC[m)
+// turn it off; parameters are processed left-to-right within one SGR.
+func dropDimAndAnsi(b []byte) string {
+	out := make([]byte, 0, len(b))
+	faint := false
+	for i := 0; i < len(b); {
+		if b[i] == 0x1b && i+1 < len(b) && b[i+1] == '[' {
+			j := i + 2
+			for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
+				j++
+			}
+			if j < len(b) && b[j] == 'm' { // SGR — update faint state
+				for _, ppar := range strings.Split(string(b[i+2:j]), ";") {
+					switch ppar {
+					case "2":
+						faint = true
+					case "0", "22", "":
+						faint = false
+					}
+				}
+			}
+			if j < len(b) {
+				i = j + 1 // drop the whole escape sequence
+			} else {
+				i = j
+			}
+			continue
+		}
+		if !faint {
+			out = append(out, b[i])
+		}
+		i++
+	}
+	return string(out)
+}
 func (p *Provider) Create(name, dir string) error       { return CreateSession(p.socket, name, dir) }
 func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
 	return SpawnSession(p.socket, name, dir, cmd, idleSec)
@@ -91,11 +148,28 @@ func DetectState(socket, name string) string {
 	if screenHasInterrupt(out) {
 		return "working"
 	}
+	// The agent delegated to background sub-agents and is waiting on THEM, not on
+	// the user ("Waiting for 2 background agents to finish"). That's working, not a
+	// decision — never flag it for attention.
+	if bgAgentsWaitingRe.Match(out) {
+		return "working"
+	}
 	if screenHasWaitingPrompt(out) {
 		return "waiting"
 	}
 	return "idle"
 }
+
+// bgAgentsWaitingRe matches the footer an agent shows while blocked on its own
+// spawned sub-agents — "Waiting for N background agents to finish". This is
+// delegated WORK in progress, never a prompt for the user.
+var bgAgentsWaitingRe = regexp.MustCompile(`(?i)waiting for \d+ background agents?`)
+
+// agentsManagerRe matches the background-agents MANAGER list chrome — "↑/↓ to
+// select · Enter to view", "← for agents · ↓ to manage". It reuses the same
+// up/down navigation cue as a real option dialog but is NOT a user choice, so it
+// must NOT count as "waiting".
+var agentsManagerRe = regexp.MustCompile(`(?i)(enter to view|← for agents|↓ to manage|to manage tasks)`)
 
 // waitingScanLines bounds the dialog scan: a selection menu renders near the
 // bottom — but some agent TUIs draw a status block BELOW it, so the window is
@@ -132,7 +206,10 @@ func screenHasWaitingPrompt(screen []byte) bool {
 	}
 	tail := lines[start:]
 	for _, l := range tail {
-		if waitingFooterRe.MatchString(l) {
+		// Skip the background-agents manager list: it shows "↑/↓ to select · Enter
+		// to view", which matches the dialog-footer cue but is the agent browsing its
+		// own sub-agents, not a choice put to the user.
+		if waitingFooterRe.MatchString(l) && !agentsManagerRe.MatchString(l) {
 			return true
 		}
 	}
