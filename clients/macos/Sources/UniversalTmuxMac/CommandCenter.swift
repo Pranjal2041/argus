@@ -44,8 +44,9 @@ struct AgentStatus: Equatable, Codable {
 // MARK: - Provider (swappable: claude -p now, Messages API later)
 
 protocol AgentStatusProvider {
-    /// Produce a status for `key` from its recent terminal `output`. nil on failure.
-    func status(forKey key: String, output: String) async -> AgentStatus?
+    /// Produce a status for `key` from its recent terminal `output`. `note`, if present,
+    /// is a one-time message prepended to the prompt (e.g. a user status correction). nil on failure.
+    func status(forKey key: String, output: String, note: String?) async -> AgentStatus?
     /// Forget a session's conversation continuity (session ended).
     func forget(key: String)
     /// Cumulative spend (USD) + number of status calls, persisted across launches —
@@ -88,10 +89,12 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 
     func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
 
-    func status(forKey key: String, output: String) async -> AgentStatus? {
+    func status(forKey key: String, output: String, note: String? = nil) async -> AgentStatus? {
         // Bound the prompt to the recent tail (cost + focus): the last ~14KB keeps the
-        // model on the CURRENT state rather than diluting it with old scrollback.
-        let prompt = String(output.suffix(14_000))
+        // model on the CURRENT state rather than diluting it with old scrollback. A `note`
+        // (e.g. the user just corrected the status) rides at the top, before the scrollback.
+        let tail = String(output.suffix(14_000))
+        let prompt = note.map { $0 + "\n\n" + tail } ?? tail
 
         // Decide create-vs-resume; reset periodically to bound context growth.
         lock.lock()
@@ -198,6 +201,8 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 
     Reply with ONLY one line of JSON: {"label":"<LABEL>","summary":"<1-3 sentences>","lookAtThis":<string or null>}
 
+    If the input starts with a "[USER STATUS CORRECTION]" line: the user just manually changed this agent's status because they judged your auto-status wrong. Take it seriously — work out from the scrollback WHY they'd pick the status they chose, and lean toward a status consistent with their judgment. Don't simply revert to what you had. (You're not forced to output their exact label if the screen now clearly shows something different — but their correction is a strong signal about what matters here.)
+
     READING THE SCREEN CORRECTLY (this is where mistakes happen):
     - The bottom-most line that looks like "❯ <some text>" sitting just above the "⏵⏵ bypass permissions…" status bar is the LIVE INPUT BOX. The text in it is very often an AUTO-GENERATED suggestion (ghost text the agent proposes, like "yes go ahead", "continue", "yes please"). It is NOT something the user typed and NOT an approval. NEVER treat that composer line as a user message, an answer, or a go-ahead.
     - The user's REAL messages are earlier in the transcript, each one followed by the agent actually acting on it. If the agent asked a question and the next thing is just the input box (no agent work after it, no "esc to interrupt"), then the user has NOT answered yet — the agent is WAITING ON THE USER.
@@ -257,6 +262,21 @@ final class CommandCenterModel: ObservableObject {
     private var timer: Timer?
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
     private var lastOKAt: [String: Double] = [:] // when each session was last successfully summarized (for fair scheduling)
+    private var correction: [String: String] = [:] // one-time note for the model after a manual status change (NOT persisted; no learning)
+
+    /// The user manually set a card's status. Show it immediately and queue a one-time
+    /// note so the NEXT model call is told the user corrected it (and reasons about why) —
+    /// it then re-decides on its own. Nothing is persisted or learned; the label is not locked.
+    func setManualLabel(ref: SessionRef, label: String) {
+        let key = ref.id
+        let prev = statuses[key]
+        let old = prev?.label ?? "idle"
+        guard label != old else { return }
+        statuses[key] = AgentStatus(label: label, oneLiner: prev?.oneLiner ?? "", lookAtThis: prev?.lookAtThis, updatedAt: Date())
+        correction[key] = "[USER STATUS CORRECTION] The user just changed this session's status from \"\(old)\" to \"\(label)\" — they judged \"\(old)\" wrong for what's actually happening. Work out why and weigh it."
+        lastHash[key] = nil   // force the next sweep to re-summarize (and deliver the note) even if the screen is unchanged
+        persist(); publish()
+    }
     private var lastDot: [String: String] = [:] // last seen dot state — a flip forces a refresh
     private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
     private var claudeInflight = 0              // concurrent model calls (the expensive part)
@@ -374,10 +394,11 @@ final class CommandCenterModel: ObservableObject {
             guard self.claudeInflight < self.maxClaude else { ccLog("gated \(key)"); return }
             self.claudeInflight += 1
             self.inflight.insert(key)
-            let status = await self.provider.status(forKey: key, output: output)
+            let status = await self.provider.status(forKey: key, output: output, note: self.correction[key])
             self.claudeInflight -= 1
             self.inflight.remove(key)
             guard let status else { ccLog("claude-nil \(key)"); NSLog("[cc] %@ claude returned nil", key); return }
+            self.correction[key] = nil   // delivered — --resume keeps it in context so it won't just revert
             ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
             self.lastHash[key] = h
             self.lastOKAt[key] = Date().timeIntervalSince1970
@@ -558,6 +579,7 @@ struct CommandCenterView: View {
                               unseen: state.unseen.contains(t.ref.id), status: t.status,
                               inflight: t.inflight, size: size,
                               backlogged: state.backlog.contains(t.ref.id),
+                              onSetStatus: { cc.setManualLabel(ref: t.ref, label: $0) },
                               onBacklog: { state.toggleBacklog(t.ref) }) {
                     state.selection = t.ref
                     state.showOverview = false
@@ -576,8 +598,22 @@ struct AgentTileView: View {
     let inflight: Bool
     let size: Size
     let backlogged: Bool
+    let onSetStatus: (String) -> Void
     let onBacklog: () -> Void
     let onOpen: () -> Void
+
+    /// User-facing names for the status labels in the right-click "Set status" menu.
+    private func statusName(_ l: String) -> String {
+        switch l {
+        case "needs-decision": return "Needs you"
+        case "stuck":          return "Stuck"
+        case "drifting":       return "Drifting"
+        case "working":        return "Working"
+        case "look":           return "Worth a look"
+        case "milestone":      return "Milestone"
+        default:               return "Idle"
+        }
+    }
 
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     private func cf(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s * uiScale, weight: w) }
@@ -665,6 +701,16 @@ struct AgentTileView: View {
         .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(tint.opacity(isLarge ? 0.55 : 0.32), lineWidth: isLarge ? 1.6 : 1))
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
+        .contextMenu {
+            // Right-click → fix a wrong auto-status. The choice is shown immediately and
+            // fed to the model as a one-time correction (it then re-reasons); nothing is
+            // locked or remembered. Built from constant values only (no observable reads).
+            Section("Set status") {
+                ForEach(["working", "idle", "needs-decision", "stuck", "milestone", "look", "drifting"], id: \.self) { lbl in
+                    Button(statusName(lbl)) { onSetStatus(lbl) }
+                }
+            }
+        }
         .help(status?.oneLiner ?? session.name)
     }
 
