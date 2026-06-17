@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -142,6 +143,13 @@ fun App(vm: AppViewModel) {
                         },
                         actions = {
                             if (screen == 0 && vm.selected != null) {
+                                val sel = vm.selected!!
+                                if (vm.hasWandb(sel.first, sel.second)) {
+                                    IconButton(onClick = { vm.toggleWandb(sel.first, sel.second) }) {
+                                        Icon(Icons.Filled.Insights, "W&B run",
+                                            tint = if (vm.isWandbShown(sel.first, sel.second)) accent else cText)
+                                    }
+                                }
                                 IconButton(onClick = { showFind = !showFind }) {
                                     Icon(Icons.Filled.Search, "Find", tint = if (showFind) accent else cText)
                                 }
@@ -184,7 +192,7 @@ fun App(vm: AppViewModel) {
                             Column(Modifier.fillMaxSize()) {
                                 if (showFind) FindBar(onClose = { showFind = false })
                                 Box(Modifier.weight(1f)) {
-                                    key(sel.first.id, sel.second) { TerminalScreen(sel.first, sel.second) }
+                                    key(sel.first.id, sel.second) { TerminalScreen(vm, sel.first, sel.second) }
                                 }
                             }
                         }
@@ -369,13 +377,26 @@ private fun Sidebar(
                 modifier = Modifier.scale(0.8f),
             )
         }
+        // "Show hidden" — reveal user-hidden sessions so they can be restored. Only shown
+        // when at least one session is hidden (avoids clutter when nothing is hidden).
+        val anyHidden = vm.brokers.any { brk -> vm.sessions[brk.id].orEmpty().any { it.hidden } }
+        if (anyHidden) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 0.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Show hidden", color = cDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Switch(checked = vm.showHidden, onCheckedChange = { vm.showHidden = it }, modifier = Modifier.scale(0.8f))
+            }
+        }
         val brokerList = vm.brokers.toList()
-        // Read sessions + the agent-visibility toggle HERE (composable body) and pass
-        // the builder a plain pre-filtered map: reading these transitively inside the
+        // Read sessions + the visibility toggles HERE (composable body) and pass the
+        // builder a plain pre-filtered map: reading these transitively inside the
         // LazyColumn item builder did not reliably re-run it (same lesson as attention).
         val showAgent = vm.showAgentSessions
+        val showHidden = vm.showHidden
         val visibleByBroker = brokerList.associate { brk ->
-            brk.id to vm.sessions[brk.id].orEmpty().filter { showAgent || !it.agent }
+            brk.id to vm.sessions[brk.id].orEmpty().filter { (showAgent || !it.agent) && (showHidden || !it.hidden) }
         }
         LazyColumn(Modifier.weight(1f)) {
             items(brokerList, key = { it.id }) { b ->
@@ -452,6 +473,10 @@ private fun SessionMenuDialog(vm: AppViewModel, b: Broker, s: SessionInfo, onDis
                     fontSize = 13.sp, color = cDim)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("name") })
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = { vm.setHidden(b, s.name, !s.hidden); onDismiss() }) {
+                    Text(if (s.hidden) "Restore panel (unhide)" else "Hide panel", color = accent)
+                }
             }
         },
         confirmButton = {
@@ -474,9 +499,14 @@ private fun SessionMenuDialog(vm: AppViewModel, b: Broker, s: SessionInfo, onDis
 }
 
 @Composable
-private fun TerminalScreen(broker: Broker, session: String) {
+private fun TerminalScreen(vm: AppViewModel, broker: Broker, session: String) {
     val context = LocalContext.current
-    val rt = remember(broker.id, session) { RemoteTerminal(context, broker, session).also { ActiveTerm.rt = it } }
+    val rt = remember(broker.id, session) {
+        RemoteTerminal(context, broker, session).also {
+            ActiveTerm.rt = it
+            it.onWandbRuns = { runs -> vm.mergeWandb(vm.wandbKey(broker, session), runs) }
+        }
+    }
     val theme = LocalTheme.current
     LaunchedEffect(rt, theme.id) { rt.applyTheme(theme) }   // recolor the terminal on open + theme switch
     DisposableEffect(rt) {
@@ -486,12 +516,18 @@ private fun TerminalScreen(broker: Broker, session: String) {
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { rt.view },
-            modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
-        )
-        AccessoryKeys(onBytes = { rt.sendBytes(it) }, onKeyboard = { rt.showKeyboard() })
+    // Show the W&B run in place of the terminal when toggled on — the RemoteTerminal stays
+    // alive (remember), so its connection + detection keep running underneath.
+    if (vm.isWandbShown(broker, session) && vm.currentWandbRun(broker, session) != null) {
+        WandbScreen(vm, broker, session, onClose = { vm.hideWandb(broker, session) })
+    } else {
+        Column(Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { rt.view },
+                modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
+            )
+            AccessoryKeys(onBytes = { rt.sendBytes(it) }, onKeyboard = { rt.showKeyboard() })
+        }
     }
 }
 

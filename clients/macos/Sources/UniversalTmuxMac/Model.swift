@@ -19,13 +19,14 @@ struct SessionInfo: Identifiable, Hashable, Codable {
     var path: String?    // optional: older brokers don't send it
     var state: String = "idle"  // broker agent-state: "working" | "waiting" | "idle"
     var agent: Bool = false      // created by the mesh (ut spawn): hidden unless "Show agent sessions"
+    var hidden: Bool = false     // user-hidden; broker-owned so the hide syncs across devices
     var id: String { name }
 
     /// True when the broker reports the agent as blocked on the user.
     var isWaiting: Bool { state == "waiting" }
 
     enum CodingKeys: String, CodingKey {
-        case name, windows, attached, activity, path, state, agent
+        case name, windows, attached, activity, path, state, agent, hidden
     }
 
     // Custom decoder: Swift's synthesized `Decodable` does NOT apply the
@@ -42,6 +43,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         path = try c.decodeIfPresent(String.self, forKey: .path)
         state = try c.decodeIfPresent(String.self, forKey: .state) ?? "idle"
         agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? false
+        hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
     }
 }
 
@@ -122,14 +124,14 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") }
     }
 
-    /// Sessions the user has HIDDEN from the sidebar — a personal backlog they don't
-    /// want cluttering the UI. Purely a CLIENT-SIDE view filter (the session keeps
-    /// running; nothing is sent to the broker). Keyed by SessionRef.id, persisted.
-    /// Bring them back via the Hidden Panels picker (⇧⌘B).
+    /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
+    /// across devices): each refresh rebuilds this machine's membership from the `hidden`
+    /// flag on /sessions, and hide/unhide POSTs to the owning broker. Keyed by SessionRef.id.
+    /// Seeded from the old local set for an immediate (no-flicker) hide; that legacy set is
+    /// migrated to the brokers once on first sight, then dropped.
     @Published var hiddenSessions: Set<String> =
-        Set(UserDefaults.standard.stringArray(forKey: "ut.hiddenSessions") ?? []) {
-        didSet { UserDefaults.standard.set(Array(hiddenSessions), forKey: "ut.hiddenSessions") }
-    }
+        Set(UserDefaults.standard.stringArray(forKey: "ut.hiddenSessions") ?? [])
+    private var legacyHiddenToMigrate: [String] = UserDefaults.standard.stringArray(forKey: "ut.hiddenSessions") ?? []
     /// Drives the ⇧⌘B "Hidden Panels" restore sheet.
     @Published var showHiddenPicker = false
     /// Drives the ⇧⌘T theme picker sheet.
@@ -152,10 +154,44 @@ final class AppState: ObservableObject {
     /// Hide a session from the sidebar. If it was selected, move selection to the
     /// first still-visible session so the detail pane never shows a hidden panel.
     func hide(_ ref: SessionRef) {
-        hiddenSessions.insert(ref.id)
+        hiddenSessions.insert(ref.id)            // optimistic; the next refresh confirms from the broker
+        setHiddenOnBroker(ref, hidden: true)
         if selection == ref { selection = firstVisibleSession() }
     }
-    func unhide(_ ref: SessionRef) { hiddenSessions.remove(ref.id) }
+    func unhide(_ ref: SessionRef) {
+        hiddenSessions.remove(ref.id)
+        setHiddenOnBroker(ref, hidden: false)
+    }
+
+    /// Toggle a session's hidden flag on its owning broker (the synced source of truth).
+    private func setHiddenOnBroker(_ ref: SessionRef, hidden: Bool) {
+        guard let m = machines.first(where: { $0.id == ref.machineID }),
+              let enc = ref.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "\(m.httpBase)/hidden?session=\(enc)&hidden=\(hidden)") else { return }
+        var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 6
+        URLSession.shared.dataTask(with: req).resume()
+    }
+
+    /// Reconcile this machine's hidden membership with the broker's `hidden` flags (the
+    /// synced truth), and migrate any legacy local hides to the broker once.
+    private func syncHidden(machine m: Machine, sessions list: [SessionInfo]) {
+        let mPrefix = m.id + "/"
+        let legacyForM = legacyHiddenToMigrate.filter { $0.hasPrefix(mPrefix) }
+        for id in legacyForM {                        // one-time: push old local hides up
+            let name = String(id.dropFirst(mPrefix.count))
+            if !list.contains(where: { $0.name == name && $0.hidden }) {
+                setHiddenOnBroker(SessionRef(machineID: m.id, session: name), hidden: true)
+            }
+        }
+        if !legacyForM.isEmpty {
+            legacyHiddenToMigrate.removeAll { $0.hasPrefix(mPrefix) }
+            if legacyHiddenToMigrate.isEmpty { UserDefaults.standard.removeObject(forKey: "ut.hiddenSessions") }
+        }
+        var nh = hiddenSessions.filter { !$0.hasPrefix(mPrefix) }   // drop this machine's old entries
+        for s in list where s.hidden { nh.insert(SessionRef(machineID: m.id, session: s.name).id) }
+        for id in legacyForM { nh.insert(id) }                      // keep just-migrated hidden until the broker confirms
+        if nh != hiddenSessions { hiddenSessions = nh }
+    }
 
     /// Hidden sessions that STILL EXIST, with machine label — drives the restore picker.
     var hiddenSessionList: [HiddenPanel] {
@@ -338,6 +374,7 @@ final class AppState: ObservableObject {
                 self.sessionsByMachine[m.id] = list.sorted { $0.name < $1.name }
                 self.statusByMachine[m.id] = status
                 if err == nil { self.rttByMachine[m.id] = Int(Date().timeIntervalSince(started) * 1000) }
+                if err == nil { self.syncHidden(machine: m, sessions: list) }
                 if err == nil {
                     var entered: [(ref: SessionRef, machine: String)] = []
                     for s in list {
