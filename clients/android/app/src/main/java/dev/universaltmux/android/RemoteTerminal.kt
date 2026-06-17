@@ -74,6 +74,29 @@ class RemoteTerminal(
     }
 
     /** Switch this terminal to a theme (call on open + when the user picks one). */
+    /** W&B run detection — tee the raw output stream (mirrors the Mac). Fires with the
+     *  detected runs so the VM can merge + persist them. */
+    var onWandbRuns: ((List<WandbRun>) -> Unit)? = null
+    private val wandbBuf = StringBuilder()
+    private var wandbScan: Runnable? = null
+
+    private fun ingestWandb(payload: ByteArray) {
+        wandbBuf.append(String(payload, Charsets.UTF_8))
+        if (wandbBuf.length > 512 * 1024) { scanWandb(); return }   // huge reconnect snapshot → scan now
+        wandbScan?.let { main.removeCallbacks(it) }
+        val r = Runnable { scanWandb() }
+        wandbScan = r
+        main.postDelayed(r, 400)   // debounce
+    }
+
+    private fun scanWandb() {
+        val text = wandbBuf.toString()
+        val tail = if (text.length > 8192) text.substring(text.length - 8192) else text  // overlap so a split URL rejoins
+        wandbBuf.setLength(0); wandbBuf.append(tail)
+        val runs = WandbDetector.runs(text)
+        if (runs.isNotEmpty()) onWandbRuns?.invoke(runs)
+    }
+
     fun applyTheme(p: ThemePalette) {
         pendingTheme = p
         main.post { applyColors(); view.onScreenUpdated() }
@@ -112,7 +135,7 @@ class RemoteTerminal(
                 when (d.first) {
                     Op.OUTPUT -> {
                         val payload = d.third
-                        main.post { session.feedOutput(payload, 0, payload.size) }
+                        main.post { session.feedOutput(payload, 0, payload.size); ingestWandb(payload) }
                     }
                     Op.PANE_SIZE -> {
                         // The pane's authoritative size (any tmux client may have set

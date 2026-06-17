@@ -117,6 +117,21 @@ func main() {
 			_, _ = io.WriteString(w, "{}")
 		}
 	})
+	// /hidden — user-hidden sessions, broker-owned so the hide syncs across devices.
+	// POST ?session=NAME&hidden=true|false toggles + persists; the flag also rides
+	// /sessions (Info.Hidden). GET returns the set (debugging).
+	mux.HandleFunc("/hidden", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			if name := r.URL.Query().Get("session"); name != "" {
+				mgr.SetHidden(name, r.URL.Query().Get("hidden") == "true")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"hidden": mgr.HiddenNames()})
+	})
 	// /recent — a session's recent rendered scrollback as plain text, for the
 	// macOS command center's status updater (claude -p reads it). ?session=NAME
 	// &lines=N (default 400). Forks capture-pane per call, so clients must poll

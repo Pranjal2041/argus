@@ -7,9 +7,11 @@ package broker
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -270,6 +272,13 @@ type Manager struct {
 	// broker is a dumb relay here — it never parses or interprets the blob.
 	ccMu   sync.Mutex
 	ccBlob []byte
+
+	// Hidden sessions: names the user hid in a client UI. Broker-owned + persisted so the
+	// hide STICKS (survives broker restarts) and SYNCS across devices — both clients read
+	// the `hidden` flag on /sessions and toggle it via POST /hidden.
+	hiddenMu   sync.Mutex
+	hidden     map[string]bool
+	hiddenPath string
 }
 
 // SetCommandCenter stores the latest command-center status blob (from the Mac).
@@ -287,7 +296,9 @@ func (m *Manager) CommandCenter() []byte {
 }
 
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
-	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub)}
+	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}}
+	m.hiddenPath = hiddenStatePath()
+	m.loadHidden()
 	go m.sessionRefreshLoop(2 * time.Second)
 	// Reap idle agent sessions on an interval; UT_REAP_INTERVAL_SEC overrides the
 	// 5-min default (operational knob; also makes the reaper testable).
@@ -390,8 +401,83 @@ func (m *Manager) Recent(name string, lines int) (string, error) {
 // fast — it never calls the provider on the request path.
 func (m *Manager) Sessions() []session.Info {
 	m.sessMu.Lock()
-	defer m.sessMu.Unlock()
-	return m.sessCache
+	out := make([]session.Info, len(m.sessCache))
+	copy(out, m.sessCache)
+	m.sessMu.Unlock()
+	// Stamp the user-hidden flag on a COPY so toggles reflect immediately (no wait for the
+	// session-cache refresh) without mutating the cache.
+	m.hiddenMu.Lock()
+	for i := range out {
+		if m.hidden[out[i].Name] {
+			out[i].Hidden = true
+		}
+	}
+	m.hiddenMu.Unlock()
+	return out
+}
+
+// hiddenStatePath is a per-HOST file (not the NFS-shared home key) so brokers on
+// different nodes don't clobber each other's hidden state.
+func hiddenStatePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.TempDir()
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "local"
+	}
+	dir := filepath.Join(home, ".universal-tmux")
+	_ = os.MkdirAll(dir, 0o755)
+	return filepath.Join(dir, "hidden-"+host+".json")
+}
+
+func (m *Manager) loadHidden() {
+	b, err := os.ReadFile(m.hiddenPath)
+	if err != nil {
+		return
+	}
+	var names []string
+	if json.Unmarshal(b, &names) == nil {
+		m.hiddenMu.Lock()
+		for _, n := range names {
+			m.hidden[n] = true
+		}
+		m.hiddenMu.Unlock()
+	}
+}
+
+func (m *Manager) saveHiddenLocked() {
+	names := make([]string, 0, len(m.hidden))
+	for n := range m.hidden {
+		names = append(names, n)
+	}
+	if b, err := json.Marshal(names); err == nil {
+		_ = os.WriteFile(m.hiddenPath, b, 0o644)
+	}
+}
+
+// SetHidden marks/unmarks a session name as hidden and persists.
+func (m *Manager) SetHidden(name string, hidden bool) {
+	m.hiddenMu.Lock()
+	defer m.hiddenMu.Unlock()
+	if hidden {
+		m.hidden[name] = true
+	} else {
+		delete(m.hidden, name)
+	}
+	m.saveHiddenLocked()
+}
+
+// HiddenNames returns the hidden session names (for GET /hidden).
+func (m *Manager) HiddenNames() []string {
+	m.hiddenMu.Lock()
+	defer m.hiddenMu.Unlock()
+	names := make([]string, 0, len(m.hidden))
+	for n := range m.hidden {
+		names = append(names, n)
+	}
+	return names
 }
 
 // refreshSessions recomputes the cache from the provider. May be slow under load;

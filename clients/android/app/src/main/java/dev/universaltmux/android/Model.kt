@@ -73,13 +73,95 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             recomputeAttention()
         }
 
+    /** Reveal user-hidden sessions (so they can be restored). Transient toggle. */
+    var showHidden by mutableStateOf(false)
+
+    /** Hide a session (broker-owned → syncs across devices). Optimistic refresh. */
+    fun setHidden(b: Broker, name: String, hidden: Boolean) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { Net.setHidden(b, name, hidden) }
+            refresh(b)
+        }
+    }
+
     /** Sessions for a broker as shown in the UI: agent sessions filtered out unless
-     *  [showAgentSessions] is on. The list and attention surfaces both use this. */
+     *  [showAgentSessions] is on, and user-hidden ones unless [showHidden] is on. The
+     *  list and attention surfaces both use this. */
     fun visibleSessions(b: Broker): List<SessionInfo> =
-        (sessions[b.id] ?: emptyList()).filter { showAgentSessions || !it.agent }
+        (sessions[b.id] ?: emptyList()).filter { (showAgentSessions || !it.agent) && (showHidden || !it.hidden) }
+
+    // --- W&B run views (detected client-side off the output stream, like the Mac) ----
+    val wandbRuns = mutableStateMapOf<String, List<WandbRun>>()    // "<brokerId>/<name>" -> runs (first-seen order)
+    val wandbShown = mutableStateListOf<String>()                  // session keys currently showing the webview
+    private val wandbCurrent = mutableStateMapOf<String, String>() // session key -> chosen runId
+    private val wandbTTL = 7L * 24 * 3600 * 1000
+
+    fun wandbKey(b: Broker, name: String) = "${b.id}/$name"
+    fun wandbFor(b: Broker, name: String): List<WandbRun> = wandbRuns[wandbKey(b, name)] ?: emptyList()
+    fun hasWandb(b: Broker, name: String) = wandbFor(b, name).isNotEmpty()
+    fun isWandbShown(b: Broker, name: String) = wandbShown.contains(wandbKey(b, name))
+    fun currentWandbRun(b: Broker, name: String): WandbRun? {
+        val runs = wandbFor(b, name); if (runs.isEmpty()) return null
+        return runs.firstOrNull { it.runId == wandbCurrent[wandbKey(b, name)] } ?: runs.last()
+    }
+    fun setWandbCurrent(b: Broker, name: String, run: WandbRun) { wandbCurrent[wandbKey(b, name)] = run.runId }
+    fun toggleWandb(b: Broker, name: String) {
+        val key = wandbKey(b, name)
+        if (wandbShown.contains(key)) wandbShown.remove(key) else if (hasWandb(b, name)) wandbShown.add(key)
+    }
+    fun hideWandb(b: Broker, name: String) { wandbShown.remove(wandbKey(b, name)) }
+
+    /** Union-merge detected runs into the store (never replace): new ids appended, a bare-id
+     *  label upgraded to a real name once captured, original discoveredAt preserved. */
+    fun mergeWandb(key: String, found: List<WandbRun>) {
+        if (found.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val byId = LinkedHashMap<String, WandbRun>()
+        wandbRuns[key]?.forEach { byId[it.runId] = it }
+        var changed = false
+        for (r in found) {
+            val prev = byId[r.runId]
+            if (prev == null) { r.discoveredAt = now; byId[r.runId] = r; changed = true } else {
+                val label = if (prev.label != prev.runId) prev.label else r.label
+                if (label != prev.label || r.url != prev.url) {
+                    byId[r.runId] = WandbRun(r.url, r.runId, label).also { it.discoveredAt = prev.discoveredAt }
+                    changed = true
+                }
+            }
+        }
+        if (changed) { wandbRuns[key] = byId.values.toList(); saveWandb() }
+    }
+
+    private fun saveWandb() {
+        val root = JSONObject()
+        wandbRuns.forEach { (key, runs) ->
+            val arr = JSONArray()
+            runs.forEach { arr.put(JSONObject().put("url", it.url).put("runId", it.runId).put("label", it.label).put("discoveredAt", it.discoveredAt)) }
+            root.put(key, arr)
+        }
+        prefs.edit().putString("ut.wandbRuns.v1", root.toString()).apply()
+    }
+    private fun loadWandb() {
+        val s = prefs.getString("ut.wandbRuns.v1", null) ?: return
+        val now = System.currentTimeMillis()
+        runCatching {
+            val root = JSONObject(s)
+            for (key in root.keys()) {
+                val arr = root.getJSONArray(key)
+                val list = (0 until arr.length()).mapNotNull { i ->
+                    val o = arr.getJSONObject(i)
+                    val da = o.optLong("discoveredAt", now)
+                    if (now - da > wandbTTL) null
+                    else WandbRun(o.getString("url"), o.getString("runId"), o.getString("label")).also { it.discoveredAt = da }
+                }
+                if (list.isNotEmpty()) wandbRuns[key] = list
+            }
+        }
+    }
 
     init {
         loadBrokers()
+        loadWandb()
         refreshAll()
         if (authKey.isNotEmpty()) joinTailnet(authKey) // auto-join + auto-discover on startup
     }
@@ -236,7 +318,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun recomputeAttention() {
         val next = brokers.flatMap { b ->
             visibleSessions(b)
-                .filter { it.state == "waiting" && unseenKey(b, it.name) !in acknowledged }
+                .filter { !it.hidden && it.state == "waiting" && unseenKey(b, it.name) !in acknowledged }
                 .map { b to it }
         }
         if (next != attention.toList()) {
