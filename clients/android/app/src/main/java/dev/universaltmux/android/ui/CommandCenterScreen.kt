@@ -97,11 +97,12 @@ private fun ccChip(state: String, label: String?): String = when (label) {
 fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
     // Read observable state in the composable body (restartable scope) so the list
     // rebuilds when sessions / statuses / backlog change.
-    val showAgent = vm.showAgentSessions
     val tiles = vm.brokers.toList().flatMap { b ->
-        // Hidden panels never appear in the command center (matches macOS); the Mac's
-        // status agent also skips them, so there's no status to show for them anyway.
-        vm.sessions[b.id].orEmpty().filter { (showAgent || !it.agent) && !it.hidden }.map { s -> CCTile(b, s, vm.ccFor(b, s.name)) }
+        // Agent (ut spawn) and hidden sessions NEVER appear in the command center —
+        // unconditionally, regardless of the "Show agent sessions" toggle (which only
+        // affects the session list). This matches macOS, where the status agent also
+        // never summarizes them, so they'd have no status anyway.
+        vm.sessions[b.id].orEmpty().filter { !it.agent && !it.hidden }.map { s -> CCTile(b, s, vm.ccFor(b, s.name)) }
     }
     // Group into the fixed sections by CURRENT status; within a section order by name
     // (stable). A card only moves when its category actually changes — never ad-hoc.

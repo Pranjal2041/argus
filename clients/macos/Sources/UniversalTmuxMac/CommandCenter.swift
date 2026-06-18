@@ -61,8 +61,6 @@ protocol AgentStatusProvider {
 /// can't grow without bound. Swap this out for a Messages-API provider if cost bites.
 final class ClaudeStatusProvider: AgentStatusProvider {
     private let model: String
-    private let resetEvery = 20
-    private var sessions: [String: (uuid: String, turns: Int)] = [:]
     private let lock = NSLock()
 
     // Cumulative spend, persisted so cost can be assessed across launches.
@@ -87,7 +85,7 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         NSLog("[cc-cost] +$%.4f  total $%.4f over %d calls", usd, t, n)
     }
 
-    func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
+    func forget(key: String) {}   // no cross-call state to clear (each summary is fresh)
 
     func status(forKey key: String, output: String, note: String? = nil) async -> AgentStatus? {
         // Bound the prompt to the recent tail (cost + focus): the last ~14KB keeps the
@@ -96,22 +94,21 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         let tail = String(output.suffix(14_000))
         let prompt = note.map { $0 + "\n\n" + tail } ?? tail
 
-        // Decide create-vs-resume; reset periodically to bound context growth.
-        lock.lock()
-        var entry = sessions[key]
-        if let e = entry, e.turns >= resetEvery { entry = nil }
-        let uuid: String
-        let resuming: Bool
-        if let e = entry { uuid = e.uuid; resuming = true; sessions[key] = (e.uuid, e.turns + 1) }
-        else { uuid = UUID().uuidString.lowercased(); resuming = false; sessions[key] = (uuid, 1) }
-        lock.unlock()
-
+        // Each summary is a FRESH conversation — NOT a rolling --resume across sweeps.
+        // A rolling session made the model anchor on its OWN prior answers: it kept
+        // saying "working" after a screen changed to an error, and it muted prompt
+        // changes until a periodic reset. The status is a stateless read of the CURRENT
+        // screen, so judge it fresh every time. A user correction still sticks: the note
+        // is delivered this turn and the caller's lastHash skip holds the result until
+        // the screen actually changes (no conversation memory needed — and the user
+        // explicitly did not want the status to "learn").
+        let uuid = UUID().uuidString.lowercased()
         // Up to 2 attempts: a transient API/connection error (ECONNRESET, overloaded)
-        // shouldn't leave the card stale until the next 30s sweep. After the first
-        // attempt the claude session exists, so the retry --resume's it.
+        // shouldn't leave the card stale until the next 30s sweep. Attempt 0 creates the
+        // session; the retry --resume's that SAME (just-created, no answer yet) session.
         for attempt in 0..<2 {
             var args = ["-p", "--model", model, "--output-format", "json", "--system-prompt", Self.systemPrompt]
-            args += (resuming || attempt > 0) ? ["--resume", uuid] : ["--session-id", uuid]
+            args += attempt == 0 ? ["--session-id", uuid] : ["--resume", uuid]
             if let out = await Self.runClaude(args: args, stdin: prompt), let env = Self.envelope(out) {
                 recordCost(env.cost)
                 if let status = Self.parseStatus(env.result) { return status }
@@ -207,6 +204,7 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     - The bottom-most line that looks like "❯ <some text>" sitting just above the "⏵⏵ bypass permissions…" status bar is the LIVE INPUT BOX. The text in it is very often an AUTO-GENERATED suggestion (ghost text the agent proposes, like "yes go ahead", "continue", "yes please"). It is NOT something the user typed and NOT an approval. NEVER treat that composer line as a user message, an answer, or a go-ahead.
     - The user's REAL messages are earlier in the transcript, each one followed by the agent actually acting on it. If the agent asked a question and the next thing is just the input box (no agent work after it, no "esc to interrupt"), then the user has NOT answered yet — the agent is WAITING ON THE USER.
     - "esc to interrupt" / "/stop to interrupt" on screen = the agent is generating right now (working). Its ABSENCE means the agent is not currently generating.
+    - AGENT HALTED ON AN ERROR: if the agent's LAST output is an error it did not get past — "API Error" / "Rate limited" / a crash / an exception / a command that failed and it stopped — with no successful agent work after it and no "esc to interrupt", the agent is STUCK and needs you. Do NOT assume it "recovered": treat an error as recovered ONLY if you can see real agent work AFTER it. The agent's own earlier "recovered / running to completion" narration does not count if a LATER error left it halted at the bottom. (Being out of room — "100% context used" / "context low" — is NOT itself stuck; the agent compacts and continues.)
 
     The summary is INSIGHT, not a recap:
     - Lead with the meaningful state: the key result/finding it produced, the decision it's waiting on, whether it finished, or where it's stuck — relative to the user's task.
@@ -214,7 +212,7 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     - Surface any loose end that needs the user — a pending approval, an unanswered question it asked, a known blocker. That is often the single most useful thing to say.
     - NO FILLER. Never write "ready for next task", "awaiting command", "ready for you to try", "sitting at the prompt", or restate routine steps.
 
-    BACKGROUND JOBS: a long-running job whose output is VISIBLY PROGRESSING — a training run with a climbing step count, a sweep with a rising %, an rsync with files ticking up, fresh log lines — counts as ACTIVE even when the agent itself is idle at the prompt; report the job's state and progress ("training step 393/400, val healthy"), label working. BUT: a count of shells or processes merely existing ("17 shells still running") is NOT progress and NOT "working" on its own — only count a job as active if its output is actually advancing. And a pending question to the user (see below) ALWAYS takes priority over a running job.
+    BACKGROUND JOBS: a long-running job whose output is VISIBLY PROGRESSING — a training run with a climbing step count, a sweep with a rising %, an rsync with files ticking up, fresh log lines — counts as ACTIVE even when the agent itself is idle at the prompt; report the job's state and progress ("training step 393/400, val healthy"), label working. BUT: a count of shells or processes merely existing ("17 shells still running") is NOT progress and NOT "working" on its own — only count a job as active if its output is actually advancing. And a pending question to the user, OR the agent being halted on an error (see "stuck"), ALWAYS takes priority over a running job — report that the agent needs you, not the job's %. A job's pace dropping sharply is a corroborating sign the agent stalled.
 
     SUB-AGENTS: an agent that spawned its own background sub-agents and is "Waiting for N background agents to finish" (you'll see a list of running sub-tasks / "↓ to manage" / "← for agents") is WORKING — it delegated the work and is waiting on ITS OWN agents, NOT on you. This is NEVER needs-decision. Summarize what the sub-agents are doing.
 
@@ -226,7 +224,7 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 
     LABEL — work down this list IN ORDER and pick the FIRST that applies. Do not skip ahead.
     1. needs-decision: the AGENT itself asked the user a SPECIFIC question and is blocked on the answer — you can point to the actual question the agent wrote on screen (no agent work after it, no "esc to interrupt"). It is NOT needs-decision if YOU are the one inferring "awaiting requirements / awaiting confirmation / needs the user to clarify" — that is you second-guessing; when the USER is the one giving instructions, the agent should act (working), it is not waiting on anyone. Ghost text in the composer is not an answer; an optional session-quality/feedback prompt is not a question (see OPTIONAL FEEDBACK PROMPTS).
-    2. stuck: the agent is genuinely halted — the SAME error/failure repeating with no progress, a crash or permission loop, or it explicitly gave up. NOT a hard or still-unsolved problem it is actively working on, NOT user frustration, NOT the mere existence of an open bug, NOT a fresh user message. A difficult task in progress is "working", not "stuck".
+    2. stuck: the agent is genuinely halted — its last output is an unrecovered error ("API Error" / "Rate limited", a crash, an exception, a permission loop), the same failure is repeating with no progress, or it explicitly gave up. This holds EVEN IF a background job still shows some progress: a halted agent that needs you outranks the job's %. NOT a hard or still-unsolved problem it is actively working on, NOT user frustration, NOT the mere existence of an open bug, NOT a fresh user message. A difficult task in progress is "working", not "stuck".
     3. drifting: clearly off-track or churning without making progress (only if obvious).
     4. working: the agent is generating now ("esc to interrupt" present), OR a background job's output is visibly advancing (see BACKGROUND JOBS).
     5. look: nothing is running, but a notable or surprising result is on screen the user should see (no decision needed).
