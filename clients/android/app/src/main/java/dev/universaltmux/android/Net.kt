@@ -41,6 +41,7 @@ data class SessionInfo(
     val state: String,
     val agent: Boolean = false,   // created by the mesh (ut spawn): hidden unless "Show agent sessions"
     val hidden: Boolean = false,  // user-hidden; broker-owned so the hide syncs across devices
+    val tmuxId: String? = null,   // broker's STABLE session handle ($N): unchanged across rename — connect by it so a renamed pane never sticks on "reconnecting"
 )
 
 /** One session's AI status, published by the macOS client and read here. */
@@ -111,6 +112,7 @@ object Net {
                     s.optString("state", ""),
                     s.optBoolean("agent", false),
                     s.optBoolean("hidden", false),
+                    s.optString("id", "").ifEmpty { null },
                 )
             }
         }
@@ -133,6 +135,16 @@ object Net {
             }
         }
     } catch (_: Exception) { emptyList() }
+
+    /** Set a manual command-center status for a session. The phone can't run the status
+     *  model, so it queues this on the broker; the Mac applies it and re-publishes. */
+    fun setCCOverride(b: Broker, session: String, label: String) {
+        try {
+            val u = "${b.httpBase}/ccoverride?session=${enc(session)}&label=${enc(label)}"
+            client.newCall(Request.Builder().url(u).post(RequestBody.create(null, ByteArray(0))).build()).execute().close()
+        } catch (_: Exception) {
+        }
+    }
 
     /** Toggle a session's hidden flag on its owning broker (broker-owned → syncs across devices). */
     fun setHidden(b: Broker, session: String, hidden: Boolean) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,17 +60,43 @@ func newSessionHub(tm session.Session) *sessionHub {
 	return h
 }
 
+// maxFramePayload caps a single WebSocket message's payload. A larger message
+// fails some clients' receive with EMSGSIZE "Message too long"
+// (URLSessionWebSocketTask defaults to a 1 MiB limit), and since a reconnect just
+// re-sends the same oversized frame, that becomes an infinite reconnect flap — it
+// hit sessions whose scrollback snapshot exceeded 1 MiB. A long snapshot or output
+// burst is split across several opOutput frames; the terminal feeds them in order,
+// so splitting at an arbitrary byte boundary is transparent (TCP already does).
+const maxFramePayload = 256 * 1024
+
+// outputFrames encodes data as one or more opOutput frames, each within
+// maxFramePayload, preserving byte order.
+func outputFrames(pane string, data []byte) [][]byte {
+	if len(data) <= maxFramePayload {
+		return [][]byte{encodeFrame(opOutput, pane, data)}
+	}
+	frames := make([][]byte, 0, len(data)/maxFramePayload+1)
+	for off := 0; off < len(data); off += maxFramePayload {
+		end := off + maxFramePayload
+		if end > len(data) {
+			end = len(data)
+		}
+		frames = append(frames, encodeFrame(opOutput, pane, data[off:end]))
+	}
+	return frames
+}
+
 func (h *sessionHub) pump() {
 	defer close(h.dead)
 	for out := range h.tm.Output() {
-		var frame []byte
+		var frames [][]byte
 		if out.Cols > 0 && out.Rows > 0 {
 			// In-band size event: broadcast the authoritative pane size in stream
 			// order, so each client re-pins its grid exactly between the bytes
 			// formatted for the old width and those formatted for the new.
-			frame = encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))
+			frames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
 		} else {
-			frame = encodeFrame(opOutput, out.Pane, out.Data)
+			frames = outputFrames(out.Pane, out.Data)
 		}
 		h.mu.Lock()
 		h.lastPane = out.Pane
@@ -79,17 +106,22 @@ func (h *sessionHub) pump() {
 		}
 		h.mu.Unlock()
 		for _, s := range subs {
-			select {
-			case s.ch <- frame:
-			case <-s.done:
-			default:
-				// Subscriber can't keep up — e.g. a laptop that slept or dropped off
-				// whose TCP hasn't timed out yet. EVICT it instead of blocking: a
-				// blocked send here stalls pump → outCh → the control PTY → the session's
-				// program, freezing it (a wedged agent after laptop sleep). The evicted
-				// client reconnects and resyncs from the snapshot. A live client drains
-				// its 1024-deep buffer far faster than this ever fills.
-				s.cancel()
+		send:
+			for _, frame := range frames {
+				select {
+				case s.ch <- frame:
+				case <-s.done:
+					break send
+				default:
+					// Subscriber can't keep up — e.g. a laptop that slept or dropped off
+					// whose TCP hasn't timed out yet. EVICT it instead of blocking: a
+					// blocked send here stalls pump → outCh → the control PTY → the session's
+					// program, freezing it (a wedged agent after laptop sleep). The evicted
+					// client reconnects and resyncs from the snapshot. A live client drains
+					// its 1024-deep buffer far faster than this ever fills.
+					s.cancel()
+					break send
+				}
 			}
 		}
 	}
@@ -134,9 +166,12 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	// prime and for explicit on-resize redraw requests (opReqSnapshot).
 	sendSnapshot := func() {
 		if snap := h.tm.Snapshot(); len(snap) > 0 {
-			select {
-			case sub.ch <- encodeFrame(opOutput, h.tm.Pane(), snap):
-			case <-sub.done:
+			for _, frame := range outputFrames(h.tm.Pane(), snap) {
+				select {
+				case sub.ch <- frame:
+				case <-sub.done:
+					return
+				}
 			}
 		}
 	}
@@ -273,6 +308,13 @@ type Manager struct {
 	ccMu   sync.Mutex
 	ccBlob []byte
 
+	// Command-center status OVERRIDES: a client that can't run the status model (the
+	// phone) POSTs a manual label here; the Mac (the only generator) polls these,
+	// applies each through its normal correction path, and clears it. Transient —
+	// consumed within seconds — so kept in memory only.
+	ccOvMu      sync.Mutex
+	ccOverrides map[string]CCOverride
+
 	// Hidden sessions: names the user hid in a client UI. Broker-owned + persisted so the
 	// hide STICKS (survives broker restarts) and SYNCS across devices — both clients read
 	// the `hidden` flag on /sessions and toggle it via POST /hidden.
@@ -295,8 +337,49 @@ func (m *Manager) CommandCenter() []byte {
 	return m.ccBlob
 }
 
+// CCOverride is a phone-set manual status awaiting the Mac's pickup.
+type CCOverride struct {
+	Label string `json:"label"`
+	TS    int64  `json:"ts"`
+}
+
+// SetCCOverride records a manual status a client set for a session and returns its
+// timestamp; the Mac clears it by matching this TS, so a newer override set in
+// between is never lost.
+func (m *Manager) SetCCOverride(session, label string) int64 {
+	ts := time.Now().UnixMilli()
+	m.ccOvMu.Lock()
+	if m.ccOverrides == nil {
+		m.ccOverrides = map[string]CCOverride{}
+	}
+	m.ccOverrides[session] = CCOverride{Label: label, TS: ts}
+	m.ccOvMu.Unlock()
+	return ts
+}
+
+// CCOverrides returns a copy of the pending manual-status overrides.
+func (m *Manager) CCOverrides() map[string]CCOverride {
+	m.ccOvMu.Lock()
+	defer m.ccOvMu.Unlock()
+	out := make(map[string]CCOverride, len(m.ccOverrides))
+	for k, v := range m.ccOverrides {
+		out[k] = v
+	}
+	return out
+}
+
+// ClearCCOverride drops a pending override once the Mac has consumed it, but only if
+// the timestamp still matches — so a newer override set in between is preserved.
+func (m *Manager) ClearCCOverride(session string, ts int64) {
+	m.ccOvMu.Lock()
+	defer m.ccOvMu.Unlock()
+	if v, ok := m.ccOverrides[session]; ok && v.TS == ts {
+		delete(m.ccOverrides, session)
+	}
+}
+
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
-	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}}
+	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}, ccOverrides: map[string]CCOverride{}}
 	m.hiddenPath = hiddenStatePath()
 	m.loadHidden()
 	go m.sessionRefreshLoop(2 * time.Second)
@@ -537,11 +620,39 @@ func (m *Manager) hub(name string) (*sessionHub, error) {
 	return h, nil
 }
 
+// resolveTarget maps a connection target to a session NAME. A target starting
+// with "$" is a stable tmux session id; we ask the provider for the session's
+// current name (which follows renames). Plain names pass through unchanged, as
+// do ids the provider can't resolve (a dead id then fails the Has() guard, so
+// it can't resurrect anything). Backends without id support (ConPTY) simply
+// don't implement SessionForID, so their clients keep using names.
+func (m *Manager) resolveTarget(target string) string {
+	if !strings.HasPrefix(target, "$") {
+		return target
+	}
+	if r, ok := m.prov.(interface {
+		SessionForID(string) (string, bool)
+	}); ok {
+		if cur, ok := r.SessionForID(target); ok {
+			return cur
+		}
+	}
+	return target
+}
+
 // Serve attaches a client to an EXISTING session. It never creates one: a
 // WebSocket reconnecting to a name that was renamed away (or killed) must NOT
 // resurrect it — that bug produced a duplicate "ghost" session after a rename.
 // Sessions are created only via the explicit /control?action=create path.
+//
+// A client may connect by the session's STABLE tmux id ($N) instead of its
+// name: the id never changes across a rename, so an auto-reconnecting socket
+// survives a rename (from any client) even across a broker or app restart — the
+// name-based reconnect bug that made a renamed pane stick on "reconnecting".
+// We resolve the id back to the session's CURRENT name here, then run the
+// existing name-keyed machinery (so id- and name-connections share one hub).
 func (m *Manager) Serve(ctx context.Context, c *websocket.Conn, name string) error {
+	name = m.resolveTarget(name)
 	if !m.prov.Has(name) {
 		return fmt.Errorf("no such session: %q", name)
 	}

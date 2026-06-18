@@ -1,7 +1,9 @@
 package dev.universaltmux.android
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -9,10 +11,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.Circle
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -90,7 +99,9 @@ fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
     // rebuilds when sessions / statuses / backlog change.
     val showAgent = vm.showAgentSessions
     val tiles = vm.brokers.toList().flatMap { b ->
-        vm.sessions[b.id].orEmpty().filter { showAgent || !it.agent }.map { s -> CCTile(b, s, vm.ccFor(b, s.name)) }
+        // Hidden panels never appear in the command center (matches macOS); the Mac's
+        // status agent also skips them, so there's no status to show for them anyway.
+        vm.sessions[b.id].orEmpty().filter { (showAgent || !it.agent) && !it.hidden }.map { s -> CCTile(b, s, vm.ccFor(b, s.name)) }
     }
     // Group into the fixed sections by CURRENT status; within a section order by name
     // (stable). A card only moves when its category actually changes — never ad-hoc.
@@ -146,6 +157,7 @@ private fun CCHeader(title: String, n: Int) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CCCard(vm: AppViewModel, t: CCTile, large: Boolean, dim: Boolean = false, onOpen: (Broker, String) -> Unit) {
     val st = t.st
@@ -154,10 +166,12 @@ private fun CCCard(vm: AppViewModel, t: CCTile, large: Boolean, dim: Boolean = f
     val look = st?.lookAtThis
     val hasSummary = !st?.summary.isNullOrBlank()
     val summary = if (hasSummary) st!!.summary else "no status yet"
+    var showMenu by remember { mutableStateOf(false) }
+    if (showMenu) CCCardMenu(vm, t, onDismiss = { showMenu = false })
     Column(
         Modifier.fillMaxWidth().padding(vertical = 4.dp)
             .background(ccPanel, RoundedCornerShape(12.dp))
-            .clickable { onOpen(t.b, t.s.name) }
+            .combinedClickable(onClick = { onOpen(t.b, t.s.name) }, onLongClick = { showMenu = true })
             .alpha(if (dim) 0.6f else 1f)
             .padding(12.dp),
     ) {
@@ -188,4 +202,53 @@ private fun CCCard(vm: AppViewModel, t: CCTile, large: Boolean, dim: Boolean = f
             )
         }
     }
+}
+
+// The labels offered in the long-press "Set status" menu (mirrors the macOS menu).
+private val CC_STATUS_OPTIONS = listOf(
+    "working" to "Working",
+    "idle" to "Idle",
+    "needs-decision" to "Needs you",
+    "stuck" to "Stuck",
+    "milestone" to "Milestone",
+    "look" to "Worth a look",
+    "drifting" to "Drifting",
+)
+
+/** Long-press menu for a command-center card: set its status (synced to the Mac, which
+ *  applies it and re-publishes) or toggle backlog (a local per-device choice). */
+@Composable
+private fun CCCardMenu(vm: AppViewModel, t: CCTile, onDismiss: () -> Unit) {
+    val current = t.st?.label
+    val backlogged = vm.isBacklogged(t.b, t.s.name)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ccPanel,
+        title = { Text(t.s.name, color = ccText, fontSize = 16.sp, maxLines = 1) },
+        text = {
+            Column {
+                Text("SET STATUS", color = ccDim, fontSize = 11.sp, modifier = Modifier.padding(bottom = 2.dp))
+                CC_STATUS_OPTIONS.forEach { (lbl, name) ->
+                    val sel = lbl == current
+                    Text(
+                        (if (sel) "● " else "    ") + name,
+                        color = if (sel) cMilestone else ccText, fontSize = 15.sp,
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { vm.setManualStatus(t.b, t.s.name, lbl); onDismiss() }
+                            .padding(vertical = 9.dp),
+                    )
+                }
+                Divider(color = ccFaint.copy(alpha = 0.3f), modifier = Modifier.padding(vertical = 4.dp))
+                Text(
+                    if (backlogged) "Remove from backlog" else "Backlog — set aside",
+                    color = ccText, fontSize = 15.sp,
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { vm.toggleBacklog(t.b, t.s.name); onDismiss() }
+                        .padding(vertical = 9.dp),
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = ccDim) } },
+    )
 }

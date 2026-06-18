@@ -277,6 +277,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun ccKey(b: Broker, name: String) = "${b.id}/$name"
     fun ccFor(b: Broker, name: String): AgentCardStatus? = ccStatus[ccKey(b, name)]
 
+    // A status the user set on THIS device, shown optimistically until the Mac reflects
+    // it back via /ccstatus (or a 15s timeout) — so the card doesn't flicker to the old
+    // label on the next poll before the Mac has processed the override.
+    private val pendingOverride = mutableStateMapOf<String, Pair<String, Long>>()
+
+    /** Manually set a card's status from the phone: optimistic locally + relayed to the
+     *  Mac (the only generator) via the broker, which applies it and re-publishes. */
+    fun setManualStatus(b: Broker, name: String, label: String) {
+        val k = ccKey(b, name)
+        val cur = ccStatus[k]
+        ccStatus[k] = AgentCardStatus(name, label, cur?.summary ?: "", cur?.lookAtThis, System.currentTimeMillis() / 1000.0)
+        pendingOverride[k] = label to System.currentTimeMillis()
+        viewModelScope.launch { withContext(Dispatchers.IO) { Net.setCCOverride(b, name, label) } }
+    }
+
     /** Pull each broker's /ccstatus and merge (each broker holds only its own sessions). */
     fun refreshCC() {
         brokers.toList().forEach { b ->
@@ -284,7 +299,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val items = withContext(Dispatchers.IO) { Net.ccStatus(b) }
                 val prefix = "${b.id}/"
                 val live = HashSet<String>()
-                items.forEach { val k = ccKey(b, it.session); ccStatus[k] = it; live.add(k) }
+                items.forEach { item ->
+                    val k = ccKey(b, item.session)
+                    val pend = pendingOverride[k]
+                    // Keep showing a just-set override until the Mac's published status
+                    // matches it (or it ages out) — otherwise the card flickers back.
+                    ccStatus[k] = if (pend != null && pend.first != item.label && System.currentTimeMillis() - pend.second < 15_000) {
+                        item.copy(label = pend.first)
+                    } else {
+                        pendingOverride.remove(k)
+                        item
+                    }
+                    live.add(k)
+                }
                 ccStatus.keys.filter { it.startsWith(prefix) && it !in live }.forEach { ccStatus.remove(it) }
             }
         }

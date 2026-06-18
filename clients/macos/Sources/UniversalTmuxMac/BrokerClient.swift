@@ -42,6 +42,12 @@ final class BrokerClient {
     func start() {
         guard !closed else { return }
         let t = URLSession.shared.webSocketTask(with: url)
+        // A session's scrollback snapshot can exceed URLSession's default 1 MiB
+        // message cap — which fails the receive with EMSGSIZE and, since the
+        // reconnect re-sends it, loops forever ("reconnecting"). The broker now
+        // chunks large frames; this raised cap is belt-and-suspenders (and fixes
+        // it immediately against any broker not yet updated).
+        t.maximumMessageSize = 64 * 1024 * 1024
         task = t
         live = false
         t.resume()

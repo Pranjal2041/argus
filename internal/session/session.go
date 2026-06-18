@@ -30,6 +30,7 @@ type Info struct {
 	State    string `json:"state"`    // attention: working | waiting | idle
 	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn): hidden from the app UI by default, auto-reaped when idle
 	Hidden   bool   `json:"hidden"`   // user-hidden in a client UI; broker-owned so the hide syncs across devices
+	ID       string `json:"id"`       // backend's STABLE session handle (tmux $N): unchanged across rename, so clients connect by it to survive a rename across any reconnect
 }
 
 // Session is one live session the broker streams to/from clients.

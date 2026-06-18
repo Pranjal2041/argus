@@ -29,6 +29,11 @@ class RemoteTerminal(
     private val context: Context,
     private val broker: Broker,
     private val sessionName: String,
+    // The STABLE tmux id ($N) to connect by, when the broker reports one: it never
+    // changes across a rename, so the auto-reconnecting socket survives a rename
+    // (the broker resolves the id to the current name). Null → connect by name
+    // (older brokers); sessionName stays the display/wandb key either way.
+    private val connectHandle: String = sessionName,
 ) {
     private val main = Handler(Looper.getMainLooper())
     val view = TerminalView(context, null)
@@ -122,7 +127,7 @@ class RemoteTerminal(
 
     private fun connect() {
         if (closed) return
-        val url = "${broker.wsBase}/ws?session=${java.net.URLEncoder.encode(sessionName, "UTF-8")}"
+        val url = "${broker.wsBase}/ws?session=${java.net.URLEncoder.encode(connectHandle, "UTF-8")}"
         Log.d(TAG, "connecting $url")
         ws = Net.client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {

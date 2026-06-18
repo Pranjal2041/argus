@@ -218,9 +218,15 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 
     SUB-AGENTS: an agent that spawned its own background sub-agents and is "Waiting for N background agents to finish" (you'll see a list of running sub-tasks / "↓ to manage" / "← for agents") is WORKING — it delegated the work and is waiting on ITS OWN agents, NOT on you. This is NEVER needs-decision. Summarize what the sub-agents are doing.
 
+    OPTIONAL FEEDBACK PROMPTS: the agent CLIs periodically pop an OPTIONAL "how was this session? / rate this response / feedback on session quality" prompt on their own. It is not a real question and the user just ignores it — it is NEVER needs-decision and never "needs you". Treat it as chrome and report the actual underlying state instead (e.g. the background job that is still running, or idle).
+
+    OVERRIDES — check these FIRST; if one fits, use it and stop:
+    - Is the newest real activity a USER MESSAGE — new instructions, requirements, a description of what to build, a correction, or pushback like "still broken / check it again"? Then the ball is in the AGENT's court: it owns the next move and should just do it. Label "working" (or "idle" only if nothing is running and it plainly has not started yet). NEVER "needs-decision" or "stuck". This holds even if the user's message looks unfinished or trails off mid-sentence, and even if you think the agent ought to confirm the approach first — a user GIVING direction is the agent's cue to act, NOT the agent waiting on the user. Do NOT invent an "awaiting requirements / awaiting confirmation / awaiting clarification" state from a user who is handing the agent a task.
+    - Is the only thing "asking" the user an optional session-quality/feedback/rating prompt? It is never needs-decision (see OPTIONAL FEEDBACK PROMPTS) — fall through to the real state below.
+
     LABEL — work down this list IN ORDER and pick the FIRST that applies. Do not skip ahead.
-    1. needs-decision: the agent asked the user a question or asked for approval / a choice, and has NOT yet been answered (no agent work after it, no "esc to interrupt"). The auto-suggested ghost text in the input box does NOT count as an answer — if the agent asked and is sitting there, it is waiting on the user.
-    2. stuck: a visible error or blocker it cannot get past.
+    1. needs-decision: the AGENT itself asked the user a SPECIFIC question and is blocked on the answer — you can point to the actual question the agent wrote on screen (no agent work after it, no "esc to interrupt"). It is NOT needs-decision if YOU are the one inferring "awaiting requirements / awaiting confirmation / needs the user to clarify" — that is you second-guessing; when the USER is the one giving instructions, the agent should act (working), it is not waiting on anyone. Ghost text in the composer is not an answer; an optional session-quality/feedback prompt is not a question (see OPTIONAL FEEDBACK PROMPTS).
+    2. stuck: the agent is genuinely halted — the SAME error/failure repeating with no progress, a crash or permission loop, or it explicitly gave up. NOT a hard or still-unsolved problem it is actively working on, NOT user frustration, NOT the mere existence of an open bug, NOT a fresh user message. A difficult task in progress is "working", not "stuck".
     3. drifting: clearly off-track or churning without making progress (only if obvious).
     4. working: the agent is generating now ("esc to interrupt" present), OR a background job's output is visibly advancing (see BACKGROUND JOBS).
     5. look: nothing is running, but a notable or surprising result is on screen the user should see (no decision needed).
@@ -263,6 +269,7 @@ final class CommandCenterModel: ObservableObject {
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
     private var lastOKAt: [String: Double] = [:] // when each session was last successfully summarized (for fair scheduling)
     private var correction: [String: String] = [:] // one-time note for the model after a manual status change (NOT persisted; no learning)
+    private var consumedOverrideTS: [String: Int64] = [:] // last phone-set override applied per session (so each is consumed once)
 
     /// The user manually set a card's status. Show it immediately and queue a one-time
     /// note so the NEXT model call is told the user corrected it (and reasons about why) —
@@ -332,6 +339,8 @@ final class CommandCenterModel: ObservableObject {
 
     private func pulse() {
         guard let app else { ccLog("pulse: app nil (not bound)"); return }
+        // Pick up manual statuses set on another device (the phone) and apply them here.
+        for m in app.machines { Task { [weak self] in await self?.consumeOverrides(machine: m) } }
         pulseN += 1
         let fullSweep = (pulseN % 6 == 0)   // content-driven refresh ~every 30s
         if fullSweep {
@@ -341,7 +350,11 @@ final class CommandCenterModel: ObservableObject {
         var liveKeys = Set<String>()
         var candidates: [(ref: SessionRef, machine: Machine, name: String, force: Bool)] = []
         for m in app.machines {
-            for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent {
+            // Skip hidden sessions entirely: no model call is spent on them (the
+            // status agent is inactive for hidden panels) and they never reach the
+            // published /ccstatus blob, so neither this Mac nor the phone shows them
+            // in the command center.
+            for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent && !s.hidden {
                 let ref = SessionRef(machineID: m.id, session: s.name)
                 liveKeys.insert(ref.id)
                 let dotChanged = lastDot[ref.id] != s.state   // nil (new session) counts as changed
@@ -367,6 +380,31 @@ final class CommandCenterModel: ObservableObject {
         }
         if pruned { persist() }
         publish()   // keep the broker blob fresh for the phone each sweep
+    }
+
+    /// Pull manual status overrides a phone set (it can't run the model itself), apply
+    /// each through the normal correction path — so the Mac shows it immediately, the
+    /// model is told the user corrected it, and it re-publishes /ccstatus so the change
+    /// syncs back to every device — then clear it on the broker.
+    private func consumeOverrides(machine: Machine) async {
+        guard let url = URL(string: machine.httpBase + "/ccoverride") else { return }
+        var req = URLRequest(url: url); req.timeoutInterval = 6
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+        struct Ov: Decodable { let session: String; let label: String; let ts: Int64 }
+        struct Wrap: Decodable { let overrides: [Ov] }
+        guard let w = try? JSONDecoder().decode(Wrap.self, from: data) else { return }
+        for ov in w.overrides {
+            let ref = SessionRef(machineID: machine.id, session: ov.session)
+            guard consumedOverrideTS[ref.id] != ov.ts else { continue }   // consume each once
+            consumedOverrideTS[ref.id] = ov.ts
+            setManualLabel(ref: ref, label: ov.label)
+            // Clear it on the broker (compare-and-clear by ts, so a newer one survives).
+            guard let enc = ov.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let cu = URL(string: machine.httpBase + "/ccoverride?session=\(enc)&clear=\(ov.ts)") else { continue }
+            var creq = URLRequest(url: cu); creq.httpMethod = "POST"; creq.timeoutInterval = 6
+            URLSession.shared.dataTask(with: creq).resume()
+        }
     }
 
     private func update(ref: SessionRef, machine: Machine, name: String, force: Bool = false) {
@@ -426,7 +464,9 @@ final class CommandCenterModel: ObservableObject {
         // tailnet hostname for the same broker).
         for m in app.machines {
             var items: [Item] = []
-            for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent {
+            // Hidden sessions are excluded from the published blob too, so the phone's
+            // command center never sees them (matches this Mac hiding them from view).
+            for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent && !s.hidden {
                 guard let st = statuses[SessionRef(machineID: m.id, session: s.name).id] else { continue }
                 items.append(Item(session: s.name, label: st.label, summary: st.oneLiner,
                                   lookAtThis: st.lookAtThis, updatedAt: st.updatedAt.timeIntervalSince1970))

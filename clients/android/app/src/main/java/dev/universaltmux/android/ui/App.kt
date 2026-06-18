@@ -501,8 +501,12 @@ private fun SessionMenuDialog(vm: AppViewModel, b: Broker, s: SessionInfo, onDis
 @Composable
 private fun TerminalScreen(vm: AppViewModel, broker: Broker, session: String) {
     val context = LocalContext.current
+    // Connect by the session's STABLE tmux id ($N) so the socket survives a rename
+    // across any reconnect; the display/wandb key stays the name. Null on older
+    // brokers → RemoteTerminal falls back to the name.
+    val connectHandle = vm.sessions[broker.id]?.firstOrNull { it.name == session }?.tmuxId ?: session
     val rt = remember(broker.id, session) {
-        RemoteTerminal(context, broker, session).also {
+        RemoteTerminal(context, broker, session, connectHandle).also {
             ActiveTerm.rt = it
             it.onWandbRuns = { runs -> vm.mergeWandb(vm.wandbKey(broker, session), runs) }
         }

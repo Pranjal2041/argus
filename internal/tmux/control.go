@@ -110,6 +110,22 @@ func (p *Provider) Kill(name string) error              { return KillSession(p.s
 func (p *Provider) Rename(from, to string) error        { return RenameSession(p.socket, from, to) }
 func (p *Provider) Has(name string) bool                { return HasSession(p.socket, name) }
 func (p *Provider) SetHistoryLimit(lines int)           { SetHistoryLimit(p.socket, lines) }
+
+// SessionForID resolves a stable tmux session id ($N) to that session's CURRENT
+// name (which follows renames). The broker uses this so a client reconnecting
+// by id always reaches the right session no matter how it was renamed. Returns
+// ok=false if the id no longer exists or maps to an internal session.
+func (p *Provider) SessionForID(id string) (string, bool) {
+	out, err := exec.Command("tmux", tmuxArgs(p.socket, "display-message", "-t", id, "-p", "#{session_name}")...).Output()
+	if err != nil {
+		return "", false
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" || isInternalSession(name) {
+		return "", false
+	}
+	return name, true
+}
 func (p *Provider) Dial(ctx context.Context, name string) (session.Session, error) {
 	c, err := Dial(ctx, p.socket, name)
 	if err != nil {
@@ -282,10 +298,12 @@ func isInternalSession(name string) bool { return strings.HasPrefix(name, intern
 // ListSessions returns the sessions on the given tmux server (-L socket).
 // A missing server / no sessions yields an empty list, not an error.
 func ListSessions(socket string) []SessionInfo {
-	// @ut_agent LAST so a tab inside pane_current_path can't shift it (paths can
-	// contain odd chars but the agent flag is a fixed trailing field).
+	// session_id ($N) is the STABLE handle clients connect by (survives rename).
+	// It and @ut_agent are placed AFTER pane_current_path so a tab inside the path
+	// can't shift the fixed trailing fields — both id and the agent flag are
+	// tab-free, so reading from the end is safe (SplitN keeps the path in f[4]).
 	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{@ut_agent}")...).Output()
+		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\t#{@ut_agent}")...).Output()
 	if err != nil {
 		return []SessionInfo{}
 	}
@@ -294,7 +312,7 @@ func ListSessions(socket string) []SessionInfo {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 6)
+		f := strings.SplitN(line, "\t", 7)
 		if len(f) < 4 {
 			continue
 		}
@@ -308,10 +326,14 @@ func ListSessions(socket string) []SessionInfo {
 		if len(f) >= 5 {
 			path = f[4]
 		}
-		agent := len(f) >= 6 && f[5] == "1"
+		id := ""
+		if len(f) >= 6 {
+			id = f[5]
+		}
+		agent := len(f) >= 7 && f[6] == "1"
 		sessions = append(sessions, SessionInfo{
 			Name: f[0], Windows: windows, Attached: attached > 0, Activity: act, Path: path,
-			State: DetectState(socket, f[0]), Agent: agent,
+			State: DetectState(socket, f[0]), Agent: agent, ID: id,
 		})
 	}
 	return sessions
