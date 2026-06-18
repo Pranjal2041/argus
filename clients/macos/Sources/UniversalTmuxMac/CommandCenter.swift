@@ -61,6 +61,8 @@ protocol AgentStatusProvider {
 /// can't grow without bound. Swap this out for a Messages-API provider if cost bites.
 final class ClaudeStatusProvider: AgentStatusProvider {
     private let model: String
+    private let resetEvery = 20
+    private var sessions: [String: (uuid: String, turns: Int)] = [:]
     private let lock = NSLock()
 
     // Cumulative spend, persisted so cost can be assessed across launches.
@@ -85,31 +87,44 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         NSLog("[cc-cost] +$%.4f  total $%.4f over %d calls", usd, t, n)
     }
 
-    func forget(key: String) {}   // no cross-call state to clear (each summary is fresh)
+    func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
 
     func status(forKey key: String, output: String, note: String? = nil) async -> AgentStatus? {
-        // Bound the prompt to the recent tail (cost + focus): the last ~14KB keeps the
-        // model on the CURRENT state rather than diluting it with old scrollback. A `note`
-        // (e.g. the user just corrected the status) rides at the top, before the scrollback.
         let tail = String(output.suffix(14_000))
-        let prompt = note.map { $0 + "\n\n" + tail } ?? tail
 
-        // Each summary is a FRESH conversation — NOT a rolling --resume across sweeps.
-        // A rolling session made the model anchor on its OWN prior answers: it kept
-        // saying "working" after a screen changed to an error, and it muted prompt
-        // changes until a periodic reset. The status is a stateless read of the CURRENT
-        // screen, so judge it fresh every time. A user correction still sticks: the note
-        // is delivered this turn and the caller's lastHash skip holds the result until
-        // the screen actually changes (no conversation memory needed — and the user
-        // explicitly did not want the status to "learn").
-        let uuid = UUID().uuidString.lowercased()
+        // The conversation is STATEFUL (--resume across sweeps) so the model keeps
+        // continuity, and a user correction — appended as a turn — stays in context and
+        // keeps steering. The catch: behavior is steered HERE, in this continuation
+        // message, NOT by editing the system prompt mid-conversation (a resumed session
+        // won't pick that up). So every turn's message is EXPLICIT: re-read the CURRENT
+        // screen and report it as of now, never coast on an earlier answer. A correction
+        // (the user changed the status) rides at the very top, so it's the first thing
+        // the model reads this turn.
+        var msg = ""
+        if let note { msg += note + "\n\n" }
+        msg += """
+        This is the CURRENT screen of this session right now. Re-read it from scratch and report the status as of THIS moment — do not just repeat an earlier turn's answer. If the screen now shows an error the agent is halted on, a finished task, a question it is waiting on, or any new state, report THAT. Reply with ONLY the status JSON.
+
+        """ + tail
+
+        // Resume the session's rolling conversation; reset the id every `resetEvery`
+        // turns so it can't grow without bound.
+        lock.lock()
+        var entry = sessions[key]
+        if let e = entry, e.turns >= resetEvery { entry = nil }
+        let uuid: String
+        let resuming: Bool
+        if let e = entry { uuid = e.uuid; resuming = true; sessions[key] = (e.uuid, e.turns + 1) }
+        else { uuid = UUID().uuidString.lowercased(); resuming = false; sessions[key] = (uuid, 1) }
+        lock.unlock()
+
         // Up to 2 attempts: a transient API/connection error (ECONNRESET, overloaded)
-        // shouldn't leave the card stale until the next 30s sweep. Attempt 0 creates the
-        // session; the retry --resume's that SAME (just-created, no answer yet) session.
+        // shouldn't leave the card stale until the next 30s sweep. After the first
+        // attempt the claude session exists, so the retry --resume's it.
         for attempt in 0..<2 {
             var args = ["-p", "--model", model, "--output-format", "json", "--system-prompt", Self.systemPrompt]
-            args += attempt == 0 ? ["--session-id", uuid] : ["--resume", uuid]
-            if let out = await Self.runClaude(args: args, stdin: prompt), let env = Self.envelope(out) {
+            args += (resuming || attempt > 0) ? ["--resume", uuid] : ["--session-id", uuid]
+            if let out = await Self.runClaude(args: args, stdin: msg), let env = Self.envelope(out) {
                 recordCost(env.cost)
                 if let status = Self.parseStatus(env.result) { return status }
             }
@@ -434,7 +449,7 @@ final class CommandCenterModel: ObservableObject {
             self.claudeInflight -= 1
             self.inflight.remove(key)
             guard let status else { ccLog("claude-nil \(key)"); NSLog("[cc] %@ claude returned nil", key); return }
-            self.correction[key] = nil   // delivered — --resume keeps it in context so it won't just revert
+            self.correction[key] = nil   // delivered once; it now lives in the resumed conversation as a turn, so the model keeps it in context going forward
             ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
             self.lastHash[key] = h
             self.lastOKAt[key] = Date().timeIntervalSince1970
