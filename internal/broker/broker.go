@@ -321,6 +321,16 @@ type Manager struct {
 	hiddenMu   sync.Mutex
 	hidden     map[string]bool
 	hiddenPath string
+
+	// Session history: a durable per-node log of every session that has existed —
+	// name, node, and the folders it ran in (with timestamps) — so the user can
+	// recover where a now-gone session was running. Recorded off the refresh loop,
+	// persisted per-host (like the hidden set).
+	histMu    sync.Mutex
+	history   map[string]*SessionHistory
+	histPath  string
+	histNode  string
+	histDirty bool
 }
 
 // SetCommandCenter stores the latest command-center status blob (from the Mac).
@@ -379,9 +389,12 @@ func (m *Manager) ClearCCOverride(session string, ts int64) {
 }
 
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
-	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}, ccOverrides: map[string]CCOverride{}}
+	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}, ccOverrides: map[string]CCOverride{}, history: map[string]*SessionHistory{}}
 	m.hiddenPath = hiddenStatePath()
 	m.loadHidden()
+	m.histPath = historyStatePath()
+	m.histNode = histNodeName()
+	m.loadHistory()
 	go m.sessionRefreshLoop(2 * time.Second)
 	// Reap idle agent sessions on an interval; UT_REAP_INTERVAL_SEC overrides the
 	// 5-min default (operational knob; also makes the reaper testable).
@@ -573,6 +586,7 @@ func (m *Manager) refreshSessions() {
 	m.sessMu.Lock()
 	m.sessCache = list
 	m.sessMu.Unlock()
+	m.recordHistory(list)
 }
 
 // sessionRefreshLoop primes the cache, then refreshes it on an interval until ctx
@@ -581,12 +595,18 @@ func (m *Manager) sessionRefreshLoop(interval time.Duration) {
 	m.refreshSessions()
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-m.ctx.Done():
+			m.flushHistory() // persist lastSeen on clean shutdown
 			return
 		case <-t.C:
 			m.refreshSessions()
+			ticks++
+			if ticks%30 == 0 { // ~every 60s at the 2s interval: flush lastSeen updates
+				m.flushHistory()
+			}
 		}
 	}
 }
