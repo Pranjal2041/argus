@@ -67,6 +67,28 @@ struct HiddenPanel: Identifiable {
     var id: String { ref.id }
 }
 
+/// One stretch of time a session's folder (cwd) stayed put — broker /history.
+struct FolderSpan: Codable, Hashable {
+    let path: String
+    let first: Int64
+    let last: Int64
+}
+
+/// A recorded session in the broker's durable history (name, node, folders it ran
+/// in, timestamps). Persists after the session is gone, for the History view.
+struct SessionHistoryItem: Codable, Identifiable, Hashable {
+    let name: String
+    let node: String
+    var agent: Bool = false
+    var folders: [FolderSpan] = []
+    let first: Int64
+    let last: Int64
+    var alive: Bool = false
+    var id: String { node + "/" + name + "/" + String(first) }
+}
+
+struct SessionHistoryResponse: Codable { let sessions: [SessionHistoryItem] }
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -137,6 +159,10 @@ final class AppState: ObservableObject {
     private var legacyHiddenToMigrate: [String] = UserDefaults.standard.stringArray(forKey: "ut.hiddenSessions") ?? []
     /// Drives the ⇧⌘B "Hidden Panels" restore sheet.
     @Published var showHiddenPicker = false
+    /// Drives the ⇧⌘Y "Session History" sheet + its (broker-sourced) contents.
+    @Published var showHistory = false
+    @Published var historyItems: [SessionHistoryItem] = []
+    @Published var historyLoading = false
     /// Drives the ⇧⌘T theme picker sheet.
     @Published var showThemePicker = false
 
@@ -359,6 +385,33 @@ final class AppState: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 9) { self.isRefreshing = false }
             }
         }
+    }
+
+    /// Pull the durable session history from every broker and merge it (newest first)
+    /// for the ⇧⌘Y History view. Each broker owns its own node's history, so this is
+    /// the union across nodes — including sessions that no longer exist.
+    func loadHistory() {
+        historyLoading = true
+        let group = DispatchGroup()
+        var collected: [SessionHistoryItem] = []
+        let lock = NSLock()
+        for m in machines {
+            guard let url = URL(string: m.httpBase + "/history") else { continue }
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 8
+            group.enter()
+            URLSession.shared.dataTask(with: req) { data, _, _ in
+                defer { group.leave() }
+                guard let data,
+                      let decoded = try? JSONDecoder().decode(SessionHistoryResponse.self, from: data) else { return }
+                lock.lock(); collected.append(contentsOf: decoded.sessions); lock.unlock()
+            }.resume()
+        }
+        group.notify(queue: .main) {
+            self.historyItems = collected.sorted { $0.last > $1.last }
+            self.historyLoading = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self.historyLoading = false }
     }
 
     func refresh(_ m: Machine, group: DispatchGroup? = nil) {

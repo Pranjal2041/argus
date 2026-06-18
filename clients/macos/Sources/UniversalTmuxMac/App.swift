@@ -50,6 +50,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("p", modifiers: .command)
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
+                Button("Session History…") { state.showHistory = true; state.loadHistory() }
+                    .keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Command Center") { state.showOverview.toggle() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
@@ -281,6 +283,114 @@ private struct HiddenPanelRow: View {
     }
 }
 
+/// The ⇧⌘Y Session History sheet: every session each broker has recorded (name,
+/// node, folders it ran in, with timestamps) — including ones that no longer exist —
+/// so you can recover where something was running. Filterable by name/node/folder.
+struct SessionHistoryView: View {
+    @EnvironmentObject var state: AppState
+    @State private var query = ""
+
+    private var items: [SessionHistoryItem] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return state.historyItems }
+        return state.historyItems.filter {
+            $0.name.lowercased().contains(q) || $0.node.lowercased().contains(q)
+                || $0.folders.contains { $0.path.lowercased().contains(q) }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath").foregroundStyle(Theme.textSecondary)
+                Text("Session History").font(.system(size: 15, weight: .semibold))
+                if !state.historyItems.isEmpty {
+                    Text("\(state.historyItems.count)").font(.system(size: 11, weight: .medium)).monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.surface))
+                }
+                Spacer()
+                if state.historyLoading {
+                    ProgressView().controlSize(.small)
+                }
+                Button { state.loadHistory() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Refresh")
+                Button("Done") { state.showHistory = false }.keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
+            TextField("Filter by name, node, or folder", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 12).padding(.bottom, 10)
+            Divider()
+            if items.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock").font(.system(size: 30)).foregroundStyle(Theme.textTertiary)
+                    Text(state.historyLoading ? "Loading…" : "No history yet").foregroundStyle(Theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity).padding(40)
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(items) { SessionHistoryRow(item: $0) }
+                    }
+                    .padding(8)
+                }
+            }
+        }
+        .frame(width: 580, height: 580)
+        .background(Theme.appBackground)
+    }
+}
+
+private struct SessionHistoryRow: View {
+    let item: SessionHistoryItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Circle().fill(item.alive ? Theme.running : Theme.textTertiary.opacity(0.45)).frame(width: 7, height: 7)
+                Text(item.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                if item.agent {
+                    Text("agent").font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.textTertiary)
+                        .padding(.horizontal, 4).padding(.vertical, 1).background(Capsule().fill(Theme.surface))
+                }
+                Text(item.node).font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                Spacer()
+                Text(item.alive ? "running" : relativeShort(item.last))
+                    .font(.system(size: 11)).foregroundStyle(item.alive ? Theme.running : Theme.textTertiary)
+                    .help(absoluteTime(item.last))
+            }
+            // Folders the session ran in, newest first (it may have cd'd around).
+            ForEach(Array(item.folders.reversed().enumerated()), id: \.offset) { _, f in
+                HStack(spacing: 6) {
+                    Image(systemName: "folder").font(.system(size: 9)).foregroundStyle(Theme.textTertiary)
+                    Text(f.path).font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Text(relativeShort(f.last)).font(.system(size: 10)).foregroundStyle(Theme.textTertiary)
+                        .help(absoluteTime(f.first) + " → " + absoluteTime(f.last))
+                }
+            }
+            if item.folders.isEmpty {
+                Text("(no folder recorded)").font(.system(size: 11)).foregroundStyle(Theme.textTertiary)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.4)))
+    }
+}
+
+/// "Jun 18, 2:05 PM" for a unix-seconds timestamp (history tooltips).
+func absoluteTime(_ unixSeconds: Int64) -> String {
+    guard unixSeconds > 0 else { return "—" }
+    let f = DateFormatter()
+    f.dateFormat = "MMM d, h:mm a"
+    return f.string(from: Date(timeIntervalSince1970: TimeInterval(unixSeconds)))
+}
+
 /// A sidebar session row identified by MACHINE + name, not name alone. Two nodes
 /// can host sessions with the same name (e.g. both have `scenesmith`); keying the
 /// ForEach on the bare `SessionInfo.id` (= name) collapses them to one SwiftUI
@@ -425,6 +535,7 @@ struct RootView: View {
         .onChange(of: state.renderText) { v in if v == nil { terminals.focusTerminal() } }
         .sheet(isPresented: $state.showNew) { newSessionSheet }
         .sheet(isPresented: $state.showHiddenPicker) { HiddenPanelsView().environmentObject(state) }
+        .sheet(isPresented: $state.showHistory) { SessionHistoryView().environmentObject(state) }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
             TextField("name", text: $state.renameText)
             Button("Rename") {

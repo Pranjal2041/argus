@@ -159,6 +159,14 @@ func main() {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"hidden": mgr.HiddenNames()})
 	})
+	// /history — durable per-node session history: every session that has existed
+	// here, with its node + the folders it ran in (with timestamps). Lets a client
+	// show "where was session X running" after it's gone. GET only.
+	mux.HandleFunc("/history", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.History()})
+	})
 	// /recent — a session's recent rendered scrollback as plain text, for the
 	// macOS command center's status updater (claude -p reads it). ?session=NAME
 	// &lines=N (default 400). Forks capture-pane per call, so clients must poll
