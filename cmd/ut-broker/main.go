@@ -117,6 +117,33 @@ func main() {
 			_, _ = io.WriteString(w, "{}")
 		}
 	})
+	// /ccoverride — a manual command-center status set from a client that can't run
+	// the status model (the phone). POST ?session=NAME&label=LABEL queues it; the Mac
+	// polls GET, applies it as a correction + re-publishes /ccstatus, then clears it
+	// with POST ?session=NAME&clear=TS. Transient relay (in-memory).
+	mux.HandleFunc("/ccoverride", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		if r.Method == http.MethodPost {
+			if session := q.Get("session"); session != "" {
+				if cs := q.Get("clear"); cs != "" {
+					ts, _ := strconv.ParseInt(cs, 10, 64)
+					mgr.ClearCCOverride(session, ts)
+				} else if label := q.Get("label"); label != "" {
+					mgr.SetCCOverride(session, label)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		ovs := mgr.CCOverrides()
+		list := make([]map[string]any, 0, len(ovs))
+		for s, v := range ovs {
+			list = append(list, map[string]any{"session": s, "label": v.Label, "ts": v.TS})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"overrides": list})
+	})
 	// /hidden — user-hidden sessions, broker-owned so the hide syncs across devices.
 	// POST ?session=NAME&hidden=true|false toggles + persists; the flag also rides
 	// /sessions (Info.Hidden). GET returns the set (debugging).

@@ -20,6 +20,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
     var state: String = "idle"  // broker agent-state: "working" | "waiting" | "idle"
     var agent: Bool = false      // created by the mesh (ut spawn): hidden unless "Show agent sessions"
     var hidden: Bool = false     // user-hidden; broker-owned so the hide syncs across devices
+    var tmuxID: String?          // broker's STABLE session handle ($N): unchanged across rename — we connect by it so a renamed pane never sticks on "reconnecting"
     var id: String { name }
 
     /// True when the broker reports the agent as blocked on the user.
@@ -27,6 +28,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case name, windows, attached, activity, path, state, agent, hidden
+        case tmuxID = "id"
     }
 
     // Custom decoder: Swift's synthesized `Decodable` does NOT apply the
@@ -44,6 +46,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         state = try c.decodeIfPresent(String.self, forKey: .state) ?? "idle"
         agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? false
         hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        tmuxID = try c.decodeIfPresent(String.self, forKey: .tmuxID)
     }
 }
 
@@ -520,7 +523,12 @@ final class AppState: ObservableObject {
 
     func wsURL(for ref: SessionRef) -> URL? {
         guard let m = machines.first(where: { $0.id == ref.machineID }) else { return nil }
-        let enc = ref.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ref.session
+        // Connect by the STABLE tmux id ($N) when the broker reports one: it never
+        // changes across a rename, so the auto-reconnecting socket survives a rename
+        // even across a broker/app restart (the broker resolves the id to the current
+        // name). Fall back to the name for older brokers that don't send an id.
+        let handle = session(for: ref)?.tmuxID ?? ref.session
+        let enc = handle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? handle
         return URL(string: m.wsBase + "/ws?session=" + enc)
     }
 }
