@@ -29,6 +29,27 @@ the broker serves on loopback (useful on a Mac that's already on the tailnet).
 The client discovers brokers by the [`/whoami` handshake](/docs/architecture#discovery--capability-based-never-by-hostname),
 so device names don't matter to it.
 
+## The mesh fabric
+
+Beyond attaching, `ut` is also a small **cross-host fabric** — the primitives you (or an agent) use
+to reach and orchestrate work on any machine on the tailnet, by name, without SSH. Each runs through
+the target host's broker.
+
+| command | what it does |
+|---|---|
+| `ut ls` | list every session across all reachable hosts |
+| `ut exec <@host[:shell]> <cmd…>` | run a command on a host and return its output |
+| `ut sh <@host> [name]` | create a persistent shell on a host (keeps env / cwd / venv) |
+| `ut run <host:shell> <cmd…>` | run a command inside one of those persistent shells |
+| `ut spawn [--idle <dur>] <@host[:name]> <cmd…>` | fire a long job into a fresh session |
+| `ut send <@host:shell> <text…>` | type text into a session |
+| `ut tail <@host:session>` | read a session's recent output |
+| `ut cp <src> <dst>` | copy a file (either side may be `host:path`) |
+
+A session started by `ut spawn` is an **agent session**: hidden from the app by default and
+**auto-reaped** once it has sat idle past its leash (`--idle`, a few hours by default), so a swarm of
+short-lived helpers does not pile up.
+
 ## Environment
 
 | variable | default | meaning |
