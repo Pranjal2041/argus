@@ -208,6 +208,17 @@ struct FileContentView: View {
                 fileHint("doc.text", "Select a file to open")
             }
         }
+        .confirmationDialog(
+            "Save changes to “\(tab.pendingClose?.name ?? "")” before closing?",
+            isPresented: Binding(get: { tab.pendingClose != nil }, set: { if !$0 { tab.pendingClose = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Save") { if let d = tab.pendingClose { tab.save(d); tab.closeDoc(d.id) }; tab.pendingClose = nil }
+            Button("Don't Save", role: .destructive) { if let d = tab.pendingClose { tab.closeDoc(d.id) }; tab.pendingClose = nil }
+            Button("Cancel", role: .cancel) { tab.pendingClose = nil }
+        } message: {
+            Text("Your changes will be lost if you don't save.")
+        }
     }
 }
 
@@ -240,12 +251,12 @@ private struct DocChip: View {
             Image(systemName: iconForFile(doc.name)).font(.system(size: 10)).foregroundStyle(active ? Flat.accent : Flat.faint)
             Text(doc.name).font(.system(size: 12, weight: active ? .medium : .regular))
                 .foregroundStyle(active ? Flat.text : Flat.dim).lineLimit(1)
-            Button { tab.closeDoc(doc.id) } label: {
+            Button { tab.requestClose(doc) } label: {
                 Image(systemName: doc.dirty ? "circle.fill" : "xmark")
                     .font(.system(size: doc.dirty ? 7 : 8, weight: .bold))
                     .frame(width: 12, height: 12)
             }.buttonStyle(.plain).foregroundStyle(doc.dirty ? Flat.accent : Flat.faint)
-                .help(doc.dirty ? "Unsaved — close (discards changes)" : "Close")
+                .help(doc.dirty ? "Unsaved — close" : "Close")
         }
         .padding(.horizontal, 10)
         .frame(maxHeight: .infinity)

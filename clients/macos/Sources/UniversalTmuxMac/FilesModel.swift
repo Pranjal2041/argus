@@ -25,6 +25,7 @@ struct FileEntry: Codable, Hashable {
 }
 
 private struct ListResp: Codable { let path: String; let entries: [FileEntry] }
+private struct FindResp: Codable { let root: String; let files: [FileEntry]; let truncated: Bool }
 private struct HomeResp: Codable { let home: String; let roots: [String]; let sep: String }
 private struct StatResp: Codable { let path: String; let name: String; let isDir: Bool; let exists: Bool; let size: Int64 }
 
@@ -149,6 +150,13 @@ final class FileTab: ObservableObject, Identifiable {
     @Published var openDocs: [OpenDoc] = []
     @Published var activeDocID: UUID? = nil
     var activeDoc: OpenDoc? { openDocs.first { $0.id == activeDocID } }
+    @Published var pendingClose: OpenDoc? = nil   // a dirty tab awaiting a save/discard choice
+
+    // ⌘P quick-open: a fuzzy file finder over the current root.
+    @Published var showQuickOpen = false
+    @Published var quickOpenFiles: [FileEntry] = []
+    @Published var quickOpenLoading = false
+    private var quickOpenRoot: String? = nil       // root the cached file list was built for
 
     // pending dialog ops (driven from the tree's context menu, shown by the view)
     @Published var renaming: FileNode? = nil
@@ -198,14 +206,20 @@ final class FileTab: ObservableObject, Identifiable {
     func zoomReset() { activeDoc?.zoomReset() }
 
     /// Write the active doc's live draft (kept current by the editor's change events).
-    func save() {
-        guard let doc = activeDoc, case .text = doc.content else { return }
+    func save() { if let doc = activeDoc { save(doc) } }
+    func save(_ doc: OpenDoc) {
+        guard case .text = doc.content else { return }
         let text = doc.draft, path = doc.path
         Task { if await postWrite(path, Data(text.utf8)) { doc.markSaved() } }
     }
 
     /// Focus an already-open doc (or no-op). Keeps the tree highlight in sync.
     func activate(_ doc: OpenDoc) { activeDocID = doc.id; selection = doc.path }
+
+    /// Close request from the tab's × — confirms first if the doc has unsaved edits.
+    func requestClose(_ doc: OpenDoc) {
+        if doc.dirty { pendingClose = doc } else { closeDoc(doc.id) }
+    }
 
     func closeDoc(_ id: UUID) {
         guard let idx = openDocs.firstIndex(where: { $0.id == id }) else { return }
@@ -215,6 +229,32 @@ final class FileTab: ObservableObject, Identifiable {
             activeDocID = next?.id
             selection = next?.path
         }
+    }
+
+    // MARK: quick-open (⌘P)
+    func openQuickOpen() {
+        showQuickOpen = true
+        guard !rootPath.isEmpty else { return }
+        if quickOpenRoot == rootPath, !quickOpenFiles.isEmpty { return }   // cached for this root
+        quickOpenLoading = true
+        let root = rootPath
+        Task {
+            let files = await fetchFind(root)
+            guard rootPath == root else { return }   // user navigated away
+            quickOpenFiles = files
+            quickOpenRoot = root
+            quickOpenLoading = false
+        }
+    }
+    func closeQuickOpen() { showQuickOpen = false }
+
+    private func fetchFind(_ root: String) async -> [FileEntry] {
+        guard var c = URLComponents(string: httpBase + "/fs/find") else { return [] }
+        c.queryItems = [.init(name: "path", value: root), .init(name: "limit", value: "20000")]
+        guard let url = c.url,
+              let (data, _) = try? await fsSession.data(from: url),
+              let res = try? JSONDecoder().decode(FindResp.self, from: data) else { return [] }
+        return res.files
     }
 
     // MARK: file operations (context-menu ops)

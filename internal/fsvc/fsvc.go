@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Entry is one directory member.
@@ -164,6 +165,81 @@ func List(path string) (ListResult, error) {
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
 	return ListResult{Path: path, Entries: entries}, nil
+}
+
+// FindResult is the response for /fs/find: the files under a root, for the editor's
+// ⌘P quick-open. Files only (not directories), capped.
+type FindResult struct {
+	Root      string  `json:"root"`
+	Files     []Entry `json:"files"`
+	Truncated bool    `json:"truncated"` // hit the count cap or the time budget
+}
+
+// findIgnoredDir reports directories quick-open should never descend into — heavy
+// or noise dirs (deps, caches, VCS) that would blow the cap and aren't what you
+// fuzzy-search for.
+func findIgnoredDir(name string) bool {
+	switch name {
+	case ".git", ".svn", ".hg", "node_modules", "bower_components", "vendor",
+		".venv", "venv", "env", "__pycache__", ".mypy_cache", ".pytest_cache",
+		".ipynb_checkpoints", "site-packages", ".tox", ".next", ".nuxt", "dist",
+		"build", "target", "out", ".gradle", ".idea", ".cache", ".terraform",
+		".DS_Store", "__MACOSX", ".Trash":
+		return true
+	}
+	return false
+}
+
+// Find recursively lists the files under root (skipping heavy dirs), bounded by a
+// count limit and a wall-clock budget so it stays responsive even on huge or slow
+// (remote) trees.
+func Find(root string, limit int) FindResult {
+	if limit <= 0 || limit > 50000 {
+		limit = 20000
+	}
+	res := FindResult{Root: root, Files: []Entry{}}
+	if strings.TrimSpace(root) == "" {
+		return res
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if len(res.Files) >= limit || time.Now().After(deadline) {
+			res.Truncated = true
+			return
+		}
+		if depth > 40 {
+			return
+		}
+		dirents, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, d := range dirents {
+			if len(res.Files) >= limit || time.Now().After(deadline) {
+				res.Truncated = true
+				return
+			}
+			name := d.Name()
+			if d.Type()&os.ModeSymlink != 0 {
+				continue // skip symlinks (avoid loops / escaping the tree)
+			}
+			if d.IsDir() {
+				if !findIgnoredDir(name) {
+					walk(filepath.Join(dir, name), depth+1)
+				}
+				continue
+			}
+			full := filepath.Join(dir, name)
+			var size int64
+			if info, err := d.Info(); err == nil {
+				size = info.Size()
+			}
+			res.Files = append(res.Files, Entry{Name: name, Path: full, IsDir: false, Size: size})
+		}
+	}
+	walk(root, 0)
+	return res
 }
 
 // ServeFile streams a file with Range support (large files + media streaming)
