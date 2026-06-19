@@ -1,0 +1,130 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0d0e12; }
+      #editor { position: absolute; inset: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="editor"></div>
+    <script src="vs/loader.js"></script>
+    <script>
+      // Monaco (VS Code's editor) bridged to the native Files pane. Exposes the same
+      // window.UTEditor API the Swift WKWebView already drives:
+      //   init(), setContent(text, filename, readOnly), getContent(),
+      //   setFontSize(px), setEditable(bool), gotoLine(n), setTheme(spec), setWordWrap(bool)
+      // Edits post {type:'change', text} and ⌘S posts {type:'save'} to the 'ut' handler.
+      (function () {
+        var base = location.href.replace(/[^/]*$/, ""); // .../monaco/
+        // Self-contained language workers via a blob trampoline so it works from file://.
+        // (If the worker can't start the editor still runs: Monarch highlighting, minimap,
+        // find, multi-cursor and themes are all main-thread.)
+        self.MonacoEnvironment = {
+          getWorkerUrl: function () {
+            var code =
+              "self.MonacoEnvironment={baseUrl:'" + base + "'};" +
+              "importScripts('" + base + "vs/base/worker/workerMain.js');";
+            return URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+          },
+        };
+        require.config({ paths: { vs: "vs" } });
+
+        var editor = null;
+        var changeTimer = null;
+        // Calls that arrive before Monaco finishes loading are buffered and applied
+        // once the editor exists, so the native side never has to know the timing.
+        var pending = { content: null, font: 13, editable: false, theme: { base: "vs-dark" }, line: null, wrap: false };
+
+        function post(type, extra) {
+          var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ut;
+          if (h) h.postMessage(Object.assign({ type: type }, extra || {}));
+        }
+
+        function applyTheme(spec) {
+          pending.theme = spec || pending.theme;
+          var t = pending.theme;
+          document.body.style.background = t.bg || "#0d0e12";
+          if (!window.monaco) return;
+          var colors = {};
+          if (t.bg) { colors["editor.background"] = t.bg; colors["minimap.background"] = t.bg; colors["editorGutter.background"] = t.bg; }
+          if (t.fg) colors["editor.foreground"] = t.fg;
+          if (t.selection) colors["editor.selectionBackground"] = t.selection;
+          if (t.lineHighlight) colors["editor.lineHighlightBackground"] = t.lineHighlight;
+          if (t.accent) colors["editorCursor.foreground"] = t.accent;
+          monaco.editor.defineTheme("ut", { base: t.base || "vs-dark", inherit: true, rules: [], colors: colors });
+          monaco.editor.setTheme("ut");
+        }
+
+        function modelFor(text, filename) {
+          var uri = monaco.Uri.file(filename || "untitled.txt");
+          var m = monaco.editor.getModel(uri);
+          if (!m) m = monaco.editor.createModel(text, undefined, uri);
+          else if (m.getValue() !== text) m.setValue(text);
+          return m;
+        }
+
+        window.UTEditor = {
+          init: function () {
+            require(["vs/editor/editor.main"], function () {
+              editor = monaco.editor.create(document.getElementById("editor"), {
+                value: "",
+                automaticLayout: true,
+                fontSize: pending.font,
+                fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
+                minimap: { enabled: true },
+                smoothScrolling: true,
+                cursorSmoothCaretAnimation: "on",
+                cursorBlinking: "smooth",
+                bracketPairColorization: { enabled: true },
+                guides: { bracketPairs: true, indentation: true },
+                renderWhitespace: "selection",
+                renderLineHighlight: "all",
+                scrollBeyondLastLine: false,
+                roundedSelection: false,
+                padding: { top: 8 },
+                readOnly: pending.editable !== true,
+                wordWrap: pending.wrap ? "on" : "off",
+                tabSize: 4,
+                scrollbar: { verticalScrollbarSize: 11, horizontalScrollbarSize: 11 },
+              });
+              applyTheme(pending.theme);
+              if (pending.content) {
+                var c = pending.content;
+                editor.setModel(modelFor(c.text, c.filename));
+                editor.updateOptions({ readOnly: !!c.readOnly });
+              }
+              if (pending.line) UTEditor.gotoLine(pending.line);
+              editor.onDidChangeModelContent(function () {
+                if (changeTimer) clearTimeout(changeTimer);
+                changeTimer = setTimeout(function () { post("change", { text: editor.getValue() }); }, 120);
+              });
+              editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () { post("save"); });
+              post("ready");
+            });
+          },
+          setContent: function (text, filename, readOnly) {
+            if (!editor) { pending.content = { text: text, filename: filename, readOnly: readOnly }; return; }
+            editor.setModel(modelFor(text, filename));
+            editor.updateOptions({ readOnly: !!readOnly });
+          },
+          getContent: function () { return editor ? editor.getValue() : (pending.content ? pending.content.text : ""); },
+          setFontSize: function (px) { pending.font = px; if (editor) editor.updateOptions({ fontSize: px }); },
+          setEditable: function (b) { pending.editable = b; if (editor) editor.updateOptions({ readOnly: !b }); },
+          gotoLine: function (n) {
+            pending.line = n;
+            if (!editor) return;
+            editor.revealLineInCenter(n);
+            editor.setPosition({ lineNumber: n, column: 1 });
+            editor.focus();
+          },
+          setTheme: function (spec) { applyTheme(spec); },
+          setWordWrap: function (on) { pending.wrap = on; if (editor) editor.updateOptions({ wordWrap: on ? "on" : "off" }); },
+        };
+      })();
+    </script>
+    <script>window.UTEditor && window.UTEditor.init();</script>
+  </body>
+</html>

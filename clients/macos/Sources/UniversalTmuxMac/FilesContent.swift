@@ -9,9 +9,9 @@ private let editorBaseFont: CGFloat = 13   // CM6 base size; preview zoom multip
 
 // MARK: - CodeMirror 6 (text viewer/editor) in a WKWebView
 
-/// Hosts the bundled CodeMirror 6 (Resources/codemirror). One web view persists
-/// and is repainted via `UTEditor` calls as the selection/zoom/edit-mode changes,
-/// so switching files, zooming, or toggling edit never reloads the editor.
+/// Hosts the bundled Monaco editor (VS Code's editor, Resources/monaco). One web
+/// view persists and is repainted via `UTEditor` calls as the selection/zoom/theme
+/// changes, so switching files or zooming never reloads the editor.
 struct CodeMirrorView: NSViewRepresentable {
     let text: String
     let filename: String
@@ -20,8 +20,9 @@ struct CodeMirrorView: NSViewRepresentable {
     let editable: Bool
     let scrollToLine: Int?  // jump here once this file loads (terminal cmd+click)
     let onChange: (String) -> Void
+    var onSave: () -> Void = {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(onChange: onChange) }
+    func makeCoordinator() -> Coordinator { Coordinator(onChange: onChange, onSave: onSave) }
 
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -34,19 +35,21 @@ struct CodeMirrorView: NSViewRepresentable {
         context.coordinator.webView = wv
         context.coordinator.pending = (text, filename, path, fontSize, editable)
         context.coordinator.scrollLine = scrollToLine
-        let dir = Bundle.main.resourceURL!.appendingPathComponent("codemirror")
+        let dir = Bundle.main.resourceURL!.appendingPathComponent("monaco")
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
         return wv
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
         context.coordinator.onChange = onChange
+        context.coordinator.onSave = onSave
         context.coordinator.update(text, filename, path, fontSize, editable, scrollToLine)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         var onChange: (String) -> Void
+        var onSave: () -> Void
         private var ready = false
         var pending: (String, String, String, CGFloat, Bool)?
         private var loadedPath: String?     // which file's content is in the editor
@@ -55,7 +58,9 @@ struct CodeMirrorView: NSViewRepresentable {
         var scrollLine: Int? = nil          // requested jump line for the loaded file
         private var curScrollLine: Int? = nil
 
-        init(onChange: @escaping (String) -> Void) { self.onChange = onChange }
+        init(onChange: @escaping (String) -> Void, onSave: @escaping () -> Void) {
+            self.onChange = onChange; self.onSave = onSave
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
@@ -79,10 +84,23 @@ struct CodeMirrorView: NSViewRepresentable {
         private func load(_ text: String, _ name: String, _ path: String, _ font: CGFloat, _ editable: Bool) {
             loadedPath = path
             curScrollLine = nil   // new document → allow a jump
+            applyTheme()          // match the app theme before painting the document
             webView?.evaluateJavaScript("window.UTEditor.setContent(\(js(text)), \(js(name)), \(editable ? "false" : "true"))")
             curEditable = editable
             setFont(font)
             maybeScroll()
+        }
+        /// Build a Monaco theme from the active app palette so the editor matches the app
+        /// (token colors come from VS Code's own light/dark theme; chrome colors are ours).
+        func applyTheme() {
+            func hex(_ c: NSColor, _ alpha: String = "") -> String {
+                let s = c.usingColorSpace(.sRGB) ?? c
+                return String(format: "#%02x%02x%02x", Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255)) + alpha
+            }
+            let base = Theme.current.isLight ? "vs" : "vs-dark"
+            let lineHl = Theme.current.isLight ? "#0000000a" : "#ffffff0d"
+            let spec = "{base:'\(base)',bg:'\(hex(Theme.nsAppBackground))',fg:'\(hex(Theme.nsForeground))',accent:'\(hex(Theme.nsCursor))',selection:'\(hex(Theme.nsCursor, "33"))',lineHighlight:'\(lineHl)'}"
+            webView?.evaluateJavaScript("window.UTEditor.setTheme(\(spec))")
         }
         /// Jump to the requested line once (per file / per line change).
         private func maybeScroll() {
@@ -99,9 +117,11 @@ struct CodeMirrorView: NSViewRepresentable {
             webView?.evaluateJavaScript("window.UTEditor.setEditable(\(editable ? "true" : "false"))")
         }
         func userContentController(_ u: WKUserContentController, didReceive message: WKScriptMessage) {
-            if let d = message.body as? [String: Any], d["type"] as? String == "change",
-               let text = d["text"] as? String {
-                onChange(text)
+            guard let d = message.body as? [String: Any], let type = d["type"] as? String else { return }
+            switch type {
+            case "change": if let text = d["text"] as? String { onChange(text) }
+            case "save":   onSave()   // ⌘S pressed while focus is inside the editor
+            default:       break
             }
         }
         private func js(_ s: String) -> String {
@@ -201,8 +221,8 @@ struct FileContentView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         case .text(let t, let name, let path):
             CodeMirrorView(text: t, filename: name, path: path, fontSize: editorBaseFont * tab.zoom,
-                           editable: tab.editing, scrollToLine: tab.pendingLine,
-                           onChange: { tab.editorChanged($0) })   // persists; no .id
+                           editable: true, scrollToLine: tab.pendingLine,
+                           onChange: { tab.editorChanged($0) }, onSave: { tab.save() })   // always editable; ⌘S saves
         case .image(let img):
             ImageViewer(image: img, zoom: tab.zoom).id(tab.selection ?? "")
         case .pdf(let data):
@@ -220,22 +240,13 @@ struct FileContentView: View {
         if zoomable {
             HStack(spacing: 8) {
                 if isText {
-                    Button {
-                        if tab.editing { tab.save(); tab.toggleEditing() } else { tab.toggleEditing() }
-                    } label: {
+                    Button { tab.save() } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: tab.editing ? "checkmark.circle" : "pencil").font(.system(size: 10, weight: .semibold))
-                            Text(tab.editing ? "Done" : "Edit").font(.system(size: 11, weight: .medium))
-                        }.foregroundStyle(tab.editing ? Flat.accent : Flat.dim)
-                    }.buttonStyle(.plain).help(tab.editing ? "Save & done" : "Edit")
-                    if tab.editing {
-                        Button { tab.save() } label: {
-                            HStack(spacing: 4) {
-                                if tab.dirty { Circle().fill(Flat.accent).frame(width: 5, height: 5) }
-                                Text("Save").font(.system(size: 11, weight: .semibold))
-                            }.foregroundStyle(tab.dirty ? Flat.accent : Flat.dim)
-                        }.buttonStyle(.plain).help("Save (⌘S)")
-                    }
+                            if tab.dirty { Circle().fill(Flat.accent).frame(width: 5, height: 5) }
+                            Image(systemName: tab.dirty ? "arrow.down.circle" : "checkmark.circle").font(.system(size: 10, weight: .semibold))
+                            Text(tab.dirty ? "Save" : "Saved").font(.system(size: 11, weight: .medium))
+                        }.foregroundStyle(tab.dirty ? Flat.accent : Flat.dim)
+                    }.buttonStyle(.plain).help("Save (⌘S)").disabled(!tab.dirty)
                     Divider().frame(height: 14)
                 }
                 zBtn("minus") { tab.zoomOut() }

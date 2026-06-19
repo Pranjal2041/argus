@@ -38,3 +38,4 @@ brand/__pycache__/
 
 # Jupyter checkpoint cache
 .ipynb_checkpoints/
+clients/macos/monaco/node_modules/

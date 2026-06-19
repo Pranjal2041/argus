@@ -1,0 +1,12 @@
+{
+  "name": "ut-monaco",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Bundled Monaco (VS Code's editor) for the Argus Files browser, loaded in a WKWebView.",
+  "scripts": {
+    "build": "rm -rf ../Resources/monaco/vs && mkdir -p ../Resources/monaco && cp -R node_modules/monaco-editor/min/vs ../Resources/monaco/vs"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.52.2"
+  }
+}
