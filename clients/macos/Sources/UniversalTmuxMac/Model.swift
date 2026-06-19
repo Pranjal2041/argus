@@ -159,10 +159,21 @@ final class AppState: ObservableObject {
     private var legacyHiddenToMigrate: [String] = UserDefaults.standard.stringArray(forKey: "ut.hiddenSessions") ?? []
     /// Drives the ⇧⌘B "Hidden Panels" restore sheet.
     @Published var showHiddenPicker = false
-    /// Drives the ⇧⌘Y "Session History" sheet + its (broker-sourced) contents.
+    /// Drives the ⇧⌘Y "Session History" sheet + its (durable, locally-cached) contents.
     @Published var showHistory = false
     @Published var historyItems: [SessionHistoryItem] = []
     @Published var historyLoading = false
+    private let historyStoreKey = "ut.historyCache.v1"
+    private let historyTTLDays = 90
+    /// Durable local union of every history record this client has ever fetched, keyed by
+    /// SessionHistoryItem.id (node/name/first). Persisted, so a machine's history survives
+    /// the machine going offline — which is the whole point of history. A background task
+    /// keeps it fresh from whatever brokers are online; the view reads THIS, never the
+    /// live brokers, so nothing vanishes when a machine steps away.
+    private var historyCache: [String: SessionHistoryItem] = [:]
+    /// Nodes that answered /history in the most recent refresh — gates the "alive" dot so
+    /// an offline machine's cached sessions don't keep showing as still-running.
+    private var historyOnlineNodes: Set<String> = []
     /// Drives the ⇧⌘T theme picker sheet.
     @Published var showThemePicker = false
 
@@ -328,6 +339,7 @@ final class AppState: ObservableObject {
                     httpBase: "http://127.0.0.1:8722", wsBase: "ws://127.0.0.1:8722"),
         ]
         selection = SessionRef(machineID: "local", session: "ut-demo")
+        loadHistoryCache()
     }
 
     func toggleSidebar() {
@@ -352,6 +364,9 @@ final class AppState: ObservableObject {
                 for m in self.machines { self.refresh(m) }
                 tick += 1
                 if tick % 6 == 0 { self.discoverNewBrokers() }
+                // Pull durable history in the background while machines are reachable, so
+                // it's captured before a node goes offline. ~2s after launch, then ~30s.
+                if tick == 1 || tick % 15 == 0 { self.refreshHistoryCache() }
             }
         }
     }
@@ -387,15 +402,28 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Pull the durable session history from every broker and merge it (newest first)
-    /// for the ⇧⌘Y History view. Each broker owns its own node's history, so this is
-    /// the union across nodes — including sessions that no longer exist.
+    /// Open-the-view entry (⇧⌘Y / the refresh button): show the durable cache instantly —
+    /// so an offline machine's history is right there — then fold in anything new from the
+    /// brokers that are currently online.
     func loadHistory() {
         historyLoading = true
+        rebuildHistoryItems()        // instant: the union of everything ever seen
+        refreshHistoryCache()        // then merge fresh records from online brokers
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self.historyLoading = false }
+    }
+
+    /// Fetch durable history from every ONLINE broker and fold it into the persistent
+    /// local cache. Runs in the background off the poll timer (and when the view opens),
+    /// so each machine's history is captured while it's reachable and kept after it leaves.
+    /// Each broker owns its own node's history, so this is the union across nodes.
+    func refreshHistoryCache() {
+        let mlist = machines
+        guard !mlist.isEmpty else { return }
         let group = DispatchGroup()
         var collected: [SessionHistoryItem] = []
+        var responded: Set<String> = []
         let lock = NSLock()
-        for m in machines {
+        for m in mlist {
             guard let url = URL(string: m.httpBase + "/history") else { continue }
             var req = URLRequest(url: url)
             req.timeoutInterval = 8
@@ -404,14 +432,55 @@ final class AppState: ObservableObject {
                 defer { group.leave() }
                 guard let data,
                       let decoded = try? JSONDecoder().decode(SessionHistoryResponse.self, from: data) else { return }
-                lock.lock(); collected.append(contentsOf: decoded.sessions); lock.unlock()
+                lock.lock()
+                collected.append(contentsOf: decoded.sessions)
+                for s in decoded.sessions { responded.insert(s.node) }
+                lock.unlock()
             }.resume()
         }
         group.notify(queue: .main) {
-            self.historyItems = collected.sorted { $0.last > $1.last }
+            self.mergeHistory(collected, respondedNodes: responded)
             self.historyLoading = false
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self.historyLoading = false }
+    }
+
+    /// Union-merge fetched records into the durable cache. A broker's record for a given
+    /// id only ever grows (folders accrue, lastSeen ticks), so a fresh fetch supersedes the
+    /// cached copy. Prune by the 90-day TTL, persist, and rebuild the view list.
+    private func mergeHistory(_ fetched: [SessionHistoryItem], respondedNodes: Set<String>) {
+        let cutoff = Int64(Date().timeIntervalSince1970) - Int64(historyTTLDays) * 24 * 3600
+        for item in fetched where item.last >= cutoff {
+            historyCache[item.id] = item
+        }
+        for (k, v) in historyCache where v.last < cutoff { historyCache.removeValue(forKey: k) }
+        historyOnlineNodes = respondedNodes
+        saveHistoryCache()
+        rebuildHistoryItems()
+    }
+
+    /// Rebuild the published, sorted view list from the durable cache, gating each item's
+    /// "alive" flag by whether its node answered the latest refresh — so a cached session
+    /// on an offline machine isn't shown as still-running.
+    private func rebuildHistoryItems() {
+        let online = historyOnlineNodes
+        historyItems = historyCache.values
+            .map { var it = $0; it.alive = it.alive && online.contains(it.node); return it }
+            .sorted { $0.last > $1.last }
+    }
+
+    private func loadHistoryCache() {
+        if let data = UserDefaults.standard.data(forKey: historyStoreKey),
+           let items = try? JSONDecoder().decode([SessionHistoryItem].self, from: data) {
+            let cutoff = Int64(Date().timeIntervalSince1970) - Int64(historyTTLDays) * 24 * 3600
+            for it in items where it.last >= cutoff { historyCache[it.id] = it }
+        }
+        rebuildHistoryItems()
+    }
+
+    private func saveHistoryCache() {
+        if let data = try? JSONEncoder().encode(Array(historyCache.values)) {
+            UserDefaults.standard.set(data, forKey: historyStoreKey)
+        }
     }
 
     func refresh(_ m: Machine, group: DispatchGroup? = nil) {
