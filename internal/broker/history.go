@@ -154,8 +154,13 @@ func (m *Manager) flushHistory() {
 	m.histMu.Unlock()
 }
 
-// History returns every recorded session, newest activity first, with Alive set from
-// the sessions currently present.
+// History returns every recorded session this node knows about, newest activity first.
+// It is the union of this node's own in-memory records AND any sibling node history
+// files sharing the same state dir — e.g. every SLURM node of a cluster on one NFS home.
+// That lets an online node surface the history of nodes that are currently offline, so a
+// session's record doesn't disappear just because the node it ran on went away. On a
+// machine that shares its home with no one (a Mac, a Windows box) there is only the one
+// file, so this is just its own history. Alive is set from THIS node's live sessions only.
 func (m *Manager) History() []SessionHistory {
 	live := map[string]bool{}
 	m.sessMu.Lock()
@@ -164,14 +169,57 @@ func (m *Manager) History() []SessionHistory {
 	}
 	m.sessMu.Unlock()
 
+	cutoff := time.Now().Unix() - int64(histTTLDays)*24*3600
+	type histKey struct {
+		node, name string
+		first      int64
+	}
+	seen := map[histKey]bool{}
+
 	m.histMu.Lock()
-	defer m.histMu.Unlock()
 	out := make([]SessionHistory, 0, len(m.history))
 	for _, r := range m.history {
 		rec := *r
 		rec.Alive = live[r.Name]
 		out = append(out, rec)
+		seen[histKey{rec.Node, rec.Name, rec.First}] = true
 	}
+	m.histMu.Unlock()
+
+	// Fold in sibling node files (other nodes sharing this NFS home). Read-only, so a
+	// half-written sibling just fails to parse and is skipped until the next read.
+	if m.histPath != "" {
+		dir := filepath.Dir(m.histPath)
+		if files, err := filepath.Glob(filepath.Join(dir, "history-*.json")); err == nil {
+			for _, f := range files {
+				if f == m.histPath {
+					continue // own node — already covered by the fresher in-memory copy
+				}
+				b, err := os.ReadFile(f)
+				if err != nil {
+					continue
+				}
+				var recs []*SessionHistory
+				if json.Unmarshal(b, &recs) != nil {
+					continue
+				}
+				for _, r := range recs {
+					if r == nil || r.Name == "" || r.Last < cutoff {
+						continue
+					}
+					k := histKey{r.Node, r.Name, r.First}
+					if seen[k] {
+						continue
+					}
+					seen[k] = true
+					rec := *r
+					rec.Alive = false // another node's session — not live on this one
+					out = append(out, rec)
+				}
+			}
+		}
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Last > out[j].Last })
 	return out
 }
