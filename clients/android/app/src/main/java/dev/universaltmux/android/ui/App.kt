@@ -580,6 +580,7 @@ private fun AccessoryKeys(onBytes: (ByteArray) -> Unit, onKeyboard: () -> Unit) 
         "tab" to byteArrayOf(9),
         "^C" to byteArrayOf(3),
         "^Z" to byteArrayOf(26),
+        "^L" to byteArrayOf(12),
         "↑" to byteArrayOf(27, 91, 65),
         "↓" to byteArrayOf(27, 91, 66),
         "←" to byteArrayOf(27, 91, 68),
