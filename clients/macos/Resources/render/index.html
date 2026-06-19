@@ -7,12 +7,13 @@
 <head>
 <meta charset="utf-8">
 <link rel="stylesheet" href="katex/katex.min.css">
-<link rel="stylesheet" href="hljs/github.min.css">
+<link rel="stylesheet" href="hljs/github.min.css" id="hljs-light">
+<link rel="stylesheet" href="hljs/github-dark.min.css" id="hljs-dark" disabled>
 <style>
   :root { color-scheme: light; }
-  html, body { margin: 0; padding: 0; background: #FBFBFA; }
+  html, body { margin: 0; padding: 0; background: var(--ut-bg, #FBFBFA); }
   body {
-    color: #1F2328;
+    color: var(--ut-fg, #1F2328);
     font: 16px/1.7 -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
     -webkit-font-smoothing: antialiased;
     padding: 30px 40px 56px;
@@ -58,6 +59,24 @@
     padding: 2px 8px; cursor: pointer;
   }
   .jtoggle:hover { color: #1F2328; background: #FFF; }
+  /* Dark variant — the editor's markdown PREVIEW opts in via UTRender.setTheme so it
+     matches the app theme. The Renders panel (⇧⌘M) never calls setTheme, so it stays
+     the light reading surface. bg/fg come from the app (--ut-bg/--ut-fg); the rest is
+     a tasteful dark palette. */
+  html.dark body { color: var(--ut-fg, #c9d1d9); }
+  html.dark h1, html.dark h2, html.dark h3, html.dark h4, html.dark th, html.dark strong { color: #e6edf3; }
+  html.dark h1 { border-bottom-color: #30363d; }
+  html.dark hr { border-top-color: #30363d; }
+  html.dark a { color: #4493f8; }
+  html.dark blockquote { border-left-color: #3b434b; color: #8b949e; }
+  html.dark code { background: #6e768133; color: #c9d1d9; }
+  html.dark pre, html.dark pre.term { background: #161b22; border-color: #30363d; color: #c9d1d9; }
+  html.dark th, html.dark td { border-color: #30363d; }
+  html.dark th { background: #161b22; }
+  html.dark tr:nth-child(2n) td { background: #161b2266; }
+  html.dark #empty { color: #6e7681; }
+  html.dark .jtoggle { color: #8b949e; background: #161b22d8; border-color: #30363d; }
+  html.dark .jtoggle:hover { color: #e6edf3; background: #161b22; }
 </style>
 <script src="marked.min.js"></script>
 <script src="katex/katex.min.js"></script>
@@ -284,6 +303,18 @@
   window.UTRender = {
     set(md, px) { if (px) this.setZoom(px); render(md); },
     setZoom(px) { document.body.style.fontSize = px + "px"; },
+    // Opt-in theming (the editor preview calls this; the Renders panel never does,
+    // so it stays light). spec = { dark:bool, bg:'#hex', fg:'#hex' }.
+    setTheme(spec) {
+      spec = spec || {};
+      var root = document.documentElement;
+      root.classList.toggle("dark", !!spec.dark);
+      if (spec.bg) root.style.setProperty("--ut-bg", spec.bg); else root.style.removeProperty("--ut-bg");
+      if (spec.fg) root.style.setProperty("--ut-fg", spec.fg); else root.style.removeProperty("--ut-fg");
+      var light = document.getElementById("hljs-light"), dark = document.getElementById("hljs-dark");
+      if (light) light.disabled = !!spec.dark;
+      if (dark) dark.disabled = !spec.dark;
+    },
   };
 })();
 </script>

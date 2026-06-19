@@ -52,6 +52,48 @@ enum FileContent {
     case error(String)
 }
 
+/// How a markdown document is shown: just the editor, editor+preview side by side,
+/// or just the rendered preview.
+enum PreviewMode: String { case editor, split, preview }
+
+/// One open file in a browser tab — its content + per-file edit/zoom/preview state.
+/// A FileTab keeps a list of these (VS Code-style per-file tabs) and shows the active
+/// one in the content pane.
+@MainActor
+final class OpenDoc: ObservableObject, Identifiable {
+    let id = UUID()
+    let path: String
+    let name: String
+    @Published var content: FileContent
+    @Published var dirty = false
+    @Published var draft = ""   // @Published so a live markdown preview re-renders as you type
+    var originalText = ""
+    @Published var zoom: CGFloat = 1.0
+    @Published var pendingLine: Int? = nil
+    @Published var previewMode: PreviewMode = .editor
+
+    init(path: String, name: String, content: FileContent) {
+        self.path = path; self.name = name; self.content = content
+    }
+
+    var isMarkdown: Bool {
+        ["md", "markdown", "mdx", "mdown", "mkd"].contains((name as NSString).pathExtension.lowercased())
+    }
+
+    func editorChanged(_ text: String) {
+        draft = text
+        let d = text != originalText
+        if d != dirty { dirty = d }
+    }
+    /// Adopt freshly-loaded text as the clean baseline.
+    func loadedText(_ s: String) { draft = s; originalText = s; dirty = false; content = .text(s, name: name, path: path) }
+    func markSaved() { originalText = draft; dirty = false }
+
+    func zoomIn()    { zoom = min(4.0, zoom * 1.15) }
+    func zoomOut()   { zoom = max(0.4, zoom / 1.15) }
+    func zoomReset() { zoom = 1.0 }
+}
+
 /// A pending "new" operation (drives the new-folder/new-file dialog).
 struct NewItem: Identifiable { let id = UUID(); let parent: String; let isDir: Bool }
 
@@ -100,17 +142,13 @@ final class FileTab: ObservableObject, Identifiable {
     /// flattener reads but the view can't individually observe.
     @Published private(set) var treeRevision = 0
     private func bumpTree() { treeRevision &+= 1 }
-    @Published var selection: String? = nil
-    @Published var content: FileContent = .empty
+    @Published var selection: String? = nil   // the file highlighted in the tree
     @Published var sep: String = "/"
-    @Published var zoom: CGFloat = 1.0   // preview zoom (⌘+/−/0), independent of the global UI scale
-    @Published var pendingLine: Int? = nil   // line to jump to after a terminal cmd+click open
 
-    // editor
-    @Published var editing = false
-    @Published var dirty = false
-    var draft = ""
-    var originalText = ""
+    // Open files (per-file tabs). The active one shows in the content pane.
+    @Published var openDocs: [OpenDoc] = []
+    @Published var activeDocID: UUID? = nil
+    var activeDoc: OpenDoc? { openDocs.first { $0.id == activeDocID } }
 
     // pending dialog ops (driven from the tree's context menu, shown by the view)
     @Published var renaming: FileNode? = nil
@@ -154,23 +192,29 @@ final class FileTab: ObservableObject, Identifiable {
     func goUp() { Task { await setRoot(parentPath(rootPath)) } }
     func goHome() { start() }
 
-    // MARK: preview zoom (independent of the interface scale)
-    func zoomIn()    { zoom = min(4.0, zoom * 1.15) }
-    func zoomOut()   { zoom = max(0.4, zoom / 1.15) }
-    func zoomReset() { zoom = 1.0 }
+    // MARK: active-doc convenience (toolbar + ⌘-shortcuts act on the active file)
+    func zoomIn()    { activeDoc?.zoomIn() }
+    func zoomOut()   { activeDoc?.zoomOut() }
+    func zoomReset() { activeDoc?.zoomReset() }
 
-    // MARK: editor
-    func editorChanged(_ text: String) {
-        draft = text
-        let d = text != originalText
-        if d != dirty { dirty = d }
-    }
-    func toggleEditing() { editing.toggle() }
-    /// Write the current draft (kept live by the editor's immediate change events).
+    /// Write the active doc's live draft (kept current by the editor's change events).
     func save() {
-        guard case let .text(_, _, path) = content else { return }
-        let text = draft
-        Task { if await postWrite(path, Data(text.utf8)) { originalText = text; dirty = false } }
+        guard let doc = activeDoc, case .text = doc.content else { return }
+        let text = doc.draft, path = doc.path
+        Task { if await postWrite(path, Data(text.utf8)) { doc.markSaved() } }
+    }
+
+    /// Focus an already-open doc (or no-op). Keeps the tree highlight in sync.
+    func activate(_ doc: OpenDoc) { activeDocID = doc.id; selection = doc.path }
+
+    func closeDoc(_ id: UUID) {
+        guard let idx = openDocs.firstIndex(where: { $0.id == id }) else { return }
+        openDocs.remove(at: idx)
+        if activeDocID == id {
+            let next = openDocs.indices.contains(idx) ? openDocs[idx] : openDocs.last
+            activeDocID = next?.id
+            selection = next?.path
+        }
     }
 
     // MARK: file operations (context-menu ops)
@@ -188,7 +232,8 @@ final class FileTab: ObservableObject, Identifiable {
         let parent = parentPath(node.entry.path)
         Task {
             if await post("/fs/delete", ["path": node.entry.path]) {
-                if selection == node.entry.path { selection = nil; content = .empty }
+                if let d = openDocs.first(where: { $0.path == node.entry.path }) { closeDoc(d.id) }
+                if selection == node.entry.path { selection = nil }
                 await refresh(parent)
             }
         }
@@ -295,41 +340,52 @@ final class FileTab: ObservableObject, Identifiable {
 
     func open(_ node: FileNode) {
         let e = node.entry
-        pendingLine = nil    // a normal tree click never jumps to a line
         selection = e.path
         guard !e.isDir else { return }
-        let kind = kindFor(e.name, size: e.size)
-        if kind == .media {
-            if let u = readURL(e.path) { content = .media(u) } else { content = .error("bad path") }
-            return
-        }
-        content = .loading(e.path)
-        Task { await fetchContent(e, kind: kind) }
+        openEntry(e, line: nil)
     }
 
-    private func fetchContent(_ e: FileEntry, kind: FileKind) async {
-        guard let url = readURL(e.path) else { content = .error("bad path"); return }
+    /// Open a file as a doc, or focus it if already open; jump to `line` if given.
+    func openEntry(_ e: FileEntry, line: Int?) {
+        selection = e.path
+        if let existing = openDocs.first(where: { $0.path == e.path }) {
+            activeDocID = existing.id
+            if let line { existing.pendingLine = line }
+            return
+        }
+        let kind = kindFor(e.name, size: e.size)
+        let initial: FileContent = (kind == .media)
+            ? (readURL(e.path).map { .media($0) } ?? .error("bad path"))
+            : .loading(e.path)
+        let doc = OpenDoc(path: e.path, name: e.name, content: initial)
+        doc.pendingLine = line
+        openDocs.append(doc)
+        activeDocID = doc.id
+        if kind == .media { return }
+        Task { await fetchContent(e, into: doc, kind: kind) }
+    }
+
+    private func fetchContent(_ e: FileEntry, into doc: OpenDoc, kind: FileKind) async {
+        guard let url = readURL(e.path) else { doc.content = .error("bad path"); return }
         do {
             let (data, resp) = try await fsSession.data(from: url)
-            if selection != e.path { return }   // user moved on
+            guard openDocs.contains(where: { $0.id == doc.id }) else { return }   // tab closed mid-fetch
             if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
-                content = .error("HTTP \(http.statusCode)"); return
+                doc.content = .error("HTTP \(http.statusCode)"); return
             }
             switch kind {
             case .image:
-                content = NSImage(data: data).map { .image($0) } ?? .binary(e)
+                doc.content = NSImage(data: data).map { .image($0) } ?? .binary(e)
             case .pdf:
-                content = .pdf(data)
+                doc.content = .pdf(data)
             case .text:
-                if let s = String(data: data, encoding: .utf8) {
-                    editing = false; dirty = false; draft = s; originalText = s
-                    content = .text(s, name: e.name, path: e.path)
-                } else { content = .binary(e) }
+                if let s = String(data: data, encoding: .utf8) { doc.loadedText(s) }
+                else { doc.content = .binary(e) }
             default:
-                content = .binary(e)
+                doc.content = .binary(e)
             }
         } catch {
-            if selection == e.path { content = .error(error.localizedDescription) }
+            if openDocs.contains(where: { $0.id == doc.id }) { doc.content = .error(error.localizedDescription) }
         }
     }
 
@@ -351,16 +407,8 @@ final class FileTab: ObservableObject, Identifiable {
         }
         await setRoot(parentPath(path))   // show the file's directory context
         guard exists else { return }       // parent shown; the file itself is gone
-        pendingLine = line
-        selection = path
         let e = FileEntry(name: name, path: path, isDir: false, size: size, mtime: 0, mode: "")
-        let kind = kindFor(name, size: size)
-        if kind == .media {
-            content = readURL(path).map { .media($0) } ?? .error("bad path")
-            return
-        }
-        content = .loading(path)
-        await fetchContent(e, kind: kind)
+        openEntry(e, line: line)           // opens (or focuses) the file as a doc, jumping to `line`
     }
 
     // MARK: helpers
