@@ -191,14 +191,81 @@ struct MediaPlayer: NSViewRepresentable {
     func updateNSView(_ v: AVPlayerView, context: Context) {}
 }
 
-// MARK: - content dispatcher (with edit/save + zoom toolbar)
+// MARK: - content area: an open-file tab strip + the active document's pane
 
 struct FileContentView: View {
     @ObservedObject var tab: FileTab
 
-    private var isText: Bool { if case .text = tab.content { return true }; return false }
+    var body: some View {
+        VStack(spacing: 0) {
+            if !tab.openDocs.isEmpty {
+                DocTabStrip(tab: tab)
+                Divider().overlay(Flat.hairline)
+            }
+            if let doc = tab.activeDoc {
+                DocPane(tab: tab, doc: doc).id(doc.id)
+            } else {
+                fileHint("doc.text", "Select a file to open")
+            }
+        }
+    }
+}
+
+private func fileHint(_ symbol: String, _ text: String) -> some View {
+    VStack(spacing: 10) {
+        Image(systemName: symbol).font(.system(size: 26, weight: .light)).foregroundStyle(.tertiary)
+        Text(text).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+}
+
+// MARK: open-file tabs (VS Code-style, one chip per open document)
+
+private struct DocTabStrip: View {
+    @ObservedObject var tab: FileTab
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) { ForEach(tab.openDocs) { DocChip(tab: tab, doc: $0) } }
+        }
+        .frame(height: 34)
+        .background(Flat.sidebar)
+    }
+}
+
+private struct DocChip: View {
+    @ObservedObject var tab: FileTab
+    @ObservedObject var doc: OpenDoc
+    var body: some View {
+        let active = doc.id == tab.activeDocID
+        HStack(spacing: 6) {
+            Image(systemName: iconForFile(doc.name)).font(.system(size: 10)).foregroundStyle(active ? Flat.accent : Flat.faint)
+            Text(doc.name).font(.system(size: 12, weight: active ? .medium : .regular))
+                .foregroundStyle(active ? Flat.text : Flat.dim).lineLimit(1)
+            Button { tab.closeDoc(doc.id) } label: {
+                Image(systemName: doc.dirty ? "circle.fill" : "xmark")
+                    .font(.system(size: doc.dirty ? 7 : 8, weight: .bold))
+                    .frame(width: 12, height: 12)
+            }.buttonStyle(.plain).foregroundStyle(doc.dirty ? Flat.accent : Flat.faint)
+                .help(doc.dirty ? "Unsaved — close (discards changes)" : "Close")
+        }
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity)
+        .background(active ? Flat.bg : Color.clear)
+        .overlay(alignment: .top) { if active { Rectangle().fill(Flat.accent).frame(height: 2) } }
+        .overlay(alignment: .trailing) { Rectangle().fill(Flat.hairline).frame(width: 1) }
+        .contentShape(Rectangle())
+        .onTapGesture { tab.activate(doc) }
+    }
+}
+
+// MARK: the active document's pane (editor / image / pdf / media, + markdown preview)
+
+private struct DocPane: View {
+    @ObservedObject var tab: FileTab
+    @ObservedObject var doc: OpenDoc
+
+    private var isText: Bool { if case .text = doc.content { return true }; return false }
     private var zoomable: Bool {
-        switch tab.content { case .text, .image, .pdf: return true; default: return false }
+        switch doc.content { case .text, .image, .pdf: return true; default: return false }
     }
 
     var body: some View {
@@ -211,55 +278,88 @@ struct FileContentView: View {
     }
 
     @ViewBuilder private var pane: some View {
-        switch tab.content {
+        switch doc.content {
         case .empty:
-            hint("doc.text", "Select a file to preview")
+            fileHint("doc.text", "Empty")
         case .loading(let p):
             VStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text((p as NSString).lastPathComponent).font(.system(size: 11)).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         case .text(let t, let name, let path):
-            CodeMirrorView(text: t, filename: name, path: path, fontSize: editorBaseFont * tab.zoom,
-                           editable: true, scrollToLine: tab.pendingLine,
-                           onChange: { tab.editorChanged($0) }, onSave: { tab.save() })   // always editable; ⌘S saves
+            textPane(t, name, path)
         case .image(let img):
-            ImageViewer(image: img, zoom: tab.zoom).id(tab.selection ?? "")
+            ImageViewer(image: img, zoom: doc.zoom)
         case .pdf(let data):
-            PDFKitView(data: data, zoom: tab.zoom).id(tab.selection ?? "")
+            PDFKitView(data: data, zoom: doc.zoom)
         case .media(let url):
             MediaPlayer(url: url).id(url)
         case .binary(let e):
-            hint("doc.zipper", "\(e.name)\n\(byteSize(e.size)) · not a previewable text file")
+            fileHint("doc.zipper", "\(e.name)\n\(byteSize(e.size)) · not a previewable text file")
         case .error(let m):
-            hint("exclamationmark.triangle", m)
+            fileHint("exclamationmark.triangle", m)
+        }
+    }
+
+    @ViewBuilder private func textPane(_ t: String, _ name: String, _ path: String) -> some View {
+        let editor = CodeMirrorView(text: t, filename: name, path: path, fontSize: editorBaseFont * doc.zoom,
+                                    editable: true, scrollToLine: doc.pendingLine,
+                                    onChange: { doc.editorChanged($0) }, onSave: { tab.save() })
+        let mdSource = doc.dirty ? doc.draft : t   // live as you type
+        if doc.isMarkdown && doc.previewMode == .preview {
+            MarkdownPreviewView(markdown: mdSource, fontSize: Double(editorBaseFont * doc.zoom))
+        } else if doc.isMarkdown && doc.previewMode == .split {
+            HSplitView {
+                editor.frame(minWidth: 240)
+                MarkdownPreviewView(markdown: mdSource, fontSize: Double(editorBaseFont * doc.zoom)).frame(minWidth: 240)
+            }
+        } else {
+            editor
         }
     }
 
     @ViewBuilder private var toolbar: some View {
         if zoomable {
             HStack(spacing: 8) {
+                if doc.isMarkdown {
+                    ForEach([PreviewMode.editor, .split, .preview], id: \.self) { m in
+                        Button { doc.previewMode = m } label: {
+                            Image(systemName: mdIcon(m)).font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(doc.previewMode == m ? Flat.accent : Flat.dim)
+                                .frame(width: 20, height: 18)
+                        }.buttonStyle(.plain).help(m.rawValue.capitalized)
+                    }
+                    Divider().frame(height: 14)
+                }
                 if isText {
                     Button { tab.save() } label: {
                         HStack(spacing: 4) {
-                            if tab.dirty { Circle().fill(Flat.accent).frame(width: 5, height: 5) }
-                            Image(systemName: tab.dirty ? "arrow.down.circle" : "checkmark.circle").font(.system(size: 10, weight: .semibold))
-                            Text(tab.dirty ? "Save" : "Saved").font(.system(size: 11, weight: .medium))
-                        }.foregroundStyle(tab.dirty ? Flat.accent : Flat.dim)
-                    }.buttonStyle(.plain).help("Save (⌘S)").disabled(!tab.dirty)
+                            if doc.dirty { Circle().fill(Flat.accent).frame(width: 5, height: 5) }
+                            Image(systemName: doc.dirty ? "arrow.down.circle" : "checkmark.circle").font(.system(size: 10, weight: .semibold))
+                            Text(doc.dirty ? "Save" : "Saved").font(.system(size: 11, weight: .medium))
+                        }.foregroundStyle(doc.dirty ? Flat.accent : Flat.dim)
+                    }.buttonStyle(.plain).help("Save (⌘S)").disabled(!doc.dirty)
                     Divider().frame(height: 14)
                 }
-                zBtn("minus") { tab.zoomOut() }
-                Button { tab.zoomReset() } label: {
-                    Text("\(Int((tab.zoom * 100).rounded()))%")
+                zBtn("minus") { doc.zoomOut() }
+                Button { doc.zoomReset() } label: {
+                    Text("\(Int((doc.zoom * 100).rounded()))%")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(Flat.dim).frame(width: 38)
                 }.buttonStyle(.plain).help("Reset zoom (⌘0)")
-                zBtn("plus") { tab.zoomIn() }
+                zBtn("plus") { doc.zoomIn() }
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.5)))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Flat.hairline, lineWidth: 1))
+        }
+    }
+
+    private func mdIcon(_ m: PreviewMode) -> String {
+        switch m {
+        case .editor:  return "chevron.left.forwardslash.chevron.right"
+        case .split:   return "rectangle.split.2x1"
+        case .preview: return "eye"
         }
     }
 
@@ -276,18 +376,55 @@ struct FileContentView: View {
 
     private var zoomShortcuts: some View {
         ZStack {
-            Button("") { tab.zoomIn() }.keyboardShortcut("+", modifiers: .command)
-            Button("") { tab.zoomIn() }.keyboardShortcut("=", modifiers: .command)
-            Button("") { tab.zoomOut() }.keyboardShortcut("-", modifiers: .command)
-            Button("") { tab.zoomReset() }.keyboardShortcut("0", modifiers: .command)
+            Button("") { doc.zoomIn() }.keyboardShortcut("+", modifiers: .command)
+            Button("") { doc.zoomIn() }.keyboardShortcut("=", modifiers: .command)
+            Button("") { doc.zoomOut() }.keyboardShortcut("-", modifiers: .command)
+            Button("") { doc.zoomReset() }.keyboardShortcut("0", modifiers: .command)
         }.opacity(0).frame(width: 0, height: 0)
     }
+}
 
-    private func hint(_ symbol: String, _ text: String) -> some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 26, weight: .light)).foregroundStyle(.tertiary)
-            Text(text).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+// MARK: - markdown preview (reuses the offline render bundle: marked + KaTeX + hljs)
+
+private struct MarkdownPreviewView: NSViewRepresentable {
+    let markdown: String
+    let fontSize: Double
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> WKWebView {
+        let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        wv.navigationDelegate = context.coordinator
+        if #available(macOS 12.0, *) { wv.underPageBackgroundColor = NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1) }
+        context.coordinator.pending = (markdown, fontSize)
+        let dir = Bundle.main.resourceURL!.appendingPathComponent("render")
+        wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
+        return wv
+    }
+    func updateNSView(_ wv: WKWebView, context: Context) { context.coordinator.update(wv, markdown, fontSize) }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var pending: (String, Double)?
+        private var ready = false
+        private var shownText: String?
+        private var shownSize: Double = 0
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            ready = true
+            if let p = pending { push(webView, p.0, p.1); pending = nil }
+        }
+        func update(_ wv: WKWebView, _ text: String, _ size: Double) {
+            guard ready else { pending = (text, size); return }
+            if shownText != text { push(wv, text, size) }
+            else if shownSize != size { shownSize = size; wv.evaluateJavaScript("window.UTRender.setZoom(\(Int(size)))") }
+        }
+        private func push(_ wv: WKWebView, _ text: String, _ size: Double) {
+            shownText = text; shownSize = size
+            wv.evaluateJavaScript("window.UTRender.set(\(js(text)), \(Int(size)))")
+        }
+        private func js(_ s: String) -> String {
+            guard let d = try? JSONSerialization.data(withJSONObject: [s]),
+                  let arr = String(data: d, encoding: .utf8) else { return "\"\"" }
+            return String(arr.dropFirst().dropLast())
+        }
     }
 }
 
