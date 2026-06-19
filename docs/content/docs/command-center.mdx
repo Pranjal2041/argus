@@ -1,0 +1,63 @@
+---
+title: Command Center
+description: One screen that tells you what every agent is doing and where your attention should go.
+---
+
+The Command Center is the part of Argus that turns "a wall of terminals" into "a glance." Instead
+of reading every session yourself, it shows one card per agent with a short, plain-English line
+about what that agent is actually doing right now — and, more importantly, whether it **needs you**.
+
+It is the answer to the question the whole project is built around: with agents running everywhere,
+where should your attention go *first*?
+
+## What it does
+
+- **A card per agent**, across every machine, each with a one-line status that is *insight*, not a
+  recap: the key result it just produced, the decision it is blocked on, the job it is monitoring,
+  or where it got stuck.
+- **A clear label** on each card — **Needs you**, **Stuck**, **Working**, **Worth a look**,
+  **Milestone**, or **Idle** — so the few that want you stand out from the many that are fine.
+- **Fixed sections**, top to bottom: *Needs you* first, then *Working*, then *Done & idle*, then a
+  *Backlog* you set aside. Cards stay put as their text updates, so nothing flies around while you
+  read.
+- **Set a status yourself.** If a card is wrong, change it. Your correction is shown immediately and
+  synced to your other devices, and the model is told you overrode it so it reasons about why rather
+  than flipping it straight back.
+- **Cross-device.** Your Mac does the work and publishes the result; your phone reads the same cards
+  over the tailnet. Change a status on either and it propagates both ways.
+
+<Callout type="info">
+It reads each agent's screen **passively** — nothing is ever typed into your agents to find out
+what they are doing. Agent sessions started by the mesh (`ut spawn`) and hidden panels are left out
+of the Command Center entirely.
+</Callout>
+
+## How it works
+
+Each session already has a deterministic **state dot** in the sidebar (running / waiting / idle),
+read straight from the screen. The Command Center adds a layer on top of that: a small language
+model that reads the *content* of the screen and writes the human line.
+
+On macOS, Argus periodically pulls each active session's recent scrollback from its broker and asks
+a fast model (`claude -p`, Haiku) for a compact `{label, summary}` judged against what you asked
+that agent to do. The result is published to the owning broker so any client — your phone included —
+can read it. There is no central service: the Mac generates, the brokers relay, the phone displays.
+
+The status is a read of the **current** screen every time, so it follows reality. If an agent that
+was "working" hits an API error and stops, the card flips to **stuck**; when you hand it new
+instructions, it flips back to **working**. A status you set by hand is delivered to the model as a
+correction it keeps in context, so it sticks until the screen genuinely changes — without being
+permanently forced.
+
+<Callout type="warn">
+The Command Center is a macOS feature today (the phone reads its results). It costs a small amount
+per refresh, since it runs a model over each changed session; unchanged screens are skipped, and
+hidden / agent sessions are never summarized.
+</Callout>
+
+## Read next
+
+<Cards>
+  <Card title="Themes" href="/docs/themes" description="Recolor the whole app — chrome, terminals, and editor — to match how you like to work." />
+  <Card title="Session history" href="/docs/history" description="A durable record of every session that has run, so you can find where one was." />
+</Cards>
