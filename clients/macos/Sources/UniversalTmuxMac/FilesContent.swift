@@ -394,7 +394,7 @@ private struct MarkdownPreviewView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         wv.navigationDelegate = context.coordinator
-        if #available(macOS 12.0, *) { wv.underPageBackgroundColor = NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1) }
+        if #available(macOS 12.0, *) { wv.underPageBackgroundColor = paneBG }   // app bg, so no light flash in dark mode
         context.coordinator.pending = (markdown, fontSize)
         let dir = Bundle.main.resourceURL!.appendingPathComponent("render")
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
@@ -409,7 +409,16 @@ private struct MarkdownPreviewView: NSViewRepresentable {
         private var shownSize: Double = 0
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
+            applyTheme(webView)   // match the app (dark/light + bg/fg) before painting
             if let p = pending { push(webView, p.0, p.1); pending = nil }
+        }
+        private func applyTheme(_ wv: WKWebView) {
+            func hex(_ c: NSColor) -> String {
+                let s = c.usingColorSpace(.sRGB) ?? c
+                return String(format: "#%02x%02x%02x", Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255))
+            }
+            let spec = "{dark:\(!Theme.current.isLight),bg:'\(hex(Theme.nsAppBackground))',fg:'\(hex(Theme.nsForeground))'}"
+            wv.evaluateJavaScript("window.UTRender.setTheme && window.UTRender.setTheme(\(spec))")
         }
         func update(_ wv: WKWebView, _ text: String, _ size: Double) {
             guard ready else { pending = (text, size); return }
