@@ -1,0 +1,31 @@
+---
+title: Dashboards & notebooks
+description: An in-app browser for remote web UIs, and Jupyter notebooks that run on the host.
+---
+
+A lot of what agents produce lives behind a web UI on the machine that ran them — a training
+dashboard, a TensorBoard, a Jupyter server. Reaching those normally means an `ssh -L`, a forwarded
+port, and a browser tab. Argus folds that into the app: a built-in, tabbed browser that reaches any
+host's web service over the same tailnet, plus first-class Jupyter notebooks that run on the host.
+
+## Dashboards
+
+The **Dashboards** window is a small web browser with tabs — back / forward / reload and an address
+bar — pointed at services on your remote hosts. Open a tab against a host and Argus sets up the
+[port-forward](/docs/ports) for you, so a server bound to `localhost:6006` on a cluster node is just
+*there*, no manual tunnel. It is the natural home for anything web: a run dashboard, a TensorBoard, an
+internal tool, or a host's JupyterLab.
+
+## Notebooks
+
+Open a `.ipynb` from a host and it renders **in the main pane** as that host's Notebook view, reached
+over the same forward. The key point: **the kernel runs on the host** — the GPU node, with its
+environment and data — while you edit and run cells from your Mac. No SSH, no copying notebooks
+around, no local kernel. "Open JupyterLab" launches a host's full Jupyter and opens it in a dashboard
+tab.
+
+<Callout type="info">
+Both ride the existing per-host broker and the port-forward hub — there is no extra service to deploy.
+A notebook's kernel and a dashboard's server live on the machine that owns the work; Argus just gives
+you a window onto them.
+</Callout>

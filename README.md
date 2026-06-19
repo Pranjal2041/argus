@@ -55,10 +55,13 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   preview, upload & download, and *reveal-from-session* to jump to a session's working directory.
 - **Ports** — a port-forward hub: bind a local port and tunnel it over the tailnet to any
   remote broker, no `ssh -L` juggling.
+- **Dashboards & notebooks** — an in-app browser for remote web UIs (training dashboards,
+  TensorBoard), and Jupyter notebooks whose **kernel runs on the host** while you edit from your Mac.
 - **Weights & Biases** — when an agent prints a W&B run URL, open the run in-app, already logged in.
 - **History & themes** — a durable record of every session that has run (name, node, folders), and
   themes that recolor the whole app: chrome, terminals, and editor.
-- **`ut` CLI** — a drop-in for `tmux` that publishes a host's tmux server to your tailnet.
+- **`ut` CLI + mesh** — a drop-in for `tmux` that publishes a host to your tailnet, plus a small
+  cross-host fabric (`ut exec` / `ut spawn` / `ut tail` / `ut cp`) to orchestrate work by host name.
 
 ## How it works
 

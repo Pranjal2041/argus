@@ -1,0 +1,46 @@
+---
+title: Terminals
+description: Reach any session on any machine, live, from one window.
+---
+
+The terminal is the core of Argus. The sidebar lists every session on every machine you can reach —
+grouped by machine, then by folder — and opening one streams it live, exactly as if you had run
+`tmux attach` on that host, but without the SSH.
+
+## The session list
+
+Sessions are grouped **machine → folder → session**, each row showing a live **state dot** and its
+last-activity time, with a count badge per group. The dot is read passively from the screen (no input
+is sent to the agent): **running** when the agent's "esc to interrupt" footer is on screen, **idle**
+otherwise, and a separate "needs you" signal when it is waiting on input. For the richer, model-written
+version of this, see the [Command Center](/docs/command-center).
+
+## Working in a session
+
+- **Live stream** over a binary WebSocket — full input, resize and reflow to your window, a 100k-line
+  scrollback, and auto-reconnect with a connection dot in the header.
+- **Lifecycle** — create, rename, and kill sessions from the sidebar or the command palette.
+- **Find in terminal** (`⌘F`), **scroll to bottom**, and **clear buffer** (`⌘K`).
+- **Command palette** (`⌘P`) — jump to any session or run any action, across all machines.
+- **Copy / paste / select-all**, and independent font zoom (`⌘+` / `⌘−` / `⌘0`).
+- **Click to open** — a file path or URL in the output opens on the right host: a file in
+  [Files](/docs/files), a local web address in [Dashboards](/docs/dashboards).
+
+## Hidden panels
+
+Some sessions are noise — a finished job, a scratch shell. **Hide** one (`⇧⌘B` opens the restore
+list) and it drops out of the session list and the command center. Hidden state is **owned by the
+broker**, so it is remembered across restarts and syncs across your devices: hide a panel on your Mac
+and it is hidden on your phone too. Restore it whenever you want.
+
+## Render output
+
+Agents often print Markdown, tables, and LaTeX into a terminal, where it reads as raw text. **Render
+Output** (`⇧⌘M`) lifts the current screen into a clean reading view — Markdown, math, and highlighted
+code — rendered entirely offline, so nothing leaves your machine. It is a reading surface laid over
+the terminal, not a replacement for it.
+
+<Callout type="info">
+Everything here works whether or not anything is attached to the session — the broker reads and
+streams from the tmux server (or ConPTY on Windows) directly.
+</Callout>
