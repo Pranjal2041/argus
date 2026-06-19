@@ -42,19 +42,22 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 
 ## What it does
 
-- **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows)
-  over a binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect,
-  create / rename / kill, find-in-terminal, and a cross-machine command palette.
-- **Attention model** — a sidebar of *machines → folders → sessions* with a live state dot per
-  session, **running** (blue) vs **idle** (green). The broker reads it passively from the session
-  screen (`tmux capture-pane` on Unix, the ConPTY output ring on Windows): running = the agent's
-  `esc to interrupt` footer is on screen — Claude Code and Codex both print it only during a turn.
-  No input is sent to the agent, so it works even with nothing attached.
-- **Files** — a cross-host file explorer with a CodeMirror 6 viewer/editor (syntax
-  highlighting for dozens of languages), image / PDF / media preview, upload & download with
-  progress, and *reveal-from-session* to jump straight to a session's working directory.
+- **Command Center** — one card per agent, across every machine, with a plain-English line on
+  what each is doing and which ones **need you**. A small model reads each session's screen
+  (passively — nothing is ever typed into your agents) and labels it *working*, *needs you*,
+  *stuck*, or *idle*; you can override a card by hand, and it syncs to your phone.
+- **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
+  binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
+  rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session
+  (read passively from the screen, so it works with nothing attached).
+- **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
+  per-file tabs, `⌘P` quick-open, live Markdown preview, syntax highlighting, image / PDF / media
+  preview, upload & download, and *reveal-from-session* to jump to a session's working directory.
 - **Ports** — a port-forward hub: bind a local port and tunnel it over the tailnet to any
   remote broker, no `ssh -L` juggling.
+- **Weights & Biases** — when an agent prints a W&B run URL, open the run in-app, already logged in.
+- **History & themes** — a durable record of every session that has run (name, node, folders), and
+  themes that recolor the whole app: chrome, terminals, and editor.
 - **`ut` CLI** — a drop-in for `tmux` that publishes a host's tmux server to your tailnet.
 
 ## How it works

@@ -1,0 +1,34 @@
+---
+title: Weights & Biases
+description: Open the W&B run an agent just launched, right inside Argus.
+---
+
+When an agent kicks off a training run, it prints a Weights & Biases URL and moves on. Argus notices
+those URLs in the session's output and lets you open the run **in place** — without copying a link
+into a browser and logging in again. It turns "an agent is training something" into "here is the live
+run."
+
+## What it does
+
+- **Detects W&B runs** in a session's output as they scroll by — the `wandb: View run at …` line, the
+  synced-run line, or a bare run URL.
+- **Opens the run in-app** in a web view, in place of the terminal, so you can watch the charts next to
+  the agent that launched them.
+- **Stays logged in.** Your W&B session persists, so a run opens straight to its dashboard instead of a
+  login wall.
+- **Keeps a list.** Detected runs are remembered and accumulate over a session, so a run you can no
+  longer scroll back to is still one tap away. The list survives reopening the app.
+- **On Mac and Android.**
+
+## How it works
+
+Detection is entirely on the client — there is no broker involvement and nothing is sent anywhere. As
+the session's raw output streams in, Argus strips the terminal escape codes and runs it through a set
+of matchers for the shapes W&B prints, keeping each run by its id in the order it first appeared.
+Opening one loads its URL in a web view with a persistent cookie store, so your login is reused.
+
+<Callout type="info">
+Runs are remembered per session with a short expiry and merged rather than replaced, so the list grows
+as new runs appear instead of vanishing when an old URL scrolls off the screen. You can clear runs from
+the session's menu.
+</Callout>

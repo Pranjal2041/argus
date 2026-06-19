@@ -4,9 +4,13 @@
     "index",
     "architecture",
     "installation",
-    "cli",
+    "command-center",
     "files",
     "ports",
+    "wandb",
+    "history",
+    "themes",
+    "cli",
     "security"
   ]
 }

@@ -1,43 +1,55 @@
 ---
 title: Files
-description: A cross-host file explorer, viewer, and editor that rides the same broker.
+description: A cross-host file explorer with a real VS Code-grade editor, riding the same broker.
 ---
 
-Files is the third pillar, alongside terminals and ports. It's a cross-host file browser with a
-real editor that rides the **same per-host broker** you already run everywhere — so there's
-nothing extra to deploy. The terminal stays the main interface; Files is a secondary, tabbed
-window.
+Files is a cross-host file browser and editor that rides the **same per-host broker** you already run
+everywhere — so there is nothing extra to deploy. Open it in its own window and you can browse, edit,
+preview, and transfer files on any of your machines, the same way you reach their terminals.
 
 ## What it does
 
-- **Browse** any host's filesystem (Mac, Linux, Windows) in a flat, dense, Explorer-style tree.
+- **Browse** any host's filesystem (Mac, Linux, Windows) in a dense, Explorer-style tree.
 - **Reveal from a session** — jump straight to a session's working directory on its host.
-- **View** anything — source with syntax highlighting, images, PDF, audio/video, binary.
-- **Edit** text in a real editor and save back atomically.
+- **Edit** in **Monaco**, the editor that powers VS Code: syntax highlighting for dozens of
+  languages, minimap, multi-cursor, find and replace, bracket-pair colors, and the command palette.
+- **Per-file tabs** — keep several files open at once and switch between them; a dot marks unsaved
+  edits, and closing one asks before discarding.
+- **Quick-open** — press `⌘P` to fuzzy-find any file under the current root and jump to it.
+- **Markdown preview** — for `.md` files, toggle Editor / Split / Preview; the rendered view updates
+  live as you type and matches your app theme.
+- **Preview anything** — images, PDF, audio, and video, with independent zoom.
 - **Transfer** — upload and download files, with progress.
-- **Search** — filter the current directory client-side.
 
 ## How it works
 
-The transport is **broker endpoints**, not a separate service or port — the same rationale as
-the port hub. The broker exposes a small `/fs/*` API:
+The transport is **broker endpoints**, not a separate service or port — the same rationale as the
+terminal and the port hub. The broker exposes a small `/fs/*` API:
 
 | endpoint | purpose |
 |---|---|
 | `GET /fs/home` | the host's home directory |
 | `GET /fs/list` | list a directory (entries carry full absolute paths) |
+| `GET /fs/find` | recursively list files under a root, for `⌘P` quick-open |
 | `GET /fs/read` | stream a file (`Range` + content-type via `http.ServeContent`) |
+| `GET /fs/stat` | resolve a terminal-clicked path on the right host |
 | `POST /fs/write` | write a file atomically (temp + rename) |
 | `POST /fs/mkdir` | create a directory |
 | `POST /fs/rename` | rename / move |
 | `POST /fs/delete` | delete |
 
-The text engine is **CodeMirror 6** running in a `WKWebView` on macOS — read-only for the
-viewer, editable for the editor — with syntax highlighting for dozens of languages. Media uses
-native players (AppKit `AVPlayerView` for video). The Android client renders PDFs with the
-platform `PdfRenderer`.
+The editor is Monaco running in a `WKWebView` on macOS, themed from your active app palette so it
+matches the rest of the window. Files open editable — there is no separate "edit mode" — and `⌘S`
+saves the change back atomically. Markdown preview reuses Argus's offline renderer (Markdown plus
+LaTeX and code highlighting), so nothing leaves your machine. Media uses native players, and the
+Android client renders PDFs with the platform `PdfRenderer`.
+
+<Callout type="info">
+Quick-open's `/fs/find` skips heavy directories (`.git`, `node_modules`, caches, build output) and is
+capped in size and time, so it stays fast even on large repos or a remote cluster home.
+</Callout>
 
 <Callout type="info">
 The editor and the folder/interface fonts scale independently, and content panes support
-⌘+ / ⌘− / ⌘0 zoom.
+`⌘+` / `⌘−` / `⌘0` zoom.
 </Callout>

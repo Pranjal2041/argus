@@ -1,0 +1,33 @@
+---
+title: Themes
+description: Recolor the whole app — chrome, terminals, and editor — to match how you like to work.
+---
+
+Argus ships with one carefully tuned default theme, **Argus**, plus a set of the color schemes you
+already know from editors and terminals. A theme recolors *everything* at once: the window chrome,
+the terminal output, the command center, and the Monaco editor — so the app stays one coherent
+surface instead of a patchwork.
+
+## What it does
+
+- **One default, many options.** The **Argus** theme is the app's own look. Alongside it are popular
+  dark schemes — Tokyo Night, Dracula, Catppuccin, Nord, Gruvbox, One Dark, Monokai, Rosé Pine,
+  GitHub Dark — and a few light ones (Solarized Light, GitHub Light) for working in daylight.
+- **Recolors live.** Switching a theme repaints the whole app immediately, including the running
+  terminals (the 16-color ANSI palette) and the editor — no restart, no reconnect.
+- **On every client.** Themes work on macOS and Android, and your choice is remembered per device.
+
+## How it works
+
+Each theme is a palette: a set of chrome colors, a terminal ANSI-16 set, and a light/dark flag. The
+app reads its colors from the active palette everywhere, so a switch is a single swap with no
+per-screen wiring. Terminals recolor in place by re-applying the new ANSI palette to the live
+renderer, and the editor is themed from the same colors so it blends into the window.
+
+The **Argus** default uses the app's exact original colors, untouched — picking another theme is
+purely additive.
+
+<Callout type="info">
+On macOS, open the theme picker with `⇧⌘T` to preview the schemes with live swatches. On Android, the
+picker lives in the app's settings.
+</Callout>
