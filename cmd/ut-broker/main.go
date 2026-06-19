@@ -376,6 +376,13 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		fsvc.ServeFile(w, r, r.URL.Query().Get("path"))
 	})
+	// /fs/find → the files under a root (recursive, capped), for the editor's ⌘P quick-open.
+	mux.HandleFunc("/fs/find", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		_ = json.NewEncoder(w).Encode(fsvc.Find(r.URL.Query().Get("path"), limit))
+	})
 	// /fs/stat → resolve+classify a (possibly relative/~/$VAR) path against a base
 	// cwd, so a terminal-clicked path routes into Files on the right host.
 	mux.HandleFunc("/fs/stat", func(w http.ResponseWriter, r *http.Request) {

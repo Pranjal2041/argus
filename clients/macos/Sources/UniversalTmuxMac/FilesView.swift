@@ -34,7 +34,23 @@ struct FilesView: View {
         }
         .background(Flat.bg)
         .frame(minWidth: 760, minHeight: 480)
+        .background(quickOpenShortcut)
+        .overlay { quickOpenOverlay }
         .onAppear { if model.tabs.isEmpty, let m = (machines.first { $0.isLocal } ?? machines.first) { model.addTab(m) } }
+    }
+
+    private var quickOpenShortcut: some View {
+        Button("") { model.active?.openQuickOpen() }
+            .keyboardShortcut("p", modifiers: .command).opacity(0).frame(width: 0, height: 0)
+    }
+
+    @ViewBuilder private var quickOpenOverlay: some View {
+        if let tab = model.active, tab.showQuickOpen {
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.18).ignoresSafeArea().onTapGesture { tab.closeQuickOpen() }
+                QuickOpenView(tab: tab).padding(.top, 70)
+            }
+        }
     }
 
     private var tabBar: some View {
@@ -400,6 +416,140 @@ private func pickAndUpload(_ tab: FileTab, into dir: String) {
             if let data = try? Data(contentsOf: url) { tab.upload(into: dir, name: url.lastPathComponent, data: data) }
         }
     }
+}
+
+// MARK: - ⌘P quick-open (fuzzy file finder over the current root)
+
+/// Fuzzy subsequence score: nil if `query`'s chars don't all appear in order in
+/// `text`, else a score (higher = better) that rewards contiguous runs and matches
+/// at word boundaries (after / _ - . or at the start).
+func fuzzyScore(_ query: String, _ text: String) -> Int? {
+    if query.isEmpty { return 0 }
+    let q = Array(query.lowercased())
+    let t = Array(text.lowercased())
+    var qi = 0, score = 0, lastMatch = -2
+    for ti in t.indices {
+        guard qi < q.count else { break }
+        if t[ti] == q[qi] {
+            var bonus = 1
+            if ti == lastMatch + 1 { bonus += 5 }
+            if ti == 0 || t[ti - 1] == "/" || t[ti - 1] == "\\" || t[ti - 1] == "_" || t[ti - 1] == "-" || t[ti - 1] == "." { bonus += 8 }
+            score += bonus
+            lastMatch = ti
+            qi += 1
+        }
+    }
+    return qi == q.count ? score : nil
+}
+
+struct QuickOpenView: View {
+    @ObservedObject var tab: FileTab
+    @State private var query = ""
+    @State private var sel = 0
+    @FocusState private var focused: Bool
+    @State private var keyMonitor: Any?
+
+    private struct Match: Identifiable { let entry: FileEntry; let rel: String; let score: Int; var id: String { entry.path } }
+
+    private func relative(_ p: String) -> String {
+        let root = tab.rootPath
+        guard p.hasPrefix(root) else { return p }
+        var r = String(p.dropFirst(root.count))
+        if r.hasPrefix(tab.sep) { r.removeFirst() }
+        return r.isEmpty ? p : r
+    }
+
+    private var matches: [Match] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        if q.isEmpty {
+            return tab.quickOpenFiles.prefix(60).map { Match(entry: $0, rel: relative($0.path), score: 0) }
+        }
+        var out: [Match] = []
+        for e in tab.quickOpenFiles {
+            let r = relative(e.path)
+            guard let pathScore = fuzzyScore(q, r) else { continue }
+            let nameBonus = fuzzyScore(q, e.name).map { $0 * 2 } ?? 0   // prefer basename matches
+            out.append(Match(entry: e, rel: r, score: pathScore + nameBonus))
+        }
+        out.sort { $0.score != $1.score ? $0.score > $1.score : $0.entry.name.count < $1.entry.name.count }
+        return Array(out.prefix(60))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").font(.system(size: 14)).foregroundStyle(Theme.textTertiary)
+                TextField("Go to file…", text: $query)
+                    .textFieldStyle(.plain).font(.system(size: 15)).foregroundStyle(Theme.textPrimary)
+                    .focused($focused).onSubmit(open)
+                if tab.quickOpenLoading { ProgressView().controlSize(.small) }
+            }
+            .padding(.horizontal, 14).frame(height: 46)
+            Rectangle().fill(Theme.border).frame(height: 1)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(matches.enumerated()), id: \.element.id) { i, m in
+                            HStack(spacing: 8) {
+                                Image(systemName: iconForFile(m.entry.name)).font(.system(size: 12))
+                                    .foregroundStyle(i == sel ? Theme.accent : Theme.textTertiary).frame(width: 16)
+                                Text(m.entry.name).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                                Text(parentDir(m.rel)).font(.system(size: 11)).foregroundStyle(Theme.textTertiary).lineLimit(1).truncationMode(.head)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(i == sel ? Theme.accent.opacity(0.16) : .clear))
+                            .contentShape(Rectangle()).id(i)
+                            .onTapGesture { sel = i; open() }
+                        }
+                        if matches.isEmpty {
+                            Text(tab.quickOpenLoading ? "Indexing…" : "No files match")
+                                .font(.system(size: 12)).foregroundStyle(Theme.textTertiary).padding(.vertical, 18)
+                        }
+                    }
+                    .padding(8)
+                }
+                .frame(height: 380)
+                .onChange(of: sel) { i in withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(i) } }
+            }
+        }
+        .frame(width: 600)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.sidebarBackground))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
+        .onAppear { sel = 0; installKeys(); focusSoon() }
+        .onDisappear { removeKeys() }
+        .onChange(of: query) { _ in sel = 0 }
+        .onExitCommand { tab.closeQuickOpen() }
+    }
+
+    private func parentDir(_ rel: String) -> String {
+        guard let r = rel.range(of: tab.sep, options: .backwards) else { return "" }
+        return String(rel[..<r.lowerBound])
+    }
+
+    private func open() {
+        guard matches.indices.contains(sel) else { return }
+        tab.openEntry(matches[sel].entry, line: nil)
+        tab.closeQuickOpen()
+    }
+    private func focusSoon() {
+        focused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true }
+    }
+    private func installKeys() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            let n = matches.count
+            switch e.keyCode {
+            case 125: if n > 0 { sel = (sel + 1) % n }; return nil          // ↓
+            case 126: if n > 0 { sel = (sel - 1 + n) % n }; return nil      // ↑
+            case 36, 76: open(); return nil                                 // ↩
+            case 53: tab.closeQuickOpen(); return nil                       // Esc
+            default: return e
+            }
+        }
+    }
+    private func removeKeys() { if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil } }
 }
 
 func iconForFile(_ name: String) -> String {
