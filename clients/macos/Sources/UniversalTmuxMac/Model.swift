@@ -149,6 +149,35 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") }
     }
 
+    /// "Keep this Mac awake & reachable while locked." When on, hold a power assertion that
+    /// stops the system from idle-sleeping — so locking the screen (display off, lock UI)
+    /// does NOT pause this Mac's tmux sessions, its broker, or the processes inside them,
+    /// and the phone keeps reaching them. The display is still allowed to sleep. Honored on
+    /// battery too (unlike `caffeinate -s`, which is AC-only). NOTE: a power assertion stops
+    /// IDLE sleep, not LID-CLOSE sleep — a closed-lid MacBook on battery still sleeps.
+    /// Persisted, and re-applied on launch.
+    @Published var keepAwake: Bool = UserDefaults.standard.bool(forKey: "ut.keepAwake") {
+        didSet {
+            UserDefaults.standard.set(keepAwake, forKey: "ut.keepAwake")
+            applyKeepAwake()
+        }
+    }
+    /// Held token for the active "prevent idle system sleep" assertion (nil when off).
+    private var keepAwakeToken: NSObjectProtocol?
+
+    /// Create or release the power assertion to match `keepAwake`.
+    private func applyKeepAwake() {
+        if keepAwake {
+            guard keepAwakeToken == nil else { return }
+            keepAwakeToken = ProcessInfo.processInfo.beginActivity(
+                options: [.idleSystemSleepDisabled],
+                reason: "Keep this Mac reachable while the screen is locked")
+        } else if let token = keepAwakeToken {
+            ProcessInfo.processInfo.endActivity(token)
+            keepAwakeToken = nil
+        }
+    }
+
     /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
     /// across devices): each refresh rebuilds this machine's membership from the `hidden`
     /// flag on /sessions, and hide/unhide POSTs to the owning broker. Keyed by SessionRef.id.
@@ -340,6 +369,7 @@ final class AppState: ObservableObject {
         ]
         selection = SessionRef(machineID: "local", session: "ut-demo")
         loadHistoryCache()
+        applyKeepAwake()   // honor a persisted "keep awake" across relaunches
     }
 
     func toggleSidebar() {
