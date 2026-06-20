@@ -56,6 +56,9 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
+                Divider()
+                Toggle("Keep This Mac Awake While Locked", isOn: $state.keepAwake)
+                Divider()
                 Button("Refresh Sessions") { state.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
@@ -184,9 +187,18 @@ struct SettingsView: View {
                 Text("Agent sessions are started by `ut spawn` (the mesh) as background jobs. They're hidden from the sidebar by default and auto-clean when left idle. Turn this on to see and open them here.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            Section {
+                Toggle("Keep this Mac awake & reachable while locked", isOn: $state.keepAwake)
+            } header: {
+                Text("Power")
+            } footer: {
+                Text("Holds a power assertion so the Mac won't idle-sleep. Lock the screen and walk away: the display still turns off, but the system stays awake, so this Mac's sessions, its broker, and the processes inside them keep running and stay reachable from your phone. Works on battery too.\n\nThis stops idle sleep, not lid-close sleep — a closed-lid MacBook on battery still sleeps. Keep the lid open, or use an external display on power.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 400)
+        .frame(width: 440, height: 480)
         .tint(Theme.accent)
     }
 }
@@ -629,6 +641,20 @@ struct RootView: View {
                 .transition(.scale.combined(with: .opacity))
             }
             Spacer()
+            // Only takes a slot in the bar when it's ON — otherwise it lives in ⌘P /
+            // the View menu / Settings. When on, it's a glanceable indicator + quick off.
+            if state.keepAwake {
+                Button { state.keepAwake.toggle() } label: {
+                    Image(systemName: "cup.and.saucer.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Keeping this Mac awake & reachable while locked — on. Click to turn off.")
+                .transition(.scale.combined(with: .opacity))
+            }
             if state.isRefreshing {
                 ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 24, height: 22)
             } else {
@@ -1248,6 +1274,9 @@ private struct CommandPalette: View {
             ("arrow.clockwise", "Refresh Sessions", "⌘R", { state.refreshAll() }),
             ("line.3.horizontal.decrease.circle", "Filter Sessions", "⌘L", { state.focusSearch() }),
             ("sidebar.leading", "Toggle Sidebar", "⌃⌘S", { state.toggleSidebar() }),
+            (state.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer",
+             state.keepAwake ? "Stop Keeping This Mac Awake" : "Keep This Mac Awake & Reachable While Locked",
+             "", { state.keepAwake.toggle() }),
             // Window opens route through state: SwiftUI's openWindow action is
             // not available inside the AppKit palette panel's hosting view.
             ("folder", "Open Files", "", { state.openWindowRequest = "files" }),
