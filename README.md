@@ -49,7 +49,8 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session
-  (read passively from the screen, so it works with nothing attached).
+  (read passively from the screen, so it works with nothing attached). On macOS, an opt-in toggle
+  keeps the Mac awake and reachable while the screen is locked.
 - **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
   per-file tabs, `⌘P` quick-open, live Markdown preview, syntax highlighting, image / PDF / media
   preview, upload & download, and *reveal-from-session* to jump to a session's working directory.
@@ -58,8 +59,9 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 - **Dashboards & notebooks** — an in-app browser for remote web UIs (training dashboards,
   TensorBoard), and Jupyter notebooks whose **kernel runs on the host** while you edit from your Mac.
 - **Weights & Biases** — when an agent prints a W&B run URL, open the run in-app, already logged in.
-- **History & themes** — a durable record of every session that has run (name, node, folders), and
-  themes that recolor the whole app: chrome, terminals, and editor.
+- **History & themes** — a durable record of every session that has run (name, node, folders) that
+  survives a machine going offline; click a row to open the session, or re-create a finished one in
+  its last folder. Plus themes that recolor the whole app: chrome, terminals, and editor.
 - **`ut` CLI + mesh** — a drop-in for `tmux` that publishes a host to your tailnet, plus a small
   cross-host fabric (`ut exec` / `ut spawn` / `ut tail` / `ut cp`) to orchestrate work by host name.
 

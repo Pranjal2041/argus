@@ -40,6 +40,20 @@ Output** (`⇧⌘M`) lifts the current screen into a clean reading view — Mark
 code — rendered entirely offline, so nothing leaves your machine. It is a reading surface laid over
 the terminal, not a replacement for it.
 
+## Keeping a Mac reachable while locked
+
+On macOS, locking the screen does not pause anything — your sessions, the broker, and the processes
+inside them keep running. The only thing that stops them is the Mac going to **sleep**. Turn on **Keep
+this Mac awake & reachable while locked** (from `⌘P`, the View menu, or Settings) and Argus holds a
+power assertion so the Mac will not idle-sleep: the display still turns off and the screen still locks,
+but the system stays awake and your phone keeps reaching every session on it. A coffee-cup indicator
+sits in the sidebar header while it is on. It is honored on battery too, and off by default.
+
+<Callout type="warn">
+This stops *idle* sleep, not *lid-close* sleep — a closed-lid MacBook on battery still sleeps. Keep the
+lid open, or use an external display on power.
+</Callout>
+
 <Callout type="info">
 Everything here works whether or not anything is attached to the session — the broker reads and
 streams from the tmux server (or ConPTY on Windows) directly.
