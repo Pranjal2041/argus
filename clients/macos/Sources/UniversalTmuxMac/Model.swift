@@ -513,6 +513,33 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The online machine a history `node` refers to, whether or not the session is still
+    /// running — so a row stays actionable as long as its MACHINE is up. `node` is the
+    /// broker's `os.Hostname()`: for a remote broker that equals its `/whoami` name and thus
+    /// `Machine.name`, so match on that. The local Machine carries the friendly "this mac",
+    /// so match it by hostname — case-insensitively, since ProcessInfo lowercases it while
+    /// the broker keeps the original case. Returns nil when that machine is offline.
+    func machineForNode(_ node: String) -> Machine? {
+        machines.first { $0.name == node }
+            ?? machines.first { $0.isLocal && node.caseInsensitiveCompare(ProcessInfo.processInfo.hostName) == .orderedSame }
+    }
+
+    /// Act on a history row. If the session is still running, select it. If it ended but its
+    /// machine is up, RE-CREATE it (same name, in the folder it last ran in) and open that —
+    /// so clicking a dead row brings the session back. No-op if the machine is offline. The
+    /// select-vs-recreate choice reads the LIVE session list, so it's right even if the row's
+    /// cached `alive` flag is momentarily stale.
+    func openHistoryItem(_ item: SessionHistoryItem) {
+        guard let m = machineForNode(item.node) else { return }
+        if (sessionsByMachine[m.id] ?? []).contains(where: { $0.name == item.name }) {
+            selection = SessionRef(machineID: m.id, session: item.name)
+        } else {
+            createSession(on: m.id, name: item.name, dir: item.folders.last?.path)
+        }
+        showHistory = false
+        showOverview = false
+    }
+
     func refresh(_ m: Machine, group: DispatchGroup? = nil) {
         guard let url = URL(string: m.httpBase + "/sessions") else { return }
         var req = URLRequest(url: url)
