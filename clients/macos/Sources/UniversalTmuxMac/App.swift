@@ -301,11 +301,14 @@ private struct HiddenPanelRow: View {
 struct SessionHistoryView: View {
     @EnvironmentObject var state: AppState
     @State private var query = ""
+    @AppStorage("ut.historyHideAgents") private var hideAgents = true
 
     private var items: [SessionHistoryItem] {
+        var base = state.historyItems
+        if hideAgents { base = base.filter { !$0.agent } }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return state.historyItems }
-        return state.historyItems.filter {
+        guard !q.isEmpty else { return base }
+        return base.filter {
             $0.name.lowercased().contains(q) || $0.node.lowercased().contains(q)
                 || $0.folders.contains { $0.path.lowercased().contains(q) }
         }
@@ -316,8 +319,8 @@ struct SessionHistoryView: View {
             HStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath").foregroundStyle(Theme.textSecondary)
                 Text("Session History").font(.system(size: 15, weight: .semibold))
-                if !state.historyItems.isEmpty {
-                    Text("\(state.historyItems.count)").font(.system(size: 11, weight: .medium)).monospacedDigit()
+                if !items.isEmpty {
+                    Text("\(items.count)").font(.system(size: 11, weight: .medium)).monospacedDigit()
                         .foregroundStyle(Theme.textSecondary)
                         .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Capsule().fill(Theme.surface))
@@ -326,6 +329,11 @@ struct SessionHistoryView: View {
                 if state.historyLoading {
                     ProgressView().controlSize(.small)
                 }
+                Button { hideAgents.toggle() } label: {
+                    Image(systemName: hideAgents ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .help(hideAgents ? "Agent sessions hidden — click to show" : "Hide agent sessions")
                 Button { state.loadHistory() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Refresh")
                 Button("Done") { state.showHistory = false }.keyboardShortcut(.cancelAction)
@@ -344,7 +352,12 @@ struct SessionHistoryView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 4) {
-                        ForEach(items) { SessionHistoryRow(item: $0) }
+                        ForEach(items) { item in
+                            SessionHistoryRow(
+                                item: item,
+                                canOpen: state.machineForNode(item.node) != nil,
+                                onOpen: { state.openHistoryItem(item) })
+                        }
                     }
                     .padding(8)
                 }
@@ -357,6 +370,9 @@ struct SessionHistoryView: View {
 
 private struct SessionHistoryRow: View {
     let item: SessionHistoryItem
+    var canOpen: Bool = false
+    var onOpen: () -> Void = {}
+    @State private var hover = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -369,6 +385,10 @@ private struct SessionHistoryRow: View {
                 }
                 Text(item.node).font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(1)
                 Spacer()
+                if canOpen {
+                    Image(systemName: item.alive ? "arrow.up.forward.app" : "play.circle")
+                        .font(.system(size: 11)).foregroundStyle(hover ? Theme.accent : Theme.textTertiary)
+                }
                 Text(item.alive ? "running" : relativeShort(item.last))
                     .font(.system(size: 11)).foregroundStyle(item.alive ? Theme.running : Theme.textTertiary)
                     .help(absoluteTime(item.last))
@@ -391,7 +411,20 @@ private struct SessionHistoryRow: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.4)))
+        .background(RoundedRectangle(cornerRadius: 8)
+            .fill(canOpen && hover ? Theme.accent.opacity(0.14) : Theme.surface.opacity(0.4)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Theme.accent.opacity(0.4), lineWidth: 1)
+                .opacity(canOpen && hover ? 1 : 0)
+        )
+        .contentShape(Rectangle())
+        .onHover { hover = $0 }
+        .onTapGesture { if canOpen { onOpen() } }
+        .help(!canOpen ? "" : item.alive
+              ? "Open this session"
+              : "Session ended — click to re-create it"
+                + (item.folders.last.map { " in \($0.path)" } ?? "") + " and open")
     }
 }
 
