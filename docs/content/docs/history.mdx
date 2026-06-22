@@ -1,34 +1,48 @@
 ---
 title: Session history
-description: A durable record of every session that has run — name, node, and the folders it was in.
+description: A durable record of every session that has run — survives machine downtime, and a click opens or re-creates it.
 ---
 
 Sessions come and go. You spin one up on a cluster node, do some work, and kill it — and a week later
 you cannot remember which machine it was on, or which folder it ran in. Session history fixes that: it
 keeps a durable, per-host log of every session that has existed, so "where was that running?" always
-has an answer.
+has an answer — and lets you jump back into one, or bring it back, with a click.
 
 ## What it does
 
 - **Records every session** it sees: its name, the node it ran on, and the folders it was in — a list
   per session, because a session's working directory can change as you `cd` around, each with
   timestamps.
-- **Outlives the session.** The record stays after the session is killed, so you can recover where a
-  now-gone session was running.
+- **Outlives the session, and the machine.** The record stays after the session is killed, and stays
+  visible even when the machine it ran on goes offline — which is the whole point of history.
 - **One merged view.** On macOS, open it with `⇧⌘Y` to see every session across all your machines,
   newest first, filterable by name, node, or folder. Folder paths are selectable so you can copy one
   straight out.
+- **Click to open — or bring back.** Click any row whose machine is online: a still-running session
+  opens, and a session that has *ended* is **re-created** with the same name, in the folder it last ran
+  in, and opened. A click revives a finished session. Rows whose machine is offline are inert.
+- **Hide agent sessions.** Background `ut spawn` sessions are hidden by default; the eye button in the
+  header toggles them.
 
 ## How it works
 
 The **broker** does the recording, not the app — it already polls its host a couple of times a second
 to keep the session list fresh, so it folds each session it sees into a durable file on that host and
-serves it at `GET /history`. Because every host keeps its own history, the app simply reads `/history`
-from each broker and merges the results. A new session or a changed folder is written immediately, so
-nothing is lost if a host restarts.
+serves it at `GET /history`. A new session or a changed folder is written immediately, so nothing is
+lost if a host restarts.
 
-<Callout type="warn">
-History is recorded going forward, from when a host first runs a broker version that supports it. It
-is not retroactive, so it cannot recover a session that was already gone — but from then on,
-everything is logged.
+History stays visible across machine downtime in two ways:
+
+- **The app keeps a durable local cache.** It pulls `/history` from every reachable broker in the
+  background and merges it into a local store that persists across launches, so a machine's history is
+  there even after that machine goes away.
+- **A broker serves its whole shared home.** On a cluster where every node shares one home directory
+  (an NFS-mounted SLURM cluster), any online node serves the history of *all* the nodes that share that
+  home — so a finished node's sessions are reachable through a node that is still up. On a machine that
+  shares its home with no one, it just serves its own.
+
+<Callout type="info">
+History is recorded going forward, from when a host first runs a broker version that supports it, so it
+cannot recover a session that was already gone before then. From that point on it is durable, including
+across a machine going offline.
 </Callout>
