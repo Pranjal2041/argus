@@ -46,6 +46,10 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   what each is doing and which ones **need you**. A small model reads each session's screen
   (passively — nothing is ever typed into your agents) and labels it *working*, *needs you*,
   *stuck*, or *idle*; you can override a card by hand, and it syncs to your phone.
+- **Workflows, Todo Maps & Notes** — three planning surfaces that **sync across your devices** (via
+  your Mac's broker, no central server): saved **workflows** that spin up an agent in the right
+  machine + folder with one click; per-session **todo** checklists that outlive the session; and a
+  **notes** hub of free-form, time-grouped notes.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session

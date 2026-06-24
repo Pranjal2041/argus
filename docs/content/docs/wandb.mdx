@@ -11,7 +11,8 @@ run."
 ## What it does
 
 - **Detects W&B runs** in a session's output as they scroll by — the `wandb: View run at …` line, the
-  synced-run line, or a bare run URL.
+  synced-run line, or a bare run URL. Each captured run id is **validated**, so a URL that wrapped
+  across lines or got glued to other text never turns into a phantom half-run in the list.
 - **Opens the run in-app** in a web view, in place of the terminal, so you can watch the charts next to
   the agent that launched them.
 - **Stays logged in.** Your W&B session persists, so a run opens straight to its dashboard instead of a
