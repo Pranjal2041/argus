@@ -164,8 +164,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // initializers and init blocks top-to-bottom).
     val workflows = mutableStateListOf<Workflow>()
     val todoBoards = mutableStateListOf<TodoBoard>()
+    val notes = mutableStateListOf<Note>()
     private var workflowsTs = 0L
     private var todosTs = 0L
+    private var notesTs = 0L
 
     init {
         loadBrokers()
@@ -400,6 +402,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             todosTs = ts; todoBoards.clear(); todoBoards.addAll(list)
         }
         if (todoBoards.none { it.isMisc }) todoBoards.add(TodoBoard(isMisc = true))
+        UserDataJson.parseNotes(prefs.getString("ut.notes.v1", null))?.let { (ts, list) ->
+            notesTs = ts; notes.clear(); notes.addAll(list)
+        }
     }
     private fun saveWorkflowsLocal() {
         prefs.edit().putString("ut.workflows.v1", UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())).apply()
@@ -453,6 +458,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         todoBoards[i] = todoBoards[i].copy(items = items); touchTodos()
     }
     fun deleteBoard(boardId: String) { todoBoards.removeAll { it.id == boardId && !it.isMisc }; touchTodos() }
+
+    // -- Notes Hub: bump+save on edit; the reconcile pushes (no POST per keystroke) --
+    private fun saveNotesLocal() { prefs.edit().putString("ut.notes.v1", UserDataJson.notesEnvelope(notesTs, notes.toList())).apply() }
+    private fun touchNotes() { notesTs = now(); saveNotesLocal() }
+    fun addNote(): String { val n = Note(); notes.add(n); touchNotes(); return n.id }
+    fun updateNoteText(id: String, text: String) {
+        val i = notes.indexOfFirst { it.id == id }; if (i < 0) return
+        notes[i] = notes[i].copy(text = text); touchNotes()
+    }
+    fun toggleNote(id: String) {
+        val i = notes.indexOfFirst { it.id == id }; if (i < 0) return
+        notes[i] = notes[i].copy(done = !notes[i].done); touchNotes()
+    }
+    fun deleteNote(id: String) { notes.removeAll { it.id == id }; touchNotes() }
 
     // -- machine pattern matching + running a workflow --
     private fun wildcardRegex(p: String): Regex {
@@ -543,6 +562,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 todoBoards.clear(); todoBoards.addAll(boards); todosTs = rtTs; saveTodosLocal()
             } else if (lt > rtTs) {
                 withContext(Dispatchers.IO) { Net.postUserData(h, "todos", UserDataJson.todosEnvelope(lt, todoBoards.toList())) }
+            }
+
+            val rawN = withContext(Dispatchers.IO) { Net.getUserData(h, "notes") }
+            val remoteN = UserDataJson.parseNotes(rawN); val rnTs = remoteN?.first ?: 0L
+            var ln = notesTs
+            if (ln == 0L && notes.isNotEmpty()) { ln = now(); notesTs = ln; saveNotesLocal() }
+            if (remoteN != null && rnTs > ln) {
+                notes.clear(); notes.addAll(remoteN.second); notesTs = rnTs; saveNotesLocal()
+            } else if (ln > rnTs) {
+                withContext(Dispatchers.IO) { Net.postUserData(h, "notes", UserDataJson.notesEnvelope(ln, notes.toList())) }
             }
         }
     }

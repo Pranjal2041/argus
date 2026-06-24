@@ -52,12 +52,14 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Command Center") { state.showOverview.toggle() }
+                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showTodos = false; state.showNotes = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
-                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false } }
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showNotes = false } }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
+                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showTodos = false } }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
@@ -527,7 +529,9 @@ struct RootView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             Group {
-                if state.showTodos {
+                if state.showNotes {
+                    NotesHubView()
+                } else if state.showTodos {
                     TodoCenterView()
                 } else if state.showOverview {
                     CommandCenterView()
