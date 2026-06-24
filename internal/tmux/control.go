@@ -157,7 +157,11 @@ const interruptScanLines = 8
 // A passive, point-in-time capture-pane read: no history, no background
 // sampler — computed on demand when /sessions is requested.
 func DetectState(socket, name string) string {
-	out, err := exec.Command("tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
+	// Bound the capture so one wedged pane on a loaded node can't stall the whole
+	// (now-parallel) refresh; a timed-out or failed read falls back to "idle".
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
 	if err != nil {
 		return "idle"
 	}
@@ -333,9 +337,27 @@ func ListSessions(socket string) []SessionInfo {
 		agent := len(f) >= 7 && f[6] == "1"
 		sessions = append(sessions, SessionInfo{
 			Name: f[0], Windows: windows, Attached: attached > 0, Activity: act, Path: path,
-			State: DetectState(socket, f[0]), Agent: agent, ID: id,
+			Agent: agent, ID: id,
 		})
 	}
+	// Classify each session's state CONCURRENTLY. DetectState forks a capture-pane,
+	// which is slow on a loaded node; doing it serially made a full refresh cost
+	// (N × slow-capture), so the cached state lagged reality by tens of seconds — a
+	// finished agent kept its "working" dot long after its turn ended. Fan out
+	// (bounded) so a refresh costs ~one slow capture, not N. Each goroutine writes a
+	// distinct slice element, so no lock is needed.
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	for i := range sessions {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			sessions[i].State = DetectState(socket, sessions[i].Name)
+		}(i)
+	}
+	wg.Wait()
 	return sessions
 }
 
