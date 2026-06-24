@@ -64,9 +64,9 @@ private fun timeLabel(iso: String): String = try {
 @Composable
 fun NotesHubScreen(vm: AppViewModel) {
     val labels = listOf("Today", "Yesterday", "Earlier this week", "This month", "Earlier")
-    val byBucket = vm.notes.groupBy { bucketOf(it.createdAt) }
+    val byBucket = vm.notes.groupBy { bucketOf(it.editedAt) }
     val groups = (0..4).mapNotNull { b ->
-        byBucket[b]?.takeIf { it.isNotEmpty() }?.let { b to it.sortedByDescending { n -> n.createdAt } }
+        byBucket[b]?.takeIf { it.isNotEmpty() }?.let { b to it.sortedByDescending { n -> n.editedAt } }
     }
 
     Column(Modifier.fillMaxSize().background(nInk)) {
@@ -126,7 +126,7 @@ private fun NoteCard(vm: AppViewModel, note: Note) {
                 Icon(Icons.Filled.Close, "Delete", tint = nFaint, modifier = Modifier.size(15.dp))
             }
         }
-        Text(timeLabel(note.createdAt), color = nFaint.copy(alpha = 0.7f), fontSize = 10.sp,
+        Text(timeLabel(note.editedAt), color = nFaint.copy(alpha = 0.7f), fontSize = 10.sp,
             modifier = Modifier.padding(start = 38.dp, top = 2.dp))
     }
 }
