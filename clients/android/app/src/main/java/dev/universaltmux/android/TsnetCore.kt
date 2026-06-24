@@ -53,7 +53,7 @@ object TsnetCore {
             val arr = JSONArray(json)
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
-                Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")))
+                Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")), o.optString("os", ""))
             }
         } catch (t: Throwable) {
             Log.e("UTcore", "discover failed", t)

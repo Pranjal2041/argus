@@ -28,10 +28,11 @@ private class ProgressBody(private val data: ByteArray, private val onProgress: 
 
 /** A reachable broker. tsnet brokers serve real *.ts.net TLS (https/wss); a broker
  *  bound to a host's own tailnet IP (e.g. Windows via the Tailscale app) serves http/ws. */
-data class Broker(val host: String, val scheme: String, val name: String) {
+data class Broker(val host: String, val scheme: String, val name: String, val os: String = "") {
     val httpBase get() = "$scheme://$host:8722"
     val wsBase get() = (if (scheme == "https") "wss" else "ws") + "://$host:8722"
     val id get() = host
+    val isMac get() = os == "darwin"
 }
 
 data class SessionInfo(
@@ -88,7 +89,7 @@ object Net {
                     if (r.isSuccessful && body != null) {
                         val o = JSONObject(body)
                         if (o.optString("service") == "universal-tmux-broker") {
-                            return Broker(host, scheme, o.optString("name", host))
+                            return Broker(host, scheme, o.optString("name", host), o.optString("os", ""))
                         }
                     }
                 }
@@ -252,6 +253,30 @@ object Net {
     fun fsMkdir(b: Broker, path: String) = fsOp(b, "mkdir", listOf("path" to path))
     fun fsRename(b: Broker, from: String, to: String) = fsOp(b, "rename", listOf("path" to from, "to" to to))
     fun fsDelete(b: Broker, path: String) = fsOp(b, "delete", listOf("path" to path))
+
+    /** Type text into a session via the broker (tmux send-keys); appends Enter. */
+    fun send(b: Broker, session: String, text: String) {
+        try {
+            val u = "${b.httpBase}/send?session=${enc(session)}&enter=1"
+            val req = Request.Builder().url(u).post(RequestBody.create(null, text.toByteArray())).build()
+            client.newCall(req).execute().use {}
+        } catch (_: Exception) {}
+    }
+
+    /** Read the user-data sync blob for a key (Workflows / Todo Maps); null on failure. */
+    fun getUserData(b: Broker, key: String): String? = try {
+        val req = Request.Builder().url("${b.httpBase}/userdata?key=${enc(key)}").build()
+        client.newCall(req).execute().use { r -> if (r.isSuccessful) r.body?.string() else null }
+    } catch (_: Exception) { null }
+
+    /** Store a user-data sync blob (the broker keeps the newer of incoming vs stored). */
+    fun postUserData(b: Broker, key: String, body: String) {
+        try {
+            val req = Request.Builder().url("${b.httpBase}/userdata?key=${enc(key)}")
+                .post(RequestBody.create(null, body.toByteArray())).build()
+            client.newCall(req).execute().use {}
+        } catch (_: Exception) {}
+    }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 }

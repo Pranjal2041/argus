@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -91,6 +92,7 @@ func main() {
 			"proto":   1,
 			"name":    displayName,
 			"socket":  *tmuxSock,
+			"os":      runtime.GOOS, // lets the phone pick the Mac broker as the sync host
 		})
 	})
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +168,31 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.History()})
+	})
+	// /userdata — sync store for user-global app data (Workflows, Todo Maps). The user's
+	// Mac broker is the designated sync host; the macOS app and the phone both keep a local
+	// copy and sync here with last-write-wins (the blob carries its own `updatedAt`).
+	// GET ?key=K returns the stored blob; POST ?key=K body=<blob> stores it (keeping the
+	// newer of incoming vs stored) and returns the winner.
+	mux.HandleFunc("/userdata", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing key"})
+			return
+		}
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024))
+			_, _ = w.Write(broker.SetUserData(key, body))
+			return
+		}
+		if b := broker.UserData(key); b != nil {
+			_, _ = w.Write(b)
+		} else {
+			_, _ = w.Write([]byte("{}"))
+		}
 	})
 	// /recent — a session's recent rendered scrollback as plain text, for the
 	// macOS command center's status updater (claude -p reads it). ?session=NAME
