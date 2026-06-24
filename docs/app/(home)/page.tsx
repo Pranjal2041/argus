@@ -56,11 +56,17 @@ const tiles = [
 
 export default function HomePage() {
   useEffect(() => {
+    const els = document.querySelectorAll('.al-reveal');
+    // Fallback: if the observer is unavailable, just show everything.
+    if (typeof IntersectionObserver === 'undefined') {
+      els.forEach((el) => el.classList.add('in'));
+      return;
+    }
     const io = new IntersectionObserver(
       (entries) => entries.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }),
       { threshold: 0.12, rootMargin: '0px 0px -40px 0px' },
     );
-    document.querySelectorAll('.al-reveal').forEach((el) => io.observe(el));
+    els.forEach((el) => io.observe(el));
     return () => io.disconnect();
   }, []);
 

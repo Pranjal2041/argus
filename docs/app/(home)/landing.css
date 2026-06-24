@@ -48,23 +48,26 @@
   box-sizing: border-box;
 }
 
-/* ---- atmosphere: the eye's glow, a node-grid, and film grain ------------- */
+/* ---- atmosphere: deep space — nebula glow, a starfield, vignette, grain --- */
 .argus-landing::before {
-  /* the watching glow + a faint dotted constellation field */
+  /* a full-bleed observatory sky so wide margins read as space, not emptiness */
   content: "";
   position: fixed;
   inset: 0;
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(900px 600px at 50% -8%, rgba(86, 182, 206, 0.16), transparent 60%),
-    radial-gradient(700px 700px at 88% 12%, rgba(79, 155, 255, 0.08), transparent 55%),
-    radial-gradient(600px 600px at 8% 30%, rgba(187, 154, 247, 0.06), transparent 55%),
-    radial-gradient(circle, rgba(233, 236, 247, 0.045) 1px, transparent 1.4px);
-  background-size: auto, auto, auto, 30px 30px;
-  background-position: center, center, center, center;
-  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 70%, transparent 100%);
-  mask-image: linear-gradient(180deg, #000 0%, #000 70%, transparent 100%);
+    /* nebula glows reaching toward the edges */
+    radial-gradient(1100px 760px at 50% -6%, rgba(86, 182, 206, 0.22), transparent 60%),
+    radial-gradient(1000px 1000px at 98% 2%, rgba(79, 155, 255, 0.13), transparent 56%),
+    radial-gradient(900px 900px at 0% 20%, rgba(187, 154, 247, 0.11), transparent 55%),
+    radial-gradient(1300px 1000px at 50% 118%, rgba(86, 182, 206, 0.08), transparent 62%),
+    /* two offset star layers */
+    radial-gradient(circle, rgba(233, 236, 247, 0.085) 1px, transparent 1.6px) 0 0 / 34px 34px,
+    radial-gradient(circle, rgba(233, 236, 247, 0.055) 1px, transparent 1.5px) 19px 13px / 61px 61px,
+    /* edge vignette for depth */
+    radial-gradient(150% 120% at 50% 32%, transparent 50%, rgba(0, 0, 0, 0.55) 100%),
+    var(--bg);
 }
 .argus-landing::after {
   /* grain */
@@ -78,7 +81,7 @@
 }
 .argus-landing > * { position: relative; z-index: 1; }
 
-.al-wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+.al-wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
 
 /* ---- type --------------------------------------------------------------- */
 .argus-landing h1,
@@ -103,7 +106,7 @@
   justify-content: space-between;
   height: 64px;
   padding: 0 24px;
-  max-width: 1120px;
+  max-width: 1200px;
   margin: 0 auto;
   backdrop-filter: blur(8px);
 }
@@ -135,7 +138,22 @@
 .al-btn-ghost:hover { border-color: var(--accent); background: rgba(86,182,206,0.08); transform: translateY(-2px); }
 
 /* ---- hero --------------------------------------------------------------- */
-.al-hero { padding: 64px 0 40px; text-align: center; }
+.al-hero { position: relative; z-index: 1; padding: 64px 0 40px; text-align: center; }
+.al-hero::before {
+  /* large faint concentric rings emanating from behind the headline — fills wide screens */
+  content: "";
+  position: absolute;
+  top: -120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(1600px, 130vw);
+  aspect-ratio: 1;
+  z-index: -1;
+  pointer-events: none;
+  background: repeating-radial-gradient(circle at 50% 34%, transparent 0 86px, rgba(86, 182, 206, 0.06) 86px 87px);
+  -webkit-mask-image: radial-gradient(circle at 50% 34%, #000 8%, transparent 60%);
+  mask-image: radial-gradient(circle at 50% 34%, #000 8%, transparent 60%);
+}
 .al-hero h1 { font-size: clamp(40px, 7.5vw, 88px); font-weight: 700; margin: 22px auto 0; max-width: 14ch; }
 .al-hero h1 .glow { color: var(--accent); text-shadow: 0 0 44px rgba(86,182,206,0.55); }
 .al-hero-sub { max-width: 620px; margin: 24px auto 0; color: var(--ink-2); font-size: clamp(16px, 2vw, 19px); }
@@ -147,7 +165,7 @@
 /* ---- command center mockup (the centerpiece) ---------------------------- */
 .al-cc {
   margin: 56px auto 0;
-  max-width: 960px;
+  max-width: 1060px;
   border: 1px solid var(--line-2);
   border-radius: 18px;
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
@@ -283,7 +301,7 @@
 .al-cta h2 { font-size: clamp(32px, 5vw, 56px); }
 .al-cta p { color: var(--ink-2); max-width: 540px; margin: 18px auto 32px; font-size: 18px; }
 .al-foot { border-top: 1px solid var(--line); padding: 34px 24px; }
-.al-foot-in { max-width: 1120px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; color: var(--ink-3); font-size: 13px; }
+.al-foot-in { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; color: var(--ink-3); font-size: 13px; }
 .al-foot a { color: var(--ink-2); }
 .al-foot a:hover { color: var(--accent); }
 
