@@ -54,6 +54,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Command Center") { state.showOverview.toggle() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                Button("Workflows…") { state.showWorkflows = true }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
@@ -581,6 +583,7 @@ struct RootView: View {
         .sheet(isPresented: $state.showNew) { newSessionSheet }
         .sheet(isPresented: $state.showHiddenPicker) { HiddenPanelsView().environmentObject(state) }
         .sheet(isPresented: $state.showHistory) { SessionHistoryView().environmentObject(state) }
+        .sheet(isPresented: $state.showWorkflows) { WorkflowsView().environmentObject(state) }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
             TextField("name", text: $state.renameText)
             Button("Rename") {
