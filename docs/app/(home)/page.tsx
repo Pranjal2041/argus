@@ -3,9 +3,10 @@
 import { useEffect } from 'react';
 import Link from 'next/link';
 import {
-  Workflow, Terminal, FileCode2, ListTodo, Cable, LayoutDashboard,
-  LineChart, History, Palette, TerminalSquare, ShieldCheck, Check, ArrowRight,
-  Cpu, Laptop, Smartphone, Monitor,
+  Workflow, Terminal, FileCode2, ListTodo, Cable, History, Palette,
+  Check, ArrowRight, Cpu, Laptop, Smartphone, Monitor,
+  Radar, LineChart, Notebook, StickyNote, RefreshCw, Coffee,
+  ShieldCheck, Sparkles, TerminalSquare,
 } from 'lucide-react';
 
 function Github({ size = 17 }: { size?: number }) {
@@ -46,12 +47,14 @@ const meshNodes = [
 ];
 
 const tiles = [
+  { icon: Workflow, t: 'Workflows', d: 'Saved recipes — machine, folder, commands — that spin up an agent in one click. Wildcards pick a free node.' },
+  { icon: ListTodo, t: 'Todo Maps', d: 'Per-session checklists that outlive the session, so the plan is waiting when you reopen it.' },
+  { icon: StickyNote, t: 'Notes Hub', d: 'Free-form, multiline notes grouped by time — a scratchpad not tied to any machine.' },
   { icon: Cable, t: 'Port forwards', d: 'Bind a local port and tunnel it over the tailnet to any remote broker — no ssh -L juggling.' },
-  { icon: LayoutDashboard, t: 'Dashboards & notebooks', d: 'An in-app browser for remote web UIs, and Jupyter notebooks whose kernel runs on the host.' },
-  { icon: LineChart, t: 'Weights & Biases', d: 'When an agent prints a W&B run URL, open the run in place — already logged in.' },
   { icon: History, t: 'Session history', d: 'A durable record of every session that ran — survives downtime; a click opens or re-creates it.' },
   { icon: Palette, t: 'Themes', d: 'Recolor the whole app — chrome, terminals, and editor — with editor-grade schemes.' },
-  { icon: TerminalSquare, t: 'ut CLI + mesh', d: 'A drop-in for tmux that publishes a host, plus a fabric: ut ls / exec / spawn / tail / cp.' },
+  { icon: RefreshCw, t: 'Cross-device sync', d: 'Workflows, todos, and notes follow you from Mac to phone, with your Mac as the sync host.' },
+  { icon: Coffee, t: 'Awake while locked', d: 'Keep the Mac reachable behind a lock screen, so tmux, the broker, and your jobs keep running.' },
 ];
 
 export default function HomePage() {
@@ -143,41 +146,52 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* marquee feature rows */}
+      {/* marquee feature rows — the flagship craft */}
       <section className="al-wrap" style={{ paddingBottom: 40 }}>
-        {/* Workflows */}
+        {/* 1. Command Center — the intelligence */}
         <div className="al-feat al-reveal">
           <div className="al-feat-copy">
-            <span className="al-eyebrow">Workflows</span>
-            <h3>Spin up an agent in one click.</h3>
-            <p>Save the recipe — a machine, a folder, a command sequence — and starting it becomes a tap instead of attach, cd, and type.</p>
+            <span className="al-eyebrow">Command Center</span>
+            <h3>Know which agents need you.</h3>
+            <p>This is the heart of Argus. It reads each session&apos;s screen, passively, and writes a one-line, plain-English status — working, stuck at a prompt, hit an error, or done. The ones that need you float to the top.</p>
             <ul>
-              <li><Check size={16} /> Wildcard machines: <span className="al-mono" style={{ color: 'var(--accent-bright)' }}>babel-*</span> picks any free node.</li>
-              <li><Check size={16} /> Creates the session, cd&apos;s in, and types your commands — or just opens it if it&apos;s already running.</li>
-              <li><Check size={16} /> Synced across your devices through your Mac.</li>
+              <li><Check size={16} /> A real status, in plain English, not just a blinking cursor.</li>
+              <li><Check size={16} /> A <b style={{ color: 'var(--ink)' }}>Needs you</b> band so a stuck run never hides in a sea of tabs.</li>
+              <li><Check size={16} /> Agent-agnostic: the unit is the session, not claude or codex.</li>
             </ul>
           </div>
           <div className="al-feat-art">
-            <div className="al-art-bar"><Workflow size={13} /> Workflows · this mac</div>
+            <div className="al-art-bar"><Radar size={13} /> Command Center · every machine</div>
             <div className="al-art-body">
-              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--accent)' }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 14 }}>website</b><span className="al-card-host" style={{ marginLeft: 'auto' }}>~/dev/site</span><span className="al-chip">run</span></div>
-              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--violet)' }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 14 }}>storage-analysis</b><span className="al-card-host" style={{ marginLeft: 'auto' }}>babel-* : ~/scratch</span><span className="al-chip">run</span></div>
-              <div className="al-mini al-term" style={{ marginTop: 12 }}>
-                <span className="c-dim">$</span> claude --resume <span className="c-cyan">b63novw6</span>
+              <div className="al-triage-sec"><b>● Needs you — 1</b></div>
+              <div className="al-card s-needs" style={{ opacity: 1, animation: 'none' }}>
+                <div className="al-card-top">
+                  <span className="al-card-dot" />
+                  <span className="al-card-id">
+                    <span className="al-card-name">vlm_gating</span>
+                    <span className="al-card-host">babel-o9-32</span>
+                  </span>
+                  <span className="al-card-pill pill-needs">Needs you</span>
+                </div>
+                <div className="al-card-line">Run failed — <b>CUDA OOM</b> at step 4,210.</div>
+                <div className="al-insight"><Sparkles size={14} /><span>Out of memory on the 80&nbsp;GB card. Drop the per-device batch to 2 and it should fit.</span></div>
               </div>
+              <div className="al-triage-sec" style={{ color: 'var(--ink-3)' }}>Working — 4 · Idle — 2</div>
+              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--blue)', marginTop: 0 }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>dist_training</b><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)' }}>rollouts 6/8</span></div>
+              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--blue)', marginTop: 0 }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>cua-mouse</b><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)' }}>probe 2/7</span></div>
             </div>
           </div>
         </div>
 
-        {/* Terminals */}
+        {/* 2. Terminals + agent state + renders */}
         <div className="al-feat rev al-reveal">
           <div className="al-feat-copy">
-            <span className="al-eyebrow">Terminals</span>
-            <h3>Every session, live, in one window.</h3>
-            <p>Stream any session over a binary WebSocket — tmux control-mode on Unix, ConPTY on Windows — with full input, reflow, and a 100k-line scrollback. No SSH drawer.</p>
+            <span className="al-eyebrow">Live terminals</span>
+            <h3>Every session live — and it tells you when it&apos;s working.</h3>
+            <p>Stream any session over a binary WebSocket — tmux control-mode on Unix, ConPTY on Windows — with full input, reflow, and a 100k-line scrollback. A live dot reads the screen to show running versus idle, with no cooperation from the agent.</p>
             <ul>
-              <li><Check size={16} /> A live running/idle dot per session, read passively from the screen.</li>
-              <li><Check size={16} /> Render Markdown, math, and tables from agent output, offline.</li>
+              <li><Check size={16} /> Running/idle detected from the screen — the &quot;esc to interrupt&quot; signal.</li>
+              <li><Check size={16} /> <span className="al-mono">⇧⌘M</span> renders Markdown, LaTeX math, and tables from raw output, offline.</li>
               <li><Check size={16} /> Keep the Mac awake and reachable while it&apos;s locked.</li>
             </ul>
           </div>
@@ -194,14 +208,76 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* Files / Monaco */}
+        {/* 3. Weights & Biases */}
+        <div className="al-feat al-reveal">
+          <div className="al-feat-copy">
+            <span className="al-eyebrow">Weights &amp; Biases</span>
+            <h3>Your runs, in the same window.</h3>
+            <p>When an agent prints a W&amp;B run URL, Argus catches it off the output stream, validates it, and opens the run in a webview in place of the terminal — already logged in. No copy-paste, no browser tab hunting.</p>
+            <ul>
+              <li><Check size={16} /> Detected from the raw stream and validated, so no mangled false positives.</li>
+              <li><Check size={16} /> Login persists; flip between every run an agent has launched.</li>
+              <li><Check size={16} /> The run list persists and grows, on macOS and Android.</li>
+            </ul>
+          </div>
+          <div className="al-feat-art">
+            <div className="al-art-bar"><LineChart size={13} /> wandb · vlm_gating / b63novw6</div>
+            <div className="al-art-body">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
+                <span className="al-card-dot" style={{ background: 'var(--green)', marginTop: 0 }} />
+                <b style={{ fontFamily: 'var(--font-display)', fontSize: 14 }}>silvery-sweep-42</b>
+                <span className="al-chip" style={{ marginLeft: 'auto' }}>running</span>
+              </div>
+              <svg className="al-spark" viewBox="0 0 260 96" preserveAspectRatio="none" aria-hidden>
+                <line className="grid" x1="0" y1="24" x2="260" y2="24" />
+                <line className="grid" x1="0" y1="48" x2="260" y2="48" />
+                <line className="grid" x1="0" y1="72" x2="260" y2="72" />
+                <polyline className="reward" points="6,82 40,74 74,60 108,53 142,38 176,31 210,22 250,15" />
+                <polyline className="loss" points="6,24 40,33 74,40 108,49 142,56 176,65 210,70 250,77" />
+              </svg>
+              <div className="al-metrics">
+                <span className="al-metric"><i style={{ background: 'var(--accent-bright)' }} />reward <b>7.94</b></span>
+                <span className="al-metric"><i style={{ background: 'var(--amber)' }} />loss <b>0.42</b></span>
+                <span className="al-metric">step <b>4.2k</b></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 4. Dashboards & notebooks */}
+        <div className="al-feat rev al-reveal">
+          <div className="al-feat-copy">
+            <span className="al-eyebrow">Dashboards &amp; Jupyter</span>
+            <h3>Remote web apps and notebooks, in app.</h3>
+            <p>An in-app browser for any web UI on a host — TensorBoard, a dev server, a dashboard — forwarded over the tailnet. Plus Jupyter notebooks whose kernel runs on the remote machine, so the work happens on the host&apos;s GPU.</p>
+            <ul>
+              <li><Check size={16} /> View a remote port without leaving Argus or wiring up a tunnel.</li>
+              <li><Check size={16} /> Run notebook cells against a kernel on the host, not your laptop.</li>
+            </ul>
+          </div>
+          <div className="al-feat-art">
+            <div className="al-art-bar"><Notebook size={13} /> train.ipynb · babel-t5-24 · Python 3.11</div>
+            <div className="al-art-body al-mini">
+              <div className="al-nb-cell">
+                <span className="al-nb-prompt">In [12]:</span>
+                <div className="al-term" style={{ flex: 1, minWidth: 0 }}>
+                  <div><span style={{ color: 'var(--violet)' }}>from</span> trainer <span style={{ color: 'var(--violet)' }}>import</span> distill</div>
+                  <div>distill.<span className="c-cyan">fit</span>(student, teacher, epochs=<span className="c-amber">4</span>)</div>
+                </div>
+              </div>
+              <div className="al-nb-out">Epoch 4/4 — val_acc <span className="c-green">0.91</span> · loss <span className="c-amber">0.42</span> · 1m 58s</div>
+            </div>
+          </div>
+        </div>
+
+        {/* 5. Files / Monaco */}
         <div className="al-feat al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Files</span>
             <h3>Edit any host&apos;s files in VS Code&apos;s editor.</h3>
-            <p>A cross-host file explorer with Monaco built in — per-file tabs, <span className="al-mono">⌘P</span> quick-open, live Markdown preview, and image / PDF / media preview.</p>
+            <p>A cross-host file explorer with Monaco built in — per-file tabs, <span className="al-mono">⌘P</span> quick-open, live Markdown preview, and image / PDF / media preview, themed to match the app.</p>
             <ul>
-              <li><Check size={16} /> Syntax highlighting and themes that match the app.</li>
+              <li><Check size={16} /> Syntax highlighting and editor themes that match the window.</li>
               <li><Check size={16} /> Upload, download, and reveal a session&apos;s working directory.</li>
             </ul>
           </div>
@@ -213,28 +289,6 @@ export default function HomePage() {
               <div><span className="c-dim">164</span>    <span style={{ color: 'var(--violet)' }}>if</span> screenHasInterrupt(out) {'{'}</div>
               <div><span className="c-dim">165</span>        <span style={{ color: 'var(--violet)' }}>return</span> <span className="c-green">&quot;working&quot;</span></div>
               <div><span className="c-dim">166</span>    {'}'}</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Planning: Todo Maps + Notes */}
-        <div className="al-feat rev al-reveal">
-          <div className="al-feat-copy">
-            <span className="al-eyebrow">Todo Maps · Notes Hub</span>
-            <h3>Plans for your agents, kept with them.</h3>
-            <p>When you run ahead of an agent, park the next steps in a per-session checklist that <em>outlives</em> the session — and keep a separate hub of free-form, time-grouped notes.</p>
-            <ul>
-              <li><Check size={16} /> Boards keyed to a machine + session; reopen it and your todos are there.</li>
-              <li><Check size={16} /> Multiline notes, grouped Today / Yesterday / Earlier — by last edit.</li>
-              <li><Check size={16} /> Both synced across your Mac and phone.</li>
-            </ul>
-          </div>
-          <div className="al-feat-art">
-            <div className="al-art-bar"><ListTodo size={13} /> vlm_gating</div>
-            <div className="al-art-body">
-              <div className="al-row"><span className="al-check on" /><span>Implement the work-while-I-sleep feature</span></div>
-              <div className="al-row"><span className="al-check" /><span>Wire OPD config + launch</span></div>
-              <div className="al-row al-strike"><span className="al-check on" /><span>Teacher multimodal logprob fix</span></div>
             </div>
           </div>
         </div>
@@ -266,11 +320,17 @@ export default function HomePage() {
               directly over your tailnet — encrypted, peer-to-peer. Nothing is hosted, nothing is
               centralized, and a machine that goes away simply drops off the map.
             </p>
-            <ul className="al-feat-copy" style={{ marginTop: 20, paddingLeft: 0, listStyle: 'none' }}>
-              <li style={{ marginBottom: 10 }}><Check size={16} style={{ color: 'var(--accent)' }} /> &nbsp;Discovery is capability-based — never by hostname.</li>
-              <li style={{ marginBottom: 10 }}><Cpu size={16} style={{ color: 'var(--accent)' }} /> &nbsp;The unit is the tmux socket, not a SLURM job — clusters are not a special case.</li>
-              <li><ShieldCheck size={16} style={{ color: 'var(--accent)' }} /> &nbsp;Brokers run as you, reachable only from your devices.</li>
+            <ul className="al-feat-copy" style={{ marginTop: 20, paddingLeft: 0, listStyle: 'none', display: 'grid', gap: 10 }}>
+              <li><Check size={16} style={{ color: 'var(--accent)' }} /> Discovery is capability-based — never by hostname.</li>
+              <li><Cpu size={16} style={{ color: 'var(--accent)' }} /> The unit is the tmux socket, not a SLURM job — clusters aren&apos;t a special case.</li>
+              <li><TerminalSquare size={16} style={{ color: 'var(--accent)' }} /> Drive the whole fabric from a shell: <span className="al-mono">ut ls / exec / spawn / tail / cp</span>.</li>
             </ul>
+            <div className="al-mini al-term al-cli">
+              <div><span className="c-dim">$</span> ut ls</div>
+              <div className="c-dim">HOST           SESSIONS  STATE</div>
+              <div>babel-t5-24    <span style={{ color: 'var(--ink)' }}>3</span>         <span className="c-green">● working</span></div>
+              <div>this-mac       <span style={{ color: 'var(--ink)' }}>2</span>         <span className="c-amber">● idle</span></div>
+            </div>
           </div>
         </div>
       </section>
@@ -279,11 +339,11 @@ export default function HomePage() {
       <section className="al-sec al-wrap" style={{ paddingTop: 24 }}>
         <div className="al-sec-head al-reveal">
           <span className="al-eyebrow">And the rest of the toolbox</span>
-          <h2>Everything an agent leaves behind, in reach.</h2>
+          <h2>Everything around the agents, in reach.</h2>
         </div>
         <div className="al-grid">
           {tiles.map((t, i) => (
-            <div key={t.t} className="al-tile al-reveal" style={{ transitionDelay: `${(i % 3) * 60}ms` }}>
+            <div key={t.t} className="al-tile al-reveal" style={{ transitionDelay: `${(i % 4) * 50}ms` }}>
               <span className="al-tile-ic"><t.icon size={20} /></span>
               <h3>{t.t}</h3>
               <p>{t.d}</p>
