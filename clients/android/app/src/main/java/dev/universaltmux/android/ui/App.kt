@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -93,6 +95,7 @@ fun App(vm: AppViewModel) {
                 while (true) {
                     if (TsnetCore.isUp && tick % 5 == 0) vm.refreshAll() else vm.pollKnown()
                     vm.refreshCC()   // pull the Mac-published statuses for the command center
+                    if (tick % 2 == 0) { vm.enrichOs(); vm.syncUserData() }  // sync Workflows + Todo Maps
                     tick++
                     delay(3000)
                 }
@@ -142,6 +145,12 @@ fun App(vm: AppViewModel) {
                             }
                         },
                         actions = {
+                            // The action icons scroll horizontally so adding features never
+                            // crowds the bar or squeezes the title off-screen.
+                            Row(
+                                Modifier.widthIn(max = 232.dp).horizontalScroll(rememberScrollState()),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                             if (screen == 0 && vm.selected != null) {
                                 val sel = vm.selected!!
                                 if (vm.hasWandb(sel.first, sel.second)) {
@@ -167,7 +176,14 @@ fun App(vm: AppViewModel) {
                             IconButton(onClick = { screen = if (screen == 2) 0 else 2 }) {
                                 Icon(Icons.Filled.SettingsEthernet, "Ports", tint = if (screen == 2) accent else cText)
                             }
+                            IconButton(onClick = { screen = if (screen == 4) 0 else 4 }) {
+                                Icon(Icons.Filled.PlayArrow, "Workflows", tint = if (screen == 4) accent else cText)
+                            }
+                            IconButton(onClick = { screen = if (screen == 5) 0 else 5 }) {
+                                Icon(Icons.Filled.CheckCircle, "Todo Maps", tint = if (screen == 5) accent else cText)
+                            }
                             IconButton(onClick = { vm.refreshAll() }) { Icon(Icons.Filled.Refresh, "Refresh") }
+                            }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = panel, titleContentColor = cText),
                     )
@@ -180,6 +196,10 @@ fun App(vm: AppViewModel) {
                         PortsScreen(vm)
                     } else if (screen == 3) {
                         CommandCenterScreen(vm) { b, s -> vm.selected = b to s; screen = 0 }
+                    } else if (screen == 4) {
+                        WorkflowsScreen(vm) { screen = 0 }
+                    } else if (screen == 5) {
+                        TodoMapsScreen(vm) { screen = 0 }
                     } else {
                         val sel = vm.selected
                         if (sel == null) {

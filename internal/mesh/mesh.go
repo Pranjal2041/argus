@@ -29,6 +29,7 @@ type Peer struct {
 	Name   string `json:"name"`   // display name from /whoami
 	Host   string `json:"host"`   // tailnet host:port-less address to reach it
 	Scheme string `json:"scheme"` // http | https
+	Os     string `json:"os"`     // runtime.GOOS — lets a client pick the Mac as sync host
 }
 
 // Mesh routes to peer brokers. ts is nil in local mode (use the host network).
@@ -209,13 +210,14 @@ func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
 		var who struct {
 			Service string `json:"service"`
 			Name    string `json:"name"`
+			Os      string `json:"os"`
 		}
 		if json.Unmarshal(body, &who) == nil && who.Service == "universal-tmux-broker" {
 			name := who.Name
 			if name == "" {
 				name = a.host
 			}
-			return Peer{Name: name, Host: a.host, Scheme: a.scheme}, true
+			return Peer{Name: name, Host: a.host, Scheme: a.scheme, Os: who.Os}, true
 		}
 	}
 	return Peer{}, false

@@ -159,9 +159,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Synced user-global data (Workflows + Todo Maps). Declared BEFORE init so they are
+    // initialized when init's loadUserData() touches them (Kotlin runs property
+    // initializers and init blocks top-to-bottom).
+    val workflows = mutableStateListOf<Workflow>()
+    val todoBoards = mutableStateListOf<TodoBoard>()
+    private var workflowsTs = 0L
+    private var todosTs = 0L
+
     init {
         loadBrokers()
         loadWandb()
+        loadUserData()
         refreshAll()
         if (authKey.isNotEmpty()) joinTailnet(authKey) // auto-join + auto-discover on startup
     }
@@ -196,13 +205,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val arr = JSONArray(prefs.getString("brokers", "[]") ?: "[]")
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            brokers.add(Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host"))))
+            brokers.add(Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")), o.optString("os", "")))
         }
     }
 
     private fun saveBrokers() {
         val arr = JSONArray()
-        brokers.forEach { arr.put(JSONObject().put("host", it.host).put("scheme", it.scheme).put("name", it.name)) }
+        brokers.forEach { arr.put(JSONObject().put("host", it.host).put("scheme", it.scheme).put("name", it.name).put("os", it.os)) }
         prefs.edit().putString("brokers", arr.toString()).apply()
     }
 
@@ -371,6 +380,170 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) { Net.control(b, "kill", name, null) }
             if (selected == (b to name)) selected = null
             refresh(b)
+        }
+    }
+
+    // ===================== Workflows + Todo Maps (synced) =====================
+    // User-global data synced through the Mac broker (the sync host): a local copy lives
+    // here + in prefs, and reconcile() trades it with the host using last-write-wins.
+    // NOTE: the state lists are declared ABOVE init (see top of the class) so they are
+    // non-null when init's loadUserData() runs.
+
+    private fun now() = System.currentTimeMillis()
+    private fun syncHost(): Broker? = brokers.firstOrNull { it.isMac }
+
+    private fun loadUserData() {
+        UserDataJson.parseWorkflows(prefs.getString("ut.workflows.v1", null))?.let { (ts, list) ->
+            workflowsTs = ts; workflows.clear(); workflows.addAll(list)
+        }
+        UserDataJson.parseTodos(prefs.getString("ut.todoBoards.v1", null))?.let { (ts, list) ->
+            todosTs = ts; todoBoards.clear(); todoBoards.addAll(list)
+        }
+        if (todoBoards.none { it.isMisc }) todoBoards.add(TodoBoard(isMisc = true))
+    }
+    private fun saveWorkflowsLocal() {
+        prefs.edit().putString("ut.workflows.v1", UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())).apply()
+    }
+    private fun saveTodosLocal() {
+        prefs.edit().putString("ut.todoBoards.v1", UserDataJson.todosEnvelope(todosTs, todoBoards.toList())).apply()
+    }
+    private fun touchWorkflows() {
+        workflowsTs = now(); saveWorkflowsLocal()
+        val h = syncHost() ?: return
+        val body = UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())
+        viewModelScope.launch { withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", body) } }
+    }
+    private fun touchTodos() {
+        todosTs = now(); saveTodosLocal()
+        val h = syncHost() ?: return
+        val body = UserDataJson.todosEnvelope(todosTs, todoBoards.toList())
+        viewModelScope.launch { withContext(Dispatchers.IO) { Net.postUserData(h, "todos", body) } }
+    }
+
+    fun upsertWorkflow(w: Workflow) {
+        val i = workflows.indexOfFirst { it.id == w.id }
+        if (i >= 0) workflows[i] = w else workflows.add(w)
+        touchWorkflows()
+    }
+    fun deleteWorkflow(w: Workflow) { workflows.removeAll { it.id == w.id }; touchWorkflows() }
+
+    fun ensureBoard(machine: String, session: String) {
+        val m = machine.trim(); val s = session.trim()
+        if (s.isEmpty()) return
+        if (todoBoards.none { !it.isMisc && it.machine == m && it.session == s }) {
+            todoBoards.add(TodoBoard(machine = m, session = s)); touchTodos()
+        }
+    }
+    fun addTodo(boardId: String, text: String) {
+        val t = text.trim(); if (t.isEmpty()) return
+        val i = todoBoards.indexOfFirst { it.id == boardId }; if (i < 0) return
+        val items = todoBoards[i].items.toMutableList(); items.add(TodoItem(text = t))
+        todoBoards[i] = todoBoards[i].copy(items = items); touchTodos()
+    }
+    fun toggleTodo(boardId: String, itemId: String) {
+        val i = todoBoards.indexOfFirst { it.id == boardId }; if (i < 0) return
+        val items = todoBoards[i].items.map {
+            if (it.id == itemId) { val nd = !it.done; it.copy(done = nd, completedAt = if (nd) nowIso() else null) } else it
+        }.toMutableList()
+        todoBoards[i] = todoBoards[i].copy(items = items); touchTodos()
+    }
+    fun deleteTodo(boardId: String, itemId: String) {
+        val i = todoBoards.indexOfFirst { it.id == boardId }; if (i < 0) return
+        val items = todoBoards[i].items.filter { it.id != itemId }.toMutableList()
+        todoBoards[i] = todoBoards[i].copy(items = items); touchTodos()
+    }
+    fun deleteBoard(boardId: String) { todoBoards.removeAll { it.id == boardId && !it.isMisc }; touchTodos() }
+
+    // -- machine pattern matching + running a workflow --
+    private fun wildcardRegex(p: String): Regex {
+        val sb = StringBuilder("^")
+        for (c in p) when {
+            c == '*' -> sb.append(".*")
+            c.isLetterOrDigit() || c == ' ' || c == '_' || c == '-' -> sb.append(c)
+            else -> sb.append('\\').append(c)
+        }
+        sb.append('$')
+        return Regex(sb.toString(), RegexOption.IGNORE_CASE)
+    }
+    fun brokersMatching(pattern: String): List<Broker> {
+        val p = pattern.trim()
+        if (p.isEmpty()) return emptyList()
+        if (p.equals("this mac", true) || p.equals("mac", true) || p.equals("local", true))
+            return brokers.filter { it.isMac }
+        val rx = wildcardRegex(p)
+        return brokers.filter { rx.matches(it.name) }
+    }
+    private fun cdCommand(folder: String): String =
+        if (folder == "~" || folder.startsWith("~/")) "cd $folder"
+        else "cd '" + folder.replace("'", "'\\''") + "'"
+
+    fun runWorkflowOn(wf: Workflow, b: Broker) {
+        val exists = (sessions[b.id] ?: emptyList()).any { it.name == wf.name }
+        if (exists) { selected = b to wf.name; return }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { Net.control(b, "create", wf.name, null) }
+            selected = b to wf.name
+            refresh(b)
+            kotlinx.coroutines.delay(700)
+            val lines = mutableListOf<String>()
+            val folder = wf.folder.trim()
+            if (folder.isNotEmpty()) lines.add(cdCommand(folder))
+            lines.addAll(wf.commands.split("\n").map { it.trim() }.filter { it.isNotEmpty() })
+            for (line in lines) { withContext(Dispatchers.IO) { Net.send(b, wf.name, line) }; kotlinx.coroutines.delay(250) }
+        }
+    }
+
+    // -- todo board live detection --
+    private fun boardBrokerMatch(b: Broker, board: TodoBoard) =
+        b.name == board.machine || (b.isMac && (board.machine.equals("this mac", true) ||
+            board.machine.equals("mac", true) || board.machine.equals("local", true)))
+    fun liveBrokerFor(board: TodoBoard): Broker? =
+        if (board.isMisc) null else brokers.firstOrNull { b ->
+            boardBrokerMatch(b, board) && (sessions[b.id] ?: emptyList()).any { it.name == board.session }
+        }
+    fun isSessionLive(board: TodoBoard) = liveBrokerFor(board) != null
+
+    /** Fill in each broker's os (Mac-detection) by probing /whoami — the discovery engine
+     *  may not carry it yet. Runs after discovery + on the poll. */
+    fun enrichOs() {
+        brokers.toList().forEach { b ->
+            if (b.os.isEmpty()) viewModelScope.launch {
+                val probed = withContext(Dispatchers.IO) { Net.probe(b.host) }
+                if (probed != null && probed.os.isNotEmpty()) {
+                    val i = brokers.indexOfFirst { it.host == b.host }
+                    if (i >= 0 && brokers[i].os.isEmpty()) { brokers[i] = brokers[i].copy(os = probed.os); saveBrokers() }
+                }
+            }
+        }
+    }
+
+    /** Reconcile both keys with the Mac sync host: adopt remote when newer, push local when
+     *  newer (or to bootstrap). Runs on the poll loop. */
+    fun syncUserData() {
+        val h = syncHost() ?: return
+        viewModelScope.launch {
+            val rawW = withContext(Dispatchers.IO) { Net.getUserData(h, "workflows") }
+            val remoteW = UserDataJson.parseWorkflows(rawW); val rwTs = remoteW?.first ?: 0L
+            var lw = workflowsTs
+            if (lw == 0L && workflows.isNotEmpty()) { lw = now(); workflowsTs = lw; saveWorkflowsLocal() }
+            if (remoteW != null && rwTs > lw) {
+                workflows.clear(); workflows.addAll(remoteW.second); workflowsTs = rwTs; saveWorkflowsLocal()
+            } else if (lw > rwTs) {
+                withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", UserDataJson.workflowsEnvelope(lw, workflows.toList())) }
+            }
+
+            val rawT = withContext(Dispatchers.IO) { Net.getUserData(h, "todos") }
+            val remoteT = UserDataJson.parseTodos(rawT); val rtTs = remoteT?.first ?: 0L
+            val hasData = todoBoards.any { !it.isMisc || it.items.isNotEmpty() }
+            var lt = todosTs
+            if (lt == 0L && hasData) { lt = now(); todosTs = lt; saveTodosLocal() }
+            if (remoteT != null && rtTs > lt) {
+                val boards = remoteT.second.toMutableList()
+                if (boards.none { it.isMisc }) boards.add(TodoBoard(isMisc = true))
+                todoBoards.clear(); todoBoards.addAll(boards); todosTs = rtTs; saveTodosLocal()
+            } else if (lt > rtTs) {
+                withContext(Dispatchers.IO) { Net.postUserData(h, "todos", UserDataJson.todosEnvelope(lt, todoBoards.toList())) }
+            }
         }
     }
 }

@@ -131,6 +131,13 @@ struct TodoBoard: Identifiable, Codable, Hashable {
     var pending: Int { items.lazy.filter { !$0.done }.count }
 }
 
+/// Wire format for the /userdata sync store: a timestamped payload. `updatedAt` is unix
+/// millis; last-write-wins by comparing it. Shared by the Mac app and the phone.
+struct SyncEnvelope<T: Codable>: Codable {
+    var updatedAt: Int64
+    var data: T
+}
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -226,7 +233,13 @@ final class AppState: ObservableObject {
     @Published var showWorkflows = false
     /// Persisted workflow definitions (UserDefaults `ut.workflows.v1`).
     @Published var workflows: [Workflow] = AppState.loadWorkflows() {
-        didSet { AppState.saveWorkflows(workflows) }
+        didSet {
+            AppState.saveWorkflows(workflows)
+            if !applyingRemoteWorkflows {       // a local edit → stamp + push to the sync host
+                workflowsUpdatedAt = nowMs()
+                pushUserData("workflows", workflows, workflowsUpdatedAt)
+            }
+        }
     }
     /// Set when a run's machine pattern matched >1 online host — the view shows a picker.
     @Published var workflowPick: WorkflowPick?
@@ -332,7 +345,13 @@ final class AppState: ObservableObject {
     /// Boards keyed by <machine, session> plus one Misc board. Persisted with full item
     /// history (created/completed timestamps), so nothing is lost for later analysis.
     @Published var todoBoards: [TodoBoard] = AppState.loadTodoBoards() {
-        didSet { AppState.saveTodoBoards(todoBoards) }
+        didSet {
+            AppState.saveTodoBoards(todoBoards)
+            if !applyingRemoteTodos {           // a local edit → stamp + push to the sync host
+                todosUpdatedAt = nowMs()
+                pushUserData("todos", todoBoards, todosUpdatedAt)
+            }
+        }
     }
 
     private static func loadTodoBoards() -> [TodoBoard] {
@@ -393,6 +412,86 @@ final class AppState: ObservableObject {
         selection = SessionRef(machineID: m.id, session: b.session)
         showTodos = false
         showOverview = false
+    }
+
+    // MARK: User-data sync (Workflows + Todo Maps) — this Mac IS the sync host.
+
+    private var applyingRemoteWorkflows = false
+    private var applyingRemoteTodos = false
+    private var workflowsUpdatedAt: Int64 {
+        get { Int64(UserDefaults.standard.integer(forKey: "ut.workflows.updatedAt")) }
+        set { UserDefaults.standard.set(Int(newValue), forKey: "ut.workflows.updatedAt") }
+    }
+    private var todosUpdatedAt: Int64 {
+        get { Int64(UserDefaults.standard.integer(forKey: "ut.todoBoards.updatedAt")) }
+        set { UserDefaults.standard.set(Int(newValue), forKey: "ut.todoBoards.updatedAt") }
+    }
+    private func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+    /// The sync host is this Mac's own broker (loopback).
+    private var syncHostBase: String? { machines.first { $0.isLocal }?.httpBase }
+
+    private func pushUserData<T: Codable>(_ key: String, _ data: T, _ ts: Int64) {
+        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=\(key)") else { return }
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        guard let body = try? enc.encode(SyncEnvelope(updatedAt: ts, data: data)) else { return }
+        var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 8
+        URLSession.shared.dataTask(with: req).resume()
+    }
+
+    /// Reconcile both keys with the sync store: adopt the remote when it's newer, push the
+    /// local copy up when it's newer (or to bootstrap pre-existing data). Runs on the poll
+    /// timer + at launch.
+    func syncUserData() {
+        syncWorkflows()
+        syncTodos()
+    }
+
+    private func syncWorkflows() {
+        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=workflows") else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+            var remoteTs: Int64 = 0; var remote: [Workflow]?
+            if let data, let env = try? dec.decode(SyncEnvelope<[Workflow]>.self, from: data) {
+                remoteTs = env.updatedAt; remote = env.data
+            }
+            DispatchQueue.main.async {
+                var localTs = self.workflowsUpdatedAt
+                if localTs == 0, !self.workflows.isEmpty { localTs = self.nowMs(); self.workflowsUpdatedAt = localTs }
+                if remoteTs > localTs, let remote {
+                    self.applyingRemoteWorkflows = true
+                    self.workflows = remote
+                    self.applyingRemoteWorkflows = false
+                    self.workflowsUpdatedAt = remoteTs
+                } else if localTs > remoteTs {
+                    self.pushUserData("workflows", self.workflows, localTs)
+                }
+            }
+        }.resume()
+    }
+
+    private func syncTodos() {
+        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=todos") else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+            var remoteTs: Int64 = 0; var remote: [TodoBoard]?
+            if let data, let env = try? dec.decode(SyncEnvelope<[TodoBoard]>.self, from: data) {
+                remoteTs = env.updatedAt; remote = env.data
+            }
+            DispatchQueue.main.async {
+                let hasData = self.todoBoards.contains { !$0.isMisc || !$0.items.isEmpty }
+                var localTs = self.todosUpdatedAt
+                if localTs == 0, hasData { localTs = self.nowMs(); self.todosUpdatedAt = localTs }
+                if remoteTs > localTs, var remote {
+                    if !remote.contains(where: { $0.isMisc }) { remote.append(TodoBoard(isMisc: true)) }
+                    self.applyingRemoteTodos = true
+                    self.todoBoards = remote
+                    self.applyingRemoteTodos = false
+                    self.todosUpdatedAt = remoteTs
+                } else if localTs > remoteTs {
+                    self.pushUserData("todos", self.todoBoards, localTs)
+                }
+            }
+        }.resume()
     }
 
     /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
@@ -615,6 +714,9 @@ final class AppState: ObservableObject {
                 // Pull durable history in the background while machines are reachable, so
                 // it's captured before a node goes offline. ~2s after launch, then ~30s.
                 if tick == 1 || tick % 15 == 0 { self.refreshHistoryCache() }
+                // Sync Workflows + Todo Maps with this Mac's broker (the sync host) so the
+                // phone shares them. ~4s after launch, then ~10s.
+                if tick == 2 || tick % 5 == 0 { self.syncUserData() }
             }
         }
     }
