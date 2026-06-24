@@ -69,6 +69,17 @@ scheduler's cgroup tears down every process — broker and tmux server alike —
 so recovery is `--requeue`-style auto-rerun plus a **stable socket name** the client transparently
 reattaches to when the job comes back.
 
+## User-data sync: your Mac is the sync host
+
+[Workflows](/docs/workflows), [Todo Maps](/docs/todo-maps), and the [Notes Hub](/docs/notes) are
+**user-global** — they belong to you, not to any one host like a session or a hidden panel does. To
+keep them in step across your Mac and your phone with no central server, one broker is the **sync
+host**: your **Mac's** broker. Each app keeps a local copy and reconciles with it. A small
+`/userdata` key-value store on the broker holds each blob, every change carries a timestamp, and the
+**newer** copy wins (last-write-wins). Your Mac talks to its own loopback broker; your phone reaches
+the Mac broker over the tailnet, which it already does for sessions. So a workflow you add on the Mac
+shows up on the phone within seconds, and a note you jot on the phone lands on the Mac just as fast.
+
 <Callout type="info">
 The broker, the file service, and the port-forward agent all ride the **same** per-host broker
 over the tailnet — so adding Files or Ports needs zero extra deployment.

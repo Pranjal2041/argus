@@ -1,0 +1,41 @@
+---
+title: Workflows
+description: Saved recipes that spin up an agent in the right place with the right command, in one click.
+---
+
+Some agents you start the same way every time: a `claude` in a particular folder on a particular
+machine, running a particular command. **Workflows** save that recipe, so starting it is one click
+instead of attach, `cd`, and type.
+
+## What a workflow is
+
+Each workflow is a **name**, a **machine**, a **folder**, and a **command sequence** — plus optional
+notes and a color tag. The machine is a **wildcard**, so `babel-*` matches any node of a cluster,
+`this mac` matches your Mac, and an exact hostname matches one box.
+
+## Running one
+
+Open the Workflows panel (`⇧⌘W` on macOS, or the ▶ tab on the phone) and click a card. Argus:
+
+1. Resolves the machine pattern to an **online** host — asking which one if several match.
+2. If a session with that name already exists there, it just **opens** it.
+3. Otherwise it **creates** the session, `cd`s into the folder, types your command sequence (paced so
+   the shell keeps up), and drops you into the terminal.
+
+So "run my website agent" or "resume codex over there" becomes a single tap. The session is named
+after the workflow, so re-running reattaches rather than piling up duplicates.
+
+## The form
+
+- **Machine** — type a wildcard, or pick from a dropdown of *This Mac*, your online hosts, and
+  derived patterns like *Any babel-\**.
+- **Folder** — type it, or (on macOS) **Browse** the target machine's filesystem over its broker and
+  pick a directory. The result comes back as a portable `~`-relative path when it's under home, so a
+  workflow stays valid across cluster nodes that share a home.
+- **Commands** — one per line. A **Use a command** picker drops in a command from another workflow
+  (your reused command is one click away) or a common preset.
+
+<Callout type="info">
+Workflows are **synced across your devices** (see [Architecture](/docs/architecture#user-data-sync-your-mac-is-the-sync-host)),
+so the ones you define on your Mac are there on your phone too.
+</Callout>

@@ -1,0 +1,29 @@
+---
+title: Todo Maps
+description: Per-session checklists that outlive the session — your plans for an agent, kept with it.
+---
+
+When you run ahead of an agent and have ideas for what it should do next, **Todo Maps** is where you
+park them. Each board is a checklist tied to a **machine + session**, plus one **Misc** board for
+general to-dos. Crucially, a board **outlives its session**: kill the session and the board stays;
+reopen the same machine + session name later and your pending tasks are right there.
+
+## What it does
+
+- **One board per session**, laid out like the Command Center — big cards, with a live dot when that
+  session is currently running.
+- **Add tasks and check them off** — a checked task strikes through and stays, so the board doubles
+  as a record. A board with nothing pending tucks itself away until you flip *Show finished*.
+- **A future session is fine** — make a board for a machine + session that isn't running yet, ready
+  for when it is. Pick a live session, or type the machine and name by hand.
+- **Open the session** straight from a board's menu when it's live.
+
+## Built for later analysis
+
+Every task carries **created** and **completed** timestamps, and nothing is silently deleted — so the
+store is a full history of what you planned for each agent and when you finished it.
+
+<Callout type="info">
+Open it with `⇧⌘D` on macOS, or the checklist tab on the phone. Boards are **synced across your
+devices** (see [Architecture](/docs/architecture#user-data-sync-your-mac-is-the-sync-host)).
+</Callout>
