@@ -465,7 +465,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun addNote(): String { val n = Note(); notes.add(n); touchNotes(); return n.id }
     fun updateNoteText(id: String, text: String) {
         val i = notes.indexOfFirst { it.id == id }; if (i < 0) return
-        notes[i] = notes[i].copy(text = text); touchNotes()
+        notes[i] = notes[i].copy(text = text, editedAt = nowIso()); touchNotes()
     }
     fun toggleNote(id: String) {
         val i = notes.indexOfFirst { it.id == id }; if (i < 0) return

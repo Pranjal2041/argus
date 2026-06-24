@@ -49,7 +49,8 @@ data class Note(
     val id: String = newId(),
     var text: String = "",
     var done: Boolean = false,
-    val createdAt: String = nowIso()
+    val createdAt: String = nowIso(),
+    var editedAt: String = nowIso()   // last content edit — drives time grouping/sort
 )
 
 /** JSON for the /userdata sync envelopes — kept byte-compatible with the Mac's Codable. */
@@ -124,7 +125,9 @@ object UserDataJson {
             val arr = o.getJSONArray("data")
             val list = (0 until arr.length()).map { i ->
                 val n = arr.getJSONObject(i)
-                Note(n.optString("id", newId()), n.optString("text"), n.optBoolean("done"), n.optString("createdAt", nowIso()))
+                val created = n.optString("createdAt", nowIso())
+                Note(n.optString("id", newId()), n.optString("text"), n.optBoolean("done"),
+                    created, n.optString("editedAt", created))   // editedAt falls back to createdAt
             }
             o.getLong("updatedAt") to list
         } catch (_: Exception) { null }
@@ -132,7 +135,8 @@ object UserDataJson {
 
     fun notesEnvelope(updatedAt: Long, list: List<Note>): String {
         val arr = JSONArray()
-        list.forEach { n -> arr.put(JSONObject().put("id", n.id).put("text", n.text).put("done", n.done).put("createdAt", n.createdAt)) }
+        list.forEach { n -> arr.put(JSONObject().put("id", n.id).put("text", n.text).put("done", n.done)
+            .put("createdAt", n.createdAt).put("editedAt", n.editedAt)) }
         return JSONObject().put("updatedAt", updatedAt).put("data", arr).toString()
     }
 }

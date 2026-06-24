@@ -139,12 +139,25 @@ struct SyncEnvelope<T: Codable>: Codable {
 }
 
 /// A free-form note in the Notes Hub — multiline text, optionally checkable, not tied to
-/// any machine or session. Grouped by `createdAt` into time buckets in the view.
+/// any machine or session. Grouped/sorted by `editedAt` (last content edit) in the view.
 struct Note: Identifiable, Codable, Hashable {
     var id = UUID()
     var text: String = ""
     var done = false
     var createdAt = Date()
+    var editedAt = Date()
+    init() {}
+    // Decode-tolerant: `editedAt` falls back to `createdAt` for notes written before the
+    // field existed, so old/cross-version data never fails to load.
+    enum CodingKeys: String, CodingKey { case id, text, done, createdAt, editedAt }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        done = try c.decodeIfPresent(Bool.self, forKey: .done) ?? false
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        editedAt = try c.decodeIfPresent(Date.self, forKey: .editedAt) ?? createdAt
+    }
 }
 
 /// Sessions on one machine grouped by their working directory.
@@ -458,6 +471,7 @@ final class AppState: ObservableObject {
     func updateNoteText(_ id: UUID, _ text: String) {
         guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[i].text = text
+        notes[i].editedAt = Date()       // last edit drives time grouping/sort
     }
     func toggleNote(_ id: UUID) {
         guard let i = notes.firstIndex(where: { $0.id == id }) else { return }

@@ -1,8 +1,9 @@
+import AppKit
 import SwiftUI
 
-/// The ⇧⌘N "Notes" hub: a full main-pane panel (like the command center / Todo Maps) of
-/// free-form notes — multiline, optionally checkable, not tied to any machine or session.
-/// Grouped into time buckets, newest first.
+/// The ⇧⌘N "Notes" hub: a full main-pane panel of free-form notes — multiline, optionally
+/// checkable, not tied to any machine or session. Grouped into time buckets by last edit,
+/// newest first.
 struct NotesHubView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("ut.uiScale") private var uiScale = 1.0
@@ -20,10 +21,10 @@ struct NotesHubView: View {
             return 4
         }
         let labels = ["Today", "Yesterday", "Earlier this week", "This month", "Earlier"]
-        let by = Dictionary(grouping: state.notes, by: { bucket($0.createdAt) })
+        let by = Dictionary(grouping: state.notes, by: { bucket($0.editedAt) })
         return (0..<5).compactMap { b in
             guard let ns = by[b], !ns.isEmpty else { return nil }
-            return (labels[b], ns.sorted { $0.createdAt > $1.createdAt })   // newest first
+            return (labels[b], ns.sorted { $0.editedAt > $1.editedAt })   // newest edit first
         }
     }
 
@@ -41,10 +42,9 @@ struct NotesHubView: View {
                     Text("No notes yet. Tap + to write one.").font(cf(14)).foregroundStyle(Theme.textTertiary).padding(.top, 50)
                 }
             }
-            .frame(maxWidth: 780, alignment: .leading)   // a comfortable reading column
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20).padding(.bottom, 24).padding(.top, 34)
         }
-        .frame(maxWidth: .infinity)
         .background(Theme.appBackground)
     }
 
@@ -67,6 +67,7 @@ private struct NoteRow: View {
     @EnvironmentObject var state: AppState
     @AppStorage("ut.uiScale") private var uiScale = 1.0
     @State private var text = ""
+    @State private var height: CGFloat = 22
     @State private var hover = false
 
     private func cf(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s * uiScale, weight: w) }
@@ -80,7 +81,7 @@ private struct NoteRow: View {
                 Image(systemName: note.done ? "checkmark.circle.fill" : "circle")
                     .font(cf(16)).foregroundStyle(note.done ? Theme.running : Theme.textTertiary)
             }
-            .buttonStyle(.plain).padding(.top, 1)
+            .buttonStyle(.plain).padding(.top, 2)
 
             if note.done {
                 Text(note.text.isEmpty ? "(empty)" : note.text)
@@ -89,17 +90,22 @@ private struct NoteRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                TextField("Write a note…", text: $text, axis: .vertical)
-                    .textFieldStyle(.plain).font(cf(15)).foregroundStyle(Theme.textPrimary)
-                    .focused($focused, equals: note.id)
-                    .onChange(of: text) { v in state.updateNoteText(note.id, v) }
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("Write a note…").font(cf(15)).foregroundStyle(Theme.textTertiary)
+                    }
+                    NoteEditor(text: $text, height: $height, fontSize: 15 * uiScale,
+                               color: NSColor(Theme.textPrimary), isFocused: focused == note.id)
+                        .frame(height: max(22, height))
+                        .onChange(of: text) { v in state.updateNoteText(note.id, v) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             VStack(alignment: .trailing, spacing: 4) {
                 Button { state.deleteNote(note.id) } label: { Image(systemName: "xmark").font(cf(11)) }
                     .buttonStyle(.plain).foregroundStyle(Theme.textTertiary).opacity(hover ? 1 : 0)
-                Text(timeLabel(note.createdAt)).font(cf(10)).foregroundStyle(Theme.textTertiary.opacity(0.7))
-                    .fixedSize()
+                Text(timeLabel(note.editedAt)).font(cf(10)).foregroundStyle(Theme.textTertiary.opacity(0.7)).fixedSize()
             }
         }
         .padding(12)
@@ -107,5 +113,64 @@ private struct NoteRow: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border, lineWidth: 1))
         .onHover { hover = $0 }
         .onAppear { if text != note.text { text = note.text } }
+    }
+}
+
+/// An auto-growing plain-text editor backed by NSTextView — so Enter inserts a newline
+/// (true multiline) and the field grows to fit its content. SwiftUI's TextField/TextEditor
+/// don't give both on macOS.
+private struct NoteEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var height: CGFloat
+    var fontSize: CGFloat
+    var color: NSColor
+    var isFocused: Bool
+
+    func makeNSView(context: Context) -> NSTextView {
+        let tv = NSTextView()
+        tv.delegate = context.coordinator
+        tv.isRichText = false
+        tv.allowsUndo = true
+        tv.drawsBackground = false
+        tv.backgroundColor = .clear
+        tv.font = .systemFont(ofSize: fontSize)
+        tv.textColor = color
+        tv.insertionPointColor = color
+        tv.textContainerInset = .zero
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.string = text
+        return tv
+    }
+
+    func updateNSView(_ tv: NSTextView, context: Context) {
+        if tv.string != text { tv.string = text }
+        if tv.font?.pointSize != fontSize { tv.font = .systemFont(ofSize: fontSize) }
+        tv.textColor = color
+        DispatchQueue.main.async {
+            Self.recalc(tv, $height)
+            if isFocused, tv.window?.firstResponder !== tv { tv.window?.makeFirstResponder(tv) }
+        }
+    }
+
+    static func recalc(_ tv: NSTextView, _ height: Binding<CGFloat>) {
+        guard let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+        lm.ensureLayout(for: tc)
+        let h = max(20, lm.usedRect(for: tc).height)
+        if abs(height.wrappedValue - h) > 0.5 { height.wrappedValue = h }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        let parent: NoteEditor
+        init(_ p: NoteEditor) { parent = p }
+        func textDidChange(_ n: Notification) {
+            guard let tv = n.object as? NSTextView else { return }
+            parent.text = tv.string
+            DispatchQueue.main.async { NoteEditor.recalc(tv, self.parent.$height) }
+        }
     }
 }
