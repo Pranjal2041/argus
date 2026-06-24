@@ -30,19 +30,19 @@ function EyeMark() {
 }
 
 const ccCards = [
-  { name: 'vlm_gating', host: 'babel-o9-32', cls: 's-needs', pill: 'pill-needs', label: 'Needs you', line: <>Run failed — <b>CUDA OOM</b> at step 4,210. Waiting on a smaller batch.</> },
-  { name: 'dist_training', host: 'babel-t5-24', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Generating rollouts <b>6/8</b> · 9.7 tok/s, GPUs healthy.</> },
-  { name: 'robocasa', host: 'babel-t5-24', cls: 's-milestone', pill: 'pill-mile', label: 'Milestone', line: <>Student-drop + teacher-full vLLM servers <b>up</b>.</> },
-  { name: 'cua-mouse', host: 'this mac', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Probe executing — 2/7 trials, no action needed.</> },
-  { name: 'unreal_engine', host: 'babel-q9-24', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Compiling shaders · 41% · monitor at :07.</> },
-  { name: 'astronomy', host: 'this mac', cls: 's-idle', pill: 'pill-idle', label: 'Idle', line: <>Finished the figure export.</> },
+  { name: 'caption-model', host: 'gpu-node-07', cls: 's-needs', pill: 'pill-needs', label: 'Needs you', line: <>Run failed — <b>CUDA OOM</b> at step 4,210. Waiting on a smaller batch.</> },
+  { name: 'rl-finetune', host: 'gpu-node-12', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Generating rollouts <b>6/8</b> · 9.7 tok/s, GPUs healthy.</> },
+  { name: 'recsys-train', host: 'gpu-node-12', cls: 's-milestone', pill: 'pill-mile', label: 'Milestone', line: <>Eval harness + model server <b>up</b>.</> },
+  { name: 'web-agent', host: 'this mac', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Probe executing — 2/7 trials, no action needed.</> },
+  { name: 'game-sim', host: 'gpu-node-03', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Compiling shaders · 41% · monitor at :07.</> },
+  { name: 'paper-figures', host: 'this mac', cls: 's-idle', pill: 'pill-idle', label: 'Idle', line: <>Finished the figure export.</> },
 ];
 
 const meshNodes = [
   { x: 50, y: 3, c: 'var(--green)', label: 'this mac' },
-  { x: 94, y: 36, c: 'var(--blue)', label: 'babel-o9-32' },
-  { x: 78, y: 92, c: 'var(--amber)', label: 'babel-t5-24' },
-  { x: 22, y: 92, c: 'var(--violet)', label: 'pranjala-win' },
+  { x: 94, y: 36, c: 'var(--blue)', label: 'gpu-node-07' },
+  { x: 78, y: 92, c: 'var(--amber)', label: 'gpu-node-12' },
+  { x: 22, y: 92, c: 'var(--violet)', label: 'windows-pc' },
   { x: 6, y: 36, c: 'var(--orange)', label: 'phone' },
 ];
 
@@ -168,8 +168,8 @@ export default function HomePage() {
                 <div className="al-card-top">
                   <span className="al-card-dot" />
                   <span className="al-card-id">
-                    <span className="al-card-name">vlm_gating</span>
-                    <span className="al-card-host">babel-o9-32</span>
+                    <span className="al-card-name">caption-model</span>
+                    <span className="al-card-host">gpu-node-07</span>
                   </span>
                   <span className="al-card-pill pill-needs">Needs you</span>
                 </div>
@@ -177,8 +177,8 @@ export default function HomePage() {
                 <div className="al-insight"><Sparkles size={14} /><span>Out of memory on the 80&nbsp;GB card. Drop the per-device batch to 2 and it should fit.</span></div>
               </div>
               <div className="al-triage-sec" style={{ color: 'var(--ink-3)' }}>Working — 4 · Idle — 2</div>
-              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--blue)', marginTop: 0 }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>dist_training</b><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)' }}>rollouts 6/8</span></div>
-              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--blue)', marginTop: 0 }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>cua-mouse</b><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)' }}>probe 2/7</span></div>
+              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--blue)', marginTop: 0 }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>rl-finetune</b><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)' }}>rollouts 6/8</span></div>
+              <div className="al-row"><span className="al-card-dot" style={{ background: 'var(--blue)', marginTop: 0 }} /><b style={{ fontFamily: 'var(--font-display)', fontSize: 13 }}>web-agent</b><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)' }}>probe 2/7</span></div>
             </div>
           </div>
         </div>
@@ -196,13 +196,13 @@ export default function HomePage() {
             </ul>
           </div>
           <div className="al-feat-art">
-            <div className="al-art-bar"><Terminal size={13} /> vlm_gating · babel-t5-24</div>
+            <div className="al-art-bar"><Terminal size={13} /> eval-pipeline · gpu-node-12</div>
             <div className="al-art-body al-mini al-term">
-              <div><span className="c-green">●</span> On-policy distillation: the student generates, the teacher scores.</div>
+              <div><span className="c-green">●</span> Building the nightly eval pipeline: fetch, score, report.</div>
               <div className="c-dim">  5 tasks (4 done, 1 in progress)</div>
-              <div><span className="c-green">  ✔</span> RL trainer drop-mode forward + router freeze</div>
-              <div><span className="c-green">  ✔</span> Teacher multimodal logprob fix</div>
-              <div><span className="c-amber">  ◼</span> OPD config + launch + end-to-end verify</div>
+              <div><span className="c-green">  ✔</span> Dataset loader + shard caching</div>
+              <div><span className="c-green">  ✔</span> Metric aggregation across shards</div>
+              <div><span className="c-amber">  ◼</span> Wire the report + end-to-end test</div>
               <div style={{ marginTop: 8 }} className="c-cyan">✻ Working… <span className="c-dim">(esc to interrupt)</span></div>
             </div>
           </div>
@@ -221,7 +221,7 @@ export default function HomePage() {
             </ul>
           </div>
           <div className="al-feat-art">
-            <div className="al-art-bar"><LineChart size={13} /> wandb · vlm_gating / b63novw6</div>
+            <div className="al-art-bar"><LineChart size={13} /> wandb · caption-model / k9f3m2x7</div>
             <div className="al-art-body">
               <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
                 <span className="al-card-dot" style={{ background: 'var(--green)', marginTop: 0 }} />
@@ -256,13 +256,13 @@ export default function HomePage() {
             </ul>
           </div>
           <div className="al-feat-art">
-            <div className="al-art-bar"><Notebook size={13} /> train.ipynb · babel-t5-24 · Python 3.11</div>
+            <div className="al-art-bar"><Notebook size={13} /> train.ipynb · gpu-node-12 · Python 3.11</div>
             <div className="al-art-body al-mini">
               <div className="al-nb-cell">
                 <span className="al-nb-prompt">In [12]:</span>
                 <div className="al-term" style={{ flex: 1, minWidth: 0 }}>
-                  <div><span style={{ color: 'var(--violet)' }}>from</span> trainer <span style={{ color: 'var(--violet)' }}>import</span> distill</div>
-                  <div>distill.<span className="c-cyan">fit</span>(student, teacher, epochs=<span className="c-amber">4</span>)</div>
+                  <div><span style={{ color: 'var(--violet)' }}>from</span> trainer <span style={{ color: 'var(--violet)' }}>import</span> fit_model</div>
+                  <div><span className="c-cyan">fit_model</span>(model, train_ds, epochs=<span className="c-amber">4</span>)</div>
                 </div>
               </div>
               <div className="al-nb-out">Epoch 4/4 — val_acc <span className="c-green">0.91</span> · loss <span className="c-amber">0.42</span> · 1m 58s</div>
@@ -282,13 +282,47 @@ export default function HomePage() {
             </ul>
           </div>
           <div className="al-feat-art">
-            <div className="al-art-bar"><FileCode2 size={13} /> control.go · babel-t5-24</div>
+            <div className="al-art-bar"><FileCode2 size={13} /> control.go · gpu-node-12</div>
             <div className="al-art-body al-mini al-term" style={{ lineHeight: 1.7 }}>
               <div><span className="c-dim">160</span>  <span style={{ color: 'var(--violet)' }}>func</span> <span className="c-cyan">DetectState</span>(socket, name <span className="c-amber">string</span>) <span className="c-amber">string</span> {'{'}</div>
               <div><span className="c-dim">161</span>    out, err := exec.<span className="c-cyan">Command</span>(<span className="c-green">&quot;tmux&quot;</span>, ...)</div>
               <div><span className="c-dim">164</span>    <span style={{ color: 'var(--violet)' }}>if</span> screenHasInterrupt(out) {'{'}</div>
               <div><span className="c-dim">165</span>        <span style={{ color: 'var(--violet)' }}>return</span> <span className="c-green">&quot;working&quot;</span></div>
               <div><span className="c-dim">166</span>    {'}'}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* 6. Work from your phone */}
+        <div className="al-feat rev al-reveal">
+          <div className="al-feat-copy">
+            <span className="al-eyebrow">Android</span>
+            <h3>Run it all from your pocket.</h3>
+            <p>The whole command center, live terminals, and files — on your phone, over the same tailnet. Jump into a stuck run from anywhere, with a key bar for esc, tab, <span className="al-mono">^C</span>, and <span className="al-mono">^L</span>.</p>
+            <ul>
+              <li><Check size={16} /> The same peer-to-peer reach — no servers, just your tailnet.</li>
+              <li><Check size={16} /> Workflows, todos, and notes synced from your Mac.</li>
+              <li><Check size={16} /> Foreground forwarding keeps tunnels alive in your pocket.</li>
+            </ul>
+          </div>
+          <div className="al-feat-art al-art-bare">
+            <div className="al-phone">
+              <div className="al-phone-screen">
+                <div className="al-phone-hd"><EyeMark /> <b>Argus</b> <span className="al-phone-badge"><i />1 needs you</span></div>
+                <div className="al-phone-body">
+                  <div className="al-pcard s-needs">
+                    <div className="al-pcard-top"><span className="al-card-dot" /><b>caption-model</b><span className="pill pill-needs">Needs you</span></div>
+                    <div className="al-pcard-line">CUDA OOM — waiting on a smaller batch.</div>
+                  </div>
+                  <div className="al-pcard">
+                    <div className="al-pcard-top"><span className="al-card-dot" style={{ background: 'var(--blue)' }} /><b>rl-finetune</b><span className="pill pill-working">Working</span></div>
+                    <div className="al-pcard-line">Generating rollouts 6/8 · GPUs healthy.</div>
+                  </div>
+                </div>
+                <div className="al-keybar">
+                  <span className="al-key">esc</span><span className="al-key">tab</span><span className="al-key">^C</span><span className="al-key">^L</span><span className="al-key">↑</span><span className="al-key">⇧</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -328,7 +362,7 @@ export default function HomePage() {
             <div className="al-mini al-term al-cli">
               <div><span className="c-dim">$</span> ut ls</div>
               <div className="c-dim">HOST           SESSIONS  STATE</div>
-              <div>babel-t5-24    <span style={{ color: 'var(--ink)' }}>3</span>         <span className="c-green">● working</span></div>
+              <div>gpu-node-12    <span style={{ color: 'var(--ink)' }}>3</span>         <span className="c-green">● working</span></div>
               <div>this-mac       <span style={{ color: 'var(--ink)' }}>2</span>         <span className="c-amber">● idle</span></div>
             </div>
           </div>

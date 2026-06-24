@@ -282,6 +282,27 @@
 /* ut CLI block in the mesh section */
 .al-cli { margin-top: 20px; padding: 13px 15px; border-radius: 11px; background: var(--panel); border: 1px solid var(--line); line-height: 1.7; white-space: pre; overflow-x: auto; }
 
+/* phone mockup (work from your phone) */
+.al-feat-art.al-art-bare { background: transparent; border: none; box-shadow: none; min-height: 0; overflow: visible; }
+.al-phone { position: relative; width: min(258px, 82%); margin: 0 auto; border-radius: 38px; padding: 10px; background: linear-gradient(160deg, #2b2d37, #131419); border: 1px solid var(--line-2); box-shadow: 0 34px 80px -28px rgba(0, 0, 0, .85), inset 0 1px 0 rgba(255, 255, 255, .05); }
+.al-phone::before { content: ""; position: absolute; top: 19px; left: 50%; transform: translateX(-50%); width: 62px; height: 5px; border-radius: 3px; background: rgba(0, 0, 0, .55); z-index: 3; }
+.al-phone-screen { border-radius: 28px; background: var(--bg-2); overflow: hidden; border: 1px solid rgba(0, 0, 0, .4); }
+.al-phone-hd { padding: 27px 14px 11px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.al-phone-hd .al-eye { width: 20px; height: 20px; }
+.al-phone-hd b { font-family: var(--font-display); font-size: 14px; }
+.al-phone-badge { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--orange); display: flex; align-items: center; gap: 5px; }
+.al-phone-badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--orange); }
+.al-phone-body { padding: 12px; display: grid; gap: 9px; }
+.al-pcard { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 10px 11px; }
+.al-pcard.s-needs { border-color: rgba(255, 159, 64, .35); }
+.al-pcard-top { display: flex; align-items: center; gap: 7px; }
+.al-pcard-top .al-card-dot { margin-top: 0; }
+.al-pcard-top b { font-family: var(--font-display); font-size: 12.5px; }
+.al-pcard-top .pill { margin-left: auto; font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
+.al-pcard-line { margin-top: 6px; font-size: 11px; color: var(--ink-2); line-height: 1.4; }
+.al-keybar { display: flex; gap: 6px; padding: 11px 12px 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.al-key { font-family: var(--font-mono); font-size: 11px; padding: 5px 9px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line-2); color: var(--ink-2); }
+
 /* ---- the mesh / no-central-server diagram ------------------------------ */
 .al-mesh-wrap { display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
 .al-mesh { position: relative; aspect-ratio: 1; max-width: 440px; margin: 0 auto; width: 100%; }
