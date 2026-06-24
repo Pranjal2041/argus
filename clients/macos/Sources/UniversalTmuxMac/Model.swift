@@ -89,6 +89,26 @@ struct SessionHistoryItem: Codable, Identifiable, Hashable {
 
 struct SessionHistoryResponse: Codable { let sessions: [SessionHistoryItem] }
 
+/// A saved "standard workflow": spin up a session in a known place and type a known
+/// command sequence. Shown in the Workflows panel grouped by machine; click to run.
+struct Workflow: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var machine: String        // wildcard pattern — "babel-*", "this mac", an exact name
+    var folder: String         // working dir, e.g. "~/scratch" (~ expanded by the shell)
+    var commands: String       // command sequence, one per line
+    var notes: String = ""     // optional description
+    var colorHex: String = ""  // optional accent ("" = default)
+}
+
+/// A pending run whose machine pattern matched more than one online host — the user
+/// picks which one in a small dialog.
+struct WorkflowPick: Identifiable {
+    let id = UUID()
+    let workflow: Workflow
+    let machines: [Machine]
+}
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -176,6 +196,111 @@ final class AppState: ObservableObject {
             ProcessInfo.processInfo.endActivity(token)
             keepAwakeToken = nil
         }
+    }
+
+    // MARK: Standard Workflows — saved recipes (machine + folder + command sequence).
+
+    /// Drives the ⇧⌘W Workflows panel.
+    @Published var showWorkflows = false
+    /// Persisted workflow definitions (UserDefaults `ut.workflows.v1`).
+    @Published var workflows: [Workflow] = AppState.loadWorkflows() {
+        didSet { AppState.saveWorkflows(workflows) }
+    }
+    /// Set when a run's machine pattern matched >1 online host — the view shows a picker.
+    @Published var workflowPick: WorkflowPick?
+    /// A transient error to surface (no online match, create failed).
+    @Published var workflowError: String?
+
+    private static func loadWorkflows() -> [Workflow] {
+        guard let d = UserDefaults.standard.data(forKey: "ut.workflows.v1"),
+              let w = try? JSONDecoder().decode([Workflow].self, from: d) else { return [] }
+        return w
+    }
+    private static func saveWorkflows(_ w: [Workflow]) {
+        if let d = try? JSONEncoder().encode(w) { UserDefaults.standard.set(d, forKey: "ut.workflows.v1") }
+    }
+
+    func upsertWorkflow(_ wf: Workflow) {
+        if let i = workflows.firstIndex(where: { $0.id == wf.id }) { workflows[i] = wf }
+        else { workflows.append(wf) }
+    }
+    func deleteWorkflow(_ wf: Workflow) { workflows.removeAll { $0.id == wf.id } }
+
+    /// Online machines whose name matches a workflow's wildcard pattern (`*` → any run of
+    /// chars, case-insensitive, full match). The local machine also matches its hostname
+    /// and the friendly aliases "this mac" / "mac" / "local".
+    func machinesMatching(_ pattern: String) -> [Machine] {
+        let p = pattern.trimmingCharacters(in: .whitespaces)
+        guard !p.isEmpty else { return [] }
+        let rx = "^" + NSRegularExpression.escapedPattern(for: p).replacingOccurrences(of: "\\*", with: ".*") + "$"
+        guard let re = try? NSRegularExpression(pattern: rx, options: [.caseInsensitive]) else { return [] }
+        func hit(_ s: String) -> Bool { re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+        return machines.filter { m in
+            if hit(m.name) { return true }
+            if m.isLocal, hit(ProcessInfo.processInfo.hostName) || hit("this mac") || hit("mac") || hit("local") { return true }
+            return false
+        }
+    }
+
+    /// Run a workflow: resolve its machine pattern, then run on the single online match,
+    /// or ask which one if several match (or surface an error if none are reachable).
+    func runWorkflow(_ wf: Workflow) {
+        let ms = machinesMatching(wf.machine)
+        if ms.isEmpty { workflowError = "No reachable machine matches “\(wf.machine)”."; return }
+        if ms.count == 1 { runWorkflow(wf, on: ms[0]) } else { workflowPick = WorkflowPick(workflow: wf, machines: ms) }
+    }
+
+    /// Run a workflow on a specific host. The session is named after the workflow: if one
+    /// by that name already exists on this host it's just opened (no re-typing); otherwise
+    /// it's created and the command sequence is typed in.
+    func runWorkflow(_ wf: Workflow, on m: Machine) {
+        workflowPick = nil
+        showWorkflows = false
+        showOverview = false
+        let ref = SessionRef(machineID: m.id, session: wf.name)
+        if (sessionsByMachine[m.id] ?? []).contains(where: { $0.name == wf.name }) {
+            selection = ref                              // already running → just open it
+            return
+        }
+        control(m.id, action: "create", session: wf.name) { ok in   // `then` runs on main
+            guard ok else { self.workflowError = "Could not create session “\(wf.name)” on \(m.name)."; return }
+            self.selection = ref
+            self.refreshAll()
+            self.sendWorkflowCommands(wf, to: ref)
+        }
+    }
+
+    /// Type a freshly-created workflow session: `cd` into the folder, then each command
+    /// line, paced so the shell keeps up. Goes over the broker's /send (tmux send-keys),
+    /// so the session need not be attached.
+    private func sendWorkflowCommands(_ wf: Workflow, to ref: SessionRef) {
+        var lines: [String] = []
+        let folder = wf.folder.trimmingCharacters(in: .whitespaces)
+        if !folder.isEmpty { lines.append(cdCommand(folder)) }
+        lines += wf.commands.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var delay = 0.7   // let the shell come up before the first line, then pace
+        for line in lines {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.sendToSession(ref, text: line) }
+            delay += 0.25
+        }
+    }
+
+    /// A `cd` line for the folder. Leaves a leading `~` unquoted so the shell expands it;
+    /// quotes everything else so a path with spaces survives.
+    private func cdCommand(_ folder: String) -> String {
+        if folder == "~" || folder.hasPrefix("~/") { return "cd " + folder }
+        return "cd '" + folder.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Type text into a session via the broker (tmux send-keys); appends Enter by default.
+    func sendToSession(_ ref: SessionRef, text: String, enter: Bool = true) {
+        guard let m = machines.first(where: { $0.id == ref.machineID }),
+              let enc = ref.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "\(m.httpBase)/send?session=\(enc)&enter=\(enter ? "1" : "0")") else { return }
+        var req = URLRequest(url: url); req.httpMethod = "POST"
+        req.httpBody = text.data(using: .utf8); req.timeoutInterval = 6
+        URLSession.shared.dataTask(with: req).resume()
     }
 
     /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
