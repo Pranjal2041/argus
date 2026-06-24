@@ -44,6 +44,14 @@ data class TodoBoard(
     val pending: Int get() = items.count { !it.done }
 }
 
+// ---- Notes Hub -------------------------------------------------------------
+data class Note(
+    val id: String = newId(),
+    var text: String = "",
+    var done: Boolean = false,
+    val createdAt: String = nowIso()
+)
+
 /** JSON for the /userdata sync envelopes — kept byte-compatible with the Mac's Codable. */
 object UserDataJson {
     fun parseWorkflows(envelope: String?): Pair<Long, List<Workflow>>? {
@@ -105,6 +113,26 @@ object UserDataJson {
             arr.put(JSONObject().put("id", board.id).put("machine", board.machine).put("session", board.session)
                 .put("isMisc", board.isMisc).put("items", items))
         }
+        return JSONObject().put("updatedAt", updatedAt).put("data", arr).toString()
+    }
+
+    fun parseNotes(envelope: String?): Pair<Long, List<Note>>? {
+        if (envelope == null) return null
+        return try {
+            val o = JSONObject(envelope)
+            if (!o.has("updatedAt") || !o.has("data")) return null
+            val arr = o.getJSONArray("data")
+            val list = (0 until arr.length()).map { i ->
+                val n = arr.getJSONObject(i)
+                Note(n.optString("id", newId()), n.optString("text"), n.optBoolean("done"), n.optString("createdAt", nowIso()))
+            }
+            o.getLong("updatedAt") to list
+        } catch (_: Exception) { null }
+    }
+
+    fun notesEnvelope(updatedAt: Long, list: List<Note>): String {
+        val arr = JSONArray()
+        list.forEach { n -> arr.put(JSONObject().put("id", n.id).put("text", n.text).put("done", n.done).put("createdAt", n.createdAt)) }
         return JSONObject().put("updatedAt", updatedAt).put("data", arr).toString()
     }
 }

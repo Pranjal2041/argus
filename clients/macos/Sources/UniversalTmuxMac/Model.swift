@@ -138,6 +138,15 @@ struct SyncEnvelope<T: Codable>: Codable {
     var data: T
 }
 
+/// A free-form note in the Notes Hub — multiline text, optionally checkable, not tied to
+/// any machine or session. Grouped by `createdAt` into time buckets in the view.
+struct Note: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var text: String = ""
+    var done = false
+    var createdAt = Date()
+}
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -414,6 +423,48 @@ final class AppState: ObservableObject {
         showOverview = false
     }
 
+    // MARK: Notes Hub — free-form, time-grouped notes (synced like todos/workflows).
+
+    @Published var showNotes = false
+    @Published var notes: [Note] = AppState.loadNotes() {
+        // Save locally + stamp on a local edit; the periodic reconcile pushes it (no POST
+        // per keystroke). Adopting a remote copy sets applyingRemoteNotes to skip the stamp.
+        didSet {
+            AppState.saveNotes(notes)
+            if !applyingRemoteNotes { notesUpdatedAt = nowMs() }
+        }
+    }
+    private var applyingRemoteNotes = false
+    private var notesUpdatedAt: Int64 {
+        get { Int64(UserDefaults.standard.integer(forKey: "ut.notes.updatedAt")) }
+        set { UserDefaults.standard.set(Int(newValue), forKey: "ut.notes.updatedAt") }
+    }
+    private static func loadNotes() -> [Note] {
+        guard let d = UserDefaults.standard.data(forKey: "ut.notes.v1") else { return [] }
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        return (try? dec.decode([Note].self, from: d)) ?? []
+    }
+    private static func saveNotes(_ n: [Note]) {
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        if let d = try? enc.encode(n) { UserDefaults.standard.set(d, forKey: "ut.notes.v1") }
+    }
+
+    @discardableResult
+    func addNote() -> UUID {
+        let n = Note()
+        notes.append(n)
+        return n.id
+    }
+    func updateNoteText(_ id: UUID, _ text: String) {
+        guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[i].text = text
+    }
+    func toggleNote(_ id: UUID) {
+        guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[i].done.toggle()
+    }
+    func deleteNote(_ id: UUID) { notes.removeAll { $0.id == id } }
+
     // MARK: User-data sync (Workflows + Todo Maps) — this Mac IS the sync host.
 
     private var applyingRemoteWorkflows = false
@@ -444,6 +495,7 @@ final class AppState: ObservableObject {
     func syncUserData() {
         syncWorkflows()
         syncTodos()
+        syncNotes()
     }
 
     private func syncWorkflows() {
@@ -489,6 +541,29 @@ final class AppState: ObservableObject {
                     self.todosUpdatedAt = remoteTs
                 } else if localTs > remoteTs {
                     self.pushUserData("todos", self.todoBoards, localTs)
+                }
+            }
+        }.resume()
+    }
+
+    private func syncNotes() {
+        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=notes") else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+            var remoteTs: Int64 = 0; var remote: [Note]?
+            if let data, let env = try? dec.decode(SyncEnvelope<[Note]>.self, from: data) {
+                remoteTs = env.updatedAt; remote = env.data
+            }
+            DispatchQueue.main.async {
+                var localTs = self.notesUpdatedAt
+                if localTs == 0, !self.notes.isEmpty { localTs = self.nowMs(); self.notesUpdatedAt = localTs }
+                if remoteTs > localTs, let remote {
+                    self.applyingRemoteNotes = true
+                    self.notes = remote
+                    self.applyingRemoteNotes = false
+                    self.notesUpdatedAt = remoteTs
+                } else if localTs > remoteTs {
+                    self.pushUserData("notes", self.notes, localTs)
                 }
             }
         }.resume()

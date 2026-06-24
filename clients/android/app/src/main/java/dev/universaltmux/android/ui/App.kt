@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Close
@@ -182,6 +183,9 @@ fun App(vm: AppViewModel) {
                             IconButton(onClick = { screen = if (screen == 5) 0 else 5 }) {
                                 Icon(Icons.Filled.CheckCircle, "Todo Maps", tint = if (screen == 5) accent else cText)
                             }
+                            IconButton(onClick = { screen = if (screen == 6) 0 else 6 }) {
+                                Icon(Icons.Filled.EditNote, "Notes", tint = if (screen == 6) accent else cText)
+                            }
                             IconButton(onClick = { vm.refreshAll() }) { Icon(Icons.Filled.Refresh, "Refresh") }
                             }
                         },
@@ -200,6 +204,8 @@ fun App(vm: AppViewModel) {
                         WorkflowsScreen(vm) { screen = 0 }
                     } else if (screen == 5) {
                         TodoMapsScreen(vm) { screen = 0 }
+                    } else if (screen == 6) {
+                        NotesHubScreen(vm)
                     } else {
                         val sel = vm.selected
                         if (sel == null) {
