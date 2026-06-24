@@ -35,19 +35,24 @@ enum WandbDetector {
 
         func consider(urlString: String, label rawLabel: String?, trustContext: Bool) {
             let cleaned = trimTrailing(urlString)
-            guard let u = URL(string: cleaned), let id = runId(from: u) else { return }
+            guard let u = URL(string: cleaned) else { return }
             // Accept if the host is clearly W&B, or a captioned matcher already
             // proved the context ("View run … at: <url>" / a `wandb:` line).
             guard trustContext || isWandbHost(u) else { return }
+            // Validate the run id: recover it from any trailing text glued on with no
+            // space, reject truncations/junk, and rebuild a canonical run URL so even a
+            // mangled capture opens the right run.
+            guard let raw = rawRunId(from: u), let id = normalizedRunId(raw),
+                  let url = canonicalRunURL(from: u, id: id) else { return }
             let label = rawLabel?
                 .trimmingCharacters(in: CharacterSet(charactersIn: " \t'\"“”·•:"))
                 .nilIfEmpty ?? id
             if byId[id] == nil { order.append(id) }
             // Keep a named label once we have one; otherwise take the freshest URL.
             if let existing = byId[id], existing.label != existing.runId, label == id {
-                byId[id] = WandbRun(url: u, runId: id, label: existing.label)
+                byId[id] = WandbRun(url: url, runId: id, label: existing.label)
             } else {
-                byId[id] = WandbRun(url: u, runId: id, label: label)
+                byId[id] = WandbRun(url: url, runId: id, label: label)
             }
         }
 
@@ -72,7 +77,30 @@ enum WandbDetector {
         // (3) Bare URLs anywhere — only trusted when the host itself is W&B.
         for url in urls(in: text) { consider(urlString: url, label: nil, trustContext: false) }
 
-        return order.compactMap { byId[$0] }
+        return dropTruncations(order.compactMap { byId[$0] })
+    }
+
+    /// Re-validate an already-stored list with the current rules (recovers ids, rebuilds
+    /// canonical URLs, drops junk + truncations, dedups) — used to clean the persisted
+    /// store on load and after each merge, so historical false positives disappear without
+    /// a manual clear. Preserves each run's earliest first-seen time and its best label.
+    static func sanitize(_ runs: [WandbRun]) -> [WandbRun] {
+        var byId: [String: WandbRun] = [:]
+        var order: [String] = []
+        for r in runs {
+            guard let raw = rawRunId(from: r.url), let id = normalizedRunId(raw),
+                  let url = canonicalRunURL(from: r.url, id: id) else { continue }
+            let label = (r.label != r.runId && !r.label.isEmpty) ? r.label : id
+            if byId[id] == nil { order.append(id) }
+            if let ex = byId[id] {
+                byId[id] = WandbRun(url: url, runId: id,
+                                    label: ex.label != id ? ex.label : label,
+                                    discoveredAt: min(ex.discoveredAt, r.discoveredAt))
+            } else {
+                byId[id] = WandbRun(url: url, runId: id, label: label, discoveredAt: r.discoveredAt)
+            }
+        }
+        return dropTruncations(order.compactMap { byId[$0] })
     }
 
     // MARK: matchers
@@ -96,17 +124,64 @@ enum WandbDetector {
     private static func isWandbHost(_ u: URL) -> Bool {
         let host = (u.host ?? "").lowercased()
         if host == "wandb.ai" || host.hasSuffix(".wandb.ai") || host.contains("wandb") { return true }
-        // self-hosted with the canonical /<entity>/<project>/runs/<id> shape
+        // self-hosted with the canonical /<entity>/<project>/runs/<id> shape — `runs` must
+        // be exactly the third path segment, so a CI URL like
+        // github.com/<o>/<r>/actions/runs/<n> (runs deeper) is NOT mistaken for a W&B run.
         let segs = u.path.split(separator: "/")
-        if let ri = segs.firstIndex(of: "runs"), ri >= 2, ri + 1 < segs.count { return true }
+        if let ri = segs.firstIndex(of: "runs"), ri == 2, ri + 1 < segs.count { return true }
         return false
     }
 
-    private static func runId(from u: URL) -> String? {
+    /// The raw path segment after `/runs/` — may be mangled (glued to following text, or
+    /// truncated); `normalizedRunId` cleans and validates it.
+    private static func rawRunId(from u: URL) -> String? {
         let segs = u.path.split(separator: "/").map(String.init)
         guard let ri = segs.firstIndex(of: "runs"), ri + 1 < segs.count else { return nil }
         let id = segs[ri + 1]
         return id.isEmpty ? nil : id
+    }
+
+    /// A W&B run id is a token of `[A-Za-z0-9]` (plus `-`/`_` for custom ids). Two failure
+    /// modes show up in real terminal output: the URL gets glued to a following word with
+    /// no space ("…/runs/r9egz1t7—that"), and it gets split/truncated by a line-wrap or a
+    /// stray color code ("…/runs/5512f5" of `5512f5bf`). Cut at the first illegal character
+    /// to recover the id from the first case, then require W&B's generated-id length (8) to
+    /// reject the second. Truncations that survive (a prefix of a longer real id) are
+    /// dropped by `dropTruncations`.
+    private static func normalizedRunId(_ raw: String) -> String? {
+        var id = ""
+        for ch in raw {
+            if ch == "-" || ch == "_" || (ch.isASCII && (ch.isLetter || ch.isNumber)) { id.append(ch) }
+            else { break }
+        }
+        return id.count >= 8 ? id : nil
+    }
+
+    /// Rebuild a clean `scheme://host/<entity>/<project>/runs/<id>` URL from a (possibly
+    /// mangled) capture, dropping any junk path/query that got glued on, so the run still
+    /// opens correctly.
+    private static func canonicalRunURL(from u: URL, id: String) -> URL? {
+        let segs = u.path.split(separator: "/").map(String.init)
+        guard let ri = segs.firstIndex(of: "runs") else { return nil }
+        var comps = URLComponents()
+        comps.scheme = u.scheme
+        comps.host = u.host
+        comps.port = u.port
+        comps.path = "/" + (segs[0...ri] + [id]).joined(separator: "/")
+        return comps.url
+    }
+
+    /// Drop ids that are a strict prefix of another detected id in the SAME project — the
+    /// signature of a truncated URL ("5512f5" alongside "5512f5bf"). Real 8-char W&B ids
+    /// being prefixes of one another is vanishingly unlikely, so this only removes
+    /// truncations, never a legitimate run.
+    private static func dropTruncations(_ runs: [WandbRun]) -> [WandbRun] {
+        func project(_ r: WandbRun) -> URL { r.url.deletingLastPathComponent() }
+        return runs.filter { a in
+            !runs.contains { b in
+                b.runId != a.runId && b.runId.hasPrefix(a.runId) && project(b) == project(a)
+            }
+        }
     }
 
     private static func trimTrailing(_ s: String) -> String {

@@ -530,10 +530,13 @@ final class TerminalController: ObservableObject {
         let cutoff = Date().addingTimeInterval(-Self.wandbTTL)
         var kept: [String: [WandbRun]] = [:]
         for (key, runs) in stored {
-            let fresh = runs.filter { $0.discoveredAt >= cutoff }
+            // Re-validate with the current rules so already-stored false positives (mangled
+            // / truncated ids) disappear without the user having to clear them by hand.
+            let fresh = WandbDetector.sanitize(runs.filter { $0.discoveredAt >= cutoff })
             if !fresh.isEmpty { kept[key] = fresh }
         }
         wandbRuns = kept
+        persistWandb()   // write the cleaned store back so the migration is permanent
     }
 
     private func persistWandb() {
@@ -562,7 +565,9 @@ final class TerminalController: ObservableObject {
                 changed = true
             }
         }
-        if changed { wandbRuns[ref.id] = runs; persistWandb() }
+        // Re-validate the merged set: drops cross-scan truncations (a short id seen in one
+        // scan next to its full id in another) and is idempotent on already-clean runs.
+        if changed { wandbRuns[ref.id] = WandbDetector.sanitize(runs); persistWandb() }
     }
 
     /// Manually forget ONE detected run for a session (the user's per-run "clear").
