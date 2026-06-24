@@ -109,6 +109,28 @@ struct WorkflowPick: Identifiable {
     let machines: [Machine]
 }
 
+/// One checklist item. Keeps created/completed timestamps so the store doubles as a
+/// record you can analyze later (how many you create, how long they take, etc.).
+struct TodoItem: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var text: String
+    var done = false
+    var createdAt = Date()
+    var completedAt: Date?
+}
+
+/// A todo board ("Todo Map"), keyed by <machine, session name> — or the single Misc
+/// board. Persists independently of the session: kill it, reopen the same machine + name
+/// later, and the board is still here (matched by that key).
+struct TodoBoard: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var machine = ""        // "" together with isMisc for the Misc board
+    var session = ""
+    var isMisc = false
+    var items: [TodoItem] = []
+    var pending: Int { items.lazy.filter { !$0.done }.count }
+}
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -303,6 +325,76 @@ final class AppState: ObservableObject {
         URLSession.shared.dataTask(with: req).resume()
     }
 
+    // MARK: Todo Maps — per-session checklists that outlive the session.
+
+    /// Drives the ⇧⌘D Todo Maps panel.
+    @Published var showTodos = false
+    /// Boards keyed by <machine, session> plus one Misc board. Persisted with full item
+    /// history (created/completed timestamps), so nothing is lost for later analysis.
+    @Published var todoBoards: [TodoBoard] = AppState.loadTodoBoards() {
+        didSet { AppState.saveTodoBoards(todoBoards) }
+    }
+
+    private static func loadTodoBoards() -> [TodoBoard] {
+        guard let d = UserDefaults.standard.data(forKey: "ut.todoBoards.v1") else { return [] }
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        return (try? dec.decode([TodoBoard].self, from: d)) ?? []
+    }
+    private static func saveTodoBoards(_ b: [TodoBoard]) {
+        // ISO-8601 dates so the stored JSON is directly readable for later analysis.
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        if let d = try? enc.encode(b) { UserDefaults.standard.set(d, forKey: "ut.todoBoards.v1") }
+    }
+
+    /// Create a board for a (machine, session) if one doesn't exist yet (the session need
+    /// not be running — a board can be set up for a future session).
+    func ensureBoard(machine: String, session: String) {
+        let m = machine.trimmingCharacters(in: .whitespaces)
+        let s = session.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return }
+        if !todoBoards.contains(where: { !$0.isMisc && $0.machine == m && $0.session == s }) {
+            todoBoards.append(TodoBoard(machine: m, session: s))
+        }
+    }
+    func addTodo(_ boardID: UUID, _ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, let i = todoBoards.firstIndex(where: { $0.id == boardID }) else { return }
+        todoBoards[i].items.append(TodoItem(text: t))
+    }
+    func toggleTodo(_ boardID: UUID, _ itemID: UUID) {
+        guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }),
+              let ii = todoBoards[bi].items.firstIndex(where: { $0.id == itemID }) else { return }
+        todoBoards[bi].items[ii].done.toggle()
+        todoBoards[bi].items[ii].completedAt = todoBoards[bi].items[ii].done ? Date() : nil
+    }
+    func deleteTodo(_ boardID: UUID, _ itemID: UUID) {
+        guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }) else { return }
+        todoBoards[bi].items.removeAll { $0.id == itemID }
+    }
+    func deleteBoard(_ boardID: UUID) {
+        todoBoards.removeAll { $0.id == boardID && !$0.isMisc }   // Misc is permanent
+    }
+
+    /// The online machine + session a board points at, if it is running right now.
+    func liveMachine(for b: TodoBoard) -> Machine? {
+        guard !b.isMisc else { return nil }
+        return machines.first { m in
+            let nameOK = m.name == b.machine
+                || (m.isLocal && (b.machine.caseInsensitiveCompare("this mac") == .orderedSame
+                                  || b.machine.caseInsensitiveCompare(ProcessInfo.processInfo.hostName) == .orderedSame))
+            return nameOK && (sessionsByMachine[m.id] ?? []).contains { $0.name == b.session }
+        }
+    }
+    func isSessionLive(_ b: TodoBoard) -> Bool { liveMachine(for: b) != nil }
+
+    /// Jump to a board's session in the terminal (if it's running).
+    func openBoardSession(_ b: TodoBoard) {
+        guard let m = liveMachine(for: b) else { return }
+        selection = SessionRef(machineID: m.id, session: b.session)
+        showTodos = false
+        showOverview = false
+    }
+
     /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
     /// across devices): each refresh rebuilds this machine's membership from the `hidden`
     /// flag on /sessions, and hide/unhide POSTs to the owning broker. Keyed by SessionRef.id.
@@ -495,6 +587,7 @@ final class AppState: ObservableObject {
         selection = SessionRef(machineID: "local", session: "ut-demo")
         loadHistoryCache()
         applyKeepAwake()   // honor a persisted "keep awake" across relaunches
+        if !todoBoards.contains(where: { $0.isMisc }) { todoBoards.append(TodoBoard(isMisc: true)) }
     }
 
     func toggleSidebar() {
