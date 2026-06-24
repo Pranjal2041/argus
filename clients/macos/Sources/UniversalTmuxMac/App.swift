@@ -56,6 +56,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false } }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
@@ -525,7 +527,9 @@ struct RootView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             Group {
-                if state.showOverview {
+                if state.showTodos {
+                    TodoCenterView()
+                } else if state.showOverview {
                     CommandCenterView()
                 } else {
                     detail
