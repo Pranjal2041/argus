@@ -97,7 +97,11 @@ private struct NoteRow: View {
                     NoteEditor(text: $text, height: $height, fontSize: 15 * uiScale,
                                color: NSColor(Theme.textPrimary), isFocused: focused == note.id)
                         .frame(height: max(22, height))
-                        .onChange(of: text) { v in state.updateNoteText(note.id, v) }
+                        // Only a REAL edit (text diverged from the model) bumps editedAt.
+                        // The .onAppear sync below sets `text = note.text`, which also fires
+                        // this onChange — without the guard, just OPENING the panel re-stamped
+                        // every note's editedAt to now (jumping old notes to "Today").
+                        .onChange(of: text) { v in if v != note.text { state.updateNoteText(note.id, v) } }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
