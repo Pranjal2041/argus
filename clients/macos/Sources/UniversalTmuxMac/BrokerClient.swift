@@ -25,6 +25,7 @@ final class BrokerClient {
     private var live = false          // received at least one frame on the current socket
     private var everConnected = false // distinguishes first connect from a reconnect
     private var backoff: TimeInterval = 0.5
+    private var epoch = 0             // bumped on each start(); a stale receive/reconnect callback bails on mismatch (no double socket)
 
     var onOutput: (([UInt8]) -> Void)?
     var onPaneSize: ((_ cols: Int, _ rows: Int) -> Void)?  // authoritative pane size (op 5)
@@ -33,14 +34,26 @@ final class BrokerClient {
 
     init(url: URL) { self.url = url }
 
-    /// Point future (re)connections at a new session URL without tearing down the
-    /// current live socket — used for a seamless rename (the broker keeps the
-    /// session streaming, so the open socket stays valid; only reconnects need the
-    /// new name).
-    func updateURL(_ u: URL) { url = u }
+    /// Point (re)connections at a new session URL. On a LIVE socket this only
+    /// affects future reconnects, so a seamless rename keeps streaming (the broker
+    /// holds the session open across the rename). When NOT live — e.g. stuck
+    /// reconnecting because the session's stable id ($N) went stale after it was
+    /// re-created (resumed from history) — adopt the new URL and reconnect at once,
+    /// so it dials the new id immediately instead of waiting out the backoff.
+    func updateURL(_ u: URL) {
+        guard u != url else { return }
+        url = u
+        guard !closed, !live else { return }
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        backoff = 0.5
+        start()
+    }
 
     func start() {
         guard !closed else { return }
+        epoch &+= 1
+        let myEpoch = epoch
         let t = URLSession.shared.webSocketTask(with: url)
         // A session's scrollback snapshot can exceed URLSession's default 1 MiB
         // message cap — which fails the receive with EMSGSIZE and, since the
@@ -53,7 +66,7 @@ final class BrokerClient {
         t.resume()
         onStatus?(everConnected ? .reconnecting : .connecting)
         onConnect?() // queued by URLSession until the socket opens; re-sends geometry
-        receiveLoop()
+        receiveLoop(myEpoch)
     }
 
     func stop() {
@@ -62,9 +75,11 @@ final class BrokerClient {
         task = nil
     }
 
-    private func receiveLoop() {
+    private func receiveLoop(_ myEpoch: Int) {
         task?.receive { [weak self] result in
-            guard let self, !self.closed else { return }
+            // A reconnect (or updateURL) bumps `epoch`; a callback from a superseded
+            // socket bails so we never run two receive loops at once.
+            guard let self, !self.closed, myEpoch == self.epoch else { return }
             switch result {
             case .success(let message):
                 if !self.live {
@@ -74,21 +89,21 @@ final class BrokerClient {
                     self.onStatus?(.connected)
                 }
                 if case .data(let data) = message { self.handle(data) }
-                self.receiveLoop()
+                self.receiveLoop(myEpoch)
             case .failure:
-                guard !self.closed else { return }
+                guard !self.closed, myEpoch == self.epoch else { return }
                 self.live = false
                 self.onStatus?(.reconnecting)
-                self.scheduleReconnect()
+                self.scheduleReconnect(myEpoch)
             }
         }
     }
 
-    private func scheduleReconnect() {
+    private func scheduleReconnect(_ myEpoch: Int) {
         let delay = backoff
         backoff = min(backoff * 2, 10) // 0.5,1,2,4,8,10,10…
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.closed else { return }
+            guard let self, !self.closed, myEpoch == self.epoch else { return }
             self.start()
         }
     }

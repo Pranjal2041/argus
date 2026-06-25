@@ -11,6 +11,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     let view: TerminalView
     private let client: BrokerClient
     private let httpBase: String   // broker http(s) base, for uploading pasted images
+    private(set) var connURL: URL  // the session URL this conn (re)connects to; changes on rename or resume (new tmux id)
     private var lastPane = ""
 
     /// Forwarded live connection state (for the header status chip).
@@ -54,6 +55,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         view = TerminalView(frame: .zero)
         client = BrokerClient(url: url)
         httpBase = PaneConn.httpBase(from: url)
+        connURL = url
         super.init()
         view.terminalDelegate = self
         // Keep text selectable. With mouse reporting ON (SwiftTerm's default),
@@ -120,7 +122,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// Repoint this live connection at the renamed session's URL. The open socket
     /// is left untouched (the broker keeps streaming across the rename); only a
     /// future reconnect uses the new URL.
-    func rename(to newURL: URL) { client.updateURL(newURL) }
+    func rename(to newURL: URL) { connURL = newURL; client.updateURL(newURL) }
 
     /// Send raw input to this pane's active pane (op=input, empty pane id).
     func sendInput(_ text: String) {
@@ -807,6 +809,12 @@ final class TerminalController: ObservableObject {
         let conn: PaneConn
         if let existing = conns[ref.id] {
             conn = existing
+            // A pane is keyed by session NAME, but the URL carries the stable tmux id
+            // ($N), which changes when the session is re-created under the same name —
+            // e.g. resumed from history. The parent recomputes wsURL on every update,
+            // so adopt a changed URL here; BrokerClient then dials the new id (and, if
+            // it was stuck reconnecting on the dead old id, reconnects at once).
+            if existing.connURL != url { existing.rename(to: url) }
         } else {
             conn = PaneConn(url: url)
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
