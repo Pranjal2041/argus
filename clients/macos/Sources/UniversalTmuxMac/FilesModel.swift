@@ -13,7 +13,8 @@ private let fsSession: URLSession = {
 
 // MARK: - wire types (mirror the broker's /fs JSON)
 
-struct FileEntry: Codable, Hashable {
+struct FileEntry: Codable, Hashable, Identifiable {
+    var id: String { path }   // computed (not coded): paths are unique within a listing
     let name: String
     let path: String          // absolute, platform-native (we never join paths ourselves)
     let isDir: Bool
@@ -53,9 +54,16 @@ enum FileContent {
     case error(String)
 }
 
-/// How a markdown document is shown: just the editor, editor+preview side by side,
-/// or just the rendered preview.
+/// How a previewable document is shown: just the editor, editor+preview side by
+/// side, or just the rendered preview.
 enum PreviewMode: String { case editor, split, preview }
+
+/// Which rich preview (if any) a document supports, beyond the plain editor.
+enum DocPreview: Equatable { case none, markdown, json, csv, tsv }
+
+/// How the file tree is ordered. Directories always sort before files; this picks
+/// the key within each group.
+enum FileSort: String, CaseIterable { case name = "Name", modified = "Date Modified", size = "Size", kind = "Kind" }
 
 /// One open file in a browser tab — its content + per-file edit/zoom/preview state.
 /// A FileTab keeps a list of these (VS Code-style per-file tabs) and shows the active
@@ -75,11 +83,29 @@ final class OpenDoc: ObservableObject, Identifiable {
 
     init(path: String, name: String, content: FileContent) {
         self.path = path; self.name = name; self.content = content
+        // Data files open showing their rich preview first (the upgrade); markdown
+        // keeps opening in the editor (its long-standing default).
+        switch previewKind {
+        case .json, .csv, .tsv: previewMode = .preview
+        default: break
+        }
     }
 
     var isMarkdown: Bool {
         ["md", "markdown", "mdx", "mdown", "mkd"].contains((name as NSString).pathExtension.lowercased())
     }
+
+    /// Which rich preview this file supports (drives the editor/split/preview toggle).
+    var previewKind: DocPreview {
+        if isMarkdown { return .markdown }
+        switch (name as NSString).pathExtension.lowercased() {
+        case "json", "geojson": return .json
+        case "csv": return .csv
+        case "tsv", "tab": return .tsv
+        default: return .none
+        }
+    }
+    var previewable: Bool { previewKind != .none }
 
     func editorChanged(_ text: String) {
         draft = text
@@ -145,6 +171,38 @@ final class FileTab: ObservableObject, Identifiable {
     private func bumpTree() { treeRevision &+= 1 }
     @Published var selection: String? = nil   // the file highlighted in the tree
     @Published var sep: String = "/"
+
+    // Sort order for the tree (applied per-directory; folders always first).
+    @Published var sortBy: FileSort = .name
+    @Published var sortAsc = true
+    // A file whose "Get Info" panel is open (nil = none).
+    @Published var inspecting: FileEntry? = nil
+
+    /// Order a directory's nodes by the active sort key. Folders sort before files
+    /// in both directions; the chosen key (name/mtime/size/extension) orders within
+    /// each group, with name as the stable tie-break.
+    func sortNodes(_ nodes: [FileNode]) -> [FileNode] {
+        nodes.sorted { a, b in
+            if a.entry.isDir != b.entry.isDir { return a.entry.isDir }
+            let asc: Bool
+            switch sortBy {
+            case .name:
+                asc = a.entry.name.localizedStandardCompare(b.entry.name) == .orderedAscending
+            case .modified:
+                asc = a.entry.mtime != b.entry.mtime ? a.entry.mtime < b.entry.mtime
+                    : a.entry.name.localizedStandardCompare(b.entry.name) == .orderedAscending
+            case .size:
+                asc = a.entry.size != b.entry.size ? a.entry.size < b.entry.size
+                    : a.entry.name.localizedStandardCompare(b.entry.name) == .orderedAscending
+            case .kind:
+                let ea = (a.entry.name as NSString).pathExtension.lowercased()
+                let eb = (b.entry.name as NSString).pathExtension.lowercased()
+                asc = ea != eb ? ea < eb
+                    : a.entry.name.localizedStandardCompare(b.entry.name) == .orderedAscending
+            }
+            return sortAsc ? asc : !asc
+        }
+    }
 
     // Open files (per-file tabs). The active one shows in the content pane.
     @Published var openDocs: [OpenDoc] = []
