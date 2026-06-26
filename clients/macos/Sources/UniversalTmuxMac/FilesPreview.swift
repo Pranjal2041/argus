@@ -293,7 +293,7 @@ private struct JSONRow: View {
             }
             // key / index label
             if let k = node.key {
-                Text(verbatim: "\(k):").font(mono(CGFloat(fontSize))).foregroundStyle(Theme.accent)
+                Text(verbatim: "\(k):").font(mono(CGFloat(fontSize))).foregroundStyle(Theme.accent).textSelection(.enabled)
             } else if let i = node.index {
                 Text(verbatim: "\(i)").font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
             }
@@ -318,13 +318,13 @@ private struct JSONRow: View {
                 .font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
         case .string(let s):
             Text(verbatim: "\"\(s)\"").font(mono(CGFloat(fontSize)))
-                .foregroundStyle(Color(hex: "#9ECE6A")).lineLimit(1).truncationMode(.tail)
+                .foregroundStyle(Color(hex: "#9ECE6A")).lineLimit(1).truncationMode(.tail).textSelection(.enabled)
         case .number(let n):
-            Text(verbatim: n).font(mono(CGFloat(fontSize))).foregroundStyle(Color(hex: "#7AA2F7"))
+            Text(verbatim: n).font(mono(CGFloat(fontSize))).foregroundStyle(Color(hex: "#7AA2F7")).textSelection(.enabled)
         case .bool(let b):
-            Text(verbatim: b ? "true" : "false").font(mono(CGFloat(fontSize))).foregroundStyle(Color(hex: "#BB9AF7"))
+            Text(verbatim: b ? "true" : "false").font(mono(CGFloat(fontSize))).foregroundStyle(Color(hex: "#BB9AF7")).textSelection(.enabled)
         case .null:
-            Text(verbatim: "null").font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
+            Text(verbatim: "null").font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint).textSelection(.enabled)
         }
     }
 
@@ -508,6 +508,8 @@ struct TablePreviewView: View {
     private func cell(_ s: String, width: CGFloat) -> some View {
         Text(s).font(mono(CGFloat(fontSize) * 0.95)).foregroundStyle(Flat.text.opacity(0.9))
             .lineLimit(1).truncationMode(.tail)
+            .textSelection(.enabled)
+            .help(s.count > 24 ? s : "")   // full value on hover when the cell is truncated
             .padding(.horizontal, 8).padding(.vertical, 4)
             .frame(width: width, alignment: .leading)
             .overlay(alignment: .trailing) { Rectangle().fill(Flat.hairline.opacity(0.5)).frame(width: 1) }
