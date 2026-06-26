@@ -31,7 +31,12 @@ final class JSONParser {
     private var count = 0
     private let cap: Int
 
-    init(_ text: String, cap: Int = 200_000) { chars = Array(text); self.cap = cap }
+    init(_ text: String, cap: Int = 200_000) {
+        // Swift treats "\r\n" as ONE Character, so per-Character whitespace
+        // handling wouldn't skip a CRLF — normalize line endings to LF first.
+        let lf = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        chars = Array(lf); self.cap = cap
+    }
 
     func parse() throws -> JSONValue {
         skipWS()
@@ -366,7 +371,11 @@ enum DelimitedParser {
         var field = ""
         var row: [String] = []
         var inQuotes = false
-        let chars = Array(text)
+        // Normalize line endings first: Swift's String makes "\r\n" a SINGLE
+        // Character, so the per-Character row-break case below would never see a
+        // bare "\n" in a CRLF file (the bug that folded the whole file into one row).
+        let lf = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let chars = Array(lf)
         var i = 0
         func endField() { row.append(field); field = "" }
         func endRow() { endField(); rows.append(row); row = [] }
@@ -421,6 +430,20 @@ struct TablePreviewView: View {
         }
     }
 
+    private var totalWidth: CGFloat { max(widths.reduce(0, +), 60) }
+    private var colRange: [Int] { Array(0..<cols) }
+
+    private var headerRow: some View {
+        HStack(spacing: 0) { ForEach(colRange, id: \.self) { c in headerCell(c) } }
+            .background(Flat.sidebar)
+            .overlay(alignment: .bottom) { Rectangle().fill(Flat.hairline).frame(height: 1) }
+    }
+
+    private func rowView(_ idx: Int, _ r: [String]) -> some View {
+        HStack(spacing: 0) { ForEach(colRange, id: \.self) { c in cell(c < r.count ? r[c] : "", width: width(c)) } }
+            .background(idx % 2 == 0 ? Color.clear : Flat.sidebar.opacity(0.4))
+    }
+
     var body: some View {
         Group {
             if header.isEmpty {
@@ -434,25 +457,22 @@ struct TablePreviewView: View {
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     Divider().overlay(Flat.hairline)
-                    ScrollView([.horizontal, .vertical]) {
-                        LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                            Section {
-                                ForEach(Array(sortedRows.enumerated()), id: \.offset) { idx, r in
-                                    HStack(spacing: 0) {
-                                        ForEach(0..<cols, id: \.self) { c in
-                                            cell(c < r.count ? r[c] : "", width: width(c), header: false)
-                                        }
+                    // Horizontal scroll holds the whole grid; the header sits ABOVE the
+                    // inner vertical scroll, so it stays put while rows scroll and moves
+                    // sideways with the columns. (A 2-axis scroll + pinned section header
+                    // mispositioned the header — this is the robust spreadsheet layout.)
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            headerRow
+                            ScrollView(.vertical, showsIndicators: true) {
+                                LazyVStack(alignment: .leading, spacing: 0) {
+                                    ForEach(Array(sortedRows.enumerated()), id: \.offset) { idx, r in
+                                        rowView(idx, r)
                                     }
-                                    .background(idx % 2 == 0 ? Color.clear : Flat.sidebar.opacity(0.4))
                                 }
-                            } header: {
-                                HStack(spacing: 0) {
-                                    ForEach(0..<cols, id: \.self) { c in headerCell(c) }
-                                }
-                                .background(Flat.sidebar)
-                                .overlay(alignment: .bottom) { Rectangle().fill(Flat.hairline).frame(height: 1) }
                             }
                         }
+                        .frame(width: totalWidth, alignment: .leading)
                     }
                 }
             }
@@ -485,7 +505,7 @@ struct TablePreviewView: View {
         .overlay(alignment: .trailing) { Rectangle().fill(Flat.hairline).frame(width: 1) }
     }
 
-    private func cell(_ s: String, width: CGFloat, header: Bool) -> some View {
+    private func cell(_ s: String, width: CGFloat) -> some View {
         Text(s).font(mono(CGFloat(fontSize) * 0.95)).foregroundStyle(Flat.text.opacity(0.9))
             .lineLimit(1).truncationMode(.tail)
             .padding(.horizontal, 8).padding(.vertical, 4)
