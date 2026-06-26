@@ -134,9 +134,10 @@ private struct TabPane: View {
     /// cause of the beachball hang on large folders.
     private var visibleRows: [FlatRow] {
         _ = tab.treeRevision   // dependency: recompute when a node expands/collapses/loads
+        _ = tab.sortBy; _ = tab.sortAsc   // …and when the sort order changes
         var rows: [FlatRow] = []
         func walk(_ nodes: [FileNode], _ depth: Int) {
-            for n in nodes {
+            for n in tab.sortNodes(nodes) {
                 rows.append(FlatRow(node: n, depth: depth, isLoading: false))
                 guard n.entry.isDir, n.expanded else { continue }
                 if let kids = n.children {
@@ -165,69 +166,46 @@ private struct TabPane: View {
             if let up = tab.uploading { transferBanner("Uploading", up) }
             if let down = tab.downloading { transferBanner("Downloading", down) }
             HSplitView {
-                VStack(spacing: 0) {
-                    filterBox
-                    Divider().overlay(Flat.hairline)
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(visibleRows) { row in
-                                if row.isLoading {
-                                    loadingRow(depth: row.depth)
-                                } else {
-                                    FileRow(node: row.node, tab: tab, depth: row.depth)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
-                        // Expand/collapse must never animate a placement pass over the list —
-                        // that animated nested layout was the hang on large folders.
-                        .transaction { $0.animation = nil }
-                    }
-                }
-                .background(Flat.sidebar)
-                .frame(minWidth: 220, idealWidth: 320, maxWidth: 520)
-                .contextMenu {
-                    Button("New Folder…") { tab.creating = NewItem(parent: tab.rootPath, isDir: true) }
-                    Button("New File…") { tab.creating = NewItem(parent: tab.rootPath, isDir: false) }
-                    Button("Upload File…") { pickAndUpload(tab, into: tab.rootPath) }
-                    Button("Refresh") { tab.refreshDir(tab.rootPath) }
-                }
-
+                sidebar
                 FileContentView(tab: tab)
                     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
                     .background(Flat.bg)
             }
         }
-        // Rename
-        .alert("Rename", isPresented: Binding(get: { tab.renaming != nil }, set: { if !$0 { tab.renaming = nil } })) {
-            TextField("Name", text: $renameText)
-            Button("Rename") { if let n = tab.renaming, !renameText.isEmpty { tab.rename(n, to: renameText) }; tab.renaming = nil }
-            Button("Cancel", role: .cancel) { tab.renaming = nil }
-        }
-        .onChange(of: tab.renaming?.id) { _ in renameText = tab.renaming?.entry.name ?? "" }
-        // New folder / file
-        .alert(tab.creating?.isDir == true ? "New Folder" : "New File",
-               isPresented: Binding(get: { tab.creating != nil }, set: { if !$0 { tab.creating = nil } })) {
-            TextField("Name", text: $newName)
-            Button("Create") {
-                if let c = tab.creating, !newName.isEmpty {
-                    if c.isDir { tab.mkdir(in: c.parent, name: newName) } else { tab.createFile(in: c.parent, name: newName) }
+        // The op dialogs (rename/new/delete) + Get-Info sheet live in their own
+        // modifiers, split in two so each stays cheap to type-check.
+        .modifier(FileNameDialogs(tab: tab, renameText: $renameText, newName: $newName))
+        .modifier(FileMiscDialogs(tab: tab, search: $search))
+    }
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            filterBox
+            Divider().overlay(Flat.hairline)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(visibleRows) { row in
+                        if row.isLoading {
+                            loadingRow(depth: row.depth)
+                        } else {
+                            FileRow(node: row.node, tab: tab, depth: row.depth)
+                        }
+                    }
                 }
-                tab.creating = nil
+                .padding(.vertical, 4)
+                // Expand/collapse must never animate a placement pass over the list —
+                // that animated nested layout was the hang on large folders.
+                .transaction { $0.animation = nil }
             }
-            Button("Cancel", role: .cancel) { tab.creating = nil }
         }
-        .onChange(of: tab.creating?.id) { _ in newName = "" }
-        // Delete
-        .confirmationDialog("Delete “\(tab.deleting?.entry.name ?? "")”?",
-                            isPresented: Binding(get: { tab.deleting != nil }, set: { if !$0 { tab.deleting = nil } }),
-                            titleVisibility: .visible) {
-            Button("Delete", role: .destructive) { if let n = tab.deleting { tab.delete(n) }; tab.deleting = nil }
-            Button("Cancel", role: .cancel) { tab.deleting = nil }
-        } message: {
-            Text(tab.deleting?.entry.isDir == true ? "This folder and everything in it will be permanently deleted." : "This file will be permanently deleted.")
+        .background(Flat.sidebar)
+        .frame(minWidth: 220, idealWidth: 320, maxWidth: 520)
+        .contextMenu {
+            Button("New Folder…") { tab.creating = NewItem(parent: tab.rootPath, isDir: true) }
+            Button("New File…") { tab.creating = NewItem(parent: tab.rootPath, isDir: false) }
+            Button("Upload File…") { pickAndUpload(tab, into: tab.rootPath) }
+            Button("Refresh") { tab.refreshDir(tab.rootPath) }
         }
-        .onChange(of: tab.rootPath) { _ in search = "" }   // filter is depth-1: reset it when the folder changes
     }
 
     private var filterBox: some View {
@@ -239,7 +217,31 @@ private struct TabPane: View {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: s(11))).foregroundStyle(Flat.faint) }
                     .buttonStyle(.plain)
             }
+            sortMenu
         }.padding(.horizontal, 10).padding(.vertical, 6)
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(FileSort.allCases, id: \.self) { opt in
+                Button {
+                    // Re-picking a key flips direction; a new key defaults to the most
+                    // useful direction (name/kind A→Z, date/size large→small).
+                    if tab.sortBy == opt { tab.sortAsc.toggle() }
+                    else { tab.sortBy = opt; tab.sortAsc = (opt == .name || opt == .kind) }
+                } label: {
+                    if tab.sortBy == opt {
+                        Label(opt.rawValue, systemImage: tab.sortAsc ? "chevron.up" : "chevron.down")
+                    } else {
+                        Text(opt.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down").font(.system(size: s(11), weight: .medium)).foregroundStyle(Flat.faint)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("Sort: \(tab.sortBy.rawValue) \(tab.sortAsc ? "↑" : "↓")")
     }
 
     private func transferBanner(_ verb: String, _ t: UploadState) -> some View {
@@ -307,6 +309,58 @@ private struct TabPane: View {
     }
 }
 
+/// Rename + new-folder/file dialogs, split from the delete/info ones so each
+/// modifier body stays small enough to type-check fast.
+private struct FileNameDialogs: ViewModifier {
+    @ObservedObject var tab: FileTab
+    @Binding var renameText: String
+    @Binding var newName: String
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Rename", isPresented: Binding(get: { tab.renaming != nil }, set: { if !$0 { tab.renaming = nil } })) {
+                TextField("Name", text: $renameText)
+                Button("Rename") { if let n = tab.renaming, !renameText.isEmpty { tab.rename(n, to: renameText) }; tab.renaming = nil }
+                Button("Cancel", role: .cancel) { tab.renaming = nil }
+            }
+            .onChange(of: tab.renaming?.id) { _ in renameText = tab.renaming?.entry.name ?? "" }
+            .alert(tab.creating?.isDir == true ? "New Folder" : "New File",
+                   isPresented: Binding(get: { tab.creating != nil }, set: { if !$0 { tab.creating = nil } })) {
+                TextField("Name", text: $newName)
+                Button("Create") {
+                    if let c = tab.creating, !newName.isEmpty {
+                        if c.isDir { tab.mkdir(in: c.parent, name: newName) } else { tab.createFile(in: c.parent, name: newName) }
+                    }
+                    tab.creating = nil
+                }
+                Button("Cancel", role: .cancel) { tab.creating = nil }
+            }
+            .onChange(of: tab.creating?.id) { _ in newName = "" }
+    }
+}
+
+/// Delete confirmation + the Get-Info sheet + the folder-change filter reset.
+private struct FileMiscDialogs: ViewModifier {
+    @ObservedObject var tab: FileTab
+    @Binding var search: String
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("Delete “\(tab.deleting?.entry.name ?? "")”?",
+                                isPresented: Binding(get: { tab.deleting != nil }, set: { if !$0 { tab.deleting = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete", role: .destructive) { if let n = tab.deleting { tab.delete(n) }; tab.deleting = nil }
+                Button("Cancel", role: .cancel) { tab.deleting = nil }
+            } message: {
+                Text(tab.deleting?.entry.isDir == true ? "This folder and everything in it will be permanently deleted." : "This file will be permanently deleted.")
+            }
+            .onChange(of: tab.rootPath) { _ in search = "" }   // filter is depth-1: reset it when the folder changes
+            .sheet(item: $tab.inspecting) { entry in
+                FileInfoView(entry: entry, isLocal: tab.isLocal) { tab.inspecting = nil }
+            }
+    }
+}
+
 // MARK: - recursive tree row (with context menu + double-click navigation)
 
 private struct FileRow: View {
@@ -369,6 +423,7 @@ private struct FileRow: View {
         if tab.isLocal {
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: node.entry.path)]) }
         }
+        Button("Get Info") { tab.inspecting = node.entry }
         Button("Copy Path") { copy(node.entry.path) }
         Button("Copy Name") { copy(node.entry.name) }
         Button("Rename…") { tab.renaming = node }

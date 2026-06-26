@@ -316,23 +316,35 @@ private struct DocPane: View {
         let editor = CodeMirrorView(text: t, filename: name, path: path, fontSize: editorBaseFont * doc.zoom,
                                     editable: true, scrollToLine: doc.pendingLine,
                                     onChange: { doc.editorChanged($0) }, onSave: { tab.save() })
-        let mdSource = doc.dirty ? doc.draft : t   // live as you type
-        if doc.isMarkdown && doc.previewMode == .preview {
-            MarkdownPreviewView(markdown: mdSource, fontSize: Double(editorBaseFont * doc.zoom))
-        } else if doc.isMarkdown && doc.previewMode == .split {
+        let src = doc.dirty ? doc.draft : t   // live as you type
+        let fs = Double(editorBaseFont * doc.zoom)
+        if doc.previewable && doc.previewMode == .preview {
+            preview(src, fs)
+        } else if doc.previewable && doc.previewMode == .split {
             HSplitView {
                 editor.frame(minWidth: 240)
-                MarkdownPreviewView(markdown: mdSource, fontSize: Double(editorBaseFont * doc.zoom)).frame(minWidth: 240)
+                preview(src, fs).frame(minWidth: 240)
             }
         } else {
             editor
         }
     }
 
+    /// The rich preview for this doc's kind (markdown render, JSON tree, or table).
+    @ViewBuilder private func preview(_ src: String, _ fs: Double) -> some View {
+        switch doc.previewKind {
+        case .markdown: MarkdownPreviewView(markdown: src, fontSize: fs)
+        case .json:     JSONPreviewView(text: src, fontSize: fs)
+        case .csv:      TablePreviewView(text: src, isTSV: false, fontSize: fs)
+        case .tsv:      TablePreviewView(text: src, isTSV: true, fontSize: fs)
+        case .none:     EmptyView()
+        }
+    }
+
     @ViewBuilder private var toolbar: some View {
         if zoomable {
             HStack(spacing: 8) {
-                if doc.isMarkdown {
+                if doc.previewable {
                     ForEach([PreviewMode.editor, .split, .preview], id: \.self) { m in
                         Button { doc.previewMode = m } label: {
                             Image(systemName: mdIcon(m)).font(.system(size: 10, weight: .semibold))
