@@ -65,8 +65,14 @@ struct AgentIndicator: View {
         // update branch (dots stuck green-while-working, selection stuck highlighted).
         // A static dot when not pulsing stays cheap (no per-frame timeline).
         Group {
-            if style.pulses {
-                TimelineView(.animation) { ctx in dot(phase: Self.phase(at: ctx.date)) }
+            // Pulse only while the window is focused, and tick at ~30fps instead of the
+            // display's full refresh rate. `.animation` runs at 120Hz on ProMotion, and
+            // with many session rows on screen SwiftUI re-laid-out the WHOLE sidebar every
+            // frame (cost = rows × 120fps — the dominant CPU drain found by profiling). The
+            // breathing stays smooth (phase is wall-clock derived); a backgrounded window
+            // animates nothing.
+            if style.pulses && isKey {
+                TimelineView(.periodic(from: Date(), by: 1.0 / 30.0)) { ctx in dot(phase: Self.phase(at: ctx.date)) }
             } else {
                 dot(phase: 0)
             }
