@@ -102,24 +102,41 @@ if ! broker_running; then
 exec >>'$LOGFILE' 2>&1
 KEY="\$(cat '$UT_HOME/authkey' 2>/dev/null || true)"
 [ -n "\$KEY" ] || KEY="\${TS_AUTHKEY:-}"
+tsip() { PATH=/opt/homebrew/bin:\$PATH tailscale ip -4 2>/dev/null | head -1 || true; }
 while true; do
+  WPID=""
   if [ -n "\$KEY" ]; then
     # tailnet mode: per-node device, NODE-LOCAL identity (never NFS), one shared key.
     TS_AUTHKEY="\$KEY" '$BROKER' --tmux-socket '$socket' --session '$name' \\
       --listen ':${PORT}' --tsnet-host '$host' --tsnet-dir '$LOCAL/tsnet-$socket' &
+    BPID=\$!
   else
     # local mode: serve on loopback AND (best-effort) this host's own tailnet IP, so
     # other tailnet devices (phone, laptops) can reach it — a loopback-only bind is
     # invisible from the tailnet. Never 0.0.0.0 (LAN exposure); a failed tailnet bind
     # is logged and ignored by the broker, so this can't break local mode.
-    TSIP="\$(PATH=/opt/homebrew/bin:\$PATH tailscale ip -4 2>/dev/null | head -1 || true)"
+    TSIP="\$(tsip)"
     EXTRA=""; [ -n "\$TSIP" ] && EXTRA="--extra-listen \$TSIP:${PORT}"
     '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${PORT}' \$EXTRA &
+    BPID=\$!
+    # Tailscale often connects AFTER the broker starts (boot/login race), leaving it
+    # bound to loopback only — invisible from the tailnet, so phone↔Mac sync silently
+    # breaks until the next restart. Watch for this host's tailnet IP appearing or
+    # changing and bounce the broker so the loop relaunches it bound to the new IP.
+    ( while kill -0 "\$BPID" 2>/dev/null; do
+        sleep 20
+        NOW="\$(tsip)"
+        if [ -n "\$NOW" ] && [ "\$NOW" != "\$TSIP" ]; then
+          echo "[supervisor \$(date '+%F %T')] tailnet IP [\$TSIP]->[\$NOW], rebinding broker"
+          kill "\$BPID" 2>/dev/null; break
+        fi
+      done ) &
+    WPID=\$!
   fi
-  BPID=\$!
   echo "\$BPID" > '$PIDFILE'
-  echo "[supervisor \$(date '+%F %T')] broker pid \$BPID started"
+  echo "[supervisor \$(date '+%F %T')] broker pid \$BPID started (tsip=[\${TSIP:-}])"
   wait "\$BPID"
+  [ -n "\$WPID" ] && kill "\$WPID" 2>/dev/null
   echo "[supervisor \$(date '+%F %T')] broker exited \$?, restart in 2s"
   sleep 2
 done
