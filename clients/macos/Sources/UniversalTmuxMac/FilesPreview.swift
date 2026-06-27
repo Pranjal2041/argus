@@ -253,14 +253,13 @@ struct JSONPreviewView: View {
                     .buttonStyle(.plain).foregroundStyle(Flat.dim)
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     Divider().overlay(Flat.hairline)
-                    // Vertical-only: a horizontal axis makes the content unbounded-width,
-                    // which breaks `lineLimit(1)` truncation and lets rows grow infinitely
-                    // wide. Deeply-nested / long values truncate (full value via Copy value).
-                    ScrollView(.vertical) {
+                    // Both axes: rows size to their own content (each value is collapsed to
+                    // one capped line, so a row is finite-width — no infinite blow-up) and
+                    // the widest row sets the horizontal scroll extent.
+                    ScrollView([.vertical, .horizontal]) {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 6).padding(.horizontal, 4)
                     }
                 }
@@ -291,7 +290,7 @@ private struct JSONRow: View {
     /// `limit` chars in a SINGLE pass — so a megabyte-long, multi-line value (common
     /// in messages_*.json) never reaches Text, which would otherwise choke laying it
     /// out. The full, original value is still available via right-click → Copy value.
-    private func oneLine(_ s: String, limit: Int = 400) -> String {
+    private func oneLine(_ s: String, limit: Int = 2000) -> String {
         var out = ""
         out.reserveCapacity(limit + 1)
         var n = 0
@@ -318,11 +317,12 @@ private struct JSONRow: View {
                 Text(verbatim: "\(i)").font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
             }
             valueLabel
-            Spacer(minLength: 8)
         }
         .padding(.leading, CGFloat(node.depth) * (CGFloat(fontSize) * 0.95) + 6)
         .padding(.trailing, 10).padding(.vertical, 1.5)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Size to content (no maxWidth/Spacer — those want infinite width in a
+        // horizontal scroll); the value is already capped, so this stays finite.
+        .fixedSize(horizontal: true, vertical: false)
         .contentShape(Rectangle())
         .onTapGesture { if node.isContainer { model.toggle(node) } }
         .contextMenu { Button("Copy value") { copyValue() } }
