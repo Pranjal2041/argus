@@ -253,10 +253,14 @@ struct JSONPreviewView: View {
                     .buttonStyle(.plain).foregroundStyle(Flat.dim)
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     Divider().overlay(Flat.hairline)
-                    ScrollView([.vertical, .horizontal]) {
+                    // Vertical-only: a horizontal axis makes the content unbounded-width,
+                    // which breaks `lineLimit(1)` truncation and lets rows grow infinitely
+                    // wide. Deeply-nested / long values truncate (full value via Copy value).
+                    ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 6).padding(.horizontal, 4)
                     }
                 }
@@ -283,8 +287,24 @@ private struct JSONRow: View {
 
     private func mono(_ s: CGFloat) -> Font { .system(size: s, design: .monospaced) }
 
+    /// Collapse a string to one short visual line: newlines→spaces, and capped at
+    /// `limit` chars in a SINGLE pass — so a megabyte-long, multi-line value (common
+    /// in messages_*.json) never reaches Text, which would otherwise choke laying it
+    /// out. The full, original value is still available via right-click → Copy value.
+    private func oneLine(_ s: String, limit: Int = 400) -> String {
+        var out = ""
+        out.reserveCapacity(limit + 1)
+        var n = 0
+        for ch in s {
+            if n >= limit { out += "…"; break }
+            out.append(ch == "\n" || ch == "\r" || ch == "\t" ? " " : ch)
+            n += 1
+        }
+        return out
+    }
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
+        HStack(alignment: .center, spacing: 5) {
             if node.isContainer {
                 Image(systemName: node.expanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: CGFloat(fontSize) * 0.7, weight: .semibold)).foregroundStyle(Flat.faint).frame(width: 12)
@@ -317,7 +337,7 @@ private struct JSONRow: View {
             Text(verbatim: node.expanded ? "[" : "[ … ] \(node.childCount)")
                 .font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
         case .string(let s):
-            Text(verbatim: "\"\(s)\"").font(mono(CGFloat(fontSize)))
+            Text(verbatim: "\"\(oneLine(s))\"").font(mono(CGFloat(fontSize)))
                 .foregroundStyle(Color(hex: "#9ECE6A")).lineLimit(1).truncationMode(.tail).textSelection(.enabled)
         case .number(let n):
             Text(verbatim: n).font(mono(CGFloat(fontSize))).foregroundStyle(Color(hex: "#7AA2F7")).textSelection(.enabled)
