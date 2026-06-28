@@ -261,7 +261,11 @@ struct JSONPreviewView: View {
                     // is smaller than the viewport (the "floating in the middle" bug).
                     GeometryReader { geo in
                         ScrollView([.vertical, .horizontal]) {
-                            LazyVStack(alignment: .leading, spacing: 0) {
+                            // VStack (NOT Lazy): a LazyVStack in a 2-axis scroll reports only
+                            // the viewport width, so horizontal scroll never engages; a plain
+                            // VStack reports its widest row → the content can exceed the
+                            // viewport and scroll. minWidth/minHeight pins it top-left.
+                            VStack(alignment: .leading, spacing: 0) {
                                 ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
                             }
                             .padding(.vertical, 6).padding(.horizontal, 4)
@@ -326,9 +330,11 @@ private struct JSONRow: View {
         }
         .padding(.leading, CGFloat(node.depth) * (CGFloat(fontSize) * 0.95) + 6)
         .padding(.trailing, 10).padding(.vertical, 1.5)
-        // Size to content (no maxWidth/Spacer — those want infinite width in a
-        // horizontal scroll); the value is already capped, so this stays finite.
-        .fixedSize(horizontal: true, vertical: false)
+        // Size to content in BOTH axes (the value is already capped, so width stays
+        // finite): horizontal → rows can exceed the viewport so the tree scrolls
+        // sideways; vertical → rows stay one line tall and don't stretch to fill the
+        // min-height frame (which produced the giant vertical gaps).
+        .fixedSize()
         .contentShape(Rectangle())
         .onTapGesture { if node.isContainer { model.toggle(node) } }
         .contextMenu { Button("Copy value") { copyValue() } }
