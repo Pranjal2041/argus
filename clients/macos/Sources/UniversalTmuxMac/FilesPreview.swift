@@ -253,11 +253,24 @@ struct JSONPreviewView: View {
                     .buttonStyle(.plain).foregroundStyle(Flat.dim)
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     Divider().overlay(Flat.hairline)
-                    ScrollView([.vertical, .horizontal]) {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
+                    // Both axes: rows size to their own content (each value is collapsed to
+                    // one capped line, so a row is finite-width — no infinite blow-up) and
+                    // the widest row sets the horizontal scroll extent. The GeometryReader +
+                    // minWidth/minHeight top-leading frame pins the tree to the top-left and
+                    // fills the viewport — otherwise a 2-axis ScrollView CENTERS content that
+                    // is smaller than the viewport (the "floating in the middle" bug).
+                    GeometryReader { geo in
+                        ScrollView([.vertical, .horizontal]) {
+                            // VStack (NOT Lazy): a LazyVStack in a 2-axis scroll reports only
+                            // the viewport width, so horizontal scroll never engages; a plain
+                            // VStack reports its widest row → the content can exceed the
+                            // viewport and scroll. minWidth/minHeight pins it top-left.
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
+                            }
+                            .padding(.vertical, 6).padding(.horizontal, 4)
+                            .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                         }
-                        .padding(.vertical, 6).padding(.horizontal, 4)
                     }
                 }
             } else {
@@ -283,8 +296,24 @@ private struct JSONRow: View {
 
     private func mono(_ s: CGFloat) -> Font { .system(size: s, design: .monospaced) }
 
+    /// Collapse a string to one short visual line: newlines→spaces, and capped at
+    /// `limit` chars in a SINGLE pass — so a megabyte-long, multi-line value (common
+    /// in messages_*.json) never reaches Text, which would otherwise choke laying it
+    /// out. The full, original value is still available via right-click → Copy value.
+    private func oneLine(_ s: String, limit: Int = 2000) -> String {
+        var out = ""
+        out.reserveCapacity(limit + 1)
+        var n = 0
+        for ch in s {
+            if n >= limit { out += "…"; break }
+            out.append(ch == "\n" || ch == "\r" || ch == "\t" ? " " : ch)
+            n += 1
+        }
+        return out
+    }
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
+        HStack(alignment: .center, spacing: 5) {
             if node.isContainer {
                 Image(systemName: node.expanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: CGFloat(fontSize) * 0.7, weight: .semibold)).foregroundStyle(Flat.faint).frame(width: 12)
@@ -298,11 +327,14 @@ private struct JSONRow: View {
                 Text(verbatim: "\(i)").font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
             }
             valueLabel
-            Spacer(minLength: 8)
         }
         .padding(.leading, CGFloat(node.depth) * (CGFloat(fontSize) * 0.95) + 6)
         .padding(.trailing, 10).padding(.vertical, 1.5)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Size to content in BOTH axes (the value is already capped, so width stays
+        // finite): horizontal → rows can exceed the viewport so the tree scrolls
+        // sideways; vertical → rows stay one line tall and don't stretch to fill the
+        // min-height frame (which produced the giant vertical gaps).
+        .fixedSize()
         .contentShape(Rectangle())
         .onTapGesture { if node.isContainer { model.toggle(node) } }
         .contextMenu { Button("Copy value") { copyValue() } }
@@ -317,7 +349,7 @@ private struct JSONRow: View {
             Text(verbatim: node.expanded ? "[" : "[ … ] \(node.childCount)")
                 .font(mono(CGFloat(fontSize))).foregroundStyle(Flat.faint)
         case .string(let s):
-            Text(verbatim: "\"\(s)\"").font(mono(CGFloat(fontSize)))
+            Text(verbatim: "\"\(oneLine(s))\"").font(mono(CGFloat(fontSize)))
                 .foregroundStyle(Color(hex: "#9ECE6A")).lineLimit(1).truncationMode(.tail).textSelection(.enabled)
         case .number(let n):
             Text(verbatim: n).font(mono(CGFloat(fontSize))).foregroundStyle(Color(hex: "#7AA2F7")).textSelection(.enabled)
