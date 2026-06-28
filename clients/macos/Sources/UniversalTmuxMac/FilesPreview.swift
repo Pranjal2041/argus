@@ -255,12 +255,18 @@ struct JSONPreviewView: View {
                     Divider().overlay(Flat.hairline)
                     // Both axes: rows size to their own content (each value is collapsed to
                     // one capped line, so a row is finite-width — no infinite blow-up) and
-                    // the widest row sets the horizontal scroll extent.
-                    ScrollView([.vertical, .horizontal]) {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
+                    // the widest row sets the horizontal scroll extent. The GeometryReader +
+                    // minWidth/minHeight top-leading frame pins the tree to the top-left and
+                    // fills the viewport — otherwise a 2-axis ScrollView CENTERS content that
+                    // is smaller than the viewport (the "floating in the middle" bug).
+                    GeometryReader { geo in
+                        ScrollView([.vertical, .horizontal]) {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(rows) { JSONRow(node: $0.node, fontSize: fontSize, model: model) }
+                            }
+                            .padding(.vertical, 6).padding(.horizontal, 4)
+                            .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                         }
-                        .padding(.vertical, 6).padding(.horizontal, 4)
                     }
                 }
             } else {
