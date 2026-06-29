@@ -48,7 +48,11 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         state = try c.decodeIfPresent(String.self, forKey: .state) ?? "idle"
         agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? false
         hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
-        tmuxID = try c.decodeIfPresent(String.self, forKey: .tmuxID)
+        // Normalize an EMPTY id to nil: the ConPTY (Windows) backend has no stable session
+        // id and reports "id":"" — without this, `tmuxID ?? name` would pick the empty
+        // string and the client would connect to /ws?session= (nothing), so every Windows
+        // session stuck on "connecting" after a reconnect. Empty id → fall back to the name.
+        tmuxID = (try c.decodeIfPresent(String.self, forKey: .tmuxID)).flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 
