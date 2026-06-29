@@ -899,6 +899,16 @@ struct RootView: View {
             detailHeader
             if let nb = notebooks.active {
                 NotebookPaneView(tab: nb.tab)
+                    // Resolve when a notebook becomes active — covers BOTH a restored notebook
+                    // (url == nil after relaunch) and a freshly-selected one. resolveIfNeeded
+                    // no-ops if it's already loaded/in-flight.
+                    .task(id: nb.id) {
+                        if let m = state.machines.first(where: { $0.id == nb.machineID }) {
+                            notebooks.resolveIfNeeded(nb, on: m)
+                        } else if nb.tab.url == nil {
+                            nb.tab.status = "\(machineName(nb.machineID)) is offline"
+                        }
+                    }
             } else if let ref = state.selection {
                 if terminals.isWandbShown(ref), terminals.currentRun(for: ref) != nil {
                     // W&B run, in place of the terminal. The terminal PaneConn stays
@@ -1012,7 +1022,19 @@ struct RootView: View {
         let st = ref.flatMap { terminals.connState[$0.id] }
         return HStack(spacing: 8) {
             IconButton(system: "sidebar.leading", help: "Toggle Sidebar (⌃⌘S)") { state.toggleSidebar() }
-            if let ref {
+            if let nb = notebooks.active {
+                // A notebook is the active pane — show ITS identity, not the terminal's.
+                let busy = nb.tab.status != nil || nb.tab.isLoading
+                Circle().fill(busy ? Color(hex: "#E0AF68") : Theme.attached).frame(width: 7, height: 7)
+                Image(systemName: "book.closed").font(cf(12)).foregroundStyle(Theme.textSecondary)
+                Text(nb.name).font(cf(13, .semibold)).foregroundStyle(Theme.textPrimary)
+                meta("·"); meta(machineName(nb.machineID))
+                meta("·"); meta(nb.path)
+                if let stx = nb.tab.status {
+                    meta("·")
+                    Text(stx).font(cf(11, .medium)).foregroundStyle(Color(hex: "#E0AF68")).lineLimit(1)
+                }
+            } else if let ref {
                 Circle().fill(liveColor(st)).frame(width: 7, height: 7)
                 Text(ref.session)
                     .font(cf(13, .semibold))
@@ -1036,8 +1058,15 @@ struct RootView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             Spacer(minLength: 12)
-            IconButton(system: "textformat.size.smaller", help: "Decrease font (⌘-)") { terminals.adjustFont(-1) }
-            IconButton(system: "textformat.size.larger", help: "Increase font (⌘=)") { terminals.adjustFont(1) }
+            if let nb = notebooks.active {
+                IconButton(system: "arrow.clockwise", help: "Reload notebook") {
+                    if let m = state.machines.first(where: { $0.id == nb.machineID }) { notebooks.reload(nb, on: m) }
+                }
+                IconButton(system: "safari", help: "Open in browser") { nb.tab.openInSystemBrowser() }
+            } else {
+                IconButton(system: "textformat.size.smaller", help: "Decrease font (⌘-)") { terminals.adjustFont(-1) }
+                IconButton(system: "textformat.size.larger", help: "Increase font (⌘=)") { terminals.adjustFont(1) }
+            }
             IconButton(system: "plus", help: "New session (⌘N)") { openNew() }
         }
         .frame(height: 36)
