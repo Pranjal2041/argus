@@ -31,8 +31,8 @@ const (
 	// prompt + zoxide) injects automatically; override with the broker --shell flag.
 	defaultShell = "cmd.exe"
 	ringMax      = 128 * 1024 // bytes of recent output kept to replay as the snapshot
-	defCols      = 120
-	defRows      = 30
+	// defCols/defRows live in render.go (untagged) so the cross-platform renderer can
+	// share the same ConPTY default size.
 )
 
 // winSession is one ConPTY-backed session, owned by the Provider.
@@ -185,6 +185,29 @@ func (p *Provider) Has(name string) bool {
 	defer p.mu.Unlock()
 	_, ok := p.sessions[name]
 	return ok
+}
+
+// Capture renders a session's recent output as plain text for the command-center
+// status updater (GET /recent). It implements the broker's optional `capturer`
+// capability so the macOS client can summarize Windows sessions too — without it,
+// /recent returns "capture not supported" and Windows sessions never get a status.
+//
+// tmux gets this free from capture-pane over its rendered grid; ConPTY has only the
+// raw VT ring, which is a stream of cursor-addressed repaints (not an append log),
+// so we emulate it through a vt10x virtual terminal sized to the session and dump
+// the screen (see renderRing). `lines` is unused — the visible screen is the bound.
+func (p *Provider) Capture(name string, lines int) (string, error) {
+	p.mu.Lock()
+	s := p.sessions[name]
+	p.mu.Unlock()
+	if s == nil {
+		return "", fmt.Errorf("no such session: %q", name)
+	}
+	s.mu.Lock()
+	ring := append([]byte(nil), s.ring...) // copy so rendering runs off the session lock
+	cols, rows := s.cols, s.rows
+	s.mu.Unlock()
+	return renderRing(ring, cols, rows), nil
 }
 
 func (p *Provider) Create(name, dir string) error {
