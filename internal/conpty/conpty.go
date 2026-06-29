@@ -187,6 +187,31 @@ func (p *Provider) Has(name string) bool {
 	return ok
 }
 
+// Capture renders a session's recent output as plain text for the command-center
+// status updater (GET /recent). It implements the broker's optional `capturer`
+// capability so the macOS client can summarize Windows sessions too — without it,
+// /recent returns "capture not supported" and Windows sessions never get a status.
+//
+// tmux gets this free from capture-pane over its rendered grid; ConPTY has only the
+// raw VT ring, so we render the ring ourselves (see renderRing). The conversation
+// text the summarizer needs is emitted into the ring as it scrolls, so this carries
+// real recent history, not just the currently-visible screen.
+func (p *Provider) Capture(name string, lines int) (string, error) {
+	if lines <= 0 {
+		lines = 400
+	}
+	p.mu.Lock()
+	s := p.sessions[name]
+	p.mu.Unlock()
+	if s == nil {
+		return "", fmt.Errorf("no such session: %q", name)
+	}
+	s.mu.Lock()
+	ring := append([]byte(nil), s.ring...) // copy so rendering runs off the session lock
+	s.mu.Unlock()
+	return renderRing(ring, lines), nil
+}
+
 func (p *Provider) Create(name, dir string) error {
 	p.mu.Lock()
 	if _, ok := p.sessions[name]; ok { // attach-or-create: existing is a no-op
