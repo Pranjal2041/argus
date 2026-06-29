@@ -19,6 +19,12 @@ final class DashboardTab: ObservableObject, Identifiable {
     @Published var canGoForward = false
     @Published var isLoading = false
     @Published var status: String?     // "forwarding…", an error, etc.
+    // A page can finish loading (didFinish) long before its SPA actually paints — a cold
+    // JupyterLab over a slow forward shows a blank webview for 20–45s after load. When
+    // `readinessJS` is set, WebTabView polls it after load and keeps `contentReady` false
+    // (so the pane shows a spinner, not a blank) until the page reports real content.
+    @Published var contentReady = true
+    var readinessJS: String?
     var forwardKey: String?            // "brokerHost:remotePort" if backed by a forward
     weak var webView: WKWebView?       // set by WebTabView; drives the chrome buttons
 

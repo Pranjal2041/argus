@@ -36,6 +36,8 @@ struct WebTabView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let tab: DashboardTab
         var lastLoaded: URL?
+        var retries = 0
+        private let maxRetries = 3
         init(tab: DashboardTab) { self.tab = tab }
 
         private func sync(_ wv: WKWebView) {
@@ -46,16 +48,47 @@ struct WebTabView: NSViewRepresentable {
             if let t = wv.title, !t.isEmpty { tab.title = t }
         }
         func webView(_ wv: WKWebView, didStartProvisionalNavigation n: WKNavigation!) {
-            tab.isLoading = true; tab.status = nil; sync(wv)
+            tab.isLoading = true; tab.status = nil
+            if tab.readinessJS != nil { tab.contentReady = false }
+            sync(wv)
         }
         func webView(_ wv: WKWebView, didCommit n: WKNavigation!) { sync(wv) }
-        func webView(_ wv: WKWebView, didFinish n: WKNavigation!) { tab.isLoading = false; sync(wv) }
-        func webView(_ wv: WKWebView, didFail n: WKNavigation!, withError e: Error) {
-            tab.isLoading = false; tab.status = e.localizedDescription; sync(wv)
+        func webView(_ wv: WKWebView, didFinish n: WKNavigation!) {
+            tab.isLoading = false; retries = 0; sync(wv)
+            // The page loaded, but its SPA may still be painting. If a readiness check is
+            // set (notebooks), poll it so the pane keeps a spinner until real content appears
+            // rather than flashing a blank webview on cold/slow hosts.
+            guard let js = tab.readinessJS else { tab.contentReady = true; return }
+            pollReady(wv, js, attempt: 0)
         }
-        func webView(_ wv: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError e: Error) {
+        private func pollReady(_ wv: WKWebView, _ js: String, attempt: Int) {
+            wv.evaluateJavaScript(js) { [weak self] r, _ in
+                guard let self else { return }
+                if (r as? Bool) == true { self.tab.contentReady = true; return }
+                if attempt < 75 {   // ~75s budget for a very cold notebook to paint
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.pollReady(wv, js, attempt: attempt + 1) }
+                } else {
+                    self.tab.contentReady = true   // stop spinning; show whatever rendered
+                }
+            }
+        }
+        func webView(_ wv: WKWebView, didFail n: WKNavigation!, withError e: Error) { handleFailure(wv, e) }
+        func webView(_ wv: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError e: Error) { handleFailure(wv, e) }
+
+        // A freshly-resolved endpoint (a port-forward whose tunnel just came up) can be
+        // momentarily unreachable on the very first request; WKWebView does NOT auto-retry,
+        // so without this a transient failure leaves a permanent blank. Retry a few times
+        // before surfacing the error.
+        private func handleFailure(_ wv: WKWebView, _ e: Error) {
             tab.isLoading = false
-            if (e as NSError).code != NSURLErrorCancelled { tab.status = e.localizedDescription }
+            if (e as NSError).code == NSURLErrorCancelled { sync(wv); return }  // superseded navigation
+            if retries < maxRetries, let u = lastLoaded ?? tab.url {
+                retries += 1
+                tab.status = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak wv] in wv?.load(URLRequest(url: u)) }
+            } else {
+                tab.status = e.localizedDescription
+            }
             sync(wv)
         }
         // Web content process jettisoned (memory pressure / crash) — the surface goes
