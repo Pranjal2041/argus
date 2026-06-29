@@ -1,94 +1,111 @@
 // This file is deliberately NOT build-constrained to windows (unlike the rest of
-// package conpty): renderRing is pure byte-processing with no OS dependency, so
-// keeping it here makes it unit-testable on any platform (see render_test.go).
+// package conpty): it is pure, cross-platform Go (vt10x is portable), so keeping it
+// here makes the rendering unit-testable on any platform (see render_test.go).
 package conpty
 
-import "strings"
+import (
+	"strings"
 
-// renderRing turns the raw ConPTY output ring into plain text for Capture. It:
-//   - drops faint (SGR 2) runs — Claude Code's dim autosuggestion, which the
-//     summarizer must NOT read as the user's intent (mirrors the tmux backend's
-//     dropDimAndAnsi so both platforms feed the model the same kind of text);
-//   - strips every other escape sequence (CSI cursor moves, clears, colors; OSC
-//     titles; lone ESC pairs) and other control bytes, keeping printable text;
-//   - folds each line to the text after its LAST carriage return, so in-place
-//     spinner/footer redraws (CR-overwrites) collapse to their final state;
-//   - trims trailing blank lines and returns the last `lines` lines.
+	"github.com/hinshun/vt10x"
+)
+
+// ConPTY default session size, shared with the windows backend (conpty.go).
+const (
+	defCols = 120
+	defRows = 30
+)
+
+// renderRing reconstructs a ConPTY session's CURRENT SCREEN as plain text, for the
+// command-center status updater (GET /recent). ConPTY is itself a terminal emulator
+// that repaints its viewport with cursor addressing — it is NOT an append-only log,
+// so simply stripping escapes from the raw ring loses any line that was cursor-
+// overwritten or scrolled (verified: a burst of flowing output came back empty).
+// The only correct way to read it back is to emulate it the way the client's
+// terminal does: feed the raw ring through a vt10x virtual terminal sized to the
+// session and dump the resulting grid. That deterministically yields what the
+// session actually shows (the recent conversation plus the agent's input/footer) —
+// which is exactly what the status model needs.
 //
-// Cursor-addressed redraws (ESC[A then re-emit) can't be perfectly de-duplicated
-// without a full screen emulator, but those are the bottom input box only; the
-// scrolled conversation above is emitted once and comes through clean — enough for
-// an accurate status summary.
-func renderRing(b []byte, lines int) string {
+// Faint (SGR 2) text — Claude Code's dim autosuggestion — is blanked out first (see
+// blankFaint) so the summarizer doesn't read the placeholder as the user's intent
+// (parity with the tmux backend's dropDimAndAnsi). vt10x doesn't track the dim
+// attribute, so we remove it from the byte stream rather than from the grid.
+//
+// cols/rows are the session's current ConPTY size; 0 (never sized) falls back to the
+// ConPTY defaults. Output is the visible screen (its natural bound), so the caller's
+// line budget isn't needed to cap it.
+func renderRing(b []byte, cols, rows int) string {
+	if len(b) == 0 {
+		return ""
+	}
+	if cols <= 0 || cols > 1000 {
+		cols = defCols
+	}
+	if rows <= 0 || rows > 1000 {
+		rows = defRows
+	}
+	vt := vt10x.New(vt10x.WithSize(cols, rows))
+	_, _ = vt.Write(blankFaint(b))
+	screen := vt.String()
+
+	lines := strings.Split(screen, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	end := len(lines)
+	for end > 0 && lines[end-1] == "" { // trim trailing blank rows
+		end--
+	}
+	start := 0
+	for start < end && lines[start] == "" { // trim leading blank rows
+		start++
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+// blankFaint overwrites faint (SGR 2) ASCII characters with spaces, copying every
+// escape sequence and every other byte through verbatim. Blanking (rather than
+// deleting) keeps each character's column so the virtual terminal lays out the rest
+// of the screen exactly as it would have — only the dim text becomes blanks. SGR
+// faint state is tracked across the stream: 2 turns it on; 0/22 (and a bare ESC[m)
+// turn it off; parameters within one SGR are applied left-to-right.
+func blankFaint(b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	faint := false
 	for i := 0; i < len(b); {
 		c := b[i]
-		if c == 0x1b { // ESC
-			if i+1 < len(b) && b[i+1] == '[' { // CSI: params then a final byte 0x40-0x7e
-				j := i + 2
-				for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
-					j++
-				}
-				if j < len(b) && b[j] == 'm' { // SGR - track faint across the stream
-					for _, par := range strings.Split(string(b[i+2:j]), ";") {
-						switch par {
-						case "2":
-							faint = true
-						case "0", "22", "":
-							faint = false
-						}
+		if c == 0x1b && i+1 < len(b) && b[i+1] == '[' { // CSI: copy verbatim, track faint on SGR
+			j := i + 2
+			for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
+				j++
+			}
+			if j < len(b) && b[j] == 'm' { // SGR
+				for _, par := range strings.Split(string(b[i+2:j]), ";") {
+					switch par {
+					case "2":
+						faint = true
+					case "0", "22", "":
+						faint = false
 					}
 				}
-				if j < len(b) {
-					i = j + 1
-				} else {
-					i = len(b)
-				}
-				continue
 			}
-			if i+1 < len(b) && b[i+1] == ']' { // OSC: terminated by BEL or ST (ESC\)
-				j := i + 2
-				for j < len(b) && b[j] != 0x07 && b[j] != 0x1b {
-					j++
-				}
-				if j < len(b) && b[j] == 0x1b && j+1 < len(b) && b[j+1] == '\\' {
-					j++ // also consume the backslash of ST
-				}
-				if j < len(b) {
-					i = j + 1
-				} else {
-					i = len(b)
-				}
-				continue
+			seqEnd := j + 1
+			if j >= len(b) {
+				seqEnd = len(b)
 			}
-			i += 2 // other ESC x - drop ESC and the following byte
+			out = append(out, b[i:seqEnd]...)
+			i = seqEnd
 			continue
 		}
-		if c < 0x20 && c != '\n' && c != '\r' && c != '\t' {
-			i++ // drop other control bytes
+		// Blank only printable ASCII faint chars (the autosuggestion is ASCII); leaving
+		// multibyte bytes untouched avoids miscounting a rune's display width.
+		if faint && c >= 0x20 && c < 0x7f {
+			out = append(out, ' ')
+			i++
 			continue
 		}
-		if !faint {
-			out = append(out, c)
-		}
+		out = append(out, c)
 		i++
 	}
-
-	folded := make([]string, 0, 256)
-	for _, ln := range strings.Split(string(out), "\n") {
-		if k := strings.LastIndexByte(ln, '\r'); k >= 0 {
-			ln = ln[k+1:] // keep only the last write to this line
-		}
-		folded = append(folded, strings.TrimRight(ln, " \t"))
-	}
-	end := len(folded)
-	for end > 0 && folded[end-1] == "" { // trim trailing blank lines
-		end--
-	}
-	folded = folded[:end]
-	if len(folded) > lines {
-		folded = folded[len(folded)-lines:]
-	}
-	return strings.Join(folded, "\n")
+	return out
 }

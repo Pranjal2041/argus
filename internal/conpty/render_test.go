@@ -1,69 +1,88 @@
 package conpty
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
-// TestRenderRing feeds a realistic raw ConPTY stream (OSC title spinner, SGR color,
-// a CSI erase + carriage-return overwrite, a cursor-move, a faint autosuggestion,
-// trailing blanks) and checks renderRing produces the clean plain text the
-// command-center status updater expects.
-func TestRenderRing(t *testing.T) {
-	raw := "\x1b]0;⡀ working\x07" + // OSC title (must drop)
-		"\x1b[32mUser:\x1b[0m fix the JSON preview\n" + // colored line
-		"\x1b[1mClaude:\x1b[0m switching LazyVStack to VStack.\n" +
-		"Building\x1b[K\rBuild complete!\n" + // CSI erase + CR overwrite -> "Build complete!"
-		"\x1b[2A\x1b[2K" + // cursor up + erase line (drop)
-		"⠸ Running tests (3s)\r⠼ Running tests (4s)\n" + // CR spinner -> last write
-		"\x1b[2mPress enter to send a follow-up\x1b[22m\n" + // FAINT autosuggestion (drop)
-		"> \n\n\n" // input box + trailing blanks (trim)
-
-	got := renderRing([]byte(raw), 300)
-
-	mustContain := []string{
-		"User: fix the JSON preview",
-		"Claude: switching LazyVStack to VStack.",
-		"Build complete!",
-		"Running tests (4s)",
+// TestRenderRingFlowing: plain flowing lines must all appear (the case strip-and-tail
+// dropped). 25 lines fit in a 30-row screen.
+func TestRenderRingFlowing(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 25; i++ {
+		fmt.Fprintf(&b, "ROW_%d\r\n", i)
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(got, s) {
-			t.Errorf("expected output to contain %q\n--- got ---\n%s", s, got)
+	got := renderRing([]byte(b.String()), 120, 30)
+	for i := 1; i <= 25; i++ {
+		if !strings.Contains(got, fmt.Sprintf("ROW_%d", i)) {
+			t.Errorf("missing ROW_%d\n--- got ---\n%s", i, got)
 		}
-	}
-	mustNotContain := []string{
-		"Building",     // overwritten via CR
-		"(3s)",         // earlier spinner frame
-		"follow-up",    // faint autosuggestion
-		"working",      // OSC title text
-		"\x1b",         // any leftover escape byte
-	}
-	for _, s := range mustNotContain {
-		if strings.Contains(got, s) {
-			t.Errorf("expected output NOT to contain %q\n--- got ---\n%s", s, got)
-		}
-	}
-	if strings.HasSuffix(got, "\n\n") {
-		t.Errorf("trailing blank lines were not trimmed\n--- got ---\n%q", got)
 	}
 }
 
-// TestRenderRingTail checks the line cap returns the LAST n lines.
-func TestRenderRingTail(t *testing.T) {
-	var b strings.Builder
-	for i := 0; i < 50; i++ {
-		b.WriteString("line\n")
+// TestRenderRingRepaint: a clear-screen + reposition must reflect the FINAL screen,
+// not the overwritten content — proving real emulation (not escape-stripping).
+func TestRenderRingRepaint(t *testing.T) {
+	in := "OLD CONTENT HERE\r\n" + // drawn first
+		"\x1b[2J\x1b[H" + // clear screen + home
+		"NEW CONTENT ONLY\r\n" // repainted
+	got := renderRing([]byte(in), 120, 30)
+	if !strings.Contains(got, "NEW CONTENT ONLY") {
+		t.Errorf("expected repainted text\n--- got ---\n%s", got)
 	}
-	got := renderRing([]byte(b.String()), 10)
-	if n := strings.Count(got, "line"); n != 10 {
-		t.Errorf("expected 10 tailed lines, got %d", n)
+	if strings.Contains(got, "OLD CONTENT HERE") {
+		t.Errorf("cleared text should be gone\n--- got ---\n%s", got)
+	}
+}
+
+// TestRenderRingCursorOverwrite: writing over a cell via cursor positioning must
+// show the latest character, like a real terminal.
+func TestRenderRingCursorOverwrite(t *testing.T) {
+	in := "STATUS: starting\r" + // carriage return to column 0
+		"STATUS: done    \r\n" // overwrite the line
+	got := renderRing([]byte(in), 120, 30)
+	if !strings.Contains(got, "STATUS: done") {
+		t.Errorf("expected overwritten line\n--- got ---\n%s", got)
+	}
+	if strings.Contains(got, "starting") {
+		t.Errorf("overwritten text should be gone\n--- got ---\n%s", got)
+	}
+}
+
+// TestRenderRingFaint: faint (SGR 2) text — the dim autosuggestion — must be blanked,
+// while normal text on the same line survives.
+func TestRenderRingFaint(t *testing.T) {
+	in := "REAL_INPUT \x1b[2mSUGGESTION_PLACEHOLDER\x1b[22m more\r\n"
+	got := renderRing([]byte(in), 120, 30)
+	if !strings.Contains(got, "REAL_INPUT") {
+		t.Errorf("normal text should survive\n--- got ---\n%s", got)
+	}
+	if strings.Contains(got, "SUGGESTION_PLACEHOLDER") {
+		t.Errorf("faint autosuggestion should be blanked\n--- got ---\n%s", got)
+	}
+}
+
+// TestRenderRingTrims: leading/trailing blank rows are trimmed.
+func TestRenderRingTrims(t *testing.T) {
+	in := "\r\n\r\n\r\nactual content\r\n\r\n"
+	got := renderRing([]byte(in), 120, 30)
+	if got != "actual content" {
+		t.Errorf("expected trimmed to %q, got %q", "actual content", got)
 	}
 }
 
 // TestRenderRingEmpty: empty ring -> empty string, no panic.
 func TestRenderRingEmpty(t *testing.T) {
-	if got := renderRing(nil, 100); got != "" {
+	if got := renderRing(nil, 120, 30); got != "" {
 		t.Errorf("expected empty string for nil ring, got %q", got)
+	}
+}
+
+// TestRenderRingDefaultsSize: a zero size must fall back to defaults, not panic.
+func TestRenderRingDefaultsSize(t *testing.T) {
+	got := renderRing([]byte("hello\r\n"), 0, 0)
+	if !strings.Contains(got, "hello") {
+		t.Errorf("expected 'hello' with default size, got %q", got)
 	}
 }
