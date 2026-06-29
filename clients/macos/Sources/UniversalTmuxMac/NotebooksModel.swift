@@ -85,7 +85,7 @@ final class NotebooksModel: ObservableObject {
         guard let u = URL(string: machine.httpBase + "/jupyter") else {
             nb.tab.status = "bad broker URL for \(machine.name)"; return
         }
-        var req = URLRequest(url: u); req.timeoutInterval = 130   // cold start on a loaded SLURM node ~60–90s
+        var req = URLRequest(url: u); req.timeoutInterval = 200   // must outlast the broker's 180s readiness wait so its result wins
         let info: NBJupyterResp
         do {
             let (d, resp) = try await URLSession.shared.data(for: req)

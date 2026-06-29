@@ -94,6 +94,15 @@ func (m *Manager) Ensure() (*Info, error) {
 		"--port=" + strconv.Itoa(port),
 		"--ServerApp.allow_origin=*",   // happy behind the localhost tunnel
 		"--ServerApp.open_browser=False",
+		// Cluster GPU nodes have slow or blocked internet. JupyterLab's DEFAULT extension
+		// manager ('pypi') and its update/news checks phone home to pypi.org DURING server
+		// startup — on a node whose path to pypi.org is slow this hangs 40s+ (measured on
+		// babel), and when it pushes total startup past the readiness timeout the launch
+		// "fails" even though Jupyter would have come up. We never install extensions from
+		// the UI, so disable both: cold start becomes fast and network-INDEPENDENT
+		// (measured ~90s -> ~6s on a babel node). Notebooks/kernels are unaffected.
+		"--LabApp.extension_manager=readonly",
+		"--LabApp.check_for_updates_class=jupyterlab.handlers.announcements.NeverCheckForUpdate",
 	}
 	// Root at "/" so a notebook in ANY folder the user picks is openable as
 	// /notebooks/<abs-path>. The single-document view exposes no file browser, and
@@ -110,10 +119,14 @@ func (m *Manager) Ensure() (*Info, error) {
 	}
 
 	info := &Info{Port: port, Token: token}
-	// Cold-start on a loaded SLURM node over NFS conda can take a while (~45–60s).
-	if err := waitReady(info, 120*time.Second); err != nil {
+	// Cold start on a loaded SLURM node = NFS conda import (~20–40s) + extension load;
+	// with the network startup calls above disabled it's well under a minute, but keep
+	// generous headroom so a heavily-loaded node never spuriously times out (waitReady
+	// returns the instant the server answers, so headroom is free).
+	if err := waitReady(info, 180*time.Second); err != nil {
 		_ = cmd.Process.Kill()
 		killProcessGroup(cmd.Process.Pid) // the `jupyter` launcher spawns jupyter-lab; reap the whole group
+		_ = cmd.Wait()                     // reap the killed child so a failed launch leaves no <defunct> jupyter-lab
 		return nil, fmt.Errorf("jupyter did not become ready (see %s): %w", m.logPath, err)
 	}
 	m.writeState(&state{Port: port, Token: token, PID: cmd.Process.Pid})
