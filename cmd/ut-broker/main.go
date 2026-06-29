@@ -51,12 +51,19 @@ func main() {
 	extraListen := flag.String("extra-listen", "", "additional best-effort host:port to ALSO serve the same mux on (e.g. this host's tailnet IP, so remote tailnet clients can reach a loopback-bound broker). A bind failure here is logged and ignored — it never stops the primary --listen.")
 	flag.Parse()
 
-	// Display name the client shows for this broker's device.
+	// Display name the client shows for this broker's device, plus the OS hostname.
+	// The hostname is what /history records as a session's `node`; reporting it here
+	// (alongside the possibly-different display name from --name) lets a client map a
+	// history row back to this machine even when --name != hostname (e.g. Windows
+	// runs with --name=pranjala-win but Hostname()=DESKTOP-EFJI6J4). Same "local"
+	// fallback as histNodeName so the two always agree.
+	hostName, _ := os.Hostname()
+	if hostName == "" {
+		hostName = "local"
+	}
 	displayName := *name
 	if displayName == "" {
-		if h, err := os.Hostname(); err == nil {
-			displayName = h
-		}
+		displayName = hostName
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -91,6 +98,7 @@ func main() {
 			"service": "universal-tmux-broker",
 			"proto":   1,
 			"name":    displayName,
+			"host":    hostName, // os.Hostname(): equals /history's `node`, so a client can map a history row to this machine even when name (--name) differs
 			"socket":  *tmuxSock,
 			"os":      runtime.GOOS, // lets the phone pick the Mac broker as the sync host
 		})

@@ -5,6 +5,8 @@ import SwiftUI
 struct Machine: Identifiable, Hashable {
     let id: String
     var name: String
+    var host: String = ""  // broker's OS hostname from /whoami; equals /history's `node`, so a
+                           // history row maps to this machine even when name (--name) differs
     var isLocal: Bool
     var httpBase: String // e.g. http://127.0.0.1:8722
     var wsBase: String   // e.g. ws://127.0.0.1:8722
@@ -930,6 +932,10 @@ final class AppState: ObservableObject {
     /// the broker keeps the original case. Returns nil when that machine is offline.
     func machineForNode(_ node: String) -> Machine? {
         machines.first { $0.name == node }
+            // /history records `node` as the broker's OS hostname, which can differ from the
+            // display name (--name) — e.g. Windows: name=pranjala-win, host=DESKTOP-EFJI6J4.
+            // Match the hostname reported by /whoami so those history rows stay restorable.
+            ?? machines.first { !$0.host.isEmpty && $0.host.caseInsensitiveCompare(node) == .orderedSame }
             ?? machines.first { $0.isLocal && node.caseInsensitiveCompare(ProcessInfo.processInfo.hostName) == .orderedSame }
     }
 
@@ -1191,7 +1197,7 @@ func discoverMachines() -> [Machine] {
         // the Tailscale app) serves plain http/ws. Hardcoding https made those
         // brokers discoverable but their /sessions + /ws unreachable.
         let ws = probe.scheme == "https" ? "wss" : "ws"
-        let m = Machine(id: dns, name: probe.name, isLocal: false,
+        let m = Machine(id: dns, name: probe.name, host: probe.host, isLocal: false,
                         httpBase: "\(probe.scheme)://\(dns):8722", wsBase: "\(ws)://\(dns):8722")
         lock.lock(); found.append(m); lock.unlock()
     }
@@ -1203,26 +1209,28 @@ func discoverMachines() -> [Machine] {
 /// display name iff `:8722/whoami` returns our marker — so an unrelated service on
 /// that port is never treated as a broker. Tries HTTPS (tsnet brokers serve a real
 /// `*.ts.net` cert) then plain HTTP (a broker bound to a host's own tailnet IP).
-private func probeBroker(dns: String) -> (name: String, scheme: String)? {
+private func probeBroker(dns: String) -> (name: String, host: String, scheme: String)? {
     for scheme in ["https", "http"] {
-        if let name = probeWhoami("\(scheme)://\(dns):8722/whoami") { return (name, scheme) }
+        if let r = probeWhoami("\(scheme)://\(dns):8722/whoami") { return (r.name, r.host, scheme) }
     }
     return nil
 }
 
-private func probeWhoami(_ urlString: String) -> String? {
+private func probeWhoami(_ urlString: String) -> (name: String, host: String)? {
     guard let url = URL(string: urlString) else { return nil }
     var req = URLRequest(url: url)
     req.timeoutInterval = 2.5
     let sem = DispatchSemaphore(value: 0)
-    var name: String?
+    var result: (name: String, host: String)?
     URLSession.shared.dataTask(with: req) { data, _, err in
         defer { sem.signal() }
         guard err == nil, let data,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               obj["service"] as? String == "universal-tmux-broker" else { return }
-        name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "broker"
+        let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "broker"
+        let host = (obj["host"] as? String) ?? ""  // older brokers omit it; host-match just won't fire
+        result = (name, host)
     }.resume()
     _ = sem.wait(timeout: .now() + 3)
-    return name
+    return result
 }

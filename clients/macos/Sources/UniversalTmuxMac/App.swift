@@ -361,6 +361,7 @@ struct SessionHistoryView: View {
                         ForEach(items) { item in
                             SessionHistoryRow(
                                 item: item,
+                                nodeLabel: state.machineForNode(item.node)?.name ?? item.node,
                                 canOpen: state.machineForNode(item.node) != nil,
                                 onOpen: { state.openHistoryItem(item) })
                         }
@@ -376,6 +377,7 @@ struct SessionHistoryView: View {
 
 private struct SessionHistoryRow: View {
     let item: SessionHistoryItem
+    var nodeLabel: String = ""   // friendly machine name when the node resolves, else the raw node
     var canOpen: Bool = false
     var onOpen: () -> Void = {}
     @State private var hover = false
@@ -389,7 +391,7 @@ private struct SessionHistoryRow: View {
                     Text("agent").font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.textTertiary)
                         .padding(.horizontal, 4).padding(.vertical, 1).background(Capsule().fill(Theme.surface))
                 }
-                Text(item.node).font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                Text(nodeLabel.isEmpty ? item.node : nodeLabel).font(.system(size: 11)).foregroundStyle(Theme.textSecondary).lineLimit(1)
                 Spacer()
                 if canOpen {
                     Image(systemName: item.alive ? "arrow.up.forward.app" : "play.circle")
