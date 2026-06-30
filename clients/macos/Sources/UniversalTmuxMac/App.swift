@@ -1136,13 +1136,13 @@ struct RootView: View {
 
     private var newSessionSheet: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(newIsNotebook ? "New notebook" : "New session")
+            Text(newIsNotebook ? "New JupyterLab" : "New session")
                 .font(cf(18, .semibold))
                 .foregroundStyle(Theme.textPrimary)
 
             Picker("", selection: $newIsNotebook) {
                 Text("Terminal").tag(false)
-                Text("Notebook").tag(true)
+                Text("JupyterLab").tag(true)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -1166,19 +1166,19 @@ struct RootView: View {
                 .menuStyle(.borderlessButton)
             }
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Name").font(cf(13, .medium)).foregroundStyle(Theme.textSecondary)
-                TextField(newIsNotebook ? "notebook name" : "session name", text: $newName)
-                    .textFieldStyle(.plain)
-                    .font(cf(14))
-                    .foregroundStyle(Theme.textPrimary)
-                    .padding(.horizontal, 12).frame(height: 36)
-                    .background(fieldChrome)
-                    .focused($newNameFocused)
-                    .onSubmit { createSession() }
-            }
-
-            if newIsNotebook {
+            if !newIsNotebook {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Name").font(cf(13, .medium)).foregroundStyle(Theme.textSecondary)
+                    TextField("session name", text: $newName)
+                        .textFieldStyle(.plain)
+                        .font(cf(14))
+                        .foregroundStyle(Theme.textPrimary)
+                        .padding(.horizontal, 12).frame(height: 36)
+                        .background(fieldChrome)
+                        .focused($newNameFocused)
+                        .onSubmit { createSession() }
+                }
+            } else {
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Folder").font(cf(13, .medium)).foregroundStyle(Theme.textSecondary)
                     TextField("/absolute/path/to/folder", text: $newFolder)
@@ -1188,7 +1188,7 @@ struct RootView: View {
                         .padding(.horizontal, 12).frame(height: 36)
                         .background(fieldChrome)
                         .onSubmit { createSession() }
-                    Text("The .ipynb is created here on the machine; its kernel runs there.")
+                    Text("Opens JupyterLab rooted at this folder; create or open notebooks from the Lab launcher. The kernel runs on the machine.")
                         .font(cf(10.5)).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -1198,11 +1198,12 @@ struct RootView: View {
                 Button("Cancel") { state.showNew = false }
                     .keyboardShortcut(.cancelAction)
                     .controlSize(.large)
-                Button("Create") { createSession() }
+                Button(newIsNotebook ? "Open" : "Create") { createSession() }
                     .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
-                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty
-                              || (newIsNotebook && newFolder.trimmingCharacters(in: .whitespaces).isEmpty))
+                    .disabled(newIsNotebook
+                              ? newFolder.trimmingCharacters(in: .whitespaces).isEmpty
+                              : newName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .font(cf(14))
         }
@@ -1220,14 +1221,14 @@ struct RootView: View {
     }
 
     private func createSession() {
-        let name = newName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
         if newIsNotebook {
             let dir = newFolder.trimmingCharacters(in: .whitespaces)
             guard !dir.isEmpty, let m = state.machines.first(where: { $0.id == newMachine }) else { return }
             state.showNew = false
-            notebooks.newNotebook(on: m, dir: dir, name: name)
+            notebooks.openLab(on: m, dir: dir)
         } else {
+            let name = newName.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return }
             state.showNew = false
             state.createSession(on: newMachine, name: name)
         }
