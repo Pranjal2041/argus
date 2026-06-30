@@ -41,9 +41,10 @@ type state struct {
 
 // Manager owns this host's single JupyterLab server.
 type Manager struct {
-	mu        sync.Mutex
-	statePath string
-	logPath   string
+	mu          sync.Mutex
+	statePath   string
+	logPath     string
+	settingsDir string // holds an overrides.json that shortens JupyterLab autosave
 }
 
 func NewManager() *Manager {
@@ -59,9 +60,33 @@ func NewManager() *Manager {
 		base = os.TempDir()
 	}
 	return &Manager{
-		statePath: filepath.Join(base, "ut-jupyter-"+u+".json"),
-		logPath:   filepath.Join(base, "ut-jupyter-"+u+".log"),
+		statePath:   filepath.Join(base, "ut-jupyter-"+u+".json"),
+		logPath:     filepath.Join(base, "ut-jupyter-"+u+".log"),
+		settingsDir: filepath.Join(base, "ut-jupyter-settings-"+u),
 	}
+}
+
+// autosaveSeconds is how often JupyterLab autosaves a dirty document. We shorten it
+// from JupyterLab's 120s default so that quitting the app loses at most this much
+// unedited work (the webview's unsaved state can't survive the app process dying, so
+// a tighter disk autosave is the mitigation). Scoped to Argus's Lab via app_settings_dir.
+const autosaveSeconds = 30
+
+// writeLabOverrides writes an overrides.json that shortens the autosave interval and
+// returns the dir to pass as --LabApp.app_settings_dir. Best-effort: returns "" on
+// failure, so a write problem just falls back to JupyterLab's default settings.
+func (m *Manager) writeLabOverrides() string {
+	if m.settingsDir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(m.settingsDir, 0o755); err != nil {
+		return ""
+	}
+	overrides := fmt.Sprintf(`{"@jupyterlab/docmanager-extension:plugin":{"autosaveInterval":%d}}`, autosaveSeconds)
+	if err := os.WriteFile(filepath.Join(m.settingsDir, "overrides.json"), []byte(overrides), 0o644); err != nil {
+		return ""
+	}
+	return m.settingsDir
 }
 
 // Ensure returns a live JupyterLab on this host, launching one if needed (or
@@ -104,10 +129,14 @@ func (m *Manager) Ensure() (*Info, error) {
 		"--LabApp.extension_manager=readonly",
 		"--LabApp.check_for_updates_class=jupyterlab.handlers.announcements.NeverCheckForUpdate",
 	}
-	// Root at "/" so a notebook in ANY folder the user picks is openable as
-	// /notebooks/<abs-path>. The single-document view exposes no file browser, and
-	// this matches the access the terminal already has (the broker's full shell).
+	// Root at "/" so JupyterLab can be opened rooted at ANY folder the user picks
+	// (/lab/tree/<abs-path>) — matches the access the terminal already has.
 	args = append(args, "--ServerApp.root_dir=/", "--ServerApp.preferred_dir="+homeOrRoot())
+	// Shorten the autosave interval (overrides.json), scoped to Argus's Lab only, so an
+	// app quit loses at most ~autosaveSeconds of unsaved work.
+	if dir := m.writeLabOverrides(); dir != "" {
+		args = append(args, "--LabApp.app_settings_dir="+dir)
+	}
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), "JUPYTER_TOKEN="+token)
 	cmd.SysProcAttr = detachAttr() // own process group → survives broker restart
