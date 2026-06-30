@@ -10,17 +10,15 @@ struct WebTabView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(tab: tab) }
 
     func makeNSView(context: Context) -> WKWebView {
-        // Reuse a persisted webview (notebooks) so a pane switch + return does NOT reload it.
-        // Re-point the delegates at the fresh coordinator; the page itself stays intact.
+        // Reuse a persisted webview (notebooks) AS-IS so a pane switch + return does NOT
+        // reload it. Do NOT compare tab.url to wv.url here: JupyterLab rewrites its own URL
+        // (strips ?token=, changes path as you open notebooks), so any such comparison would
+        // see a "change" on every return and reload — wiping unsaved work. Loads for persist
+        // tabs are driven solely by DashboardTab.load() (initial open + explicit Reload).
         if tab.persist, let wv = tab.heldWebView {
             wv.navigationDelegate = context.coordinator
             wv.uiDelegate = context.coordinator
             tab.webView = wv
-            context.coordinator.lastLoaded = wv.url
-            if let u = tab.url, u != wv.url {   // a new target was set while detached → load it
-                context.coordinator.lastLoaded = u
-                wv.load(URLRequest(url: u))
-            }
             return wv
         }
         let cfg = WKWebViewConfiguration()
@@ -30,8 +28,10 @@ struct WebTabView: NSViewRepresentable {
         wv.uiDelegate = context.coordinator
         wv.allowsBackForwardNavigationGestures = true
         tab.webView = wv
-        if tab.persist { tab.heldWebView = wv }
-        if let u = tab.url {
+        if tab.persist {
+            tab.heldWebView = wv
+            if let u = tab.url { context.coordinator.lastLoaded = u; wv.load(URLRequest(url: u)) }
+        } else if let u = tab.url {
             context.coordinator.lastLoaded = u
             wv.load(URLRequest(url: u))
         }
@@ -39,8 +39,10 @@ struct WebTabView: NSViewRepresentable {
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
-        // (Re)load only when the tab's target URL actually changes (address bar edit
-        // or a resolved port-forward) — never on an unrelated SwiftUI invalidation.
+        // Persist tabs (notebooks) are driven ONLY by DashboardTab.load() — never reload here
+        // (an unrelated SwiftUI invalidation, or a URL the page rewrote itself, must not wipe
+        // a live notebook). Non-persist (dashboards) keep address-bar/forward reload-on-change.
+        if tab.persist { return }
         if let u = tab.url, u != context.coordinator.lastLoaded {
             context.coordinator.lastLoaded = u
             wv.load(URLRequest(url: u))

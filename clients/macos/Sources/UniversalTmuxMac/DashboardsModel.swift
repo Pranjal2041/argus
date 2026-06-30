@@ -54,6 +54,10 @@ final class DashboardTab: ObservableObject, Identifiable {
         address = str
         status = nil
         url = u
+        // Persist tabs aren't reloaded by updateNSView (so a pane switch can't wipe them), so
+        // drive the live webview directly — this is the ONLY load path for them (initial open
+        // + explicit Reload).
+        if persist { heldWebView?.load(URLRequest(url: u)) }
     }
 
     func reload()   { webView?.reload() }
