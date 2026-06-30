@@ -3,19 +3,20 @@ import SwiftUI
 
 // MARK: - one open notebook
 
-/// An open notebook: a `.ipynb` on a machine, shown in the MAIN detail pane as the
-/// host's Notebook 7 single-document view (`/notebooks/<path>`), reached over the same
-/// port-forward the Dashboards use. The kernel runs on that host (GPU node, right env),
-/// zero SSH — the terminal's value, for notebooks.
+/// An open JupyterLab: rooted at a FOLDER on a machine, shown in the MAIN detail pane as
+/// the host's full JupyterLab (`/lab/tree/<folder>`), reached over the same port-forward
+/// the Dashboards use. You create/open notebooks from the Lab launcher; the kernel runs on
+/// that host (GPU node, right env), zero SSH — the terminal's value, for notebooks.
 struct NotebookSession: Identifiable {
     let id: UUID
     let machineID: String
     var name: String
-    let path: String          // absolute path on the host
+    let path: String          // absolute FOLDER path on the host that Lab is rooted at
     let tab: DashboardTab     // holds the resolved webview URL + WKWebView + load state
 
     @MainActor init(id: UUID = UUID(), machineID: String, name: String, path: String) {
         let t = DashboardTab(title: name, host: machineID, url: nil)
+        t.persist = true       // keep the WKWebView alive across pane switches — no re-render
         self.id = id
         self.machineID = machineID
         self.name = name
@@ -75,37 +76,18 @@ final class NotebooksModel: ObservableObject {
 
     // MARK: create / open / close
 
-    /// Create `dir/name.ipynb` (empty) on the machine, then open it in the main pane.
-    func newNotebook(on machine: Machine, dir: String, name: String) {
-        let file = name.hasSuffix(".ipynb") ? name : name + ".ipynb"
-        let base = dir.isEmpty ? "/" : (dir.hasSuffix("/") ? dir : dir + "/")
-        let path = base + file
-        if let ex = notebooks.first(where: { $0.machineID == machine.id && $0.path == path }) {
+    /// Open (or focus) JupyterLab rooted at `dir` on `machine`. No file is created here —
+    /// you make or open notebooks from the Lab launcher, which opens in that folder.
+    func openLab(on machine: Machine, dir: String) {
+        let folder = dir.isEmpty ? "/" : dir
+        if let ex = notebooks.first(where: { $0.machineID == machine.id && $0.path == folder }) {
             activeID = ex.id; save(); return
         }
-        let nb = NotebookSession(machineID: machine.id, name: file, path: path)
-        nb.tab.status = "creating \(file) on \(machine.name)…"
+        let label = (folder as NSString).lastPathComponent
+        let nb = NotebookSession(machineID: machine.id, name: label.isEmpty ? "JupyterLab" : label, path: folder)
         notebooks.append(nb); activeID = nb.id; save()
         resolving.insert(nb.id)  // claim it so the pane's resolveIfNeeded doesn't double-resolve
-        let httpBase = machine.httpBase
-        Task { @MainActor in
-            if await writeEmptyNotebook(httpBase: httpBase, path: path) {
-                await resolve(nb, on: machine)
-            } else {
-                nb.tab.status = "couldn't create \(file) in \(dir) on \(machine.name)"
-            }
-            resolving.remove(nb.id)
-        }
-    }
-
-    /// Open (or focus) an existing notebook by path.
-    func openExisting(on machine: Machine, path: String) {
-        if let ex = notebooks.first(where: { $0.machineID == machine.id && $0.path == path }) {
-            activeID = ex.id; save(); return
-        }
-        let nb = NotebookSession(machineID: machine.id, name: (path as NSString).lastPathComponent, path: path)
-        notebooks.append(nb); activeID = nb.id; save()
-        resolveIfNeeded(nb, on: machine)
+        Task { @MainActor in await resolve(nb, on: machine); resolving.remove(nb.id) }
     }
 
     func select(_ id: UUID) { activeID = id; save() }
@@ -184,12 +166,14 @@ final class NotebooksModel: ObservableObject {
 
         let rel = nb.path.hasPrefix("/") ? String(nb.path.dropFirst()) : nb.path
         let enc = rel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? rel
-        // Keep the pane's spinner up until the Notebook 7 SPA actually paints (not just
+        let labPath = enc.isEmpty ? "/lab" : "/lab/tree/\(enc)"   // full JupyterLab, rooted at the folder
+        // Keep the pane's spinner up until the JupyterLab SHELL actually paints (not just
         // until the page loads): on a cold host it can be blank for 20–45s after load.
-        nb.tab.readinessJS = "(document.querySelector('.jp-Notebook')!=null)"
+        // (.jp-LabShell is the Lab app shell; .jp-Notebook never appears on the launcher.)
+        nb.tab.readinessJS = "(document.querySelector('.jp-LabShell')!=null)"
         nb.tab.contentReady = false
         nb.tab.status = nil
-        nb.tab.load("\(base)/notebooks/\(enc)?token=\(info.token)")
+        nb.tab.load("\(base)\(labPath)?token=\(info.token)")
     }
 
     /// Poll a forwarded JupyterLab's /api/status until it answers 200 — server up AND tunnel
@@ -205,20 +189,6 @@ final class NotebooksModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 600_000_000)
         }
         return false
-    }
-
-    /// Write an empty `.ipynb` at `path` (the broker creates parent dirs). Returns false
-    /// if the broker rejects the write — so the caller surfaces an error instead of
-    /// opening a notebook that would 404.
-    private func writeEmptyNotebook(httpBase: String, path: String) async -> Bool {
-        let nb = #"{"cells":[{"cell_type":"code","source":[],"metadata":{},"outputs":[],"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#
-        guard var c = URLComponents(string: httpBase + "/fs/write") else { return false }
-        c.queryItems = [.init(name: "path", value: path)]
-        guard let url = c.url else { return false }
-        var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = nb.data(using: .utf8)
-        guard let (_, resp) = try? await URLSession.shared.data(for: req),
-              ((resp as? HTTPURLResponse)?.statusCode ?? 500) < 400 else { return false }
-        return true
     }
 
     // MARK: forward agent (mirrors DashboardsModel)

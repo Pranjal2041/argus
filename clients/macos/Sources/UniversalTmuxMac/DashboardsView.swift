@@ -10,6 +10,19 @@ struct WebTabView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(tab: tab) }
 
     func makeNSView(context: Context) -> WKWebView {
+        // Reuse a persisted webview (notebooks) so a pane switch + return does NOT reload it.
+        // Re-point the delegates at the fresh coordinator; the page itself stays intact.
+        if tab.persist, let wv = tab.heldWebView {
+            wv.navigationDelegate = context.coordinator
+            wv.uiDelegate = context.coordinator
+            tab.webView = wv
+            context.coordinator.lastLoaded = wv.url
+            if let u = tab.url, u != wv.url {   // a new target was set while detached → load it
+                context.coordinator.lastLoaded = u
+                wv.load(URLRequest(url: u))
+            }
+            return wv
+        }
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()   // persistent cookies for token/login dashboards
         let wv = WKWebView(frame: .zero, configuration: cfg)
@@ -17,6 +30,7 @@ struct WebTabView: NSViewRepresentable {
         wv.uiDelegate = context.coordinator
         wv.allowsBackForwardNavigationGestures = true
         tab.webView = wv
+        if tab.persist { tab.heldWebView = wv }
         if let u = tab.url {
             context.coordinator.lastLoaded = u
             wv.load(URLRequest(url: u))

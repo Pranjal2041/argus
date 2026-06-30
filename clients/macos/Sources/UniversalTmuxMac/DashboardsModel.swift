@@ -25,6 +25,13 @@ final class DashboardTab: ObservableObject, Identifiable {
     // (so the pane shows a spinner, not a blank) until the page reports real content.
     @Published var contentReady = true
     var readinessJS: String?
+    // When `persist` is set (notebooks/JupyterLab), the WKWebView is kept ALIVE across
+    // SwiftUI re-creation via a strong `heldWebView`, and WebTabView re-attaches it instead
+    // of building a fresh one — so switching panes and coming back does NOT reload/re-render
+    // (mirrors how the terminal controller owns its NSView). Default false: dashboards/W&B
+    // get a fresh webview as before.
+    var persist = false
+    var heldWebView: WKWebView?
     var forwardKey: String?            // "brokerHost:remotePort" if backed by a forward
     weak var webView: WKWebView?       // set by WebTabView; drives the chrome buttons
 
