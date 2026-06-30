@@ -36,7 +36,7 @@
         var changeTimer = null;
         // Calls that arrive before Monaco finishes loading are buffered and applied
         // once the editor exists, so the native side never has to know the timing.
-        var pending = { content: null, font: 13, editable: false, theme: { base: "vs-dark" }, line: null, wrap: false };
+        var pending = { content: null, font: 13, editable: false, theme: { base: "vs-dark" }, line: null, wrap: true };
 
         function post(type, extra) {
           var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ut;
@@ -102,6 +102,12 @@
                 changeTimer = setTimeout(function () { post("change", { text: editor.getValue() }); }, 120);
               });
               editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () { post("save"); });
+              // ⇧⌘P opens the command palette (Monaco also binds F1, which macOS often
+              // intercepts) — gives the VS Code shortcut people expect.
+              editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, function () {
+                editor.focus();
+                editor.trigger("", "editor.action.quickCommand", null);
+              });
               post("ready");
             });
           },
