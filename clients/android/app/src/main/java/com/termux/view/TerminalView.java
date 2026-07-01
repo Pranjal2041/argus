@@ -303,6 +303,14 @@ public final class TerminalView extends View {
         return true;
     }
 
+    /** Length of the shared leading prefix of two strings — the basis for the live-composing
+     *  diff (see the InputConnection below). Package-private + pure so it can be unit tested. */
+    static int commonPrefixLen(String a, String b) {
+        int n = Math.min(a.length(), b.length()), i = 0;
+        while (i < n && a.charAt(i) == b.charAt(i)) i++;
+        return i;
+    }
+
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         // Ensure that inputType is only set if TerminalView is selected view with the keyboard and
@@ -339,13 +347,40 @@ public final class TerminalView extends View {
 
         return new BaseInputConnection(this, true) {
 
+            // The composing text already sent to the terminal. Because we keep NO_SUGGESTIONS
+            // input (so voice-typing apps still work) rather than the password variation,
+            // Gboard COMPOSES: it buffers the word and edits it via setComposingText. The stock
+            // BaseInputConnection only surfaces that on commit, so the word was invisible while
+            // typing (symptom 1) and then re-sent/autocorrected on commit (duplication, esp.
+            // numbers — symptom 2). Instead we render composing LIVE: each setComposingText
+            // sends the minimal diff (backspace the diverging tail, type the new tail) against
+            // what we've already sent, and commit/finish just finalize without re-sending.
+            private String sentComposing = "";
+
+            private void reconcile(CharSequence nextSeq) {
+                if (mEmulator == null) return;
+                String next = nextSeq == null ? "" : nextSeq.toString();
+                int common = commonPrefixLen(sentComposing, next);
+                int deletes = sentComposing.length() - common;
+                if (deletes > 0) {
+                    KeyEvent del = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL);
+                    for (int i = 0; i < deletes; i++) sendKeyEvent(del);
+                }
+                if (next.length() > common) sendTextToTerminal(next.substring(common));
+                sentComposing = next;
+            }
+
+            @Override
+            public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: setComposingText(\"" + text + "\")");
+                reconcile(text);
+                return true;
+            }
+
             @Override
             public boolean finishComposingText() {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
-                super.finishComposingText();
-
-                sendTextToTerminal(getEditable());
-                getEditable().clear();
+                sentComposing = "";   // whatever was sent stays; composing is finalized
                 return true;
             }
 
@@ -354,13 +389,8 @@ public final class TerminalView extends View {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
                     mClient.logInfo(LOG_TAG, "IME: commitText(\"" + text + "\", " + newCursorPosition + ")");
                 }
-                super.commitText(text, newCursorPosition);
-
-                if (mEmulator == null) return true;
-
-                Editable content = getEditable();
-                sendTextToTerminal(content);
-                content.clear();
+                reconcile(text);       // diff against the live composing → no re-send/duplication
+                sentComposing = "";    // committed = final; next composing starts fresh
                 return true;
             }
 
@@ -372,7 +402,8 @@ public final class TerminalView extends View {
                 // The stock Samsung keyboard with 'Auto check spelling' enabled sends leftLength > 1.
                 KeyEvent deleteKey = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL);
                 for (int i = 0; i < leftLength; i++) sendKeyEvent(deleteKey);
-                return super.deleteSurroundingText(leftLength, rightLength);
+                sentComposing = "";    // a surrounding edit invalidates our composing tracking
+                return true;
             }
 
             void sendTextToTerminal(CharSequence text) {
