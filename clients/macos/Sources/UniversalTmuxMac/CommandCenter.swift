@@ -265,6 +265,32 @@ func ccLog(_ s: String) {
     else { try? data.write(to: url) }
 }
 
+/// Durable, append-only audit log of MANUAL status changes (the user overriding an
+/// auto-status). Unlike ccLog this lives in Application Support (NOT /tmp, which is
+/// cleared), so the record accumulates across launches and reboots — it's the ground
+/// truth for "how often / which statuses do I correct", used to tune the status prompt.
+/// One JSON object per line: {ts, machineID, machine, session, from, to}.
+enum ManualStatusLog {
+    /// ~/Library/Application Support/Argus/manual-status-changes.jsonl
+    static let url: URL = {
+        let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true))
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
+        let dir = base.appendingPathComponent("Argus", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("manual-status-changes.jsonl")
+    }()
+
+    static func record(machineID: String, machine: String, session: String, from: String, to: String) {
+        let esc: (String) -> String = { $0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") }
+        let iso = ISO8601DateFormatter().string(from: Date())
+        let line = "{\"ts\":\"\(iso)\",\"machineID\":\"\(esc(machineID))\",\"machine\":\"\(esc(machine))\",\"session\":\"\(esc(session))\",\"from\":\"\(esc(from))\",\"to\":\"\(esc(to))\"}\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(data); try? h.close() }
+        else { try? data.write(to: url) }
+    }
+}
+
 /// Drives the command center: every 30s (and for any session whose dot just changed),
 /// pulls recent output from each active session's broker and asks the provider for a
 /// status. Holds the latest status per session for the UI. Runs only while the window
@@ -292,6 +318,13 @@ final class CommandCenterModel: ObservableObject {
         let prev = statuses[key]
         let old = prev?.label ?? "idle"
         guard label != old else { return }
+        // Durable audit of every manual override (Mac UI + phone, which routes here too).
+        // This is the accumulating record of which auto-statuses you correct — what the
+        // status prompt should be tuned on. (The status model's transcripts also carry it,
+        // but they rotate; this doesn't.)
+        ManualStatusLog.record(machineID: ref.machineID,
+                               machine: app?.machines.first { $0.id == ref.machineID }?.name ?? ref.machineID,
+                               session: ref.session, from: old, to: label)
         statuses[key] = AgentStatus(label: label, oneLiner: prev?.oneLiner ?? "", lookAtThis: prev?.lookAtThis, updatedAt: Date())
         correction[key] = "[USER STATUS CORRECTION] The user just changed this session's status from \"\(old)\" to \"\(label)\" — they judged \"\(old)\" wrong for what's actually happening. Work out why and weigh it."
         lastHash[key] = nil   // force the next sweep to re-summarize (and deliver the note) even if the screen is unchanged
