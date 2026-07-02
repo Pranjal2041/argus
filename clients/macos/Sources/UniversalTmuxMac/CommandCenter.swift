@@ -325,6 +325,8 @@ final class CommandCenterModel: ObservableObject {
         ManualStatusLog.record(machineID: ref.machineID,
                                machine: app?.machines.first { $0.id == ref.machineID }?.name ?? ref.machineID,
                                session: ref.session, from: old, to: label)
+        ActivityJournal.shared.log("manualStatus", ActivityJournal.shared.ctx(ref)
+            .merging(["from": old, "to": label]) { a, _ in a })
         statuses[key] = AgentStatus(label: label, oneLiner: prev?.oneLiner ?? "", lookAtThis: prev?.lookAtThis, updatedAt: Date())
         correction[key] = "[USER STATUS CORRECTION] The user just changed this session's status from \"\(old)\" to \"\(label)\" — they judged \"\(old)\" wrong for what's actually happening. Work out why and weigh it."
         lastHash[key] = nil   // force the next sweep to re-summarize (and deliver the note) even if the screen is unchanged
@@ -486,7 +488,19 @@ final class CommandCenterModel: ObservableObject {
             ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
             self.lastHash[key] = h
             self.lastOKAt[key] = Date().timeIntervalSince1970
+            let prevLabel = self.statuses[key]?.label
             self.statuses[key] = status
+            if prevLabel != status.label {
+                // Activity journal: the fleet's own account of itself, durable
+                // (the published /ccstatus blob and /tmp log both evaporate).
+                let parts = key.split(separator: "/", maxSplits: 1)
+                ActivityJournal.shared.log("status", [
+                    "machineID": String(parts.first ?? ""),
+                    "session": parts.count > 1 ? String(parts[1]) : key,
+                    "from": prevLabel ?? "none", "to": status.label,
+                    "summary": status.oneLiner,
+                ])
+            }
             self.costUSD = self.provider.spendUSD
             self.costCalls = self.provider.callCount
             self.persist()

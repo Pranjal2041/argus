@@ -203,6 +203,18 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Record activity journal", isOn: $state.journalEnabled)
+                Button("Open Journal Folder") {
+                    NSWorkspace.shared.open(ActivityJournal.dirURL)
+                }
+            } header: {
+                Text("Activity journal")
+            } footer: {
+                Text("A local, append-only record of the moments you engage with your fleet: the screen you saw when you typed into a session, what you typed (never anything a terminal treated as secret, like a password), sessions you inspected, plus small markers for statuses, todos, workflows, W&B runs, and git reviews. One JSONL file per day, kept on this Mac only, never uploaded. This is the raw data future weekly reports read from.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle("Keep this Mac awake & reachable while locked", isOn: $state.keepAwake)
             } header: {
                 Text("Power")

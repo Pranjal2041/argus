@@ -350,7 +350,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     // MARK: TerminalViewDelegate
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
         client.send(op: Op.input, pane: lastPane, payload: Array(data))
+        utter.feed(Array(data), view: source)   // activity journal: the user spoke
     }
+    /// Journals this pane's typing as utterances (no-op until `ref` is set).
+    let utter = UtteranceSession()
     private var pendingCols = 0
     private var pendingRows = 0
     private var resizeWork: DispatchWorkItem?
@@ -589,11 +592,15 @@ final class TerminalController: ObservableObject {
         if gitShown.contains(ref.id) { hideGit(ref); return }
         gitError[ref.id] = (dir?.isEmpty ?? true) ? "no working folder known for this session yet" : nil
         gitShown.insert(ref.id)
+        // Activity journal: opening the git panel is review — the most
+        // deliberate "I am checking this agent's work" act in the app.
+        ActivityJournal.shared.log("gitPanel", ActivityJournal.shared.ctx(ref).merging(["mode": "viewer"]) { a, _ in a })
     }
 
     /// Switch the panel to the LAZYGIT TERMINAL (write operations): ensure the
     /// hidden `_git-…` session via POST /gitui, then show it in the slot.
     func openLazygitTerminal(_ ref: SessionRef, httpBase: String, dir: String) {
+        ActivityJournal.shared.log("gitPanel", ActivityJournal.shared.ctx(ref).merging(["mode": "lazygit"]) { a, _ in a })
         gitTerminal.insert(ref.id)
         guard gitSession[ref.id] == nil else { return }  // already spawned → just switch
         guard let enc = dir.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
@@ -688,6 +695,9 @@ final class TerminalController: ObservableObject {
             } else {
                 runs.append(d)   // new id — d.discoveredAt == now, starts its 7-day clock
                 changed = true
+                // Activity journal: an artifact anchor — the run outlives the 7-day UI TTL here.
+                ActivityJournal.shared.log("wandbRun", ActivityJournal.shared.ctx(ref)
+                    .merging(["runId": d.runId, "url": d.url.absoluteString]) { a, _ in a })
             }
         }
         // Re-validate the merged set: drops cross-scan truncations (a short id seen in one
@@ -957,7 +967,12 @@ final class TerminalController: ObservableObject {
             conn.applyLayout()
             conns[ref.id] = conn
         }
-        for (id, c) in conns { c.view.isHidden = (id != ref.id) }
+        conn.utter.ref = ref
+        for (id, c) in conns {
+            // Switching away ends any in-flight utterance on the pane being hidden.
+            if id != ref.id, !c.view.isHidden { c.utter.finalize() }
+            c.view.isHidden = (id != ref.id)
+        }
 
         // Only do the expensive work (refocus, geometry push) on an ACTUAL
         // selection change — updateNSView fires on every SwiftUI invalidation,
