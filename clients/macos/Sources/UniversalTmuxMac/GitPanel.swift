@@ -13,14 +13,16 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
     let webView: WKWebView
     let httpBase: String
     let dir: String
+    let ref: SessionRef?
     var onLazygit: (() -> Void)?
     var onOpenFile: ((String) -> Void)?
 
     private var ready = false
 
-    init(httpBase: String, dir: String) {
+    init(httpBase: String, dir: String, ref: SessionRef? = nil) {
         self.httpBase = httpBase
         self.dir = dir
+        self.ref = ref
         let cfg = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         cfg.userContentController = ucc
@@ -53,6 +55,13 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
             if let a = body["a"] as? String, let b = body["b"] as? String {
                 fetchDiff(scope: "range", hash: a, hash2: b, path: nil)
             }
+        case "insight":
+            guard let level = body["level"] as? String,
+                  let hashes = body["hashes"] as? [String], !hashes.isEmpty,
+                  let newest = body["newest"] as? String else { return }
+            runInsight(level: level, hashes: hashes, newest: newest,
+                       base: body["base"] as? String,
+                       metaLines: body["metaLines"] as? String ?? "")
         case "moreLog":
             fetchLog(skip: body["skip"] as? Int ?? 0, all: body["all"] as? Bool ?? false)
         case "blame":
@@ -62,6 +71,41 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         case "openFile":
             if let p = body["path"] as? String { onOpenFile?(p) }
         default: break
+        }
+    }
+
+    private var insightInflight = Set<String>()
+
+    private func runInsight(level: String, hashes: [String], newest: String,
+                            base: String?, metaLines: String) {
+        let key = GitInsights.key(hashes: hashes, level: level)
+        guard !insightInflight.contains(key) else { return }
+        insightInflight.insert(key)
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await GitInsights.shared.generate(
+                httpBase: self.httpBase, dir: self.dir, level: level,
+                hashes: hashes, newest: newest, base: base, metaLines: metaLines)
+            self.insightInflight.remove(key)
+            var payload: [String: Any] = ["level": level, "newest": newest]
+            switch outcome {
+            case .ok(let text, let cost, let cached):
+                payload["text"] = text
+                payload["cost"] = cost
+                payload["cached"] = cached
+                // Activity journal: asking for insight is a REVIEW act — and the
+                // record notes whether it cost a model call or came free.
+                var f: [String: Any] = ["level": level, "commits": hashes.count,
+                                        "cached": cached, "folder": self.dir]
+                if let r = self.ref { f["machineID"] = r.machineID; f["session"] = r.session }
+                ActivityJournal.shared.log("gitInsight", f)
+            case .fail(let msg):
+                payload["error"] = msg
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: payload),
+               let json = String(data: d, encoding: .utf8) {
+                self.eval("window.UTGit.setInsight && window.UTGit.setInsight(\(json))")
+            }
         }
     }
 
@@ -201,7 +245,7 @@ final class GitPanels: ObservableObject {
             p.onOpenFile = onOpenFile
             return p
         }
-        let p = GitPanel(httpBase: httpBase, dir: dir)
+        let p = GitPanel(httpBase: httpBase, dir: dir, ref: ref)
         p.onLazygit = onLazygit
         p.onOpenFile = onOpenFile
         panels[ref.id] = p
