@@ -191,7 +191,20 @@ button { font: inherit; }
   color: var(--fg); }
 .d2h-file-wrapper { border-radius: 10px; border-color: var(--border); margin-bottom: 14px; overflow: hidden; }
 .d2h-file-header { position: sticky; top: 0; z-index: 2; }
-.d2h-code-line, .d2h-code-side-line { font-size: 11.5px; }
+/* Keep code lines AND line-number cells on identical font metrics — sizing only
+   the code (as before) made every number box taller than its row, so the gutter
+   drifted progressively down the file. */
+.d2h-diff-table { font-size: 11.5px; line-height: 1.6; }
+.d2h-code-line, .d2h-code-side-line,
+.d2h-code-linenumber, .d2h-code-side-linenumber { font-size: 11.5px; line-height: 1.6; }
+/* Stock diff2html makes line-number cells position:ABSOLUTE with NO positioned
+   ancestor — they anchor to the viewport, which only works when the PAGE scrolls
+   (their demo). Our panel scrolls an inner container, so the whole gutter froze
+   while the code scrolled ("floating line numbers"). sticky/left keeps the intended
+   behavior — pinned left under horizontal scroll — while moving with rows. */
+.d2h-code-linenumber, .d2h-code-side-linenumber { position: sticky; z-index: 1; }
+.d2h-code-side-linenumber { left: 0; }
+.d2h-code-linenumber { left: 0; }
 .d2h-file-name { color: var(--fg); }
 .d2h-tag { background: transparent; }
 
