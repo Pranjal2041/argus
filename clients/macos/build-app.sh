@@ -15,6 +15,7 @@ cp Resources/fonts/*.ttf "$APP/Contents/Resources/" 2>/dev/null || true
 cp -R Resources/codemirror "$APP/Contents/Resources/" 2>/dev/null || true  # CM6 bundle (legacy)
 cp -R Resources/monaco "$APP/Contents/Resources/" 2>/dev/null || true       # Monaco (VS Code's editor) for the Files editor
 cp -R Resources/render "$APP/Contents/Resources/" 2>/dev/null || true      # offline marked+KaTeX+hljs bundle for Renders (⇧⌘P)
+cp -R Resources/gitview "$APP/Contents/Resources/" 2>/dev/null || true     # git panel viewer (diff2html + hljs)
 
 echo "Built $(pwd)/$APP"
 

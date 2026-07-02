@@ -9,6 +9,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
+    @StateObject private var gitPanels = GitPanels()          // read-only git viewer webviews (kept alive per session)
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
 
@@ -21,6 +22,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(dashboards)
                 .environmentObject(notebooks)
                 .environmentObject(wandb)
+                .environmentObject(gitPanels)
                 .environmentObject(commandCenter)
                 .environmentObject(themeStore)
                 .frame(minWidth: 980, minHeight: 600)
@@ -499,6 +501,7 @@ struct RootView: View {
     @EnvironmentObject var dashboards: DashboardsModel
     @EnvironmentObject var notebooks: NotebooksModel
     @EnvironmentObject var wandb: WandbController
+    @EnvironmentObject var gitPanels: GitPanels
     @Environment(\.displayScale) private var displayScale
     @Environment(\.openWindow) private var openWindow
     @State private var newName = ""
@@ -925,22 +928,53 @@ struct RootView: View {
                     }
             } else if let ref = state.selection {
                 if terminals.isGitShown(ref) {
-                    // Git panel (lazygit) in place of the terminal — a second terminal
-                    // attached to the hidden `_git-…` session on the same machine. The
-                    // session's own PaneConn stays alive (cached) in the background.
-                    if let g = terminals.gitRef(for: ref) {
-                        TerminalHostView(controller: terminals, ref: g, url: state.wsURL(for: g))
-                            .padding(EdgeInsets(top: 8, leading: Theme.contentInset, bottom: 8, trailing: Theme.contentInset))
-                    } else {
-                        VStack(spacing: 10) {
-                            if let err = terminals.gitError[ref.id] {
-                                Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundStyle(Theme.textTertiary)
-                                Text(err).font(cf(12)).foregroundStyle(Theme.textSecondary)
-                                    .multilineTextAlignment(.center).frame(maxWidth: 420)
-                            } else {
-                                ProgressView().controlSize(.small)
-                                Text("starting git panel…").font(cf(12)).foregroundStyle(Theme.textSecondary)
+                    // Git panel in place of the terminal. Default = the read-only VIEWER
+                    // (webview: status/diffs/history/blame, fed from the broker's /git/*).
+                    // The "lazygit" button switches to the lazygit TERMINAL for write ops.
+                    if terminals.isGitTerminal(ref) {
+                        if let g = terminals.gitRef(for: ref) {
+                            VStack(spacing: 0) {
+                                HStack {
+                                    Button { terminals.closeLazygitTerminal(ref) } label: {
+                                        Label("Back to git viewer", systemImage: "chevron.left")
+                                            .font(cf(11, .medium))
+                                    }
+                                    .buttonStyle(.plain).foregroundStyle(Theme.textSecondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, Theme.contentInset).padding(.vertical, 4)
+                                TerminalHostView(controller: terminals, ref: g, url: state.wsURL(for: g))
+                                    .padding(EdgeInsets(top: 0, leading: Theme.contentInset, bottom: 8, trailing: Theme.contentInset))
                             }
+                        } else {
+                            VStack(spacing: 10) {
+                                if let err = terminals.gitError[ref.id] {
+                                    Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundStyle(Theme.textTertiary)
+                                    Text(err).font(cf(12)).foregroundStyle(Theme.textSecondary)
+                                        .multilineTextAlignment(.center).frame(maxWidth: 420)
+                                } else {
+                                    ProgressView().controlSize(.small)
+                                    Text("starting lazygit…").font(cf(12)).foregroundStyle(Theme.textSecondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    } else if let m = state.machines.first(where: { $0.id == ref.machineID }),
+                              let dir = state.session(for: ref)?.path, !dir.isEmpty {
+                        GitPaneView(panel: gitPanels.panel(
+                            for: ref, httpBase: m.httpBase, dir: dir,
+                            onLazygit: { terminals.openLazygitTerminal(ref, httpBase: m.httpBase, dir: dir) },
+                            onOpenFile: { p in
+                                // Open the containing folder in Files (startPath expects a dir).
+                                let abs = p.hasPrefix("/") ? p : dir + "/" + p
+                                files.addTab(m, startPath: (abs as NSString).deletingLastPathComponent)
+                                openWindow(id: "files")
+                            }))
+                    } else {
+                        VStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundStyle(Theme.textTertiary)
+                            Text(terminals.gitError[ref.id] ?? "machine offline or no folder known")
+                                .font(cf(12)).foregroundStyle(Theme.textSecondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
