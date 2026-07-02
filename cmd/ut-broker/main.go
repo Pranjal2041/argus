@@ -457,7 +457,7 @@ func main() {
 	})
 	mux.HandleFunc("/git/diff", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		out, err := gitsvc.GetDiff(q.Get("dir"), q.Get("scope"), q.Get("hash"), q.Get("path"))
+		out, err := gitsvc.GetDiff(q.Get("dir"), q.Get("scope"), q.Get("hash"), q.Get("hash2"), q.Get("path"))
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
