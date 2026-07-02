@@ -77,14 +77,27 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         _calls = UserDefaults.standard.integer(forKey: "ut.ccCostCalls")
     }
 
+    // UserDefaults.set posts defaults-did-change SYNCHRONOUSLY on the calling
+    // thread, and under macOS 26 SwiftUI's @AppStorage observer re-enters the
+    // SwiftUI Update lock from that notification. When this code resumes inside
+    // a SwiftUI transaction (main-actor continuation drained mid-flush), that's
+    // a SAME-THREAD deadlock — the app freezes at 100% CPU spinning on the lock
+    // (caught live with `sample`: recordCost → NSNotificationCenter →
+    // UserDefaultObserver → Update.begin → mutex wait). So: defaults writes on
+    // the async model hot-path always hop to a background queue.
+    static func writeDefaults(_ work: @escaping () -> Void) { defaultsQ.async(execute: work) }
+    private static let defaultsQ = DispatchQueue(label: "cc.defaults", qos: .utility)
+
     private func recordCost(_ usd: Double) {
         lock.lock(); _costUSD += usd; _calls += 1; let t = _costUSD, n = _calls; lock.unlock()
-        UserDefaults.standard.set(t, forKey: "ut.ccCostUSD")
-        UserDefaults.standard.set(n, forKey: "ut.ccCostCalls")
-        if UserDefaults.standard.object(forKey: "ut.ccCostSince") == nil {
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ut.ccCostSince")
+        Self.defaultsQ.async {
+            UserDefaults.standard.set(t, forKey: "ut.ccCostUSD")
+            UserDefaults.standard.set(n, forKey: "ut.ccCostCalls")
+            if UserDefaults.standard.object(forKey: "ut.ccCostSince") == nil {
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ut.ccCostSince")
+            }
+            NSLog("[cc-cost] +$%.4f  total $%.4f over %d calls", usd, t, n)
         }
-        NSLog("[cc-cost] +$%.4f  total $%.4f over %d calls", usd, t, n)
     }
 
     func forget(key: String) { lock.lock(); sessions[key] = nil; lock.unlock() }
@@ -367,7 +380,11 @@ final class CommandCenterModel: ObservableObject {
     }
 
     private func persist() {
-        if let d = try? JSONEncoder().encode(statuses) { UserDefaults.standard.set(d, forKey: storeKey) }
+        // Encode on the caller (tiny); write off-thread — same deadlock rationale
+        // as recordCost (this runs in the same resumed-continuation context).
+        guard let d = try? JSONEncoder().encode(statuses) else { return }
+        let key = storeKey
+        ClaudeStatusProvider.writeDefaults { UserDefaults.standard.set(d, forKey: key) }
     }
 
     func bind(_ app: AppState) { self.app = app }
