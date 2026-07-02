@@ -49,7 +49,7 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         case "commit":
             if let h = body["hash"] as? String { fetchDiff(scope: "commit", hash: h, path: nil) }
         case "moreLog":
-            fetchLog(skip: body["skip"] as? Int ?? 0)
+            fetchLog(skip: body["skip"] as? Int ?? 0, all: body["all"] as? Bool ?? false)
         case "blame":
             if let p = body["path"] as? String { fetchBlame(path: p) }
         case "lazygit":
@@ -92,8 +92,8 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func fetchLog(skip: Int) {
-        fetch("/git/log?dir=\(enc(dir))&n=100&skip=\(skip)") { [weak self] json in
+    private func fetchLog(skip: Int, all: Bool = false) {
+        fetch("/git/log?dir=\(enc(dir))&n=100&skip=\(skip)&all=\(all ? 1 : 0)") { [weak self] json in
             self?.eval("window.UTGit.setLog(\(json), \(skip > 0))")
         }
     }

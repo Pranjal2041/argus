@@ -94,7 +94,7 @@ func TestDiffScopes(t *testing.T) {
 
 func TestLogAndCommitDiff(t *testing.T) {
 	dir := fixtureRepo(t)
-	log, err := GetLog(dir, 10, 0)
+	log, err := GetLog(dir, 10, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}

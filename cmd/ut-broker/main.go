@@ -447,7 +447,7 @@ func main() {
 		q := r.URL.Query()
 		n, _ := strconv.Atoi(q.Get("n"))
 		skip, _ := strconv.Atoi(q.Get("skip"))
-		log, err := gitsvc.GetLog(q.Get("dir"), n, skip)
+		log, err := gitsvc.GetLog(q.Get("dir"), n, skip, q.Get("all") == "1")
 		gitJSON(w, log, err)
 	})
 	mux.HandleFunc("/git/blame", func(w http.ResponseWriter, r *http.Request) {

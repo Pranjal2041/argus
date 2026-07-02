@@ -20,6 +20,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
   -webkit-user-select: none; user-select: none; overflow: hidden; }
 button { font: inherit; }
 
+/* dark, slim scrollbars everywhere (kills the white strips on dark) */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg3); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+
 /* ---------- top bar ---------- */
 #topbar { display: flex; align-items: center; gap: 14px; height: 42px;
   padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg); }
@@ -30,40 +36,55 @@ button { font: inherit; }
 #ab { color: var(--fg2); font-size: 11.5px; white-space: nowrap; }
 #tabs { display: flex; gap: 3px; background: var(--surface); border-radius: 8px; padding: 3px; }
 .tab { background: transparent; color: var(--fg2); border: none; border-radius: 6px;
-  padding: 4px 14px; font-size: 12.5px; font-weight: 500; cursor: pointer; }
-.tab.active { background: var(--surface2); color: var(--fg);
-  box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  padding: 4px 14px; font-size: 12.5px; font-weight: 500; cursor: pointer; transition: color .12s; }
+.tab.active { background: var(--surface2); color: var(--fg); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 #actions { margin-left: auto; display: flex; gap: 7px; }
 #actions button { background: var(--surface); color: var(--fg2); border: 1px solid var(--border);
-  border-radius: 7px; padding: 4px 11px; font-size: 12px; cursor: pointer; transition: color .12s; }
+  border-radius: 7px; padding: 4px 11px; font-size: 12px; cursor: pointer; transition: color .12s, border-color .12s; }
 #actions button:hover { color: var(--fg); border-color: var(--fg3); }
 
 .view { display: flex; height: calc(100% - 42px); }
 #view-blame { flex-direction: column; }
 #view-blame .blame-head { flex-shrink: 0; }
 #view-blame .content { width: 100%; }
-.sidebar { width: 290px; min-width: 220px; display: flex; flex-direction: column;
-  border-right: 1px solid var(--border); flex-shrink: 0; }
-.sidebar.wide { width: 46%; max-width: 640px; }
+.sidebar { width: 290px; min-width: 220px; display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar.wide { width: 46%; }
+.drag { width: 5px; cursor: col-resize; flex-shrink: 0; background: transparent;
+  border-right: 1px solid var(--border); transition: background .12s; }
+.drag:hover, .drag.active { background: var(--accent); border-right-color: var(--accent); }
 .sidebar .scroll { overflow-y: auto; flex: 1; padding: 6px 8px; }
 .content { flex: 1; overflow: auto; padding: 10px 14px; -webkit-user-select: text; user-select: text; }
 .content.full { padding: 0; }
 .empty { color: var(--fg3); padding: 44px 24px; text-align: center; }
 .empty .big { font-size: 26px; display: block; margin-bottom: 8px; opacity: .5; }
+.empty .hint { font-size: 11px; margin-top: 10px; color: var(--fg3); }
+.empty kbd { background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 5px; font: 10px ui-monospace, monospace; }
 
-/* ---------- filter box ---------- */
-.filterbar { padding: 8px 8px 4px; flex-shrink: 0; }
-.filterbar input { width: 100%; background: var(--surface); color: var(--fg);
-  border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; font-size: 12px; outline: none; }
+/* ---------- filter bar ---------- */
+.filterbar { padding: 8px 8px 4px; flex-shrink: 0; display: flex; gap: 6px; }
+.filterbar input { flex: 1; min-width: 0; background: var(--surface); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; font-size: 12px; outline: none;
+  transition: border-color .12s; }
 .filterbar input:focus { border-color: var(--accent); }
 .filterbar input::placeholder { color: var(--fg3); }
+.filterbar .toggle { flex-shrink: 0; background: var(--surface); color: var(--fg3);
+  border: 1px solid var(--border); border-radius: 7px; padding: 4px 10px; font-size: 11px;
+  cursor: pointer; transition: all .12s; }
+.filterbar .toggle:hover { color: var(--fg); }
+.filterbar .toggle.on { color: var(--accent); border-color: var(--accent); background: rgba(122,162,247,.1); }
+
+/* ---------- ext chip ---------- */
+.ext { flex-shrink: 0; font: 700 8.5px ui-monospace, monospace; letter-spacing: .02em;
+  padding: 1.5px 5px; border-radius: 4px; text-transform: uppercase;
+  background: var(--surface2); color: var(--fg3); }
 
 /* ---------- Changes: file list ---------- */
 .sec { display: flex; align-items: center; gap: 6px; color: var(--fg3); font-size: 10.5px;
   font-weight: 650; letter-spacing: .07em; text-transform: uppercase; padding: 10px 6px 4px; }
 .sec .cnt { background: var(--surface); border-radius: 8px; padding: 0 7px; font-size: 10px; color: var(--fg2); }
 .frow { display: flex; align-items: center; gap: 8px; padding: 4px 7px; border-radius: 7px;
-  cursor: pointer; white-space: nowrap; }
+  cursor: pointer; white-space: nowrap; transition: background .1s; }
 .frow:hover { background: var(--surface); }
 .frow.sel { background: var(--surface2); outline: 1px solid var(--border); }
 .badge { flex-shrink: 0; width: 16px; height: 16px; border-radius: 4.5px; font-size: 10px;
@@ -84,9 +105,11 @@ button { font: inherit; }
 
 /* ---------- History: commit table ---------- */
 .crow { display: flex; align-items: center; gap: 9px; padding: 0 8px 0 4px; height: 30px;
-  border-radius: 7px; cursor: pointer; }
+  border-radius: 7px; cursor: pointer; transition: background .1s; }
 .crow:hover { background: var(--surface); }
+.crow:hover svg { filter: brightness(1.25); }
 .crow.sel { background: var(--surface2); outline: 1px solid var(--border); }
+.crow.wip .txt { color: var(--fg2); font-style: italic; }
 .crow svg { flex-shrink: 0; height: 30px; }
 .csub { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px;
   white-space: nowrap; overflow: hidden; }
@@ -113,7 +136,7 @@ button { font: inherit; }
   color: var(--fg2); font-size: 11.5px; }
 .commit-card .h { font-family: ui-monospace, monospace; font-size: 11px; color: var(--fg2);
   background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
-  padding: 1px 8px; cursor: pointer; }
+  padding: 1px 8px; cursor: pointer; transition: color .12s; }
 .commit-card .h:hover { color: var(--fg); }
 .diffstat-bar { display: flex; align-items: center; gap: 10px; margin: 0 0 8px;
   color: var(--fg2); font-size: 12px; flex-wrap: wrap; }
@@ -125,11 +148,11 @@ button { font: inherit; }
   border-radius: 6px; font-size: 10.5px; padding: 2px 8px; cursor: pointer; }
 .diffstat-bar button:hover { color: var(--fg); }
 .filelist { margin: 0 0 12px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
-.flrow { display: flex; align-items: center; gap: 8px; padding: 4px 10px; cursor: pointer;
-  border-bottom: 1px solid var(--border); font-size: 12px; }
+.flrow { display: flex; align-items: center; gap: 9px; padding: 4px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border); font-size: 12px; transition: background .1s; }
 .flrow:last-child { border-bottom: none; }
 .flrow:hover { background: var(--surface); }
-.flrow .fpath { flex: 1; font-family: ui-monospace, monospace; font-size: 11.5px; }
+.flrow .fpath { flex: 1; font-family: ui-monospace, monospace; font-size: 11.5px; direction: ltr; }
 .flbar { flex-shrink: 0; display: flex; gap: 1px; }
 .flbar i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; background: var(--surface2); }
 .flbar i.p { background: var(--added); } .flbar i.m { background: var(--removed); }
