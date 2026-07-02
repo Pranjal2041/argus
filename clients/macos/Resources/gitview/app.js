@@ -89,7 +89,14 @@
   function showView(name) {
     state.view = name;
     ["changes", "history", "blame"].forEach(function (v) {
-      el("view-" + v).style.display = v === name ? "flex" : "none";
+      var node = el("view-" + v);
+      var show = v === name;
+      if (show && node.style.display === "none") {
+        node.classList.remove("showing");
+        void node.offsetWidth; // restart the entrance animation
+        node.classList.add("showing");
+      }
+      node.style.display = show ? "flex" : "none";
     });
     el("tab-changes").classList.toggle("active", name === "changes");
     el("tab-history").classList.toggle("active", name === "history");
@@ -200,6 +207,18 @@
     }, hljs);
     ui.draw();
 
+    // per-file stats chip in each diff2html file header (before the Viewed toggle)
+    var wrappersAll = host.querySelectorAll(".d2h-file-wrapper");
+    wrappersAll.forEach(function (w, i) {
+      var st = stats[i];
+      var head = w.querySelector(".d2h-file-header");
+      if (st && head) {
+        var chip = document.createElement("span");
+        chip.className = "gv-stats";
+        chip.innerHTML = '<span class="p">+' + st.add + '</span><span class="m">−' + st.del + "</span>";
+        head.insertBefore(chip, head.querySelector(".d2h-file-collapse"));
+      }
+    });
     // wire the jump list + expand/collapse
     var wrappers = host.querySelectorAll(".d2h-file-wrapper");
     target.querySelectorAll(".flrow").forEach(function (row) {
@@ -278,12 +297,11 @@
   function renderSummary(s) {
     state.summary = s;
     el("branch").textContent = s.branch || "(detached)";
-    var ab = [];
-    if (s.ahead) ab.push("↑" + s.ahead);
-    if (s.behind) ab.push("↓" + s.behind);
-    if (s.upstream) ab.push(s.upstream);
-    if (s.stashes) ab.push(s.stashes + " stash");
-    el("ab").textContent = ab.join(" · ");
+    var ab = "";
+    if (s.ahead) ab += '<span class="chip" title="ahead of upstream" style="color:var(--added)">↑' + s.ahead + "</span>";
+    if (s.behind) ab += '<span class="chip" title="behind upstream" style="color:var(--removed)">↓' + s.behind + "</span>";
+    if (s.stashes) ab += '<span class="chip" title="stashes"><svg viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>' + s.stashes + "</span>";
+    el("ab").innerHTML = ab;
     paintFiles();
   }
 
@@ -544,7 +562,13 @@
       renderDiff("changes-diff", text, meta || {});
     },
     setBlame: function (data, path) { overlay(null); renderBlame(data, path); },
-    setLoading: function (msg) { overlay(msg || "loading…"); },
+    setLoading: function (msg) {
+      var skel = '<div class="skel"></div><div class="skel w80"></div><div class="skel w60"></div><div class="skel"></div><div class="skel w40"></div>';
+      if (state.view === "history" && !el("commits").children.length) { el("commits").innerHTML = skel; return; }
+      if (state.view === "changes" && !el("files").children.length) { el("files").innerHTML = skel; return; }
+      overlay(msg || "loading…");
+    },
+    setRepo: function (name) { el("repo").textContent = name || ""; },
     setError: function (msg) { overlay(msg || "error"); },
     showView: showView
   };
