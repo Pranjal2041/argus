@@ -110,7 +110,13 @@ final class PaneConn: NSObject, TerminalViewDelegate {
                 let pt = self.view.convert(ev.locationInWindow, from: nil)
                 guard self.view.bounds.contains(pt), ev.deltaY != 0 else { return ev }
                 let term = self.view.getTerminal()
-                guard term.mouseMode != .off else { return ev }
+                // Do NOT gate on term.mouseMode: the remote app (lazygit) enabled mouse
+                // BEFORE this pane attached, and the connect snapshot is rendered text
+                // only (capture-pane) — the DECSET mouse-enable never reaches this
+                // terminal, so its mouseMode stays .off forever. Verified: injecting SGR
+                // wheel bytes into the session scrolls lazygit fine; the client gate was
+                // the only thing blocking. This pane is DEDICATED to a mouse TUI (the
+                // only kind that sets mouseReporting), so forward unconditionally.
                 let cols = max(term.cols, 1), rows = max(term.rows, 1)
                 let cw = max(self.view.bounds.width / CGFloat(cols), 1)
                 let ch = max(self.view.bounds.height / CGFloat(rows), 1)
