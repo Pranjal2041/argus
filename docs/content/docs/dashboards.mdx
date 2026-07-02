@@ -16,13 +16,19 @@ bar — pointed at services on your remote hosts. Open a tab against a host and 
 *there*, no manual tunnel. It is the natural home for anything web: a run dashboard, a TensorBoard, an
 internal tool, or a host's JupyterLab.
 
-## Notebooks
+## JupyterLab
 
-Open a `.ipynb` from a host and it renders **in the main pane** as that host's Notebook view, reached
-over the same forward. The key point: **the kernel runs on the host** — the GPU node, with its
-environment and data — while you edit and run cells from your Mac. No SSH, no copying notebooks
-around, no local kernel. "Open JupyterLab" launches a host's full Jupyter and opens it in a dashboard
-tab.
+**New → JupyterLab** asks for a machine and a folder, and opens the host's **full JupyterLab rooted
+at that folder** in the main pane — file browser, launcher, and all. Create or open notebooks from
+the Lab itself. The key point: **the kernel runs on the host** — the GPU node, with its environment
+and data — while you edit and run cells from your Mac. No SSH, no copying notebooks around, no local
+kernel.
+
+The pane is durable in both directions: switching to a terminal and back does **not** reload the Lab
+(your unsaved cell edits stay put), and open Labs are remembered across app restarts — the server
+keeps running on the host, and reopening reconnects to it. The broker also launches Jupyter with its
+network phone-homes disabled, so a cold start on an egress-restricted cluster node takes seconds,
+not minutes, and autosave is tightened to 30s so an app quit loses at most that much.
 
 <Callout type="info">
 Both ride the existing per-host broker and the port-forward hub — there is no extra service to deploy.

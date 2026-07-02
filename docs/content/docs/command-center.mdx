@@ -47,7 +47,9 @@ can read it. There is no central service: the Mac generates, the brokers relay, 
 
 The status is a read of the **current** screen every time, so it follows reality. If an agent that
 was "working" hits an API error and stops, the card flips to **stuck**; when you hand it new
-instructions, it flips back to **working**. A status you set by hand is delivered to the model as a
+instructions, it flips back to **working**. An agent minding launched work — a training run,
+a sweep, a monitoring loop it set up — counts as **working** even while its own prompt sits idle,
+so long jobs don't read as "idle". A status you set by hand is delivered to the model as a
 correction it keeps in context, so it sticks until the screen genuinely changes — without being
 permanently forced.
 

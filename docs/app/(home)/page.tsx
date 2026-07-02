@@ -6,7 +6,7 @@ import {
   Workflow, Terminal, FileCode2, ListTodo, Cable, History, Palette,
   Check, ArrowRight, Cpu, Laptop, Smartphone, Monitor,
   Radar, LineChart, Notebook, StickyNote, RefreshCw, Coffee,
-  ShieldCheck, Sparkles, TerminalSquare,
+  ShieldCheck, Sparkles, TerminalSquare, GitBranch,
 } from 'lucide-react';
 
 function Github({ size = 17 }: { size?: number }) {
@@ -247,7 +247,7 @@ export default function HomePage() {
         {/* 4. Dashboards & notebooks */}
         <div className="al-feat rev al-reveal">
           <div className="al-feat-copy">
-            <span className="al-eyebrow">Dashboards &amp; Jupyter</span>
+            <span className="al-eyebrow">Dashboards &amp; JupyterLab</span>
             <h3>Remote web apps and notebooks, in app.</h3>
             <p>An in-app browser for any web UI on a host — TensorBoard, a dev server, a dashboard — forwarded over the tailnet. Plus Jupyter notebooks whose kernel runs on the remote machine, so the work happens on the host&apos;s GPU.</p>
             <ul>
@@ -293,8 +293,34 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 6. Work from your phone */}
+        {/* 5b. Git panel */}
         <div className="al-feat rev al-reveal">
+          <div className="al-feat-copy">
+            <span className="al-eyebrow">Git panel</span>
+            <h3>See what your agents actually changed.</h3>
+            <p>One keystroke turns any session into a GitKraken-style git viewer for <i>that repo, on that machine</i> — working-tree diffs, a commit graph with your uncommitted work riding the top, and per-line blame. Read-only by design; lazygit is one click away for write ops.</p>
+            <ul>
+              <li><Check size={16} /> GitHub-grade side-by-side diffs, straight from the broker — nothing installed per host.</li>
+              <li><Check size={16} /> Hover a commit to trace its lineage; <span className="al-mono">⌘</span>-click two to compare.</li>
+              <li><Check size={16} /> Works everywhere the broker runs — clusters, macOS, Windows.</li>
+            </ul>
+          </div>
+          <div className="al-feat-art">
+            <div className="al-art-bar"><GitBranch size={13} /> gym-anything · gpu-node-07</div>
+            <div className="al-art-body al-mini" style={{ lineHeight: 2.0 }}>
+              <div><span style={{ color: 'var(--ink-dim)' }}>┆</span> <i style={{ color: 'var(--ink-dim)' }}>3 uncommitted changes — working tree</i></div>
+              <div><span style={{ color: 'var(--blue)' }}>●</span> <span className="al-card-pill" style={{ marginRight: 6 }}>main</span>Fix reward normalization <span style={{ color: 'var(--ink-dim)', float: 'right' }}>2h</span></div>
+              <div><span style={{ color: 'var(--blue)' }}>◉</span> Merge branch sweep-fixes <span style={{ color: 'var(--ink-dim)', float: 'right' }}>1d</span></div>
+              <div><span style={{ color: 'var(--green)' }}>&nbsp;●</span> <span className="al-card-pill" style={{ marginRight: 6 }}>sweep-fixes</span>Batch the rollout buffer <span style={{ color: 'var(--ink-dim)', float: 'right' }}>1d</span></div>
+              <div><span style={{ color: 'var(--blue)' }}>●</span> Add eval harness <span style={{ color: 'var(--ink-dim)', float: 'right' }}>2d</span></div>
+              <div style={{ borderTop: '1px solid var(--line)', marginTop: 6, paddingTop: 6 }}><span className="c-green">+ reward = raw / running_std</span></div>
+              <div><span style={{ color: 'var(--red, #e06c75)' }}>− reward = raw</span></div>
+            </div>
+          </div>
+        </div>
+
+        {/* 6. Work from your phone */}
+        <div className="al-feat al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Android</span>
             <h3>Run it all from your pocket.</h3>
