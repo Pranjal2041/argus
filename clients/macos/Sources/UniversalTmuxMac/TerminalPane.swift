@@ -7,12 +7,14 @@ import SwiftUI
 /// preserves scrollback and the connection (no reconnect, no reload).
 private struct PasteHome: Decodable { let home: String; let sep: String }
 
+
 final class PaneConn: NSObject, TerminalViewDelegate {
     let view: TerminalView
     private let client: BrokerClient
     private let httpBase: String   // broker http(s) base, for uploading pasted images
     private(set) var connURL: URL  // the session URL this conn (re)connects to; changes on rename or resume (new tmux id)
     private var lastPane = ""
+    private var wheelMonitor: Any?  // mouse-reporting panes: wheel → remote (see init)
 
     /// Forwarded live connection state (for the header status chip).
     var onState: ((ConnState) -> Void)?
@@ -92,9 +94,41 @@ final class PaneConn: NSObject, TerminalViewDelegate {
             DispatchQueue.main.async { self?.sendCurrentGeometry() }
         }
         client.start()
+
+        // SwiftTerm's macOS scrollWheel ALWAYS scrolls the local scrollback and never
+        // reports wheel events to the remote app — so a mouse-driven TUI (lazygit in
+        // the git panel) can't be wheel-scrolled. Its override isn't `open`, so we
+        // can't subclass it; instead, for mouse-reporting panes, intercept the wheel
+        // with a local event monitor BEFORE view dispatch and forward it as wheel
+        // reports (buttons 4/5 — the same encodeButton/sendEvent path SwiftTerm's own
+        // mouseDown uses), swallowing the event. Only fires when the REMOTE app
+        // requested mouse events; otherwise the event passes through untouched.
+        if mouseReporting {
+            wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] ev in
+                guard let self, let win = self.view.window, ev.window === win,
+                      !self.view.isHidden, self.view.superview != nil else { return ev }
+                let pt = self.view.convert(ev.locationInWindow, from: nil)
+                guard self.view.bounds.contains(pt), ev.deltaY != 0 else { return ev }
+                let term = self.view.getTerminal()
+                guard term.mouseMode != .off else { return ev }
+                let cols = max(term.cols, 1), rows = max(term.rows, 1)
+                let cw = max(self.view.bounds.width / CGFloat(cols), 1)
+                let ch = max(self.view.bounds.height / CGFloat(rows), 1)
+                let col = min(max(Int(pt.x / cw), 0), cols - 1)
+                let row = min(max(Int((self.view.bounds.height - pt.y) / ch), 0), rows - 1)
+                let button = ev.deltaY > 0 ? 4 : 5   // wheel up / down (encodeButton → 64/65)
+                let flags = term.encodeButton(button: button, release: false, shift: false, meta: false, control: false)
+                let ticks = min(3, max(1, Int(abs(ev.deltaY))))   // modest amplification for fast flicks
+                for _ in 0..<ticks { term.sendEvent(buttonFlags: flags, x: col, y: row) }
+                return nil   // swallow: don't ALSO scroll the local buffer
+            }
+        }
     }
 
-    func disconnect() { client.stop() }
+    func disconnect() {
+        client.stop()
+        if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
+    }
 
     // MARK: W&B run detection (off the raw output stream)
 
