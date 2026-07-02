@@ -40,6 +40,7 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         case "ready":
             ready = true
             applyTheme()
+            eval("window.UTGit.setRepo && window.UTGit.setRepo(\(js((dir as NSString).lastPathComponent)))")
             refresh()
         case "refresh":
             refresh()

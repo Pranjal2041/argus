@@ -9,23 +9,24 @@
   <body>
     <div id="topbar">
       <div id="branchinfo">
-        <span id="branch">…</span>
+        <span id="repo"></span>
+        <span class="chip branch"><svg viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg><span id="branch">…</span></span>
         <span id="ab"></span>
       </div>
       <div id="tabs">
-        <button id="tab-changes" class="tab active">Changes</button>
-        <button id="tab-history" class="tab">History</button>
+        <button id="tab-changes" class="tab active"><svg viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Changes</button>
+        <button id="tab-history" class="tab"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/></svg>History</button>
       </div>
       <div id="actions">
-        <button id="btn-mode" title="side-by-side ⇄ inline">⇆</button>
-        <button id="btn-refresh" title="Refresh">⟳</button>
-        <button id="btn-lazygit" title="Open lazygit (write operations)">lazygit</button>
+        <button id="btn-mode" title="side-by-side ⇄ inline"><svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></button>
+        <button id="btn-refresh" title="Refresh"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+        <button id="btn-lazygit" title="Open lazygit (write operations)"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>lazygit</button>
       </div>
     </div>
 
     <div id="view-changes" class="view">
       <div class="sidebar">
-        <div class="filterbar"><input id="files-filter" placeholder="Filter files…" /></div>
+        <div class="filterbar"><span class="searchwrap"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input id="files-filter" placeholder="Filter files…" /></span></div>
         <div class="scroll" id="files"></div>
       </div>
       <div class="drag" data-for="changes"></div>
@@ -35,7 +36,7 @@
     <div id="view-history" class="view" style="display:none">
       <div class="sidebar wide">
         <div class="filterbar">
-          <input id="log-filter" placeholder="Filter commits (subject, author, hash)…" />
+          <span class="searchwrap"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input id="log-filter" placeholder="Filter commits (subject, author, hash)…" /></span>
           <button id="all-branches" class="toggle" title="Show every branch's history in one graph">all branches</button>
         </div>
         <div class="scroll" id="commits"></div>
