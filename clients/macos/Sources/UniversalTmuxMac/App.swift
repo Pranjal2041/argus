@@ -80,7 +80,7 @@ struct UniversalTmuxApp: App {
                 Button("Find Next") { _ = terminals.findNext(state.findText) }
                     .keyboardShortcut("g", modifiers: .command)
                 Button("Find Previous") { _ = terminals.findPrev(state.findText) }
-                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .keyboardShortcut("g", modifiers: [.control, .command])   // ⇧⌘G belongs to the Git panel (feature panels are ⇧⌘-x); shift+Enter in the find bar also works
             }
             CommandMenu("Terminal") {
                 // ⇧⌘M (markdown/math) — ⇧⌘P belongs to Claude Code inside the terminal.
@@ -93,7 +93,7 @@ struct UniversalTmuxApp: App {
                         terminals.toggleGit(sel, httpBase: m.httpBase, dir: state.session(for: sel)?.path)
                     }
                 }
-                .keyboardShortcut("g", modifiers: [.control, .command])
+                .keyboardShortcut("g", modifiers: [.command, .shift])
                 Divider()
                 Button("Increase Font Size") { terminals.adjustFont(1) }
                     .keyboardShortcut("=", modifiers: .command)
@@ -1092,9 +1092,9 @@ struct RootView: View {
             } else {
                 if let ref = state.selection {
                     // Git panel toggle: lazygit in this session's folder, in place of
-                    // the terminal (⌃⌘G).
+                    // the terminal (⇧⌘G).
                     IconButton(system: terminals.isGitShown(ref) ? "terminal" : "arrow.triangle.branch",
-                               help: terminals.isGitShown(ref) ? "Back to terminal (⌃⌘G)" : "Git panel — lazygit (⌃⌘G)") {
+                               help: terminals.isGitShown(ref) ? "Back to terminal (⇧⌘G)" : "Git panel — lazygit (⇧⌘G)") {
                         if let m = state.machines.first(where: { $0.id == ref.machineID }) {
                             terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.session(for: ref)?.path)
                         }
