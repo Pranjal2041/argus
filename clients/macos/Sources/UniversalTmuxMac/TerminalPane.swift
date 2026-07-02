@@ -51,7 +51,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         view.needsDisplay = true
     }
 
-    init(url: URL) {
+    init(url: URL, mouseReporting: Bool = false) {
         view = TerminalView(frame: .zero)
         client = BrokerClient(url: url)
         httpBase = PaneConn.httpBase(from: url)
@@ -63,8 +63,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // redrawing TUI (an agent) makes text impossible to select/copy — and a
         // drag is sent to the remote app as mouse events instead of selecting.
         // This is a copy-focused viewer, so prefer local selection; the keyboard
-        // still drives the agent fully. (Could become a per-session toggle.)
-        view.allowMouseReporting = false
+        // still drives the agent fully. EXCEPTION: the git panel (lazygit) is a
+        // mouse-driven TUI where clicking panels/commits matters more than copy,
+        // so its pane opts in via mouseReporting=true.
+        view.allowMouseReporting = mouseReporting
         view.getTerminal().changeScrollback(100_000) // large client-side scrollback (default is 500)
         // Seamless theme: terminal background == window background. Applied here and
         // re-applied live on theme switch (see applyTheme + TerminalController).
@@ -516,6 +518,73 @@ final class TerminalController: ObservableObject {
         if wandbShown.contains(ref.id) { hideWandb(ref) } else { showWandb(ref) }
     }
 
+    // MARK: Git panel (lazygit) — swap the detail pane to a hidden broker session
+    // running lazygit in this session's folder (same in-place pattern as W&B).
+
+    /// Sessions whose detail pane is currently showing the git panel.
+    @Published var gitShown: Set<String> = []
+    /// ref.id → the broker's `_git-…` session name (from POST /gitui).
+    @Published var gitSession: [String: String] = [:]
+    /// ref.id → error from /gitui (e.g. lazygit download blocked), shown in the pane.
+    @Published var gitError: [String: String] = [:]
+    /// Pane ids whose conn should enable MOUSE REPORTING (lazygit is mouse-driven;
+    /// normal panes keep it off so text stays selectable). Consulted by show().
+    private var mouseRefs: Set<String> = []
+
+    func isGitShown(_ ref: SessionRef) -> Bool { gitShown.contains(ref.id) }
+
+    /// The ad-hoc SessionRef of the git panel's session for `ref` (same machine).
+    func gitRef(for ref: SessionRef) -> SessionRef? {
+        gitSession[ref.id].map { SessionRef(machineID: ref.machineID, session: $0) }
+    }
+
+    /// Toggle the git panel for `ref`: asks the machine's broker to ensure lazygit +
+    /// spawn (or reuse) the hidden `_git-…` session for `dir`, then swaps the pane.
+    func toggleGit(_ ref: SessionRef, httpBase: String, dir: String?) {
+        if gitShown.contains(ref.id) { hideGit(ref); return }
+        guard let dir, !dir.isEmpty else {
+            gitError[ref.id] = "no working folder known for this session yet"
+            gitShown.insert(ref.id)
+            return
+        }
+        gitError[ref.id] = nil
+        gitShown.insert(ref.id)   // show the pane immediately (spinner until the session arrives)
+        guard let enc = dir.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "\(httpBase)/gitui?dir=\(enc)") else {
+            gitError[ref.id] = "bad broker URL"; return
+        }
+        var req = URLRequest(url: url); req.httpMethod = "POST"
+        req.timeoutInterval = 200   // first use may download lazygit (~6MB) on slow cluster egress
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let (d, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                struct R: Decodable { let session: String?; let error: String? }
+                let r = try? JSONDecoder().decode(R.self, from: d)
+                guard code == 200, let name = r?.session else {
+                    // A 404 means the machine runs an older broker without /gitui.
+                    self.gitError[ref.id] = code == 404
+                        ? "this machine's broker predates the git panel — redeploy it"
+                        : (r?.error ?? "broker error (HTTP \(code))")
+                    return
+                }
+                let gref = SessionRef(machineID: ref.machineID, session: name)
+                self.mouseRefs.insert(gref.id)   // lazygit gets mouse reporting
+                self.gitSession[ref.id] = name
+            } catch {
+                self.gitError[ref.id] = error.localizedDescription
+            }
+        }
+    }
+
+    /// Hide the git panel and drop its connection (the broker session stays for a
+    /// fast re-open; the idle reaper cleans it up, immediately once lazygit quits).
+    func hideGit(_ ref: SessionRef) {
+        gitShown.remove(ref.id)
+        if let g = gitRef(for: ref) { drop(g.id) }
+    }
+
     // MARK: W&B persistence — a GROWING list that survives buffer-roll AND restarts.
     // Once a run id is discovered it STAYS (union, never replace) — so it doesn't
     // vanish when its URL scrolls out of the ~48KB scan buffer, and it's restored on
@@ -816,7 +885,7 @@ final class TerminalController: ObservableObject {
             // it was stuck reconnecting on the dead old id, reconnects at once).
             if existing.connURL != url { existing.rename(to: url) }
         } else {
-            conn = PaneConn(url: url)
+            conn = PaneConn(url: url, mouseReporting: mouseRefs.contains(ref.id))
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
             conn.onOpenLocalhost = { [weak self] port, path, scheme in self?.openLocalhostHandler?(port, path, scheme) }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }

@@ -88,6 +88,12 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                 Button("W&B Run ⇄ Terminal") { if let sel = state.selection { terminals.toggleWandb(sel) } }
                     .keyboardShortcut("w", modifiers: [.control, .command])
+                Button("Git Panel ⇄ Terminal") {
+                    if let sel = state.selection, let m = state.machines.first(where: { $0.id == sel.machineID }) {
+                        terminals.toggleGit(sel, httpBase: m.httpBase, dir: state.session(for: sel)?.path)
+                    }
+                }
+                .keyboardShortcut("g", modifiers: [.control, .command])
                 Divider()
                 Button("Increase Font Size") { terminals.adjustFont(1) }
                     .keyboardShortcut("=", modifiers: .command)
@@ -910,7 +916,27 @@ struct RootView: View {
                         }
                     }
             } else if let ref = state.selection {
-                if terminals.isWandbShown(ref), terminals.currentRun(for: ref) != nil {
+                if terminals.isGitShown(ref) {
+                    // Git panel (lazygit) in place of the terminal — a second terminal
+                    // attached to the hidden `_git-…` session on the same machine. The
+                    // session's own PaneConn stays alive (cached) in the background.
+                    if let g = terminals.gitRef(for: ref) {
+                        TerminalHostView(controller: terminals, ref: g, url: state.wsURL(for: g))
+                            .padding(EdgeInsets(top: 8, leading: Theme.contentInset, bottom: 8, trailing: Theme.contentInset))
+                    } else {
+                        VStack(spacing: 10) {
+                            if let err = terminals.gitError[ref.id] {
+                                Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundStyle(Theme.textTertiary)
+                                Text(err).font(cf(12)).foregroundStyle(Theme.textSecondary)
+                                    .multilineTextAlignment(.center).frame(maxWidth: 420)
+                            } else {
+                                ProgressView().controlSize(.small)
+                                Text("starting git panel…").font(cf(12)).foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else if terminals.isWandbShown(ref), terminals.currentRun(for: ref) != nil {
                     // W&B run, in place of the terminal. The terminal PaneConn stays
                     // alive (cached) in the background, so output + detection continue.
                     WandbPaneView(controller: wandb, terminals: terminals, ref: ref)
@@ -1064,6 +1090,16 @@ struct RootView: View {
                 }
                 IconButton(system: "safari", help: "Open in browser") { nb.tab.openInSystemBrowser() }
             } else {
+                if let ref = state.selection {
+                    // Git panel toggle: lazygit in this session's folder, in place of
+                    // the terminal (⌃⌘G).
+                    IconButton(system: terminals.isGitShown(ref) ? "terminal" : "arrow.triangle.branch",
+                               help: terminals.isGitShown(ref) ? "Back to terminal (⌃⌘G)" : "Git panel — lazygit (⌃⌘G)") {
+                        if let m = state.machines.first(where: { $0.id == ref.machineID }) {
+                            terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.session(for: ref)?.path)
+                        }
+                    }
+                }
                 IconButton(system: "textformat.size.smaller", help: "Decrease font (⌘-)") { terminals.adjustFont(-1) }
                 IconButton(system: "textformat.size.larger", help: "Increase font (⌘=)") { terminals.adjustFont(1) }
             }
