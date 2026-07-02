@@ -225,6 +225,10 @@ select { background: var(--paper2); color: var(--ink-dim); border: 1px solid var
 .legend { color: var(--ink-faint); font-size: 9.5px; margin-top: 6px; }
 .legend b { color: var(--phos); font-weight: 500; }
 .screenhead { color: var(--ink-faint); font-size: 9.5px; margin-top: 10px; text-transform: uppercase; letter-spacing: .12em; }
+.screen .ghost { color: #565a64; font-style: italic; }
+.screen .gtag { display: inline-block; margin-left: 10px; padding: 0 7px; border-radius: 9px;
+  border: 1px solid #3a3e48; color: #7d828e; font: normal 9px var(--mono); letter-spacing: .06em;
+  vertical-align: 1px; }
 .dl { display: grid; grid-template-columns: 92px 1fr; gap: 3px 14px; font-size: 11.5px; margin-top: 6px; }
 .dl dt { color: var(--ink-faint); text-transform: uppercase; font-size: 9.5px; letter-spacing: .1em; padding-top: 2px; }
 .dl dd { color: var(--ink); word-break: break-word; }
@@ -331,23 +335,37 @@ function gist(e) {
   }
 }
 
-// Mark the lines of the captured screen that echo what the user actually typed.
-// Everything unmarked is screen context — agent output, UI chrome, and
-// agent-SUGGESTED prompts sitting in the input box, which are NOT user input.
-function markSaid(sawLines, said) {
+// The input box lives in the bottom lines of a capture. A ❯ line there that
+// does NOT match what the user actually sent is the TUI's pre-filled
+// SUGGESTION (claude-code renders these dim; plain-text capture loses that).
+// Tag it so it can never read as the user's words. Display-only — raw stays raw.
+function renderScreen(sawLines, saidNow, saidAll) {
   const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const ns = norm(said || "");
-  return sawLines.map(l => {
-    let hit = false;
-    const nl = norm(l);
-    if (ns && nl.length >= 4) {
-      if (ns.length <= 12) hit = nl.includes(ns);
-      else for (let i = 0; i + 12 <= ns.length; i += 6) {
-        if (nl.includes(ns.slice(i, i + 12))) { hit = true; break; }
-      }
+  const sent = (saidAll || []).map(norm).filter(Boolean);
+  const n = sawLines.length;
+  return sawLines.map((l, i) => {
+    const m = l.match(/^\s*[❯›]\s+(.*\S)/);
+    if (m && i >= n - 5) {
+      const nl = norm(m[1]);
+      const mine = nl && sent.some(s => s.includes(nl) || nl.includes(s.slice(0, 24)));
+      if (!mine) return '<span class="ghost">' + esc(l) + '</span><i class="gtag">agent suggestion · not sent by you</i>';
     }
-    return hit ? "<mark>" + esc(l) + "</mark>" : esc(l);
+    let out = esc(l);
+    if (saidNow) {
+      const ns = norm(saidNow), nl = norm(l);
+      let hit = false;
+      if (ns && nl.length >= 4) {
+        if (ns.length <= 12) hit = nl.includes(ns);
+        else for (let k = 0; k + 12 <= ns.length; k += 6) { if (nl.includes(ns.slice(k, k + 12))) { hit = true; break; } }
+      }
+      if (hit) out = "<mark>" + out + "</mark>";
+    }
+    return out;
   }).join("\n");
+}
+
+function allSaid() {
+  return state.events.filter(x => x.kind === "utterance" && x.said).map(x => x.said);
 }
 
 function detail(e) {
@@ -366,13 +384,13 @@ function detail(e) {
         // The snapshot PRE-dates the typing: nothing in it is user input. Text
         // sitting in an input box here is the agent's suggestion, not yours.
         h += '<div class="screenhead">screen as you began typing — pre-input context</div>';
-        h += '<div class="screen">' + esc(e.saw.join("\n")) + "</div>";
+        h += '<div class="screen">' + renderScreen(e.saw, null, allSaid()) + "</div>";
         h += '<div class="legend">nothing on this screen is your input (it was captured <b>before</b> you typed) — a pre-filled prompt in the input box is the agent\'s suggestion. Your input is exactly the <b>SAID</b> line above.</div>';
       } else {
         const src = state.events.find(x => x.kind === "utterance" && x.id === e.of);
         h += '<div class="screenhead">the same pane, minutes after your input</div>';
-        h += '<div class="screen">' + markSaid(e.saw, src && src.said) + "</div>";
-        h += '<div class="legend"><b>amber</b> = your message from the linked utterance, echoed back · everything else is what the agent did with it</div>';
+        h += '<div class="screen">' + renderScreen(e.saw, src && src.said, allSaid()) + "</div>";
+        h += '<div class="legend"><b>amber</b> = your message from the linked utterance, echoed back · <i style="font-style:italic">grey-tagged ❯ lines</i> = the agent\'s suggested prompts, never sent · the rest is what the agent did</div>';
       }
     }
   } else {
