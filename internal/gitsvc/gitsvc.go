@@ -161,14 +161,20 @@ type Commit struct {
 	Refs    []string `json:"refs,omitempty"`
 }
 
-// GetLog returns up to n commits from HEAD (skip for paging), with decorations.
-func GetLog(dir string, n, skip int) ([]Commit, error) {
+// GetLog returns up to n commits (skip for paging), with decorations. From HEAD by
+// default; all=true walks EVERY ref (GitKraken-style whole-repo graph) in topo order
+// so the client's lane layout stays clean.
+func GetLog(dir string, n, skip int, all bool) ([]Commit, error) {
 	if n <= 0 || n > 1000 {
 		n = 100
 	}
-	out, err := run(dir, "log",
+	args := []string{"log",
 		"--pretty=format:%H\x1f%P\x1f%an\x1f%ae\x1f%at\x1f%s\x1f%D\x1e",
-		"-n", strconv.Itoa(n), "--skip", strconv.Itoa(skip))
+		"-n", strconv.Itoa(n), "--skip", strconv.Itoa(skip)}
+	if all {
+		args = append(args, "--all", "--topo-order")
+	}
+	out, err := run(dir, args...)
 	if err != nil {
 		return nil, err
 	}

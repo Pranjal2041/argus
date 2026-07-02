@@ -44,6 +44,18 @@
     else if (/^[^/]+\/.+/.test(r)) { cls += " remote"; }
     return '<span class="' + cls + '" title="' + esc(r) + '">' + esc(label) + "</span>";
   }
+  var EXT_COLORS = { go:"#00add8", swift:"#f05138", js:"#e8d44d", ts:"#3178c6", py:"#3572a5",
+    md:"#8ba9c0", json:"#e0af68", css:"#7a67c9", html:"#e34c26", sh:"#89e051", rs:"#dea584",
+    java:"#b07219", kt:"#a97bff", c:"#9a9db0", h:"#9a9db0", cpp:"#f34b7d", yml:"#cb5c5c",
+    yaml:"#cb5c5c", txt:"#9a9db0", toml:"#9c4221", sql:"#c88536", rb:"#701516" };
+  function extChip(path) {
+    var m = String(path).match(/\.([a-z0-9]+)$/i);
+    var ext = m ? m[1].toLowerCase() : "";
+    if (!ext || ext.length > 5) return "";
+    var c = EXT_COLORS[ext];
+    return '<span class="ext"' + (c ? ' style="color:' + c + '"' : "") + ">" + esc(ext) + "</span>";
+  }
+
   // Per-file added/removed counts parsed from a unified diff.
   function diffStats(text) {
     var files = [], cur = null;
@@ -67,6 +79,7 @@
     headStats: {},        // path → {add, del} from the head diff
     logFilter: "",
     fileFilter: "",
+    allBranches: false,
     selCommit: null,
     blameFrom: "changes"
   };
@@ -83,7 +96,7 @@
   el("tab-changes").onclick = function () { showView("changes"); };
   el("tab-history").onclick = function () {
     showView("history");
-    if (!state.log.length) post("moreLog", { skip: 0 });
+    if (!state.log.length) post("moreLog", { skip: 0, all: state.allBranches });
   };
   el("btn-refresh").onclick = function () { post("refresh"); };
   el("btn-lazygit").onclick = function () { post("lazygit"); };
@@ -92,6 +105,32 @@
     if (state.lastDiff) renderDiff(state.lastDiff.target, state.lastDiff.text, state.lastDiff.meta);
   };
   el("blame-back").onclick = function () { showView(state.blameFrom); };
+  el("all-branches").onclick = function () {
+    state.allBranches = !state.allBranches;
+    this.classList.toggle("on", state.allBranches);
+    state.log = [];
+    overlay("loading history…");
+    post("moreLog", { skip: 0, all: state.allBranches });
+  };
+  // draggable split between list and detail (both views)
+  document.querySelectorAll(".drag").forEach(function (h) {
+    h.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+      var sidebar = h.previousElementSibling;
+      h.classList.add("active");
+      function move(ev) {
+        var w = Math.min(Math.max(ev.clientX, 220), window.innerWidth * 0.65);
+        sidebar.style.width = w + "px";
+      }
+      function up() {
+        h.classList.remove("active");
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+      }
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+  });
   el("log-filter").oninput = function () { state.logFilter = this.value.toLowerCase(); paintLog(); };
   el("files-filter").oninput = function () { state.fileFilter = this.value.toLowerCase(); paintFiles(); };
 
@@ -139,7 +178,7 @@
         for (var b = 0; b < 5; b++) {
           blocks += '<i class="' + (tot === 0 ? "" : b < Math.round(5 * f.add / (tot || 1)) ? "p" : "m") + '"></i>';
         }
-        return '<div class="flrow" data-i="' + i + '"><span class="fpath">' + esc(f.path) + "</span>" +
+        return '<div class="flrow" data-i="' + i + '">' + extChip(f.path) + '<span class="fpath">' + esc(f.path) + "</span>" +
           '<span class="fstat"><span class="p">+' + f.add + '</span><span class="m">−' + f.del + "</span></span>" +
           '<span class="flbar">' + blocks + "</span></div>";
       }).join("");
@@ -280,26 +319,30 @@
     var s = '<svg width="' + w + '" height="' + ROW + '" viewBox="0 0 ' + w + " " + ROW + '">';
     function x(i) { return i * LW + LW / 2; }
     function color(i) { return LANE_COLORS[i % LANE_COLORS.length]; }
+    // smooth S-curve between two points (GitKraken-style continuous edges)
+    function curve(x1, y1, x2, y2, col) {
+      var my = (y1 + y2) / 2;
+      return '<path d="M ' + x1 + " " + y1 + " C " + x1 + " " + my + ", " + x2 + " " + my + ", " + x2 + " " + y2 +
+        '" fill="none" stroke="' + col + '" stroke-width="2.25" stroke-linecap="round"/>';
+    }
     for (var i = 0; i < row.before.length; i++) {
       if (i === row.col || row.before[i] === null) continue;
       if (row.after[i] === row.before[i]) {
-        s += '<line x1="' + x(i) + '" y1="0" x2="' + x(i) + '" y2="' + ROW + '" stroke="' + color(i) + '" stroke-width="2"/>';
+        s += curve(x(i), 0, x(i), ROW, color(i));
       }
     }
-    if (row.after[row.col]) {
-      s += '<line x1="' + x(row.col) + '" y1="' + mid + '" x2="' + x(row.col) + '" y2="' + ROW + '" stroke="' + color(row.col) + '" stroke-width="2"/>';
-    }
-    s += '<line x1="' + x(row.col) + '" y1="0" x2="' + x(row.col) + '" y2="' + mid + '" stroke="' + color(row.col) + '" stroke-width="2"/>';
+    if (row.after[row.col]) s += curve(x(row.col), mid, x(row.col), ROW, color(row.col));
+    s += curve(x(row.col), 0, x(row.col), mid, color(row.col));
     row.merged.forEach(function (i) {
-      s += '<path d="M ' + x(i) + " 0 Q " + x(i) + " " + mid + " " + x(row.col) + " " + mid + '" fill="none" stroke="' + color(i) + '" stroke-width="2"/>';
+      s += curve(x(i), 0, x(row.col), mid, color(i));
     });
     for (var p = 1; p < row.after.length; p++) {
       if (row.before[p] === null && row.after[p] !== null && row.after[p] !== row.before[p]) {
-        s += '<path d="M ' + x(row.col) + " " + mid + " Q " + x(p) + " " + mid + " " + x(p) + " " + ROW + '" fill="none" stroke="' + color(p) + '" stroke-width="2"/>';
+        s += curve(x(row.col), mid, x(p), ROW, color(p));
       }
     }
     if (row.isMerge) {
-      s += '<circle cx="' + x(row.col) + '" cy="' + mid + '" r="4.5" fill="none" stroke="' + color(row.col) + '" stroke-width="2"/>';
+      s += '<circle cx="' + x(row.col) + '" cy="' + mid + '" r="4.5" fill="var(--bg, #0d0e12)" stroke="' + color(row.col) + '" stroke-width="2.25"/>';
     } else {
       s += '<circle cx="' + x(row.col) + '" cy="' + mid + '" r="4" fill="' + color(row.col) + '"/>';
     }
@@ -310,6 +353,18 @@
     var rows = layoutLanes(state.log);
     var q = state.logFilter;
     var h = "";
+    // WIP row: uncommitted changes ride the top of the graph (click -> Changes view)
+    var wip = state.summary ? (state.summary.files || []).length : 0;
+    if (wip && !q) {
+      var wcol = rows.length ? rows[0].col : 0;
+      var wx = wcol * LW + LW / 2, ww = Math.max((rows.length ? rows[0].width : 1) * LW, LW);
+      h += '<div class="crow wip" id="wip-row">' +
+        '<svg width="' + ww + '" height="30" viewBox="0 0 ' + ww + ' 30">' +
+        '<line x1="' + wx + '" y1="15" x2="' + wx + '" y2="30" stroke="' + LANE_COLORS[wcol % LANE_COLORS.length] + '" stroke-width="2.25" stroke-dasharray="3 3"/>' +
+        '<circle cx="' + wx + '" cy="15" r="4.5" fill="none" stroke="' + LANE_COLORS[wcol % LANE_COLORS.length] + '" stroke-width="2" stroke-dasharray="2.5 2.5"/></svg>' +
+        '<div class="csub"><span class="txt">' + wip + ' uncommitted change' + (wip === 1 ? '' : 's') + ' — working tree</span></div>' +
+        '<span class="ctime">now</span></div>';
+    }
     state.log.forEach(function (c, i) {
       if (q && (c.subject + " " + c.author + " " + c.hash).toLowerCase().indexOf(q) === -1) return;
       var refs = (c.refs || []).map(refPill).join("");
@@ -322,7 +377,9 @@
     });
     if (state.log.length >= 100) h += '<button id="more-log">Load more…</button>';
     el("commits").innerHTML = h || '<div class="empty">No commits' + (q ? " match" : "") + ".</div>";
-    el("commits").querySelectorAll(".crow").forEach(function (row) {
+    var wipRow = el("wip-row");
+    if (wipRow) wipRow.onclick = function () { showView("changes"); };
+    el("commits").querySelectorAll(".crow:not(.wip)").forEach(function (row) {
       row.onclick = function () {
         el("commits").querySelectorAll(".crow.sel").forEach(function (r) { r.classList.remove("sel"); });
         row.classList.add("sel");
@@ -331,7 +388,7 @@
       };
     });
     var more = el("more-log");
-    if (more) more.onclick = function () { post("moreLog", { skip: state.log.length }); };
+    if (more) more.onclick = function () { post("moreLog", { skip: state.log.length, all: state.allBranches }); };
   }
 
   function renderLog(log, append) {
