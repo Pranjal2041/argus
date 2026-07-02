@@ -59,58 +59,118 @@ struct AgentIndicator: View {
     private var isKey: Bool { controlActive != .inactive }
 
     var body: some View {
-        // The pulse is driven DECLARATIVELY by the timeline — no @State + onAppear/
-        // onChange(restart) animation. That pattern wrote @State during the SwiftUI
-        // update phase, creating an AttributeGraph cycle that severed sidebar rows'
-        // update branch (dots stuck green-while-working, selection stuck highlighted).
-        // A static dot when not pulsing stays cheap (no per-frame timeline).
-        Group {
-            // Pulse only while the window is focused, and tick at ~30fps instead of the
-            // display's full refresh rate. `.animation` runs at 120Hz on ProMotion, and
-            // with many session rows on screen SwiftUI re-laid-out the WHOLE sidebar every
-            // frame (cost = rows × 120fps — the dominant CPU drain found by profiling). The
-            // breathing stays smooth (phase is wall-clock derived); a backgrounded window
-            // animates nothing.
-            if style.pulses && isKey {
-                TimelineView(.periodic(from: Date(), by: 1.0 / 30.0)) { ctx in dot(phase: Self.phase(at: ctx.date)) }
-            } else {
-                dot(phase: 0)
-            }
+        AgentDotCA(style: style, diameter: diameter)
+            .frame(width: diameter + 7, height: diameter + 7)
+            .opacity(isKey ? 1 : 0.7)
+            .help(style.help)
+    }
+}
+
+/// The breathing dot as CORE ANIMATION layers. History of this dot, so it never
+/// regresses again:
+///   1. `.animation`/@State repeatForever — wrote state during the SwiftUI update
+///      phase → AttributeGraph cycle → rows' update branches severed (dots stuck,
+///      selection stuck). Banned.
+///   2. TimelineView(.periodic 30fps) (PR #60) — fine on macOS 15, but macOS 26
+///      re-places the WHOLE lazy sidebar on every tick inside a list row: 30
+///      full placement passes/sec pinned the main thread at 100% whenever any
+///      agent was working and the window was key ("app hanging" storms).
+///   3. This: CABasicAnimations on layers. The render server interpolates;
+///      the app process does ZERO per-frame work, SwiftUI sees a fixed-size
+///      static NSView, layout is never invalidated. updateNSView re-applies
+///      only when the style actually changed (and reads no observable state).
+private struct AgentDotCA: NSViewRepresentable {
+    let style: AgentIndicatorStyle
+    let diameter: CGFloat
+
+    func makeNSView(context: Context) -> DotHost { DotHost() }
+    func updateNSView(_ v: DotHost, context: Context) { v.apply(style: style, diameter: diameter) }
+
+    final class DotHost: NSView {
+        private let halo = CALayer()
+        private let core = CALayer()
+        private var appliedKey = ""
+        private var pulsing = false
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            layer?.addSublayer(halo)
+            layer?.addSublayer(core)
         }
-        .frame(width: diameter + 7, height: diameter + 7)
-        .opacity(isKey ? 1 : 0.7)
-        .help(style.help)
-    }
+        required init?(coder: NSCoder) { nil }
 
-    /// Smooth 0→1→0 breathing phase on a ~1.4s cycle, from wall-clock time.
-    private static func phase(at date: Date) -> Double {
-        let period = 1.4
-        let t = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
-        return (1 - cos(t * 2 * .pi)) / 2
-    }
+        func apply(style: AgentIndicatorStyle, diameter: CGFloat) {
+            let color = NSColor(style.color)
+            let key = "\(color.description)|\(style.filled)|\(style.pulses)|\(diameter)"
+            guard key != appliedKey else { return }
+            appliedKey = key
+            pulsing = style.pulses
 
-    @ViewBuilder private func dot(phase: Double) -> some View {
-        ZStack {
+            let total = diameter + 7
+            let inset = (total - diameter) / 2
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            halo.frame = CGRect(x: 0, y: 0, width: total, height: total)
+            halo.cornerRadius = total / 2
+            halo.backgroundColor = color.withAlphaComponent(0.30).cgColor
+            core.frame = CGRect(x: inset, y: inset, width: diameter, height: diameter)
+            core.cornerRadius = diameter / 2
+            if style.filled {
+                core.backgroundColor = color.cgColor
+                core.borderWidth = 0
+            } else {
+                core.backgroundColor = NSColor.clear.cgColor
+                core.borderColor = color.cgColor
+                core.borderWidth = 1.5
+            }
             if style.pulses {
-                // Expanding, fading glow halo.
-                Circle()
-                    .fill(style.color.opacity(0.30))
-                    .frame(width: diameter + 7, height: diameter + 7)
-                    .scaleEffect(0.55 + 0.45 * phase)
-                    .opacity(0.55 * (1 - phase))
+                core.shadowColor = color.cgColor
+                core.shadowOpacity = 0.55
+                core.shadowRadius = 3
+                core.shadowOffset = .zero
+            } else {
+                core.shadowOpacity = 0
             }
-            // Core: solid dot or hollow ring.
-            Group {
-                if style.filled {
-                    Circle().fill(style.color)
-                } else {
-                    Circle().strokeBorder(style.color, lineWidth: 1.5)
-                }
-            }
-            .frame(width: diameter, height: diameter)
-            .opacity(style.pulses ? 1.0 - 0.45 * phase : 1.0)
-            .shadow(color: style.pulses ? style.color.opacity(0.55) : .clear,
-                    radius: style.pulses ? 3 : 0)
+            CATransaction.commit()
+            restartAnimations()
+        }
+
+        /// The render-server animations: an expanding, fading halo ring and a
+        /// gently dimming core, both on a 1.4s cycle (same feel as before).
+        private func restartAnimations() {
+            halo.removeAllAnimations()
+            core.removeAllAnimations()
+            halo.opacity = pulsing ? 0.55 : 0
+            guard pulsing else { return }
+
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 0.55
+            scale.toValue = 1.0
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0.55
+            fade.toValue = 0.0
+            let haloGroup = CAAnimationGroup()
+            haloGroup.animations = [scale, fade]
+            haloGroup.duration = 1.4
+            haloGroup.repeatCount = .infinity
+            halo.add(haloGroup, forKey: "breathe")
+
+            let dim = CABasicAnimation(keyPath: "opacity")
+            dim.fromValue = 1.0
+            dim.toValue = 0.55
+            dim.duration = 0.7
+            dim.autoreverses = true
+            dim.repeatCount = .infinity
+            dim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            core.add(dim, forKey: "breathe")
+        }
+
+        /// CA strips animations from detached layers; lazy rows detach/reattach
+        /// constantly, so re-arm whenever we land in a window.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil { restartAnimations() }
         }
     }
 }
