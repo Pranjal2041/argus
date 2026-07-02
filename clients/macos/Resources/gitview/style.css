@@ -109,6 +109,9 @@ button { font: inherit; }
 .crow:hover { background: var(--surface); }
 .crow:hover svg { filter: brightness(1.25); }
 .crow.sel { background: var(--surface2); outline: 1px solid var(--border); }
+.crow.selb { background: var(--surface2); outline: 1px dashed var(--accent); }
+.crow { transition: background .1s, opacity .12s; }
+.crow.dim { opacity: .3; }
 .crow.wip .txt { color: var(--fg2); font-style: italic; }
 .crow svg { flex-shrink: 0; height: 30px; }
 .csub { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px;

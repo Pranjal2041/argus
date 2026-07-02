@@ -124,8 +124,9 @@ func statusLetter(b byte) string {
 }
 
 // GetDiff returns a unified diff for a scope: worktree (unstaged), staged, head
-// (worktree+index vs HEAD), or a single commit. Optional path filter.
-func GetDiff(dir, scope, hash, path string) ([]byte, error) {
+// (worktree+index vs HEAD), a single commit, or a range (hash2 → hash, the
+// two-commit compare). Optional path filter.
+func GetDiff(dir, scope, hash, hash2, path string) ([]byte, error) {
 	var args []string
 	switch scope {
 	case "", "worktree":
@@ -141,6 +142,11 @@ func GetDiff(dir, scope, hash, path string) ([]byte, error) {
 		// %n between commits never applies (single commit); --format= drops the
 		// message so the output is pure diff for the renderer.
 		args = []string{"show", hash, "--format=", "--find-renames"}
+	case "range":
+		if hash == "" || hash2 == "" {
+			return nil, fmt.Errorf("range scope needs hash and hash2")
+		}
+		args = []string{"diff", hash2, hash, "--find-renames"} // changes from hash2 → hash
 	default:
 		return nil, fmt.Errorf("bad scope %q", scope)
 	}

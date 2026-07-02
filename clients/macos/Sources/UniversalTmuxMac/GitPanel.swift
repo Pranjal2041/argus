@@ -48,6 +48,10 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
                       hash: body["hash"] as? String, path: body["path"] as? String)
         case "commit":
             if let h = body["hash"] as? String { fetchDiff(scope: "commit", hash: h, path: nil) }
+        case "compare":
+            if let a = body["a"] as? String, let b = body["b"] as? String {
+                fetchDiff(scope: "range", hash: a, hash2: b, path: nil)
+            }
         case "moreLog":
             fetchLog(skip: body["skip"] as? Int ?? 0, all: body["all"] as? Bool ?? false)
         case "blame":
@@ -106,15 +110,17 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func fetchDiff(scope: String, hash: String?, path: String?) {
+    private func fetchDiff(scope: String, hash: String?, hash2: String? = nil, path: String?) {
         var url = "/git/diff?dir=\(enc(dir))&scope=\(scope)"
         if let hash { url += "&hash=\(enc(hash))" }
+        if let hash2 { url += "&hash2=\(enc(hash2))" }
         if let path { url += "&path=\(enc(path))" }
         fetchText(url) { [weak self] text in
             guard let self else { return }
             var meta = "{scope:\(self.js(scope))"
             if let hash { meta += ",hash:\(self.js(hash))" }
-            if let path { meta += ",title:\(self.js(path))" } else if scope != "commit" { meta += ",title:'working tree'" }
+            if let hash2 { meta += ",hash2:\(self.js(hash2))" }
+            if let path { meta += ",title:\(self.js(path))" } else if scope != "commit" && scope != "range" { meta += ",title:'working tree'" }
             meta += "}"
             self.eval("window.UTGit.setDiff(\(self.js(text)), \(meta))")
         }

@@ -77,7 +77,7 @@ func TestSummary(t *testing.T) {
 func TestDiffScopes(t *testing.T) {
 	dir := fixtureRepo(t)
 	for _, scope := range []string{"worktree", "staged", "head"} {
-		out, err := GetDiff(dir, scope, "", "")
+		out, err := GetDiff(dir, scope, "", "", "")
 		if err != nil {
 			t.Fatalf("%s: %v", scope, err)
 		}
@@ -86,7 +86,7 @@ func TestDiffScopes(t *testing.T) {
 		}
 	}
 	// per-path filter
-	out, err := GetDiff(dir, "worktree", "", "a.txt")
+	out, err := GetDiff(dir, "worktree", "", "", "a.txt")
 	if err != nil || !strings.Contains(string(out), "a.txt") || strings.Contains(string(out), "b.go") {
 		t.Errorf("path filter failed: %v %q", err, string(out))
 	}
@@ -121,7 +121,7 @@ func TestLogAndCommitDiff(t *testing.T) {
 		t.Errorf("HEAD refs missing main: %+v", log[0].Refs)
 	}
 	// commit-scope diff
-	out, err := GetDiff(dir, "commit", log[0].Hash, "")
+	out, err := GetDiff(dir, "commit", log[0].Hash, "", "")
 	if err != nil || !strings.Contains(string(out), "line three") {
 		t.Errorf("commit diff: %v %q", err, string(out))
 	}
@@ -170,4 +170,17 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestRangeDiff: compare two commits directly (the two-commit compare).
+func TestRangeDiff(t *testing.T) {
+	dir := fixtureRepo(t)
+	log, err := GetLog(dir, 10, 0, false)
+	if err != nil || len(log) != 2 {
+		t.Fatalf("log: %v %d", err, len(log))
+	}
+	out, err := GetDiff(dir, "range", log[0].Hash, log[1].Hash, "")
+	if err != nil || !strings.Contains(string(out), "line three") {
+		t.Errorf("range diff: %v %q", err, string(out))
+	}
 }

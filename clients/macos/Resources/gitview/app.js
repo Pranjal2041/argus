@@ -80,6 +80,7 @@
     logFilter: "",
     fileFilter: "",
     allBranches: false,
+    compareWith: null,
     selCommit: null,
     blameFrom: "changes"
   };
@@ -379,9 +380,45 @@
     el("commits").innerHTML = h || '<div class="empty">No commits' + (q ? " match" : "") + ".</div>";
     var wipRow = el("wip-row");
     if (wipRow) wipRow.onclick = function () { showView("changes"); };
-    el("commits").querySelectorAll(".crow:not(.wip)").forEach(function (row) {
-      row.onclick = function () {
-        el("commits").querySelectorAll(".crow.sel").forEach(function (r) { r.classList.remove("sel"); });
+
+    // lineage maps for hover-highlight (ancestors ∪ descendants of the hovered commit)
+    var parentsOf = {}, childrenOf = {};
+    state.log.forEach(function (c) {
+      parentsOf[c.hash] = c.parents || [];
+      (c.parents || []).forEach(function (p) { (childrenOf[p] = childrenOf[p] || []).push(c.hash); });
+    });
+    function lineage(h) {
+      var set = {}, stack = [h];
+      while (stack.length) { var x = stack.pop(); if (set[x]) continue; set[x] = 1; (parentsOf[x] || []).forEach(function (p) { stack.push(p); }); }
+      stack = [h];
+      while (stack.length) { var y = stack.pop(); if (y !== h && set[y]) continue; set[y] = 1; (childrenOf[y] || []).forEach(function (cc) { stack.push(cc); }); }
+      return set;
+    }
+    var allRows = el("commits").querySelectorAll(".crow:not(.wip)");
+    allRows.forEach(function (row) {
+      row.onmouseenter = function () {
+        var set = lineage(row.dataset.hash);
+        allRows.forEach(function (r) { r.classList.toggle("dim", !set[r.dataset.hash]); });
+      };
+      row.onmouseleave = function () {
+        allRows.forEach(function (r) { r.classList.remove("dim"); });
+      };
+      row.onclick = function (ev) {
+        // ⌘/ctrl-click with a selection = COMPARE the two commits
+        if ((ev.metaKey || ev.ctrlKey) && state.selCommit && state.selCommit !== row.dataset.hash) {
+          state.compareWith = row.dataset.hash;
+          allRows.forEach(function (r) { r.classList.remove("selb"); });
+          row.classList.add("selb");
+          var a = state.selCommit, b = state.compareWith;
+          // diff from the OLDER to the NEWER so + means "added since"
+          var byHash = {}; state.log.forEach(function (c) { byHash[c.hash] = c; });
+          if (byHash[a] && byHash[b] && byHash[a].at < byHash[b].at) { var t = a; a = b; b = t; }
+          overlay("comparing…");
+          post("compare", { a: a, b: b });
+          return;
+        }
+        state.compareWith = null;
+        el("commits").querySelectorAll(".crow.sel, .crow.selb").forEach(function (r) { r.classList.remove("sel", "selb"); });
         row.classList.add("sel");
         state.selCommit = row.dataset.hash;
         post("commit", { hash: row.dataset.hash });
@@ -394,6 +431,21 @@
   function renderLog(log, append) {
     state.log = append ? state.log.concat(log) : log;
     paintLog();
+  }
+
+  function renderRangeDiff(a, b, text) {
+    var byHash = {}; state.log.forEach(function (c) { byHash[c.hash] = c; });
+    var ca = byHash[a], cb = byHash[b];
+    function side(c, h) {
+      if (!c) return '<span class="h">' + h.slice(0, 10) + "</span>";
+      return avatar(c.author) + '<span class="h">' + h.slice(0, 10) + '</span><span class="txt" style="overflow:hidden;text-overflow:ellipsis">' + esc(c.subject) + "</span>";
+    }
+    var target = el("history-diff");
+    target.innerHTML = '<div class="commit-card"><div class="s">Compare</div>' +
+      '<div class="meta" style="flex-wrap:nowrap;min-width:0">' + side(cb, b) +
+      '<span style="color:var(--fg3);flex-shrink:0">→</span>' + side(ca, a) + "</div></div>" +
+      '<div id="commit-diff-host"></div>';
+    renderDiff("commit-diff-host", text, { title: b.slice(0, 8) + "…" + a.slice(0, 8), scope: "range-inner" });
   }
 
   function renderCommitDiff(hash, text) {
@@ -480,6 +532,7 @@
     setDiff: function (text, meta) {
       overlay(null);
       if (meta && meta.scope === "commit") { renderCommitDiff(meta.hash, text); return; }
+      if (meta && meta.scope === "range") { renderRangeDiff(meta.hash, meta.hash2, text); return; }
       // the head diff doubles as the source of per-file stats for the sidebar
       if (meta && meta.scope === "head") {
         state.headStats = {};
