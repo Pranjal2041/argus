@@ -6,7 +6,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,6 +28,7 @@ import (
 	"universal-tmux/internal/broker"
 	"universal-tmux/internal/forward"
 	"universal-tmux/internal/fsvc"
+	"universal-tmux/internal/gitui"
 	"universal-tmux/internal/jupyter"
 	"universal-tmux/internal/mesh"
 	"universal-tmux/internal/portfwd"
@@ -387,6 +390,40 @@ func main() {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(info)
+	})
+	// Git panel: ensure lazygit on this host (PATH → UT_HOME → one-time download)
+	// and run it in ?dir as a hidden agent session the client attaches to like any
+	// terminal. Same dir → same session (fast re-open); quitting lazygit marks the
+	// session done for the idle reaper.
+	mux.HandleFunc("/gitui", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		dir := r.URL.Query().Get("dir")
+		if dir == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing dir"})
+			return
+		}
+		bin, err := gitui.Resolve()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		sum := sha256.Sum256([]byte(dir))
+		name := "_git-" + hex.EncodeToString(sum[:4])
+		if !mgr.Has(name) {
+			// 30-min idle leash: an abandoned panel gets reaped; quitting lazygit
+			// sets @ut_done so the reaper collects it promptly. Plain double-quote
+			// wrapping works for BOTH sh and cmd.exe (strconv.Quote would escape
+			// Windows backslashes and break the path).
+			if err := mgr.Spawn(name, dir, "\""+bin+"\"", 1800); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"session": name})
 	})
 	// File service: browse this host's filesystem (as the broker's user) and
 	// stream file contents. /fs/home → starting points, /fs/list → a directory,

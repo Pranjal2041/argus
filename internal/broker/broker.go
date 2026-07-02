@@ -478,6 +478,9 @@ type capturer interface {
 	Capture(name string, lines int) (string, error)
 }
 
+// Has reports whether a session with this exact name exists right now.
+func (m *Manager) Has(name string) bool { return m.prov.Has(name) }
+
 // Recent returns a session's recent rendered output for the command-center status
 // updater. Errors if the session is gone or the backend can't capture. This DOES
 // fork tmux capture-pane on the request path (unlike /sessions), so the caller
