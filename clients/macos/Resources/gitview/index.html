@@ -24,18 +24,24 @@
     </div>
 
     <div id="view-changes" class="view">
-      <div class="sidebar" id="files"></div>
-      <div class="content" id="changes-diff"><div class="empty">Select a file — or “All changes”.</div></div>
+      <div class="sidebar">
+        <div class="filterbar"><input id="files-filter" placeholder="Filter files…" /></div>
+        <div class="scroll" id="files"></div>
+      </div>
+      <div class="content" id="changes-diff"><div class="empty"><span class="big">⎇</span>Select a file — or “All changes”.</div></div>
     </div>
 
     <div id="view-history" class="view" style="display:none">
-      <div class="sidebar wide" id="commits"></div>
-      <div class="content" id="history-diff"><div class="empty">Select a commit.</div></div>
+      <div class="sidebar wide">
+        <div class="filterbar"><input id="log-filter" placeholder="Filter commits (subject, author, hash)…" /></div>
+        <div class="scroll" id="commits"></div>
+      </div>
+      <div class="content" id="history-diff"><div class="empty"><span class="big">◉</span>Select a commit.</div></div>
     </div>
 
     <div id="view-blame" class="view" style="display:none">
       <div class="blame-head">
-        <button id="blame-back">←</button>
+        <button id="blame-back">← back</button>
         <span id="blame-path"></span>
       </div>
       <div class="content full" id="blame-body"></div>

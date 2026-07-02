@@ -1,6 +1,7 @@
 // Git panel logic. Swift injects data via window.UTGit.*; user intents go back via
-// webkit.messageHandlers.ut.postMessage. The page renders three read-only views:
-// Changes (status + diffs), History (lane graph + commit diffs), Blame.
+// webkit.messageHandlers.ut.postMessage. Three read-only views: Changes (status +
+// diffs with per-file stats), History (lane graph + commit detail with a file list),
+// Blame (age-heat gutter).
 (function () {
   "use strict";
 
@@ -24,16 +25,50 @@
     if (s < 86400 * 365) return Math.floor(s / 86400 / 30) + "mo";
     return Math.floor(s / 86400 / 365) + "y";
   }
+  // Stable pastel-ish color per author (GitKraken-style identity without network avatars).
+  function authorColor(name) {
+    var h = 0;
+    for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return "hsl(" + (h % 360) + ", 45%, 45%)";
+  }
+  function initials(name) {
+    var p = String(name).trim().split(/\s+/);
+    return ((p[0] || "?")[0] + (p.length > 1 ? p[p.length - 1][0] : "")).toUpperCase();
+  }
+  function avatar(name) {
+    return '<span class="avatar" style="background:' + authorColor(name) + '" title="' + esc(name) + '">' + esc(initials(name)) + "</span>";
+  }
+  function refPill(r) {
+    var cls = "ref", label = r;
+    if (/^tag: /.test(r)) { cls += " tag"; label = r.slice(5); }
+    else if (/^[^/]+\/.+/.test(r)) { cls += " remote"; }
+    return '<span class="' + cls + '" title="' + esc(r) + '">' + esc(label) + "</span>";
+  }
+  // Per-file added/removed counts parsed from a unified diff.
+  function diffStats(text) {
+    var files = [], cur = null;
+    (text || "").split("\n").forEach(function (ln) {
+      if (ln.startsWith("diff --git ")) {
+        var m = ln.match(/ b\/(.+)$/);
+        cur = { path: m ? m[1] : ln.slice(11), add: 0, del: 0 };
+        files.push(cur);
+      } else if (cur && ln.startsWith("+") && !ln.startsWith("+++")) cur.add++;
+      else if (cur && ln.startsWith("-") && !ln.startsWith("---")) cur.del++;
+    });
+    return files;
+  }
 
   var state = {
     summary: null,
     log: [],
     sideBySide: true,
     view: "changes",
-    selFile: null,       // {path, scope}
-    selCommit: null,     // hash
-    lastDiff: null,      // {text, meta}
-    blameFrom: "changes" // view to return to from blame
+    lastDiff: null,       // {target, text, meta}
+    headStats: {},        // path → {add, del} from the head diff
+    logFilter: "",
+    fileFilter: "",
+    selCommit: null,
+    blameFrom: "changes"
   };
 
   // ---- view switching ------------------------------------------------------
@@ -57,16 +92,60 @@
     if (state.lastDiff) renderDiff(state.lastDiff.target, state.lastDiff.text, state.lastDiff.meta);
   };
   el("blame-back").onclick = function () { showView(state.blameFrom); };
+  el("log-filter").oninput = function () { state.logFilter = this.value.toLowerCase(); paintLog(); };
+  el("files-filter").oninput = function () { state.fileFilter = this.value.toLowerCase(); paintFiles(); };
 
-  // ---- diff rendering (diff2html) -----------------------------------------
+  // keyboard nav in History: ↑/↓ moves the selected commit
+  document.addEventListener("keydown", function (ev) {
+    if (state.view !== "history" || (ev.target && ev.target.tagName === "INPUT")) return;
+    if (ev.key !== "ArrowDown" && ev.key !== "ArrowUp") return;
+    ev.preventDefault();
+    var rows = Array.prototype.slice.call(el("commits").querySelectorAll(".crow"));
+    if (!rows.length) return;
+    var idx = rows.findIndex(function (r) { return r.classList.contains("sel"); });
+    idx = idx === -1 ? 0 : Math.min(rows.length - 1, Math.max(0, idx + (ev.key === "ArrowDown" ? 1 : -1)));
+    rows[idx].click();
+    rows[idx].scrollIntoView({ block: "nearest" });
+  });
+
+  // ---- diff rendering (diff2html + stats header) ---------------------------
   function renderDiff(targetID, text, meta) {
     state.lastDiff = { target: targetID, text: text, meta: meta };
     var target = el(targetID);
     if (!text || !text.trim()) {
-      target.innerHTML = '<div class="empty">No changes' + (meta && meta.title ? " in " + esc(meta.title) : "") + '.</div>';
+      target.innerHTML = '<div class="empty"><span class="big">✓</span>No changes' +
+        (meta && meta.title ? " in " + esc(meta.title) : "") + ".</div>";
       return;
     }
+    var stats = diffStats(text);
+    var totAdd = 0, totDel = 0;
+    stats.forEach(function (f) { totAdd += f.add; totDel += f.del; });
+
     target.innerHTML = "";
+    // "N files changed +X −Y" bar + per-file jump list (collapsed when 1 file)
+    var bar = document.createElement("div");
+    bar.className = "diffstat-bar";
+    bar.innerHTML = '<span class="tot">' + stats.length + " file" + (stats.length === 1 ? "" : "s") + " changed</span>" +
+      '<span class="p">+' + totAdd + '</span><span class="m">−' + totDel + "</span>" +
+      '<span class="spacer"></span>' +
+      '<button data-x="collapse">collapse all</button><button data-x="expand">expand all</button>';
+    target.appendChild(bar);
+
+    if (stats.length > 1) {
+      var fl = document.createElement("div");
+      fl.className = "filelist";
+      fl.innerHTML = stats.map(function (f, i) {
+        var tot = f.add + f.del, blocks = "";
+        for (var b = 0; b < 5; b++) {
+          blocks += '<i class="' + (tot === 0 ? "" : b < Math.round(5 * f.add / (tot || 1)) ? "p" : "m") + '"></i>';
+        }
+        return '<div class="flrow" data-i="' + i + '"><span class="fpath">' + esc(f.path) + "</span>" +
+          '<span class="fstat"><span class="p">+' + f.add + '</span><span class="m">−' + f.del + "</span></span>" +
+          '<span class="flbar">' + blocks + "</span></div>";
+      }).join("");
+      target.appendChild(fl);
+    }
+
     var host = document.createElement("div");
     target.appendChild(host);
     /* global Diff2HtmlUI, hljs */
@@ -80,50 +159,68 @@
       fileContentToggle: true
     }, hljs);
     ui.draw();
+
+    // wire the jump list + expand/collapse
+    var wrappers = host.querySelectorAll(".d2h-file-wrapper");
+    target.querySelectorAll(".flrow").forEach(function (row) {
+      row.onclick = function () {
+        var w = wrappers[+row.dataset.i];
+        if (w) w.scrollIntoView({ behavior: "smooth", block: "start" });
+      };
+    });
+    bar.querySelectorAll("button").forEach(function (b) {
+      b.onclick = function () {
+        var hide = b.dataset.x === "collapse";
+        host.querySelectorAll(".d2h-file-collapse input, .d2h-file-header + div, .d2h-files-diff, .d2h-file-diff").forEach(function () {});
+        wrappers.forEach(function (w) {
+          var body = w.querySelector(".d2h-file-diff, .d2h-files-diff");
+          if (body) body.style.display = hide ? "none" : "";
+        });
+      };
+    });
     target.scrollTop = 0;
   }
 
   // ---- Changes view --------------------------------------------------------
-  function renderSummary(s) {
-    state.summary = s;
-    el("branch").textContent = s.branch || "(detached)";
-    var ab = [];
-    if (s.ahead) ab.push("↑" + s.ahead);
-    if (s.behind) ab.push("↓" + s.behind);
-    if (s.upstream) ab.push(s.upstream);
-    if (s.stashes) ab.push(s.stashes + " stash");
-    el("ab").textContent = ab.join(" · ");
-
+  function paintFiles() {
+    var s = state.summary;
+    if (!s) return;
     var staged = [], unstaged = [], untracked = [];
     (s.files || []).forEach(function (f) {
+      if (state.fileFilter && f.path.toLowerCase().indexOf(state.fileFilter) === -1) return;
       if (f.untracked) untracked.push(f);
       else {
         if (f.staged !== ".") staged.push(f);
         if (f.unstaged !== ".") unstaged.push(f);
       }
     });
-
-    var h = "";
     var total = staged.length + unstaged.length + untracked.length;
+    var h = "";
     if (total) {
-      h += '<div class="frow" data-all="1"><span class="badge R">Σ</span><span class="fpath"><bdi>All changes (' + total + ")</bdi></span></div>";
+      h += '<div class="frow" data-all="1"><span class="badge R">Σ</span><span class="fpath"><bdi>All changes</bdi></span>' +
+        '<span class="fstat"><span class="p">' + Object.keys(state.headStats).length + " files</span></span></div>";
+    }
+    function stat(f) {
+      var st = state.headStats[f.path];
+      if (!st) return "";
+      return '<span class="fstat"><span class="p">+' + st.add + '</span><span class="m">−' + st.del + "</span></span>";
     }
     function section(title, files, scope) {
       if (!files.length) return;
-      h += '<div class="sec">' + title + " (" + files.length + ")</div>";
+      h += '<div class="sec">' + title + ' <span class="cnt">' + files.length + "</span></div>";
       files.forEach(function (f) {
-        var letter = scope === "staged" ? f.staged : scope === "worktree" ? f.unstaged : "?";
+        var letter = scope === "staged" ? f.staged : scope === "worktree" ? f.unstaged : "U";
         var cls = letter === "?" ? "U" : letter;
         h += '<div class="frow" data-path="' + esc(f.path) + '" data-scope="' + scope + '">' +
-          '<span class="badge ' + cls + '">' + (letter === "?" ? "U" : letter) + "</span>" +
-          '<span class="fpath"><bdi>' + esc(f.path) + "</bdi></span>" +
+          '<span class="badge ' + cls + '">' + letter + "</span>" +
+          '<span class="fpath"><bdi>' + esc(f.path) + "</bdi></span>" + stat(f) +
           '<button class="blame-btn" data-blame="' + esc(f.path) + '">blame</button></div>';
       });
     }
     section("Staged", staged, "staged");
     section("Changes", unstaged, "worktree");
     section("Untracked", untracked, "untracked");
-    if (!total) h += '<div class="empty">Working tree clean.</div>';
+    if (!total) h += '<div class="empty"><span class="big">✓</span>Working tree clean.</div>';
     el("files").innerHTML = h;
 
     el("files").querySelectorAll(".frow").forEach(function (row) {
@@ -138,18 +235,28 @@
     });
   }
 
+  function renderSummary(s) {
+    state.summary = s;
+    el("branch").textContent = s.branch || "(detached)";
+    var ab = [];
+    if (s.ahead) ab.push("↑" + s.ahead);
+    if (s.behind) ab.push("↓" + s.behind);
+    if (s.upstream) ab.push(s.upstream);
+    if (s.stashes) ab.push(s.stashes + " stash");
+    el("ab").textContent = ab.join(" · ");
+    paintFiles();
+  }
+
   // ---- History view: lane graph -------------------------------------------
   var LANE_COLORS = ["#7aa2f7", "#4fbf78", "#e0af68", "#e06c75", "#bb9af7", "#7dcfff", "#f7768e"];
-  var LW = 12, ROW = 34; // lane width px, row height px
+  var LW = 14, ROW = 30;
 
-  // Assign each commit a column; track expected parent hashes per lane.
   function layoutLanes(log) {
-    var lanes = []; // lanes[i] = hash we expect next in column i
+    var lanes = [];
     return log.map(function (c) {
       var col = lanes.indexOf(c.hash);
       var merged = [];
       if (col === -1) { col = lanes.indexOf(null); if (col === -1) { col = lanes.length; } }
-      // all OTHER lanes waiting on this same hash merge into col
       for (var i = 0; i < lanes.length; i++) {
         if (i !== col && lanes[i] === c.hash) { merged.push(i); lanes[i] = null; }
       }
@@ -162,57 +269,59 @@
         }
       }
       while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop();
-      return { col: col, merged: merged, before: before, after: lanes.slice(), width: Math.max(before.length, lanes.length, col + 1) };
+      return { col: col, merged: merged, before: before, after: lanes.slice(),
+               isMerge: (c.parents || []).length > 1,
+               width: Math.max(before.length, lanes.length, col + 1) };
     });
   }
 
   function laneSVG(row) {
-    var w = row.width * LW, mid = ROW / 2;
+    var w = Math.max(row.width * LW, LW), mid = ROW / 2;
     var s = '<svg width="' + w + '" height="' + ROW + '" viewBox="0 0 ' + w + " " + ROW + '">';
     function x(i) { return i * LW + LW / 2; }
     function color(i) { return LANE_COLORS[i % LANE_COLORS.length]; }
-    // pass-through lanes: same hash pending before and after, not this commit's column
     for (var i = 0; i < row.before.length; i++) {
       if (i === row.col || row.before[i] === null) continue;
       if (row.after[i] === row.before[i]) {
-        s += '<line x1="' + x(i) + '" y1="0" x2="' + x(i) + '" y2="' + ROW + '" stroke="' + color(i) + '" stroke-width="1.5"/>';
+        s += '<line x1="' + x(i) + '" y1="0" x2="' + x(i) + '" y2="' + ROW + '" stroke="' + color(i) + '" stroke-width="2"/>';
       }
     }
-    // this column continues down when it still expects a parent
     if (row.after[row.col]) {
-      s += '<line x1="' + x(row.col) + '" y1="' + mid + '" x2="' + x(row.col) + '" y2="' + ROW + '" stroke="' + color(row.col) + '" stroke-width="1.5"/>';
+      s += '<line x1="' + x(row.col) + '" y1="' + mid + '" x2="' + x(row.col) + '" y2="' + ROW + '" stroke="' + color(row.col) + '" stroke-width="2"/>';
     }
-    // line arriving from above into the dot
-    s += '<line x1="' + x(row.col) + '" y1="0" x2="' + x(row.col) + '" y2="' + mid + '" stroke="' + color(row.col) + '" stroke-width="1.5"/>';
-    // merged-in lanes curve into the dot
+    s += '<line x1="' + x(row.col) + '" y1="0" x2="' + x(row.col) + '" y2="' + mid + '" stroke="' + color(row.col) + '" stroke-width="2"/>';
     row.merged.forEach(function (i) {
-      s += '<path d="M ' + x(i) + " 0 Q " + x(i) + " " + mid + " " + x(row.col) + " " + mid + '" fill="none" stroke="' + color(i) + '" stroke-width="1.5"/>';
+      s += '<path d="M ' + x(i) + " 0 Q " + x(i) + " " + mid + " " + x(row.col) + " " + mid + '" fill="none" stroke="' + color(i) + '" stroke-width="2"/>';
     });
-    // second-parent branches curve out of the dot downward
     for (var p = 1; p < row.after.length; p++) {
       if (row.before[p] === null && row.after[p] !== null && row.after[p] !== row.before[p]) {
-        s += '<path d="M ' + x(row.col) + " " + mid + " Q " + x(p) + " " + mid + " " + x(p) + " " + ROW + '" fill="none" stroke="' + color(p) + '" stroke-width="1.5"/>';
+        s += '<path d="M ' + x(row.col) + " " + mid + " Q " + x(p) + " " + mid + " " + x(p) + " " + ROW + '" fill="none" stroke="' + color(p) + '" stroke-width="2"/>';
       }
     }
-    s += '<circle cx="' + x(row.col) + '" cy="' + mid + '" r="3.4" fill="' + color(row.col) + '"/>';
+    if (row.isMerge) {
+      s += '<circle cx="' + x(row.col) + '" cy="' + mid + '" r="4.5" fill="none" stroke="' + color(row.col) + '" stroke-width="2"/>';
+    } else {
+      s += '<circle cx="' + x(row.col) + '" cy="' + mid + '" r="4" fill="' + color(row.col) + '"/>';
+    }
     return s + "</svg>";
   }
 
-  function renderLog(log, append) {
-    if (append) state.log = state.log.concat(log);
-    else state.log = log;
+  function paintLog() {
     var rows = layoutLanes(state.log);
+    var q = state.logFilter;
     var h = "";
     state.log.forEach(function (c, i) {
-      var refs = (c.refs || []).map(function (r) { return '<span class="ref">' + esc(r) + "</span>"; }).join("");
-      h += '<div class="crow" data-hash="' + c.hash + '">' + laneSVG(rows[i]) +
-        '<div class="cmeta"><div class="csub">' + refs + esc(c.subject) + "</div>" +
-        '<div class="cwho">' + esc(c.author) + " · " + rel(c.at) + " · " + c.hash.slice(0, 8) + "</div></div></div>";
+      if (q && (c.subject + " " + c.author + " " + c.hash).toLowerCase().indexOf(q) === -1) return;
+      var refs = (c.refs || []).map(refPill).join("");
+      h += '<div class="crow' + (state.selCommit === c.hash ? " sel" : "") + '" data-hash="' + c.hash + '">' +
+        laneSVG(rows[i]) +
+        '<div class="csub">' + refs + '<span class="txt" title="' + esc(c.subject) + '">' + esc(c.subject) + "</span></div>" +
+        avatar(c.author) +
+        '<span class="chash">' + c.hash.slice(0, 7) + "</span>" +
+        '<span class="ctime">' + rel(c.at) + "</span></div>";
     });
-    if (log.length >= 100 || (append && log.length)) {
-      h += '<button id="more-log">Load more…</button>';
-    }
-    el("commits").innerHTML = h || '<div class="empty">No commits.</div>';
+    if (state.log.length >= 100) h += '<button id="more-log">Load more…</button>';
+    el("commits").innerHTML = h || '<div class="empty">No commits' + (q ? " match" : "") + ".</div>";
     el("commits").querySelectorAll(".crow").forEach(function (row) {
       row.onclick = function () {
         el("commits").querySelectorAll(".crow.sel").forEach(function (r) { r.classList.remove("sel"); });
@@ -225,20 +334,25 @@
     if (more) more.onclick = function () { post("moreLog", { skip: state.log.length }); };
   }
 
+  function renderLog(log, append) {
+    state.log = append ? state.log.concat(log) : log;
+    paintLog();
+  }
+
   function renderCommitDiff(hash, text) {
     var c = null;
     for (var i = 0; i < state.log.length; i++) if (state.log[i].hash === hash) { c = state.log[i]; break; }
     var target = el("history-diff");
     var head = "";
     if (c) {
-      head = '<div class="commit-head"><div class="s">' + esc(c.subject) + "</div>" +
-        '<div class="h">' + c.hash + "</div>" +
-        '<div class="cwho">' + esc(c.author) + " &lt;" + esc(c.email || "") + "&gt; · " + new Date(c.at * 1000).toLocaleString() +
-        ((c.refs || []).length ? " · " + c.refs.map(function (r) { return '<span class="ref">' + esc(r) + "</span>"; }).join("") : "") +
-        "</div></div>";
+      head = '<div class="commit-card"><div class="s">' + esc(c.subject) + "</div>" +
+        '<div class="meta">' + avatar(c.author) + "<span>" + esc(c.author) + "</span>" +
+        '<span class="h" title="click to copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(\'' + c.hash + '\')">' + c.hash.slice(0, 12) + "</span>" +
+        "<span>" + new Date(c.at * 1000).toLocaleString() + " · " + rel(c.at) + " ago</span>" +
+        ((c.refs || []).map(refPill).join("")) + "</div></div>";
     }
     target.innerHTML = head + '<div id="commit-diff-host"></div>';
-    renderDiff("commit-diff-host", text, { title: hash.slice(0, 8) });
+    renderDiff("commit-diff-host", text, { title: hash.slice(0, 8), scope: "commit-inner" });
   }
 
   // ---- Blame view ----------------------------------------------------------
@@ -249,7 +363,6 @@
   function renderBlame(data, path) {
     el("blame-path").textContent = path;
     var lines = data.lines || [];
-    // age heat: rank commit times, newest = strongest tint
     var times = {};
     lines.forEach(function (l) { times[l.hash] = l.at; });
     var sorted = Object.keys(times).map(function (k) { return times[k]; }).sort(function (a, b) { return a - b; });
@@ -266,8 +379,8 @@
       var uncommitted = /^0+$/.test(l.hash);
       gutter += '<div class="bg-row" data-hash="' + l.hash + '" style="background:rgba(122,162,247,' + (uncommitted ? 0 : heat(l.at)) + ')" title="' +
         esc(l.summary || "") + " — " + (l.at ? new Date(l.at * 1000).toLocaleString() : "") + '">' +
-        (first ? '<span class="h">' + (uncommitted ? "·······" : l.short) + '</span><span class="a">' + esc(uncommitted ? "uncommitted" : l.author) + '</span><span class="t">' + rel(l.at) + "</span>"
-               : '<span class="h" style="visibility:hidden">' + l.short + "</span>") +
+        (first ? '<span class="h">' + (uncommitted ? "·······" : l.short.slice(0, 7)) + '</span><span class="a">' + esc(uncommitted ? "uncommitted" : l.author) + '</span><span class="t">' + rel(l.at) + "</span>"
+               : '<span class="h" style="visibility:hidden">' + l.short.slice(0, 7) + "</span>") +
         "</div>";
       code += esc(l.text) + "\n";
     });
@@ -279,6 +392,7 @@
       r.ondblclick = function () {
         if (/^0+$/.test(r.dataset.hash)) return;
         showView("history");
+        state.selCommit = r.dataset.hash;
         post("commit", { hash: r.dataset.hash });
         if (!state.log.length) post("moreLog", { skip: 0 });
       };
@@ -308,8 +422,16 @@
     setLog: function (log, append) { overlay(null); renderLog(log || [], !!append); },
     setDiff: function (text, meta) {
       overlay(null);
-      if (meta && meta.scope === "commit") renderCommitDiff(meta.hash, text);
-      else renderDiff("changes-diff", text, meta || {});
+      if (meta && meta.scope === "commit") { renderCommitDiff(meta.hash, text); return; }
+      // the head diff doubles as the source of per-file stats for the sidebar
+      if (meta && meta.scope === "head") {
+        state.headStats = {};
+        diffStats(text).forEach(function (f) { state.headStats[f.path] = f; });
+        paintFiles();
+        var all = el("files").querySelector('.frow[data-all="1"]');
+        if (all && !el("files").querySelector(".frow.sel")) all.classList.add("sel");
+      }
+      renderDiff("changes-diff", text, meta || {});
     },
     setBlame: function (data, path) { overlay(null); renderBlame(data, path); },
     setLoading: function (msg) { overlay(msg || "loading…"); },
