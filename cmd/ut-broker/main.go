@@ -28,6 +28,7 @@ import (
 	"universal-tmux/internal/broker"
 	"universal-tmux/internal/forward"
 	"universal-tmux/internal/fsvc"
+	"universal-tmux/internal/gitsvc"
 	"universal-tmux/internal/gitui"
 	"universal-tmux/internal/jupyter"
 	"universal-tmux/internal/mesh"
@@ -424,6 +425,61 @@ func main() {
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"session": name})
+	})
+	// Git panel (read-only viewer): thin views over `git` in a working directory —
+	// status summary, log, unified diffs, blame, file-at-revision. All read-only
+	// (--no-optional-locks); the client webview renders (diff2html + hljs).
+	gitJSON := func(w http.ResponseWriter, v any, err error) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	mux.HandleFunc("/git/summary", func(w http.ResponseWriter, r *http.Request) {
+		s, err := gitsvc.GetSummary(r.URL.Query().Get("dir"))
+		gitJSON(w, s, err)
+	})
+	mux.HandleFunc("/git/log", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		n, _ := strconv.Atoi(q.Get("n"))
+		skip, _ := strconv.Atoi(q.Get("skip"))
+		log, err := gitsvc.GetLog(q.Get("dir"), n, skip)
+		gitJSON(w, log, err)
+	})
+	mux.HandleFunc("/git/blame", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		lines, err := gitsvc.GetBlame(q.Get("dir"), q.Get("path"), q.Get("ref"))
+		gitJSON(w, map[string]any{"lines": lines}, err)
+	})
+	mux.HandleFunc("/git/diff", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		out, err := gitsvc.GetDiff(q.Get("dir"), q.Get("scope"), q.Get("hash"), q.Get("path"))
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(out)
+	})
+	mux.HandleFunc("/git/show", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		out, err := gitsvc.GetShow(q.Get("dir"), q.Get("ref"), q.Get("path"))
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(out)
 	})
 	// File service: browse this host's filesystem (as the broker's user) and
 	// stream file contents. /fs/home → starting points, /fs/list → a directory,

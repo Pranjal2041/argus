@@ -561,34 +561,41 @@ final class TerminalController: ObservableObject {
     // MARK: Git panel (lazygit) — swap the detail pane to a hidden broker session
     // running lazygit in this session's folder (same in-place pattern as W&B).
 
-    /// Sessions whose detail pane is currently showing the git panel.
+    /// Sessions whose detail pane is currently showing the git panel (the read-only
+    /// viewer webview by default; lazygit terminal when `gitTerminal` has the ref too).
     @Published var gitShown: Set<String> = []
+    /// Sub-mode: refs whose git panel is showing the LAZYGIT TERMINAL (write ops)
+    /// instead of the viewer. Entered via the viewer's "lazygit" button.
+    @Published var gitTerminal: Set<String> = []
     /// ref.id → the broker's `_git-…` session name (from POST /gitui).
     @Published var gitSession: [String: String] = [:]
-    /// ref.id → error from /gitui (e.g. lazygit download blocked), shown in the pane.
+    /// ref.id → error (no folder / lazygit spawn failure), shown in the pane.
     @Published var gitError: [String: String] = [:]
     /// Pane ids whose conn should enable MOUSE REPORTING (lazygit is mouse-driven;
     /// normal panes keep it off so text stays selectable). Consulted by show().
     private var mouseRefs: Set<String> = []
 
     func isGitShown(_ ref: SessionRef) -> Bool { gitShown.contains(ref.id) }
+    func isGitTerminal(_ ref: SessionRef) -> Bool { gitTerminal.contains(ref.id) }
 
-    /// The ad-hoc SessionRef of the git panel's session for `ref` (same machine).
+    /// The ad-hoc SessionRef of the lazygit session for `ref` (same machine).
     func gitRef(for ref: SessionRef) -> SessionRef? {
         gitSession[ref.id].map { SessionRef(machineID: ref.machineID, session: $0) }
     }
 
-    /// Toggle the git panel for `ref`: asks the machine's broker to ensure lazygit +
-    /// spawn (or reuse) the hidden `_git-…` session for `dir`, then swaps the pane.
+    /// Toggle the git panel (the read-only viewer). Pure client-side — the viewer
+    /// webview fetches from the broker itself; no session is spawned.
     func toggleGit(_ ref: SessionRef, httpBase: String, dir: String?) {
         if gitShown.contains(ref.id) { hideGit(ref); return }
-        guard let dir, !dir.isEmpty else {
-            gitError[ref.id] = "no working folder known for this session yet"
-            gitShown.insert(ref.id)
-            return
-        }
-        gitError[ref.id] = nil
-        gitShown.insert(ref.id)   // show the pane immediately (spinner until the session arrives)
+        gitError[ref.id] = (dir?.isEmpty ?? true) ? "no working folder known for this session yet" : nil
+        gitShown.insert(ref.id)
+    }
+
+    /// Switch the panel to the LAZYGIT TERMINAL (write operations): ensure the
+    /// hidden `_git-…` session via POST /gitui, then show it in the slot.
+    func openLazygitTerminal(_ ref: SessionRef, httpBase: String, dir: String) {
+        gitTerminal.insert(ref.id)
+        guard gitSession[ref.id] == nil else { return }  // already spawned → just switch
         guard let enc = dir.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "\(httpBase)/gitui?dir=\(enc)") else {
             gitError[ref.id] = "bad broker URL"; return
@@ -603,10 +610,10 @@ final class TerminalController: ObservableObject {
                 struct R: Decodable { let session: String?; let error: String? }
                 let r = try? JSONDecoder().decode(R.self, from: d)
                 guard code == 200, let name = r?.session else {
-                    // A 404 means the machine runs an older broker without /gitui.
                     self.gitError[ref.id] = code == 404
                         ? "this machine's broker predates the git panel — redeploy it"
                         : (r?.error ?? "broker error (HTTP \(code))")
+                    self.gitTerminal.remove(ref.id)
                     return
                 }
                 let gref = SessionRef(machineID: ref.machineID, session: name)
@@ -614,14 +621,21 @@ final class TerminalController: ObservableObject {
                 self.gitSession[ref.id] = name
             } catch {
                 self.gitError[ref.id] = error.localizedDescription
+                self.gitTerminal.remove(ref.id)
             }
         }
     }
 
-    /// Hide the git panel and drop its connection (the broker session stays for a
-    /// fast re-open; the idle reaper cleans it up, immediately once lazygit quits).
+    /// Leave the lazygit terminal, back to the read-only viewer.
+    func closeLazygitTerminal(_ ref: SessionRef) {
+        gitTerminal.remove(ref.id)
+        if let g = gitRef(for: ref) { drop(g.id) }   // close the WS; session stays (reaper cleans)
+    }
+
+    /// Hide the git panel entirely (viewer webview stays cached in GitPanels).
     func hideGit(_ ref: SessionRef) {
         gitShown.remove(ref.id)
+        gitTerminal.remove(ref.id)
         if let g = gitRef(for: ref) { drop(g.id) }
     }
 
