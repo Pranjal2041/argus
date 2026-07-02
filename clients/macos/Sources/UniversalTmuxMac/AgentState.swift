@@ -143,6 +143,7 @@ struct SessionRow: View {
     var onClearWandb: (WandbRun) -> Void = { _ in }
     var onReveal: (() -> Void)? = nil
     var onRevealFiles: (() -> Void)? = nil
+    var onGit: (() -> Void)? = nil   // open the Git panel (lazygit) for this session
 
     @State private var hover = false
     @Environment(\.controlActiveState) private var controlActive
@@ -217,6 +218,7 @@ struct SessionRow: View {
                 }
                 Divider()
             }
+            if let onGit { Button("Show Git Panel") { onGit() } }
             Button("Hide Panel") { onHide() }
             Button("Rename…") { onRename() }
             Button("Copy Name") { onCopyName() }

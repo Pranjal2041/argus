@@ -849,6 +849,14 @@ struct RootView: View {
                             : nil,
                         onRevealFiles: (s.path?.isEmpty == false)
                             ? { files.addTab(m, startPath: state.resolveBase(for: ref)); openWindow(id: "files") }
+                            : nil,
+                        onGit: (s.path?.isEmpty == false)
+                            ? {
+                                state.selection = ref; state.showOverview = false
+                                if !terminals.isGitShown(ref) {
+                                    terminals.toggleGit(ref, httpBase: m.httpBase, dir: s.path)
+                                }
+                            }
                             : nil
                     )
                 }
