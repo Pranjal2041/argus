@@ -221,6 +221,10 @@ select { background: var(--paper2); color: var(--ink-dim); border: 1px solid var
 }
 .screen::after { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: 8px;
   background: repeating-linear-gradient(180deg, transparent 0 2px, rgba(255,255,255,.012) 2px 4px); }
+.screen mark { background: rgba(232,179,75,.14); color: var(--phos); border-radius: 2px; padding: 0 1px; }
+.legend { color: var(--ink-faint); font-size: 9.5px; margin-top: 6px; }
+.legend b { color: var(--phos); font-weight: 500; }
+.screenhead { color: var(--ink-faint); font-size: 9.5px; margin-top: 10px; text-transform: uppercase; letter-spacing: .12em; }
 .dl { display: grid; grid-template-columns: 92px 1fr; gap: 3px 14px; font-size: 11.5px; margin-top: 6px; }
 .dl dt { color: var(--ink-faint); text-transform: uppercase; font-size: 9.5px; letter-spacing: .1em; padding-top: 2px; }
 .dl dd { color: var(--ink); word-break: break-word; }
@@ -327,6 +331,25 @@ function gist(e) {
   }
 }
 
+// Mark the lines of the captured screen that echo what the user actually typed.
+// Everything unmarked is screen context — agent output, UI chrome, and
+// agent-SUGGESTED prompts sitting in the input box, which are NOT user input.
+function markSaid(sawLines, said) {
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const ns = norm(said || "");
+  return sawLines.map(l => {
+    let hit = false;
+    const nl = norm(l);
+    if (ns && nl.length >= 4) {
+      if (ns.length <= 12) hit = nl.includes(ns);
+      else for (let i = 0; i + 12 <= ns.length; i += 6) {
+        if (nl.includes(ns.slice(i, i + 12))) { hit = true; break; }
+      }
+    }
+    return hit ? "<mark>" + esc(l) + "</mark>" : esc(l);
+  }).join("\n");
+}
+
 function detail(e) {
   let h = "";
   if (e.kind === "utterance" || e.kind === "outcome") {
@@ -338,7 +361,20 @@ function detail(e) {
     if (e.id) h += "<dt>id</dt><dd>" + esc(e.id) + "</dd>";
     if (e.of) h += "<dt>outcome of</dt><dd>" + esc(e.of) + "</dd>";
     h += "</dl>";
-    if (e.saw && e.saw.length) h += '<div class="screen">' + esc(e.saw.join("\n")) + "</div>";
+    if (e.saw && e.saw.length) {
+      if (e.kind === "utterance") {
+        // The snapshot PRE-dates the typing: nothing in it is user input. Text
+        // sitting in an input box here is the agent's suggestion, not yours.
+        h += '<div class="screenhead">screen as you began typing — pre-input context</div>';
+        h += '<div class="screen">' + esc(e.saw.join("\n")) + "</div>";
+        h += '<div class="legend">nothing on this screen is your input (it was captured <b>before</b> you typed) — a pre-filled prompt in the input box is the agent\'s suggestion. Your input is exactly the <b>SAID</b> line above.</div>';
+      } else {
+        const src = state.events.find(x => x.kind === "utterance" && x.id === e.of);
+        h += '<div class="screenhead">the same pane, minutes after your input</div>';
+        h += '<div class="screen">' + markSaid(e.saw, src && src.said) + "</div>";
+        h += '<div class="legend"><b>amber</b> = your message from the linked utterance, echoed back · everything else is what the agent did with it</div>';
+      }
+    }
   } else {
     h += '<dl class="dl">';
     for (const [k, v] of Object.entries(e)) {

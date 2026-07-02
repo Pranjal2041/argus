@@ -169,6 +169,9 @@ final class UtteranceSession {
         guard let ref, !parser.isEmpty else { return }
         let said = String(parser.said.prefix(4000))
         let keys = parser.keys
+        // Zero-signal guard: stray whitespace with no semantic keys (a space to
+        // nudge a pager, an accidental tap) is noise, not an interaction.
+        if said.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && keys.isEmpty { return }
         let mySaw = saw, myID = id, t0 = started
         let v = view
         // Give the pane a beat to echo, then apply the secret rule and write.
