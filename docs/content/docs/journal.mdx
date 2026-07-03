@@ -1,0 +1,67 @@
+---
+title: Activity Journal
+description: A local, append-only record of every moment you engage with your fleet — what you saw, what you said, and what came of it — with a standalone ledger to read it.
+---
+
+When agents do the work, the knowing no longer comes free with the doing. You can supervise twenty
+sessions for a week and still struggle to answer "what did I actually get done?" — the work
+happened, but not to you. The Activity Journal is Argus's answer: a raw, durable record of the
+moments **your attention touched the fleet**, kept so it can be read back — by you, or by an
+intelligence layer that turns a week of it into a report.
+
+<Callout type="info">
+Everything stays on your Mac: one JSONL file per day in
+`~/Library/Application Support/Argus/journal/`, append-only, never uploaded, never expiring. A
+heavy day is about 2&nbsp;MB — attention-gating is what makes keep-forever affordable. A Settings
+toggle turns recording off entirely.
+</Callout>
+
+## What gets recorded
+
+The journal is **attention-gated**: raw text is captured only at moments you engage; everything
+else is small structured references into stores that already exist (git, broker history, W&B).
+
+- **Utterances** — the core event. Typing into any pane is coalesced into utterances (Enter or an
+  8-second pause ends one). Each records the screen **as it looked when you started typing** (the
+  context you decided against), the text you actually sent (backspaces applied), and semantic keys
+  (⏎ ↑ ↓ ⇥ ⎋). Your words are separated from the agent's by construction — the app carries your
+  keystrokes itself.
+- **Outcomes** — a few minutes after you type, one snapshot of the same pane pairs your input with
+  what came of it.
+- **Silent attention** — watching a session for 20+ seconds without typing is an event too. Reading
+  is supervision.
+- **The ambient layer** — every Command Center status transition (durably), manual status
+  corrections, git panel opens, insight requests, workflow launches, session create/kill, todos,
+  notes, file saves, and W&B run detections. Tiny, structured, attention-independent — these cover
+  the work you never had to look at.
+
+## The secret rule
+
+If the terminal never echoes what you typed — a `sudo` password, an ssh passphrase — the journal
+withholds it too, recording only that hidden input happened. The pane's own echo behavior is the
+signal, checked patiently (some TUIs render your submitted message a beat late), so displayed text
+always survives and genuinely hidden input never lands on disk — or in any future model call that
+reads the journal.
+
+## The Activity Ledger
+
+The journal ships with its own reader — a standalone, dependency-free inspector:
+
+```bash
+python3 tools/journal_dashboard.py
+```
+
+It serves a local page (127.0.0.1:8765) with a day drawer, an hour-by-hour activity strip, per-kind
+filters, free-text search, and a live mode that follows the file as you work. Click any utterance
+to see the captured screen. Attribution is explicit: utterance screens are labeled as **pre-input
+context** (nothing in them is your input — a pre-filled prompt in an agent's input box is its
+suggestion, not your words), and outcome screens highlight your actual message where the pane
+echoed it back.
+
+## What it's for
+
+The journal is the data layer; intelligence is a modular pass over it. Because the raw record is
+kept (rather than summarized early and discarded), any future question can be asked of past weeks:
+what did I get done, which results — positive and negative — do I take home, where did my attention
+go versus where the output came from. Periodic research/engineering reports built on this record
+are already prototyped and coming to the app.
