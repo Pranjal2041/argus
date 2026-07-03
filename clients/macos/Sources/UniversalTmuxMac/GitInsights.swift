@@ -19,7 +19,7 @@ final class GitInsights {
     // "v2": prompt revision — bumping regenerates insights written by older,
     // weaker prompts instead of serving them from cache forever.
     static func key(hashes: [String], level: String) -> String {
-        let joined = "v2|" + hashes.joined(separator: ",") + "|" + level
+        let joined = "v3|" + hashes.joined(separator: ",") + "|" + level
         return SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -52,43 +52,55 @@ final class GitInsights {
         let key = Self.key(hashes: hashes, level: level)
         if let hit = cached(key) { return .ok(text: hit.text, cost: hit.cost, cached: true) }
 
+        // The steps matter, not just the destination: fetch each commit's own
+        // diff (oldest → newest) so the model can see the order of work, plus
+        // the combined net diff so churn is visible as churn.
+        var input = "COMMITS IN THE SELECTED RANGE (newest first):\n" + metaLines + "\n"
+        let oldestFirst = hashes.reversed()
+        let perCommitCap = max(6_000, 120_000 / max(1, hashes.count))
+        if hashes.count > 1 {
+            input += "\n=== INDIVIDUAL COMMIT DIFFS, oldest → newest (the steps) ===\n"
+            for h in oldestFirst {
+                guard let d = await fetchDiff(httpBase: httpBase, dir: dir,
+                                              newest: h, base: nil, single: true) else { continue }
+                var t = String(decoding: d, as: UTF8.self)
+                if t.utf8.count > perCommitCap {
+                    t = String(t.prefix(perCommitCap)) + "\n[this commit's diff truncated]"
+                }
+                input += "\n--- commit \(h.prefix(10)) ---\n" + t
+            }
+        }
         guard let diff = await fetchDiff(httpBase: httpBase, dir: dir,
                                          newest: newest, base: base, single: hashes.count == 1)
         else { return .fail("could not fetch the diff from the broker") }
-
         var diffText = String(decoding: diff, as: UTF8.self)
-        let capBytes = 180_000
-        if diffText.utf8.count > capBytes {
-            diffText = String(diffText.prefix(capBytes)) + "\n\n[diff truncated at 180 KB — judge from what is shown]"
+        if diffText.utf8.count > 60_000 {
+            diffText = String(diffText.prefix(60_000)) + "\n[net diff truncated — the per-commit steps above are complete]"
         }
-        let input = "COMMITS IN THE SELECTED RANGE (newest first):\n" + metaLines +
-            "\n\nCOMBINED DIFF (net effect, oldest → newest):\n" + diffText
+        input += "\n=== COMBINED DIFF (net effect of the whole range) ===\n" + diffText
 
         let folder = (dir as NSString).lastPathComponent
         let levelSpec: String
         switch level {
         case "brief":
             levelSpec = """
-            LEVEL = BRIEF. At most 5 bullets. Each bullet must earn its place: what changed AND why \
-            the reader should care — something they could not get from skimming `git log`. If exactly \
-            one thing deserves their eye before building on this work, end with a single line: \
-            "Look at: <file or thing> — <why>."
+            LEVEL = BRIEF. "What was done": 3-6 bullets. "Worth your attention": 1-3 bullets (or the \
+            one-line all-clear). Total under ~150 words. Every bullet earns its place.
             """
         case "detailed":
             levelSpec = """
-            LEVEL = DETAILED. Full reviewer notes. Walk each changed area (cluster of related files) \
-            in order of importance: what changed, how it is implemented, and anything questionable \
-            about the approach. Then a section "## Leftovers & risks": dead code, churn scars \
-            (added-then-rewritten remnants), missing or hollow tests, silent behavior changes, \
-            duplicated logic. End with "## Review order": a short numbered list — what to read \
-            carefully first, what can be skimmed, what can be trusted blind.
+            LEVEL = DETAILED. Same two sections at full depth. "What was done": walk each changed \
+            area — what changed, how it is implemented, and how the work actually unfolded when the \
+            per-commit steps tell a story (false starts, rewrites). "Worth your attention": every \
+            risk and leftover — dead code, churn scars, hollow tests, silent behavior changes, \
+            duplicated logic — each with enough detail to act on; end it with "Review order:" — a \
+            numbered list of what to read carefully, what to skim, what to trust.
             """
         default:
             levelSpec = """
-            LEVEL = MEDIUM. About 200 words in three sections: "## What changed" (the net effect, by \
-            area, concrete) · "## Intent" (what the agents were evidently trying to do — inferred \
-            from the code, not from their commit messages) · "## Watch out" (specific risks and \
-            leftovers, each anchored to a file or function).
+            LEVEL = MEDIUM. Same two sections, one step deeper than brief: "What was done" covers \
+            every significant change (a bullet per area or commit, 1-2 sentences each); "Worth your \
+            attention" gives each risk enough detail to act on. ~300-400 words.
             """
         }
         let prompt = """
@@ -97,8 +109,9 @@ final class GitInsights {
         is the repository's owner: they did NOT watch this work happen, and they need to decide \
         whether it is sound and what to check before building on it.
 
-        Input: the commit list (newest first) and the combined diff of the whole range — the NET \
-        effect, with intermediate churn already collapsed.
+        Input: the commit list (newest first); each commit's INDIVIDUAL diff in order (the steps \
+        as they happened); and the COMBINED diff (the net effect). Use the steps to understand the \
+        order of work and to spot churn; use the net diff to judge what actually remains.
 
         Rules:
         - Judge from the DIFF. Agent commit messages overstate and misdescribe; never repeat a claim \
@@ -112,9 +125,17 @@ final class GitInsights {
         - A small or trivial range gets one honest line, not an inflated report.
         - If the diff notes it was truncated, say what you could not verify.
 
-        Format: plain English, markdown (## headings, - bullets, **bold** for names worth noticing). \
-        The FIRST CHARACTER of your reply is the first character of the insight — no preamble, no \
-        "Here's the review", no closing pleasantries, no "overall this is solid" filler.
+        Structure — ALWAYS exactly these two sections, at every level (depth changes, shape never):
+        ## What was done
+        The upfront account the reader wants first: what this set of commits actually did to the \
+        codebase — by area, or commit by commit when the order matters. Concrete, from the diffs.
+        ## Worth your attention
+        Risks, leftovers, agent tells, things to verify — each anchored to a file or function. If \
+        nothing deserves attention, say so in one line.
+
+        Format: plain English, markdown (- bullets, **bold** for names worth noticing). The FIRST \
+        CHARACTER of your reply is "#" of "## What was done" — no preamble, no closing pleasantries, \
+        no "overall this is solid" filler.
 
         \(levelSpec)
         """

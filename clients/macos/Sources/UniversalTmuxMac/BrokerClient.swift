@@ -77,6 +77,11 @@ final class BrokerClient {
 
     func start() {
         guard !closed else { return }
+        // Re-entry safety (found by the git-insights review): updateURL — and any
+        // future caller — can restart mid-dial while this client still holds a
+        // pacing slot; the abandoned dial's callbacks bail on the epoch check and
+        // would never release it. Release before claiming anew.
+        paceRelease()
         let host = url.host ?? "?"
         Self.paceLock.lock()
         let inFlight = Self.dialing[host] ?? 0
