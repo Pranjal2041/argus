@@ -96,7 +96,7 @@ fun App(vm: AppViewModel) {
                 while (true) {
                     if (TsnetCore.isUp && tick % 5 == 0) vm.refreshAll() else vm.pollKnown()
                     vm.refreshCC()   // pull the Mac-published statuses for the command center
-                    if (tick % 2 == 0) { vm.enrichOs(); vm.syncUserData() }  // sync Workflows + Todo Maps
+                    if (tick % 2 == 0) { vm.enrichOs(); vm.syncUserData(); vm.flushJournal() }  // sync Workflows + Todo Maps + phone journal
                     tick++
                     delay(3000)
                 }

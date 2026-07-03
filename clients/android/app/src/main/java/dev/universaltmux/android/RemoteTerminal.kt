@@ -47,9 +47,23 @@ class RemoteTerminal(
         ws?.send(frame(Op.REQ_SNAPSHOT, "", ByteArray(0)).toByteString())
     }
 
+    // Activity journal: the user spoke. All input converges here (IME, hardware
+    // keys, accessory bar) — the phone journals ONLY these moments.
+    private val journal: JournalUtterance by lazy { JournalUtterance(
+        main = Handler(Looper.getMainLooper()),
+        machineID = broker.id,
+        machineName = broker.name.ifEmpty { broker.host },
+        session = sessionName,
+        screenTail = { n: Int ->
+            val text = session.emulator?.screen?.transcriptText?.replace('\u0000', ' ') ?: ""
+            text.split("\n").map { it.trimEnd() }.dropLastWhile { it.isBlank() }.takeLast(n)
+        },
+    ) }
+
     private val bridge = object : TerminalSession.RemoteBridge {
         override fun onInput(data: ByteArray, offset: Int, count: Int) {
             ws?.send(frame(Op.INPUT, "", data.copyOfRange(offset, offset + count)).toByteString())
+            journal.feed(data.copyOfRange(offset, offset + count))
         }
         override fun onResize(columns: Int, rows: Int) {
             Log.d(TAG, "resize ${columns}x$rows (ws=${ws != null})")
@@ -227,6 +241,7 @@ class RemoteTerminal(
     }
 
     fun close() {
+        journal.finalizeNow()   // an utterance in flight when the pane closes still counts
         closed = true
         ws?.cancel()
         ws = null

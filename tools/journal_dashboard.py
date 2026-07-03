@@ -471,8 +471,9 @@ function renderLedger() {
       lastHour = hour;
     }
     const t = d.toTimeString().slice(0, 8);
-    const who = e.session ? `<b>${esc(e.session)}</b>${e.machine || e.machineID ? " · " + esc(e.machine || e.machineID) : ""}`
-                          : esc(e.machine || e.machineID || e.board || "");
+    const who = (e.src === "phone" ? "📱 " : "") +
+                (e.session ? `<b>${esc(e.session)}</b>${e.machine || e.machineID ? " · " + esc(e.machine || e.machineID) : ""}`
+                           : esc(e.machine || e.machineID || e.board || ""));
     const open = state.open.has(i) ? " open" : "";
     h += `<div class="ev${open}" data-i="${i}" data-h="${hour}" style="--kc:${kcolor(e.kind)};animation-delay:${Math.min(i*12,240)}ms">
       <div class="evrow"><span class="ts">${t}</span><span class="kind">${esc(e.kind)}</span>

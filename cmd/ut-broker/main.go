@@ -186,6 +186,46 @@ func main() {
 	// copy and sync here with last-write-wins (the blob carries its own `updatedAt`).
 	// GET ?key=K returns the stored blob; POST ?key=K body=<blob> stores it (keeping the
 	// newer of incoming vs stored) and returns the winner.
+	// /journal/* — the sync host's append-only inbox for phone-captured journal
+	// events (utterances typed on Android). POST /journal/append adds JSONL;
+	// GET /journal/peek returns {off, data}; POST /journal/ack?off=N truncates
+	// what the Mac app has ingested. See userdata.go.
+	mux.HandleFunc("/journal/append", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024))
+		if err := broker.JournalAppend(body); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/journal/peek", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		off, data := broker.JournalPeek()
+		_ = json.NewEncoder(w).Encode(map[string]any{"off": off, "data": string(data)})
+	})
+	mux.HandleFunc("/journal/ack", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		off, _ := strconv.ParseInt(r.URL.Query().Get("off"), 10, 64)
+		if err := broker.JournalAck(off); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
 	mux.HandleFunc("/userdata", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")

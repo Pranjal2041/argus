@@ -72,3 +72,82 @@ func SetUserData(key string, body []byte) []byte {
 	_ = os.WriteFile(p, body, 0o644)
 	return body
 }
+
+// ---- journal inbox --------------------------------------------------------
+// The phone can't write into the Mac app's journal files directly, so the SYNC
+// HOST's broker (the Mac's) keeps a small append-only INBOX: the phone POSTs
+// utterance events as JSONL, the Mac app periodically peeks, ingests them into
+// its canonical day files (deduped by event id), and acks by byte offset.
+// Unlike /userdata this is append-only — last-write-wins is the wrong primitive
+// for a log.
+
+var journalMu sync.Mutex
+
+func journalInboxPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.TempDir()
+	}
+	dir := filepath.Join(home, ".universal-tmux")
+	_ = os.MkdirAll(dir, 0o755)
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "local"
+	}
+	return filepath.Join(dir, "journal-inbox-"+host+".jsonl")
+}
+
+// JournalAppend appends raw JSONL bytes to the inbox (a trailing newline is
+// added if missing so concatenated posts never merge lines).
+func JournalAppend(body []byte) error {
+	if len(body) == 0 {
+		return nil
+	}
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	f, err := os.OpenFile(journalInboxPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(body); err != nil {
+		return err
+	}
+	if body[len(body)-1] != '\n' {
+		if _, err := f.Write([]byte{'\n'}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// JournalPeek returns the inbox content and its size as the ack cursor.
+func JournalPeek() (int64, []byte) {
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	b, err := os.ReadFile(journalInboxPath())
+	if err != nil {
+		return 0, nil
+	}
+	return int64(len(b)), b
+}
+
+// JournalAck drops the first off bytes (the consumer ingested them). Appends
+// that raced in after the peek are preserved; if the file shrank below off
+// (shouldn't happen — single consumer), it is cleared rather than corrupted.
+func JournalAck(off int64) error {
+	if off <= 0 {
+		return nil
+	}
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	p := journalInboxPath()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil // nothing to ack
+	}
+	if off >= int64(len(b)) {
+		return os.WriteFile(p, nil, 0o644)
+	}
+	return os.WriteFile(p, b[off:], 0o644)
+}

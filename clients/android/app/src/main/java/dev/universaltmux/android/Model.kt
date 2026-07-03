@@ -538,6 +538,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Reconcile both keys with the Mac sync host: adopt remote when newer, push local when
      *  newer (or to bootstrap). Runs on the poll loop. */
+    /** Flush phone-captured journal events to the Mac broker's inbox. */
+    fun flushJournal() {
+        val h = syncHost() ?: return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val jsonl = JournalOutbox.pendingJSONL() ?: return@withContext
+                val n = jsonl.count { it == '\n' }
+                if (Net.postJournal(h, jsonl)) JournalOutbox.clearFirst(n)
+            }
+        }
+    }
+
     fun syncUserData() {
         val h = syncHost() ?: return
         viewModelScope.launch {
