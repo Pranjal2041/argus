@@ -118,6 +118,14 @@ final class BrokerClient {
         receiveLoop(myEpoch)
     }
 
+    // Insurance for the static pacing registry (flagged by the git-insights
+    // review): a client deallocated without stop() must not leak its dial slot —
+    // that would silently cap its host below maxDialingPerHost forever.
+    deinit {
+        firstFrameWork?.cancel()
+        paceRelease()
+    }
+
     func stop() {
         closed = true
         firstFrameWork?.cancel()

@@ -16,8 +16,10 @@ final class GitInsights {
             .appendingPathComponent("Argus/git-insights", isDirectory: true)
     }
 
+    // "v2": prompt revision — bumping regenerates insights written by older,
+    // weaker prompts instead of serving them from cache forever.
     static func key(hashes: [String], level: String) -> String {
-        let joined = hashes.joined(separator: ",") + "|" + level
+        let joined = "v2|" + hashes.joined(separator: ",") + "|" + level
         return SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -66,19 +68,55 @@ final class GitInsights {
         let levelSpec: String
         switch level {
         case "brief":
-            levelSpec = "BRIEF: at most 5 tight bullets — what actually changed, plus anything that needs a human's eye. Nothing else."
+            levelSpec = """
+            LEVEL = BRIEF. At most 5 bullets. Each bullet must earn its place: what changed AND why \
+            the reader should care — something they could not get from skimming `git log`. If exactly \
+            one thing deserves their eye before building on this work, end with a single line: \
+            "Look at: <file or thing> — <why>."
+            """
         case "detailed":
-            levelSpec = "DETAILED: thorough reviewer notes — walk the changes area by area, call out implementation choices, risks, leftovers or dead ends the agents left behind, and end with what to review first."
+            levelSpec = """
+            LEVEL = DETAILED. Full reviewer notes. Walk each changed area (cluster of related files) \
+            in order of importance: what changed, how it is implemented, and anything questionable \
+            about the approach. Then a section "## Leftovers & risks": dead code, churn scars \
+            (added-then-rewritten remnants), missing or hollow tests, silent behavior changes, \
+            duplicated logic. End with "## Review order": a short numbered list — what to read \
+            carefully first, what can be skimmed, what can be trusted blind.
+            """
         default:
-            levelSpec = "MEDIUM: about 200 words under three mini headings — What changed · Why (inferred intent) · Watch out for."
+            levelSpec = """
+            LEVEL = MEDIUM. About 200 words in three sections: "## What changed" (the net effect, by \
+            area, concrete) · "## Intent" (what the agents were evidently trying to do — inferred \
+            from the code, not from their commit messages) · "## Watch out" (specific risks and \
+            leftovers, each anchored to a file or function).
+            """
         }
         let prompt = """
-        You are reviewing work done mostly by CODING AGENTS in the repository folder "\(folder)". \
-        Attached: the commit list and the combined diff of the whole selected range. \
-        Agents produce noisy history — many small commits, churn that later gets rewritten, verbose \
-        messages. Judge the NET effect from the DIFF itself; never just restate commit messages. \
-        Plain English, no preamble, no flattery. Markdown: ## headings, - bullets, **bold**. \
-        Write at exactly this level → \(levelSpec)
+        You are a senior engineer reviewing a batch of commits in the repository "\(folder)". Most or \
+        all of the commits were written by CODING AGENTS working under light supervision. The reader \
+        is the repository's owner: they did NOT watch this work happen, and they need to decide \
+        whether it is sound and what to check before building on it.
+
+        Input: the commit list (newest first) and the combined diff of the whole range — the NET \
+        effect, with intermediate churn already collapsed.
+
+        Rules:
+        - Judge from the DIFF. Agent commit messages overstate and misdescribe; never repeat a claim \
+        you cannot see in the code itself.
+        - INSIGHT, not summary. "Refactored the buffer" is a summary. "The rollout buffer is now a \
+        ring buffer, and the old drain-everything path is dead code that will mislead the next \
+        reader" is insight. Every point must tell the reader something `git log` could not.
+        - Be concrete: name files and functions. A flagged risk points at the exact place.
+        - Call out agent tells plainly: dead ends left behind, defensive over-engineering, duplicated \
+        logic, TODO/FIXME markers, deletions that look accidental, tests that assert nothing.
+        - A small or trivial range gets one honest line, not an inflated report.
+        - If the diff notes it was truncated, say what you could not verify.
+
+        Format: plain English, markdown (## headings, - bullets, **bold** for names worth noticing). \
+        The FIRST CHARACTER of your reply is the first character of the insight — no preamble, no \
+        "Here's the review", no closing pleasantries, no "overall this is solid" filler.
+
+        \(levelSpec)
         """
 
         guard let outer = await Self.runClaude(
