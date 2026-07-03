@@ -6,7 +6,7 @@ import {
   Workflow, Terminal, FileCode2, ListTodo, Cable, History, Palette,
   Check, ArrowRight, Cpu, Laptop, Smartphone, Monitor,
   Radar, LineChart, Notebook, StickyNote, RefreshCw, Coffee,
-  ShieldCheck, Sparkles, TerminalSquare, GitBranch,
+  ShieldCheck, Sparkles, TerminalSquare, GitBranch, BookOpen,
 } from 'lucide-react';
 
 function Github({ size = 17 }: { size?: number }) {
@@ -55,6 +55,7 @@ const tiles = [
   { icon: Palette, t: 'Themes', d: 'Recolor the whole app — chrome, terminals, and editor — with editor-grade schemes.' },
   { icon: RefreshCw, t: 'Cross-device sync', d: 'Workflows, todos, and notes follow you from Mac to phone, with your Mac as the sync host.' },
   { icon: Coffee, t: 'Awake while locked', d: 'Keep the Mac reachable behind a lock screen, so tmux, the broker, and your jobs keep running.' },
+  { icon: BookOpen, t: 'Activity journal', d: 'A local, append-only record of every moment you engaged — what you saw, what you said, what came of it. Yours alone, on your disk.' },
 ];
 
 export default function HomePage() {
@@ -302,7 +303,7 @@ export default function HomePage() {
             <ul>
               <li><Check size={16} /> GitHub-grade side-by-side diffs, straight from the broker — nothing installed per host.</li>
               <li><Check size={16} /> Hover a commit to trace its lineage; <span className="al-mono">⌘</span>-click two to compare.</li>
-              <li><Check size={16} /> Works everywhere the broker runs — clusters, macOS, Windows.</li>
+              <li><Check size={16} /> <b style={{ color: 'var(--ink)' }}>Agent insights</b>: shift-click a commit range and a model writes what was done and what deserves your eye — on demand, cached forever.</li>
             </ul>
           </div>
           <div className="al-feat-art">

@@ -26,6 +26,20 @@ runs between clicks, no RAM is held per repo.
 - **Blame** — per-line author, commit, and age with a GitLens-style age heatmap; hover for the
   commit summary, double-click a line to jump to that commit in History.
 
+## Agent insights
+
+Agents produce noisy history — many small commits, churny edits, verbose messages. **Shift-click**
+a second commit in History to select the whole contiguous range: the panel shows the combined diff
+plus an **✦ Agent insights** bar with three levels — **Brief**, **Medium**, **Detailed**. Click one
+and a local `claude` run (Sonnet) reads the range — each commit's individual diff *and* the net
+effect — and writes what a reviewer would actually want: an upfront account of **what was done**,
+then **worth your attention** (risks, leftovers, dead ends, hollow tests), every point anchored to
+a file or function.
+
+Cost discipline is built in: nothing generates until you click a level, and results are cached
+forever keyed by the commit hashes — commits are immutable, so a cache hit can never go stale and
+repeat questions are free. The per-run cost is always shown in the footer.
+
 ## Write operations: lazygit
 
 The viewer is deliberately **read-only** — reviewing an agent's work shouldn't risk mutating it.
