@@ -13,6 +13,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Forwards.appCtx = applicationContext // lets port-forward start/stop drive the foreground service
+        JournalOutbox.init(applicationContext)
+        JournalOutbox.onAdded = { vm.flushJournal() }   // ship resolved events immediately while foregrounded
         AttentionNotifier.ensureChannel(this)
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)

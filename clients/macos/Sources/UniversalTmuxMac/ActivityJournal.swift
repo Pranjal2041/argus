@@ -74,6 +74,49 @@ final class ActivityJournal {
         return f
     }
 
+    // MARK: phone ingest
+
+    // Events captured on the phone arrive via the local broker's journal inbox
+    // (peek → ingest → ack). The peek/ack crash window can redeliver, so ingest
+    // dedupes by event id against a small persisted LRU.
+    private var seenIDs: [String] = UserDefaults.standard.stringArray(forKey: "ut.journalSeenIDs.v1") ?? []
+    private let isoIn: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private let isoInPlain: ISO8601DateFormatter = ISO8601DateFormatter()
+
+    /// Ingest JSONL from the inbox. Returns the number of events written.
+    func ingest(_ lines: String) -> Int {
+        guard Self.isEnabled else { return 0 }
+        var wrote = 0
+        for raw in lines.split(separator: "\n") {
+            guard let d = raw.data(using: .utf8),
+                  var obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  let kind = obj["kind"] as? String else { continue }
+            if let id = obj["id"] as? String {
+                if seenIDs.contains(id) { continue }
+                seenIDs.append(id)
+                if seenIDs.count > 1000 { seenIDs.removeFirst(seenIDs.count - 1000) }
+            }
+            // Honor the event's own timestamp so it lands in the right day file.
+            var date = Date()
+            if let ts = obj["ts"] as? String {
+                date = isoIn.date(from: ts) ?? isoInPlain.date(from: ts) ?? Date()
+            }
+            obj.removeValue(forKey: "ts")
+            obj.removeValue(forKey: "kind")
+            obj.removeValue(forKey: "v")
+            log(kind, obj, date: date)
+            wrote += 1
+        }
+        if wrote > 0 {
+            UserDefaults.standard.set(seenIDs, forKey: "ut.journalSeenIDs.v1")
+        }
+        return wrote
+    }
+
     // MARK: dwell — silent attention
 
     // A "viewed" event fires when the user sat on a session ≥ 20s without typing

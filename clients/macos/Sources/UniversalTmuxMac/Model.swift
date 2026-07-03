@@ -525,6 +525,30 @@ final class AppState: ObservableObject {
     /// The sync host is this Mac's own broker (loopback).
     private var syncHostBase: String? { machines.first { $0.isLocal }?.httpBase }
 
+    /// Drain phone-captured journal events from the local broker's inbox into
+    /// the canonical journal (peek → ingest (id-deduped) → ack by offset).
+    func drainJournalInbox() {
+        guard let base = syncHostBase, let url = URL(string: "\(base)/journal/peek") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 8
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            guard let data,
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let off = obj["off"] as? Int64 ?? (obj["off"] as? Int).map(Int64.init),
+                  off > 0,
+                  let lines = obj["data"] as? String, !lines.isEmpty else { return }
+            DispatchQueue.main.async {
+                _ = ActivityJournal.shared.ingest(lines)
+                // Ack regardless of per-line validity: ids are recorded, replays dedupe.
+                guard let ack = URL(string: "\(base)/journal/ack?off=\(off)") else { return }
+                var areq = URLRequest(url: ack)
+                areq.httpMethod = "POST"
+                areq.timeoutInterval = 8
+                URLSession.shared.dataTask(with: areq).resume()
+            }
+        }.resume()
+    }
+
     private func pushUserData<T: Codable>(_ key: String, _ data: T, _ ts: Int64) {
         guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=\(key)") else { return }
         let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
@@ -842,7 +866,7 @@ final class AppState: ObservableObject {
                 if tick == 1 || tick % 15 == 0 { self.refreshHistoryCache() }
                 // Sync Workflows + Todo Maps with this Mac's broker (the sync host) so the
                 // phone shares them. ~4s after launch, then ~10s.
-                if tick == 2 || tick % 5 == 0 { self.syncUserData() }
+                if tick == 2 || tick % 5 == 0 { self.syncUserData(); self.drainJournalInbox() }
             }
         }
     }
