@@ -50,8 +50,53 @@ final class BrokerClient {
         start()
     }
 
+    // ---- thundering-herd control -------------------------------------------
+    // At app (re)launch every pane dials at once. A burst of simultaneous flows
+    // from one client can poison the broker's tsnet data plane for MINUTES (flows
+    // handshake, then frames blackhole), and the resulting mass flapping both
+    // sustains the blackhole and storms SwiftUI with connection-state churn.
+    // Two standard measures: PACE dials per host (max a few in the connecting
+    // state at once) and JITTER the backoff so retries can't march in waves.
+    private static let paceLock = NSLock()
+    private static var dialing: [String: Int] = [:]   // host → conns in pre-first-frame state
+    private static let maxDialingPerHost = 3
+
+    private var pacedHost: String?   // host this conn currently counts against
+    private func paceRelease() {
+        guard let h = pacedHost else { return }
+        pacedHost = nil
+        Self.paceLock.lock()
+        Self.dialing[h] = max(0, (Self.dialing[h] ?? 1) - 1)
+        Self.paceLock.unlock()
+    }
+
+    /// Broker ALWAYS sends the pane-size frame right after accept, so a socket
+    /// that opens but stays silent is a poisoned flow (blackholed in transit) —
+    /// it will never error out on its own. Recycle it.
+    private var firstFrameWork: DispatchWorkItem?
+
     func start() {
         guard !closed else { return }
+        // Re-entry safety (found by the git-insights review): updateURL — and any
+        // future caller — can restart mid-dial while this client still holds a
+        // pacing slot; the abandoned dial's callbacks bail on the epoch check and
+        // would never release it. Release before claiming anew.
+        paceRelease()
+        let host = url.host ?? "?"
+        Self.paceLock.lock()
+        let inFlight = Self.dialing[host] ?? 0
+        if inFlight >= Self.maxDialingPerHost {
+            Self.paceLock.unlock()
+            // Too many conns to this host mid-dial — wait a beat and retry the gate.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.4...1.2)) { [weak self] in
+                self?.start()
+            }
+            return
+        }
+        Self.dialing[host] = inFlight + 1
+        Self.paceLock.unlock()
+        pacedHost = host
+
         epoch &+= 1
         let myEpoch = epoch
         let t = URLSession.shared.webSocketTask(with: url)
@@ -66,11 +111,30 @@ final class BrokerClient {
         t.resume()
         onStatus?(everConnected ? .reconnecting : .connecting)
         onConnect?() // queued by URLSession until the socket opens; re-sends geometry
+        firstFrameWork?.cancel()
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, !self.closed, myEpoch == self.epoch, !self.live else { return }
+            // Opened but silent for 6s — poisoned flow. Cancel; the receive
+            // failure path reconnects with jittered backoff.
+            self.task?.cancel(with: .goingAway, reason: nil)
+        }
+        firstFrameWork = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: watchdog)
         receiveLoop(myEpoch)
+    }
+
+    // Insurance for the static pacing registry (flagged by the git-insights
+    // review): a client deallocated without stop() must not leak its dial slot —
+    // that would silently cap its host below maxDialingPerHost forever.
+    deinit {
+        firstFrameWork?.cancel()
+        paceRelease()
     }
 
     func stop() {
         closed = true
+        firstFrameWork?.cancel()
+        paceRelease()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
     }
@@ -86,6 +150,8 @@ final class BrokerClient {
                     self.live = true
                     self.everConnected = true
                     self.backoff = 0.5
+                    self.firstFrameWork?.cancel()
+                    self.paceRelease()
                     self.onStatus?(.connected)
                 }
                 if case .data(let data) = message { self.handle(data) }
@@ -93,6 +159,8 @@ final class BrokerClient {
             case .failure:
                 guard !self.closed, myEpoch == self.epoch else { return }
                 self.live = false
+                self.firstFrameWork?.cancel()
+                self.paceRelease()
                 self.onStatus?(.reconnecting)
                 self.scheduleReconnect(myEpoch)
             }
@@ -100,7 +168,7 @@ final class BrokerClient {
     }
 
     private func scheduleReconnect(_ myEpoch: Int) {
-        let delay = backoff
+        let delay = backoff * Double.random(in: 0.7...1.3)   // jitter: no synchronized waves
         backoff = min(backoff * 2, 10) // 0.5,1,2,4,8,10,10…
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.closed, myEpoch == self.epoch else { return }

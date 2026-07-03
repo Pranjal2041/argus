@@ -181,6 +181,8 @@ final class AppState: ObservableObject {
     @Published var rttByMachine: [String: Int] = [:]  // round-trip ms per machine
     @Published var selection: SessionRef? {
         didSet {
+            // Activity journal dwell: attention moved (nil selection closes it too).
+            ActivityJournal.shared.selectionChanged(to: selection)
             guard let ref = selection else { return }
             // Visiting a panel clears its orange "done, unseen" flag → back to green.
             unseen.remove(ref.id)
@@ -239,6 +241,12 @@ final class AppState: ObservableObject {
             applyKeepAwake()
         }
     }
+    /// Activity journal on/off (default on). The journal itself also checks this
+    /// on every event, so flipping it stops capture immediately.
+    @Published var journalEnabled: Bool = ActivityJournal.isEnabled {
+        didSet { ActivityJournal.setEnabled(journalEnabled) }
+    }
+
     /// Held token for the active "prevent idle system sleep" assertion (nil when off).
     private var keepAwakeToken: NSObjectProtocol?
 
@@ -317,6 +325,10 @@ final class AppState: ObservableObject {
     /// by that name already exists on this host it's just opened (no re-typing); otherwise
     /// it's created and the command sequence is typed in.
     func runWorkflow(_ wf: Workflow, on m: Machine) {
+        // Activity journal: commissioning work is a first-class interaction.
+        ActivityJournal.shared.log("workflowRun", [
+            "workflow": wf.name, "machineID": m.id, "folder": wf.folder,
+        ])
         workflowPick = nil
         showWorkflows = false
         showOverview = false
@@ -407,12 +419,23 @@ final class AppState: ObservableObject {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, let i = todoBoards.firstIndex(where: { $0.id == boardID }) else { return }
         todoBoards[i].items.append(TodoItem(text: t))
+        ActivityJournal.shared.log("todo", todoFields(todoBoards[i], action: "add", text: t))
     }
     func toggleTodo(_ boardID: UUID, _ itemID: UUID) {
         guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }),
               let ii = todoBoards[bi].items.firstIndex(where: { $0.id == itemID }) else { return }
         todoBoards[bi].items[ii].done.toggle()
         todoBoards[bi].items[ii].completedAt = todoBoards[bi].items[ii].done ? Date() : nil
+        ActivityJournal.shared.log("todo", todoFields(
+            todoBoards[bi],
+            action: todoBoards[bi].items[ii].done ? "done" : "undone",
+            text: todoBoards[bi].items[ii].text))
+    }
+    private func todoFields(_ board: TodoBoard, action: String, text: String) -> [String: Any] {
+        var f: [String: Any] = ["action": action, "text": text]
+        if board.isMisc { f["board"] = "misc" }
+        else { f["machineID"] = board.machine; f["session"] = board.session }
+        return f
     }
     func deleteTodo(_ boardID: UUID, _ itemID: UUID) {
         guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }) else { return }
@@ -472,6 +495,7 @@ final class AppState: ObservableObject {
     func addNote() -> UUID {
         let n = Note()
         notes.append(n)
+        ActivityJournal.shared.log("note", ["action": "add", "noteID": n.id.uuidString])
         return n.id
     }
     func updateNoteText(_ id: UUID, _ text: String) {
@@ -782,6 +806,13 @@ final class AppState: ObservableObject {
         loadHistoryCache()
         applyKeepAwake()   // honor a persisted "keep awake" across relaunches
         if !todoBoards.contains(where: { $0.isMisc }) { todoBoards.append(TodoBoard(isMisc: true)) }
+        // Activity journal: resolve machine names / session cwds at event time.
+        ActivityJournal.shared.nameResolver = { [weak self] id in
+            self?.machines.first(where: { $0.id == id })?.name
+        }
+        ActivityJournal.shared.folderResolver = { [weak self] mid, session in
+            self?.sessionsByMachine[mid]?.first(where: { $0.name == session })?.path
+        }
     }
 
     func toggleSidebar() {
@@ -1018,6 +1049,9 @@ final class AppState: ObservableObject {
     // MARK: Session control (POST /control on the owning broker)
 
     func createSession(on machineID: String, name: String, dir: String? = nil) {
+        var jf: [String: Any] = ["machineID": machineID, "session": name]
+        if let dir, !dir.isEmpty { jf["folder"] = dir }
+        ActivityJournal.shared.log("sessionNew", jf)
         var extra: [String: String] = [:]
         if let dir, !dir.isEmpty { extra["dir"] = dir }
         control(machineID, action: "create", session: name, extra: extra) { ok in
@@ -1027,6 +1061,7 @@ final class AppState: ObservableObject {
     }
 
     func killSession(_ ref: SessionRef) {
+        ActivityJournal.shared.log("sessionKill", ActivityJournal.shared.ctx(ref))
         control(ref.machineID, action: "kill", session: ref.session) { _ in
             // Selection was already moved off the dead session by the caller (before its
             // pane was dropped, so it isn't recreated). Just reconverge with the broker.

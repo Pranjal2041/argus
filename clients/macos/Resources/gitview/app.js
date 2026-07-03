@@ -82,6 +82,9 @@
     allBranches: false,
     compareWith: null,
     selCommit: null,
+    rangeSel: null,       // {hashes, newest, oldest, base, metas} from shift-click
+    insight: null,        // {level, status: running|done|error, text, cost, cached, t0}
+    insightMem: {},       // key(level+newest+n) -> payload, to re-show instantly
     blameFrom: "changes"
   };
 
@@ -422,6 +425,32 @@
         allRows.forEach(function (r) { r.classList.remove("dim"); });
       };
       row.onclick = function (ev) {
+        // SHIFT-click with a selection = select the contiguous RANGE (for insights)
+        if (ev.shiftKey && state.selCommit && state.selCommit !== row.dataset.hash) {
+          ev.preventDefault();
+          var order = state.log.map(function (c) { return c.hash; });
+          var i1 = order.indexOf(state.selCommit), i2 = order.indexOf(row.dataset.hash);
+          if (i1 !== -1 && i2 !== -1) {
+            var lo = Math.min(i1, i2), hi = Math.max(i1, i2);
+            var range = state.log.slice(lo, hi + 1);   // newest → oldest
+            state.rangeSel = {
+              hashes: range.map(function (c) { return c.hash; }),
+              newest: range[0].hash,
+              oldest: range[range.length - 1].hash,
+              base: (range[range.length - 1].parents || [])[0] || null,
+              metas: range.map(function (c) { return { h: c.hash, s: c.subject, a: c.author, at: c.at }; })
+            };
+            state.compareWith = null;
+            state.insight = null;
+            allRows.forEach(function (r) {
+              r.classList.toggle("rsel", state.rangeSel.hashes.indexOf(r.dataset.hash) !== -1);
+              r.classList.remove("selb");
+            });
+            overlay("collecting the range…");
+            post("compare", { a: state.rangeSel.newest, b: state.rangeSel.base || state.rangeSel.oldest });
+          }
+          return;
+        }
         // ⌘/ctrl-click with a selection = COMPARE the two commits
         if ((ev.metaKey || ev.ctrlKey) && state.selCommit && state.selCommit !== row.dataset.hash) {
           state.compareWith = row.dataset.hash;
@@ -436,7 +465,9 @@
           return;
         }
         state.compareWith = null;
-        el("commits").querySelectorAll(".crow.sel, .crow.selb").forEach(function (r) { r.classList.remove("sel", "selb"); });
+        state.rangeSel = null;
+        state.insight = null;
+        el("commits").querySelectorAll(".crow.sel, .crow.selb, .crow.rsel").forEach(function (r) { r.classList.remove("sel", "selb", "rsel"); });
         row.classList.add("sel");
         state.selCommit = row.dataset.hash;
         post("commit", { hash: row.dataset.hash });
@@ -451,7 +482,101 @@
     paintLog();
   }
 
+
+  // ---- agent insights (range selection) ------------------------------------
+  function insightKey() {
+    var rs = state.rangeSel;
+    return rs ? rs.newest + ":" + rs.hashes.length : "";
+  }
+
+  function renderRangeView(diffText) {
+    var rs = state.rangeSel;
+    if (!rs) return;
+    var byHash = {}; state.log.forEach(function (c) { byHash[c.hash] = c; });
+    var newest = byHash[rs.newest], oldest = byHash[rs.oldest];
+    var target = el("history-diff");
+    target.innerHTML =
+      '<div class="commit-card"><div class="s">' + rs.hashes.length + " commits selected</div>" +
+      '<div class="range-ends">' +
+      (newest ? avatar(newest.author) + '<span class="txt">' + esc(newest.subject) + "</span>" : "") +
+      '<span class="dots">⋯</span>' +
+      (oldest ? avatar(oldest.author) + '<span class="txt">' + esc(oldest.subject) + "</span>" : "") +
+      "</div></div>" +
+      '<div id="insightbar">' +
+      '<span class="it">✦ Agent insights</span>' +
+      '<button class="ilvl" data-l="brief">Brief</button>' +
+      '<button class="ilvl" data-l="medium">Medium</button>' +
+      '<button class="ilvl" data-l="detailed">Detailed</button>' +
+      '<span class="ihint">generated on demand · cached per commit-set</span>' +
+      "</div>" +
+      '<div id="insightbody"></div>' +
+      '<div id="range-diff"></div>';
+    target.querySelectorAll(".ilvl").forEach(function (b) {
+      b.onclick = function () { requestInsight(b.dataset.l); };
+    });
+    renderDiff("range-diff", diffText, { title: rs.hashes.length + " commits" });
+    paintInsight();
+  }
+
+  function requestInsight(level) {
+    var rs = state.rangeSel;
+    if (!rs) return;
+    var mem = state.insightMem[insightKey() + "|" + level];
+    if (mem) { state.insight = mem; paintInsight(); return; }
+    if (state.insight && state.insight.status === "running") return;
+    state.insight = { level: level, status: "running", t0: Date.now() };
+    paintInsight();
+    var metaLines = rs.metas.map(function (m) {
+      return m.h.slice(0, 10) + "  " + m.a + "  " + new Date(m.at * 1000).toISOString().slice(0, 16) + "  " + m.s;
+    }).join("\n");
+    post("insight", { level: level, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: metaLines });
+  }
+
+  var insightTick = null;
+  function paintInsight() {
+    var box = el("insightbody");
+    if (!box) return;
+    var ins = state.insight;
+    document.querySelectorAll(".ilvl").forEach(function (b) {
+      b.classList.toggle("on", !!ins && ins.level === b.dataset.l);
+    });
+    if (insightTick) { clearInterval(insightTick); insightTick = null; }
+    if (!ins) { box.innerHTML = ""; return; }
+    if (ins.status === "running") {
+      var paint = function () {
+        var secs = Math.floor((Date.now() - ins.t0) / 1000);
+        var node = el("insightbody");
+        if (node) node.innerHTML = '<div class="ithinking">✦ sonnet is reading the diff… ' + secs + "s</div>";
+      };
+      paint();
+      insightTick = setInterval(paint, 1000);
+      return;
+    }
+    if (ins.status === "error") {
+      box.innerHTML = '<div class="ierror">insight failed: ' + esc(ins.error || "unknown") +
+        ' <button class="iretry">retry</button></div>';
+      var r = box.querySelector(".iretry");
+      if (r) r.onclick = function () { state.insight = null; requestInsight(ins.level); };
+      return;
+    }
+    box.innerHTML = '<div class="ibody">' + mdlite(ins.text || "") + "</div>" +
+      '<div class="ifoot">' + (ins.cached ? "from cache · free" : "sonnet · $" + (ins.cost || 0).toFixed(3)) + "</div>";
+  }
+
+  // minimal markdown: headings, bullets, bold, code — enough for insight prose
+  function mdlite(t) {
+    var out = esc(t)
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+    return out.split("\n").map(function (l) {
+      if (/^#{1,4}\s+/.test(l)) return '<div class="ih">' + l.replace(/^#+\s+/, "") + "</div>";
+      if (/^\s*[-•*]\s+/.test(l)) return '<div class="ib">' + l.replace(/^\s*[-•*]\s+/, "") + "</div>";
+      return l.trim() ? '<div class="ip">' + l + "</div>" : "";
+    }).join("");
+  }
+
   function renderRangeDiff(a, b, text) {
+    if (state.rangeSel && a === state.rangeSel.newest) { renderRangeView(text); return; }
     var byHash = {}; state.log.forEach(function (c) { byHash[c.hash] = c; });
     var ca = byHash[a], cb = byHash[b];
     function side(c, h) {
@@ -562,6 +687,16 @@
       renderDiff("changes-diff", text, meta || {});
     },
     setBlame: function (data, path) { overlay(null); renderBlame(data, path); },
+    setInsight: function (p) {
+      var done = p.error ? { level: p.level, status: "error", error: p.error }
+                         : { level: p.level, status: "done", text: p.text, cost: p.cost, cached: p.cached };
+      if (!p.error) state.insightMem[p.newest + ":" + (state.rangeSel && state.rangeSel.newest === p.newest ? state.rangeSel.hashes.length : "?") + "|" + p.level] = done;
+      if (state.rangeSel && state.rangeSel.newest === p.newest &&
+          state.insight && state.insight.level === p.level) {
+        state.insight = done;
+        paintInsight();
+      }
+    },
     setLoading: function (msg) {
       var skel = '<div class="skel"></div><div class="skel w80"></div><div class="skel w60"></div><div class="skel"></div><div class="skel w40"></div>';
       if (state.view === "history" && !el("commits").children.length) { el("commits").innerHTML = skel; return; }

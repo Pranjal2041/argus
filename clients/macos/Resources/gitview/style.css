@@ -243,3 +243,37 @@ button { font: inherit; }
 #overlay { position: fixed; inset: 42px 0 0 0; background: var(--bg); display: flex;
   align-items: center; justify-content: center; }
 #overlay-msg { color: var(--fg2); max-width: 520px; text-align: center; }
+
+/* ---- agent insights (shift-click range) ---- */
+.crow.rsel { background: rgba(122,162,247,.10); box-shadow: inset 2.5px 0 0 var(--accent); }
+.range-ends { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px;
+  color: var(--fg2); min-width: 0; }
+.range-ends .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 38%; }
+.range-ends .dots { color: var(--fg3); }
+#insightbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; margin-bottom: 10px;
+  background: linear-gradient(180deg, rgba(122,162,247,.10), rgba(122,162,247,.04));
+  border: 1px solid rgba(122,162,247,.25); border-radius: 10px; }
+#insightbar .it { color: var(--accent); font-weight: 600; font-size: 12.5px; margin-right: 4px; }
+.ilvl { background: var(--surface); color: var(--fg2); border: 1px solid var(--border);
+  border-radius: 15px; padding: 3px 13px; font-size: 11.5px; cursor: pointer;
+  transition: all .12s; }
+.ilvl:hover { color: var(--fg); border-color: var(--fg3); }
+.ilvl.on { background: var(--accent); color: #10121a; border-color: var(--accent); font-weight: 600; }
+#insightbar .ihint { margin-left: auto; color: var(--fg3); font-size: 10px; }
+.ithinking { color: var(--accent); font-size: 12.5px; padding: 14px 4px; animation: ipulse 1.6s ease infinite; }
+@keyframes ipulse { 50% { opacity: .45; } }
+.ierror { color: #e06c75; font-size: 12px; padding: 10px 4px; }
+.ierror .iretry { margin-left: 8px; background: transparent; color: var(--fg2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+.ibody { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 18px; margin-bottom: 4px; -webkit-user-select: text; user-select: text;
+  font-size: 12.5px; line-height: 1.65; box-shadow: 0 3px 14px rgba(0,0,0,.22); }
+.ibody .ih { font-weight: 700; color: var(--fg); margin: 10px 0 4px; font-size: 12px;
+  text-transform: uppercase; letter-spacing: .08em; }
+.ibody .ih:first-child { margin-top: 0; }
+.ibody .ib { padding-left: 16px; position: relative; margin: 3px 0; color: var(--fg); }
+.ibody .ib::before { content: "–"; position: absolute; left: 2px; color: var(--accent); }
+.ibody .ip { margin: 6px 0; color: var(--fg); }
+.ibody code { background: rgba(122,162,247,.12); border-radius: 4px; padding: 0 4px;
+  font: 11px ui-monospace, monospace; color: var(--accent); }
+.ifoot { color: var(--fg3); font-size: 10px; margin: 2px 2px 12px; }

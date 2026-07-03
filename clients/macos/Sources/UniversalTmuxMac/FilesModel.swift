@@ -268,7 +268,13 @@ final class FileTab: ObservableObject, Identifiable {
     func save(_ doc: OpenDoc) {
         guard case .text = doc.content else { return }
         let text = doc.draft, path = doc.path
-        Task { if await postWrite(path, Data(text.utf8)) { doc.markSaved() } }
+        Task {
+            if await postWrite(path, Data(text.utf8)) {
+                doc.markSaved()
+                // Activity journal: a hand-edited file is direct human work.
+                ActivityJournal.shared.log("fileSave", ["machineID": machineID, "path": path])
+            }
+        }
     }
 
     /// Focus an already-open doc (or no-op). Keeps the tree highlight in sync.
