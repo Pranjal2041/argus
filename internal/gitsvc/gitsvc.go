@@ -111,6 +111,7 @@ type Summary struct {
 	Behind   int          `json:"behind"`
 	Files    []FileChange `json:"files"`
 	Stashes  int          `json:"stashes"`
+	Root     string       `json:"root,omitempty"` // repo top-level: porcelain v2 paths are relative to THIS, not `dir`
 }
 
 // GetSummary parses `git status --porcelain=v2 --branch -z`.
@@ -120,6 +121,11 @@ func GetSummary(dir string) (*Summary, error) {
 		return nil, err
 	}
 	s := &Summary{Files: []FileChange{}}
+	// The repo top-level: file paths below are relative to it, so a client can
+	// map them to absolute tree paths even when `dir` is a subdirectory.
+	if top, e := run(dir, "rev-parse", "--show-toplevel"); e == nil {
+		s.Root = strings.TrimSpace(string(top))
+	}
 	// -z: NUL-terminated records; rename records carry a second NUL-separated path.
 	recs := strings.Split(string(out), "\x00")
 	for i := 0; i < len(recs); i++ {

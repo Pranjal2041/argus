@@ -27,6 +27,26 @@ struct FileEntry: Codable, Hashable, Identifiable {
 
 private struct ListResp: Codable { let path: String; let entries: [FileEntry] }
 private struct FindResp: Codable { let root: String; let files: [FileEntry]; let truncated: Bool }
+
+// Minimal decode of /git/summary for tree coloring (mirrors gitsvc.FileChange).
+private struct GitSummaryLite: Codable {
+    struct FC: Codable { let path: String; let staged: String; let unstaged: String; let untracked: Bool }
+    let files: [FC]
+    var root: String? = nil
+}
+
+struct GrepMatch: Codable, Hashable, Identifiable {
+    let path: String
+    let line: Int
+    let text: String
+    var id: String { path + ":" + String(line) }
+}
+private struct GrepResp: Codable {
+    var root = ""
+    var matches: [GrepMatch] = []
+    var truncated = false
+    var tool = ""
+}
 private struct HomeResp: Codable { let home: String; let roots: [String]; let sep: String }
 private struct StatResp: Codable { let path: String; let name: String; let isDir: Bool; let exists: Bool; let size: Int64 }
 
@@ -216,6 +236,55 @@ final class FileTab: ObservableObject, Identifiable {
     @Published var quickOpenLoading = false
     private var quickOpenRoot: String? = nil       // root the cached file list was built for
 
+    // ---- content search (⇧⌘F): grep across the open folder ----
+    @Published var showGrep = false
+    @Published var grepQuery = ""
+    @Published var grepRegex = false
+    @Published var grepMatches: [GrepMatch] = []
+    @Published var grepTruncated = false
+    @Published var grepRunning = false
+    @Published var grepRan = false               // a search has completed at least once
+    private var grepSeq = 0                       // drop stale responses
+
+    func openGrep() { showGrep = true }
+    func closeGrep() { showGrep = false }
+
+    /// Run a content search under the current root. Debounced by seq: only the
+    /// latest query's results are applied.
+    func runGrep() {
+        let q = grepQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty, !rootPath.isEmpty else { grepMatches = []; grepRan = false; return }
+        grepSeq += 1
+        let mySeq = grepSeq
+        let root = rootPath, regex = grepRegex
+        grepRunning = true
+        Task {
+            let res = await fetchGrep(root, q, regex)
+            guard mySeq == grepSeq else { return }   // a newer search superseded this
+            grepMatches = res.matches
+            grepTruncated = res.truncated
+            grepRunning = false
+            grepRan = true
+        }
+    }
+
+    private func fetchGrep(_ root: String, _ query: String, _ regex: Bool) async -> GrepResp {
+        guard var c = URLComponents(string: httpBase + "/fs/grep") else { return GrepResp() }
+        c.queryItems = [.init(name: "path", value: root), .init(name: "query", value: query)]
+        if regex { c.queryItems?.append(.init(name: "regex", value: "1")) }
+        guard let url = c.url,
+              let (data, _) = try? await fsSession.data(from: url),
+              let res = try? JSONDecoder().decode(GrepResp.self, from: data) else { return GrepResp() }
+        return res
+    }
+
+    /// Open a grep match in the editor at its line.
+    func openMatch(_ m: GrepMatch) {
+        let name = (m.path as NSString).lastPathComponent
+        let e = FileEntry(name: name, path: m.path, isDir: false, size: 0, mtime: 0, mode: "")
+        openEntry(e, line: m.line)
+    }
+
     // pending dialog ops (driven from the tree's context menu, shown by the view)
     @Published var renaming: FileNode? = nil
     @Published var creating: NewItem? = nil
@@ -253,6 +322,56 @@ final class FileTab: ObservableObject, Identifiable {
         rootPath = path
         roots = kids ?? []
         title = displayName(path)
+        refreshGitStatus()
+    }
+
+    // ---- git status coloring: mark tree rows an agent has changed ----
+    // Absolute path → status letter ("M" modified, "A" added, "D" deleted, "U"
+    // untracked, "R" renamed). Empty when the root isn't a git repo.
+    @Published var gitStatus: [String: String] = [:]
+    private var gitDirtyDirs: Set<String> = []   // ancestor dirs that contain a change
+
+    /// True status letter for a path, or nil. Dirs report "•" if they contain a change.
+    func gitStatusFor(_ path: String, isDir: Bool) -> String? {
+        if let s = gitStatus[path] { return s }
+        if isDir && gitDirtyDirs.contains(path) { return "•" }
+        return nil
+    }
+
+    func refreshGitStatus() {
+        let root = rootPath
+        guard !root.isEmpty else { gitStatus = [:]; gitDirtyDirs = []; return }
+        guard var c = URLComponents(string: httpBase + "/git/summary") else { return }
+        c.queryItems = [.init(name: "dir", value: root)]
+        guard let url = c.url else { return }
+        Task {
+            guard let (data, _) = try? await fsSession.data(from: url),
+                  let sum = try? JSONDecoder().decode(GitSummaryLite.self, from: data),
+                  rootPath == root else {
+                if rootPath == root { gitStatus = [:]; gitDirtyDirs = [] }   // not a repo → clear
+                return
+            }
+            var map: [String: String] = [:]
+            var dirs: Set<String> = []
+            // porcelain v2 paths are relative to the REPO TOP-LEVEL, not `dir`.
+            let base = (sum.root?.isEmpty == false) ? sum.root! : root
+            for f in sum.files {
+                let abs = f.path.hasPrefix("/") ? f.path : (base + sep + f.path)
+                let letter = f.untracked ? "U" : (f.staged != "." ? f.staged : f.unstaged)
+                map[abs] = letter == "." ? "M" : letter
+                // tint every ancestor up to root so a collapsed folder shows it holds changes
+                var p = (abs as NSString).deletingLastPathComponent
+                while p.count >= root.count, p.hasPrefix(root) {
+                    dirs.insert(p)
+                    if p == root { break }
+                    let up = (p as NSString).deletingLastPathComponent
+                    if up == p { break }
+                    p = up
+                }
+            }
+            gitStatus = map
+            gitDirtyDirs = dirs
+        }
     }
 
     func goUp() { Task { await setRoot(parentPath(rootPath)) } }
@@ -405,6 +524,7 @@ final class FileTab: ObservableObject, Identifiable {
             roots = (await list(rootPath)) ?? []
         }
         bumpTree()
+        refreshGitStatus()   // an agent's edits show up in the tree on refresh
     }
     private func findNode(_ path: String, _ nodes: [FileNode]) -> FileNode? {
         for n in nodes {
