@@ -95,6 +95,14 @@ final class BrokerClient {
 
     func start() {
         guard !closed else { return }
+        // NO GHOSTS: a superseded dial/socket must die here, not linger. start()
+        // used to just overwrite `task`; during restart churn (updateURL fires as
+        // /sessions refreshes tmux ids, while a pacing gate-retry is pending) that
+        // orphaned LIVE sockets — open on the broker, frames ignored client-side,
+        // never cancelled — inflating the very per-pair flow pressure that causes
+        // the babel blackhole. Cancel first, always.
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
         // Re-entry safety (found by the git-insights review): updateURL — and any
         // future caller — can restart mid-dial while this client still holds a
         // pacing slot; the abandoned dial's callbacks bail on the epoch check and
@@ -105,9 +113,15 @@ final class BrokerClient {
         let inFlight = Self.dialing[host] ?? 0
         if inFlight >= Self.maxDialingPerHost {
             Self.paceLock.unlock()
-            // Too many conns to this host mid-dial — wait a beat and retry the gate.
+            // Too many conns to this host mid-dial — wait a beat and retry the
+            // gate. STALENESS GUARD: only if nothing superseded this attempt
+            // (epoch unchanged) and the pane didn't connect meanwhile — a stale
+            // retry used to tear down a healthy connection and redial it, which
+            // showed as a pane flipping to "reconnecting" for no reason.
+            let retryEpoch = epoch
             DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.4...1.2)) { [weak self] in
-                self?.start()
+                guard let self, !self.closed, self.epoch == retryEpoch, !self.live else { return }
+                self.start()
             }
             return
         }
