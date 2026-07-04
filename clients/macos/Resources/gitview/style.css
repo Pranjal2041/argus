@@ -277,3 +277,14 @@ button { font: inherit; }
 .ibody code { background: rgba(122,162,247,.12); border-radius: 4px; padding: 0 4px;
   font: 11px ui-monospace, monospace; color: var(--accent); }
 .ifoot { color: var(--fg3); font-size: 10px; margin: 2px 2px 12px; }
+
+/* ---- word wrap in diffs (long lines wrap instead of horizontal scroll) ---- */
+/* diff2html sets white-space:pre + nowrap widths for h-scroll; agents write
+   very long lines, so wrap by default. Sticky line numbers stay top-aligned
+   on taller wrapped rows; break-all handles unbroken tokens (URLs, hashes). */
+.d2h-code-line-ctn { white-space: pre-wrap !important; word-break: break-all; width: auto !important; }
+.d2h-code-line, .d2h-code-side-line { white-space: normal !important; width: auto !important; }
+.d2h-file-side-diff { overflow-x: hidden; }
+.d2h-code-side-linenumber, .d2h-code-linenumber { vertical-align: top; }
+/* blame code lines wrap the same way */
+.blame-code pre, .blame-code code { white-space: pre-wrap; word-break: break-all; }
