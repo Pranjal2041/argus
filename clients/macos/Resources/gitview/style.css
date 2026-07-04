@@ -302,3 +302,62 @@ button { font: inherit; }
 .ichat-q { margin: 12px 0 6px; padding: 8px 12px; border-radius: 10px 10px 10px 3px;
   background: rgba(122,162,247,.12); border: 1px solid rgba(122,162,247,.25);
   color: var(--fg); font-size: 12.5px; -webkit-user-select: text; user-select: text; }
+
+/* ---- Pull Requests ---- */
+.prrow { padding: 9px 11px; border-radius: 8px; cursor: pointer; margin: 2px 4px;
+  border: 1px solid transparent; transition: background .1s; }
+.prrow:hover { background: var(--surface); }
+.prrow.sel { background: var(--surface2); border-color: var(--border); }
+.pr-top { display: flex; align-items: center; gap: 7px; }
+.pr-title { font-size: 12.5px; font-weight: 600; color: var(--fg); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.pr-sub { display: flex; align-items: center; gap: 7px; margin-top: 4px; font-size: 10.5px; color: var(--fg3); }
+.pr-num { color: var(--fg3); font-family: ui-monospace, monospace; }
+.pr-branch { color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.pr-stat { margin-left: auto; font-family: ui-monospace, monospace; }
+.pr-stat .p { color: var(--added); } .pr-stat .m { color: var(--removed); margin-left: 4px; }
+.pr-badge { font-size: 9.5px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--border);
+  color: var(--fg2); text-transform: lowercase; }
+.pr-badge.ok { color: var(--added); border-color: rgba(79,191,120,.4); }
+.pr-badge.warn { color: var(--removed); border-color: rgba(224,108,117,.4); }
+.pr-badge.draft { color: var(--fg3); }
+.pr-checks { font-size: 12px; }
+.pr-checks.ok { color: var(--added); } .pr-checks.bad { color: var(--removed); } .pr-checks.pending { color: var(--tag); }
+.pr-body { margin-top: 10px; padding: 10px 12px; background: var(--surface); border-radius: 8px;
+  font-size: 12px; color: var(--fg2); white-space: pre-wrap; max-height: 220px; overflow: auto; -webkit-user-select: text; user-select: text; }
+.pr-checkrow, .pr-reviews { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.pr-reviews { flex-direction: column; }
+.pr-check { font-size: 10px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg2); }
+.pr-check.ok { color: var(--added); border-color: rgba(79,191,120,.35); }
+.pr-check.bad { color: var(--removed); border-color: rgba(224,108,117,.35); }
+.pr-check.pending { color: var(--tag); border-color: rgba(224,175,104,.35); }
+.pr-rev { font-size: 11.5px; color: var(--fg2); }
+.pr-revbody { color: var(--fg3); margin: 3px 0 0 4px; white-space: pre-wrap; }
+.pr-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; align-items: center; }
+.pr-act { background: var(--surface); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 7px; padding: 5px 13px; font-size: 12px; cursor: pointer; transition: all .12s; text-decoration: none; }
+.pr-act:hover { border-color: var(--fg3); }
+.pr-act.ok { color: var(--added); border-color: rgba(79,191,120,.4); }
+.pr-act.warn { color: var(--removed); border-color: rgba(224,108,117,.4); }
+.pr-act.link { color: var(--accent); margin-left: auto; }
+#pr-actionbar { margin-top: 10px; }
+.pr-form textarea, .pr-note { width: 100%; background: var(--surface); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 7px; padding: 7px 10px; font: 12px var(--mono, ui-monospace); outline: none; }
+.pr-form textarea { min-height: 64px; resize: vertical; margin-bottom: 7px; }
+.pr-confirm { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; color: var(--fg2); flex-wrap: wrap; }
+.pr-confirm .go, .pr-form .go { background: var(--accent); color: #10121a; border: none; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-weight: 600; }
+.pr-confirm .no, .pr-form .no { background: transparent; color: var(--fg2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.pr-method, .pr-note[placeholder="optional note"] { background: var(--surface); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; font: 12px var(--mono, ui-monospace); }
+.pr-ok { color: var(--added); font-size: 12px; } .pr-err { color: var(--removed); font-size: 12px; }
+
+/* Styled <select> — never the native aqua popup (matches the ledger). */
+select.toggle, select#pr-state {
+  -webkit-appearance: none; appearance: none;
+  background-color: var(--surface); color: var(--fg2);
+  border: 1px solid var(--border); border-radius: 7px;
+  padding: 4px 26px 4px 11px; font-size: 11px; cursor: pointer; outline: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%239a9db0' stroke-width='1.5' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 9px center;
+  transition: border-color .12s, color .12s; }
+select.toggle:hover, select#pr-state:hover { color: var(--fg); border-color: var(--fg3); }
+select.toggle:focus, select#pr-state:focus { border-color: var(--accent); box-shadow: 0 0 0 2.5px rgba(122,162,247,.15); }
