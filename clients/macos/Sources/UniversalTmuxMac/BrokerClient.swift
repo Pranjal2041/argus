@@ -75,6 +75,24 @@ final class BrokerClient {
     /// it will never error out on its own. Recycle it.
     private var firstFrameWork: DispatchWorkItem?
 
+    /// HIDDEN panes reconnect lazily (60s backoff cap, 45s watchdog) instead of
+    /// hot-recycling every few seconds: with a flapping broker, N background
+    /// panes churning connection state was enough continuous invalidation to
+    /// pin SwiftUI layout on macOS 26 (the whole-Mac "hanging" storms). The
+    /// visible pane keeps the snappy caps, and unhiding nudges an immediate dial.
+    var relaxed = false
+    private var backoffCap: Double { relaxed ? 60 : 10 }
+    private var watchdogDelay: Double { relaxed ? 45 : 6 }
+
+    /// Un-hidden and not live → dial NOW (skip whatever long backoff remains).
+    func nudge() {
+        guard !closed, !live else { return }
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        backoff = 0.5
+        start()
+    }
+
     func start() {
         guard !closed else { return }
         // Re-entry safety (found by the git-insights review): updateURL — and any
@@ -119,7 +137,7 @@ final class BrokerClient {
             self.task?.cancel(with: .goingAway, reason: nil)
         }
         firstFrameWork = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDelay, execute: watchdog)
         receiveLoop(myEpoch)
     }
 
@@ -169,7 +187,7 @@ final class BrokerClient {
 
     private func scheduleReconnect(_ myEpoch: Int) {
         let delay = backoff * Double.random(in: 0.7...1.3)   // jitter: no synchronized waves
-        backoff = min(backoff * 2, 10) // 0.5,1,2,4,8,10,10…
+        backoff = min(backoff * 2, backoffCap) // 0.5,1,2,4,8,… capped (60s when hidden)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.closed, myEpoch == self.epoch else { return }
             self.start()

@@ -131,6 +131,12 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         }
     }
 
+    /// Hidden panes reconnect lazily; the visible one stays eager (see BrokerClient).
+    func setRelaxed(_ r: Bool) {
+        client.relaxed = r
+        if !r { client.nudge() }   // just revealed: if not live, dial immediately
+    }
+
     func disconnect() {
         client.stop()
         if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
@@ -972,6 +978,9 @@ final class TerminalController: ObservableObject {
             // Switching away ends any in-flight utterance on the pane being hidden.
             if id != ref.id, !c.view.isHidden { c.utter.finalize() }
             c.view.isHidden = (id != ref.id)
+            // Background panes back off calmly; the shown one is eager (and gets
+            // an immediate dial if its socket went stale while hidden).
+            c.setRelaxed(id != ref.id)
         }
 
         // Only do the expensive work (refocus, geometry push) on an ACTUAL
