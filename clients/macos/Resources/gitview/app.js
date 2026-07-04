@@ -39,10 +39,12 @@
     return '<span class="avatar" style="background:' + authorColor(name) + '" title="' + esc(name) + '">' + esc(initials(name)) + "</span>";
   }
   function refPill(r) {
-    var cls = "ref", label = r;
+    var cls = "ref", label = r, branchy = "";
     if (/^tag: /.test(r)) { cls += " tag"; label = r.slice(5); }
-    else if (/^[^/]+\/.+/.test(r)) { cls += " remote"; }
-    return '<span class="' + cls + '" title="' + esc(r) + '">' + esc(label) + "</span>";
+    else if (/^[^/]+\/.+/.test(r)) { cls += " remote"; branchy = "1"; }
+    else { branchy = "1"; }
+    return '<span class="' + cls + '"' + (branchy ? ' data-branch="' + esc(r) + '"' : "") +
+      ' title="' + esc(r) + (branchy ? ' — click to select the whole branch' : "") + '">' + esc(label) + "</span>";
   }
   var EXT_COLORS = { go:"#00add8", swift:"#f05138", js:"#e8d44d", ts:"#3178c6", py:"#3572a5",
     md:"#8ba9c0", json:"#e0af68", css:"#7a67c9", html:"#e34c26", sh:"#89e051", rs:"#dea584",
@@ -82,8 +84,9 @@
     allBranches: false,
     compareWith: null,
     selCommit: null,
-    rangeSel: null,       // {hashes, newest, oldest, base, metas} from shift-click
-    insight: null,        // {level, status: running|done|error, text, cost, cached, t0}
+    rangeSel: null,       // {hashes, newest, oldest, base, metas, label?} — range/branch/single selection
+    insight: null,        // {level, status: running|done|error, text, cost, cached, t0, question?}
+    insightChat: [],      // asked questions + answers for the current selection
     insightMem: {},       // key(level+newest+n) -> payload, to re-show instantly
     blameFrom: "changes"
   };
@@ -424,6 +427,12 @@
       row.onmouseleave = function () {
         allRows.forEach(function (r) { r.classList.remove("dim"); });
       };
+      row.querySelectorAll(".ref[data-branch]").forEach(function (pill) {
+        pill.onclick = function (ev) {
+          ev.stopPropagation();
+          selectBranch(row.dataset.hash, pill.dataset.branch, allRows);
+        };
+      });
       row.onclick = function (ev) {
         // SHIFT-click with a selection = select the contiguous RANGE (for insights)
         if (ev.shiftKey && state.selCommit && state.selCommit !== row.dataset.hash) {
@@ -442,6 +451,7 @@
             };
             state.compareWith = null;
             state.insight = null;
+            state.insightChat = [];
             allRows.forEach(function (r) {
               r.classList.toggle("rsel", state.rangeSel.hashes.indexOf(r.dataset.hash) !== -1);
               r.classList.remove("selb");
@@ -467,6 +477,7 @@
         state.compareWith = null;
         state.rangeSel = null;
         state.insight = null;
+        state.insightChat = [];
         el("commits").querySelectorAll(".crow.sel, .crow.selb, .crow.rsel").forEach(function (r) { r.classList.remove("sel", "selb", "rsel"); });
         row.classList.add("sel");
         state.selCommit = row.dataset.hash;
@@ -489,33 +500,95 @@
     return rs ? rs.newest + ":" + rs.hashes.length : "";
   }
 
+  // Click a branch PILL → select that branch's whole loaded history (the tip's
+  // ancestors within the log), for insights/questions about the branch as a whole.
+  function selectBranch(tipHash, refName, allRows) {
+    var parentsOf = {};
+    state.log.forEach(function (c) { parentsOf[c.hash] = c.parents || []; });
+    var inLog = {};
+    state.log.forEach(function (c) { inLog[c.hash] = true; });
+    var set = {}, stack = [tipHash];
+    while (stack.length) {
+      var x = stack.pop();
+      if (set[x] || !inLog[x]) continue;
+      set[x] = 1;
+      (parentsOf[x] || []).forEach(function (p) { stack.push(p); });
+    }
+    var members = state.log.filter(function (c) { return set[c.hash]; });
+    if (!members.length) return;
+    var oldest = members[members.length - 1];
+    state.rangeSel = {
+      hashes: members.map(function (c) { return c.hash; }),
+      newest: tipHash,
+      oldest: oldest.hash,
+      base: (oldest.parents || [])[0] || null,
+      metas: members.map(function (c) { return { h: c.hash, s: c.subject, a: c.author, at: c.at }; }),
+      label: "branch " + refName + " — " + members.length + " commits"
+    };
+    state.compareWith = null;
+    state.insight = null;
+    state.insightChat = [];
+    state.selCommit = tipHash;
+    (allRows || []).forEach(function (r) {
+      r.classList.toggle("rsel", !!set[r.dataset.hash]);
+      r.classList.remove("selb");
+    });
+    overlay("collecting the branch…");
+    post("compare", { a: state.rangeSel.newest, b: state.rangeSel.base || state.rangeSel.oldest });
+  }
+
+  // The insight bar + ask box, shared by range, branch, and single-commit views.
+  function insightBarHTML() {
+    return '<div id="insightbar">' +
+      '<span class="it">✦ Agent insights</span>' +
+      '<button class="ilvl" data-l="brief">Brief</button>' +
+      '<button class="ilvl" data-l="medium">Medium</button>' +
+      '<button class="ilvl" data-l="detailed">Detailed</button>' +
+      '<span class="ihint">on demand · cached forever</span>' +
+      "</div>" +
+      '<div id="insightask">' +
+      '<input id="iq" placeholder="Ask anything about this selection…">' +
+      '<button id="iask">Ask</button></div>' +
+      '<div id="insightbody"></div><div id="insightchat"></div>';
+  }
+  function wireInsightBar(target) {
+    target.querySelectorAll(".ilvl").forEach(function (b) {
+      b.onclick = function () { requestInsight(b.dataset.l); };
+    });
+    var iq = el("iq"), btn = el("iask");
+    function fire() {
+      var q = (iq.value || "").trim();
+      if (q) { requestAsk(q); iq.value = ""; }
+    }
+    btn.onclick = fire;
+    iq.onkeydown = function (ev) { if (ev.key === "Enter") fire(); };
+  }
+
   function renderRangeView(diffText) {
     var rs = state.rangeSel;
     if (!rs) return;
     var byHash = {}; state.log.forEach(function (c) { byHash[c.hash] = c; });
     var newest = byHash[rs.newest], oldest = byHash[rs.oldest];
     var target = el("history-diff");
+    var title = rs.label || (rs.hashes.length + " commits selected");
     target.innerHTML =
-      '<div class="commit-card"><div class="s">' + rs.hashes.length + " commits selected</div>" +
+      '<div class="commit-card"><div class="s">' + esc(title) + "</div>" +
       '<div class="range-ends">' +
       (newest ? avatar(newest.author) + '<span class="txt">' + esc(newest.subject) + "</span>" : "") +
       '<span class="dots">⋯</span>' +
       (oldest ? avatar(oldest.author) + '<span class="txt">' + esc(oldest.subject) + "</span>" : "") +
       "</div></div>" +
-      '<div id="insightbar">' +
-      '<span class="it">✦ Agent insights</span>' +
-      '<button class="ilvl" data-l="brief">Brief</button>' +
-      '<button class="ilvl" data-l="medium">Medium</button>' +
-      '<button class="ilvl" data-l="detailed">Detailed</button>' +
-      '<span class="ihint">generated on demand · cached per commit-set</span>' +
-      "</div>" +
-      '<div id="insightbody"></div>' +
+      insightBarHTML() +
       '<div id="range-diff"></div>';
-    target.querySelectorAll(".ilvl").forEach(function (b) {
-      b.onclick = function () { requestInsight(b.dataset.l); };
-    });
+    wireInsightBar(target);
     renderDiff("range-diff", diffText, { title: rs.hashes.length + " commits" });
     paintInsight();
+  }
+
+  function selMetaLines() {
+    return state.rangeSel.metas.map(function (m) {
+      return m.h.slice(0, 10) + "  " + m.a + "  " + new Date(m.at * 1000).toISOString().slice(0, 16) + "  " + m.s;
+    }).join("\n");
   }
 
   function requestInsight(level) {
@@ -526,10 +599,18 @@
     if (state.insight && state.insight.status === "running") return;
     state.insight = { level: level, status: "running", t0: Date.now() };
     paintInsight();
-    var metaLines = rs.metas.map(function (m) {
-      return m.h.slice(0, 10) + "  " + m.a + "  " + new Date(m.at * 1000).toISOString().slice(0, 16) + "  " + m.s;
-    }).join("\n");
-    post("insight", { level: level, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: metaLines });
+    post("insight", { level: level, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: selMetaLines() });
+  }
+
+  // Free-form question about the current selection (single commit, range, or
+  // branch). Each answer is cached like a level — commits are immutable.
+  function requestAsk(q) {
+    var rs = state.rangeSel;
+    if (!rs) return;
+    if (state.insight && state.insight.status === "running") return;
+    state.insight = { level: "ask", question: q, status: "running", t0: Date.now() };
+    paintInsight();
+    post("insight", { level: "ask", question: q, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: selMetaLines() });
   }
 
   var insightTick = null;
@@ -541,12 +622,14 @@
       b.classList.toggle("on", !!ins && ins.level === b.dataset.l);
     });
     if (insightTick) { clearInterval(insightTick); insightTick = null; }
+    paintChat();
     if (!ins) { box.innerHTML = ""; return; }
     if (ins.status === "running") {
+      var verb = ins.level === "ask" ? "answering" : "reading the diff";
       var paint = function () {
         var secs = Math.floor((Date.now() - ins.t0) / 1000);
         var node = el("insightbody");
-        if (node) node.innerHTML = '<div class="ithinking">✦ sonnet is reading the diff… ' + secs + "s</div>";
+        if (node) node.innerHTML = '<div class="ithinking">✦ sonnet is ' + verb + '… ' + secs + "s</div>";
       };
       paint();
       insightTick = setInterval(paint, 1000);
@@ -561,6 +644,17 @@
     }
     box.innerHTML = '<div class="ibody">' + mdlite(ins.text || "") + "</div>" +
       '<div class="ifoot">' + (ins.cached ? "from cache · free" : "sonnet · $" + (ins.cost || 0).toFixed(3)) + "</div>";
+  }
+
+  function paintChat() {
+    var c = el("insightchat");
+    if (!c) return;
+    c.innerHTML = state.insightChat.map(function (m) {
+      return '<div class="ichat-q">' + esc(m.q) + "</div>" +
+        (m.error ? '<div class="ierror">' + esc(m.error) + "</div>"
+                 : '<div class="ibody">' + mdlite(m.text || "") + "</div>" +
+                   '<div class="ifoot">' + (m.cached ? "from cache · free" : "sonnet · $" + (m.cost || 0).toFixed(3)) + "</div>");
+    }).join("");
   }
 
   // minimal markdown: headings, bullets, bold, code — enough for insight prose
@@ -603,7 +697,19 @@
         "<span>" + new Date(c.at * 1000).toLocaleString() + " · " + rel(c.at) + " ago</span>" +
         ((c.refs || []).map(refPill).join("")) + "</div></div>";
     }
-    target.innerHTML = head + '<div id="commit-diff-host"></div>';
+    var bar = "";
+    if (c) {
+      // Insights for a SINGLE commit too: selection = just this commit.
+      state.rangeSel = {
+        hashes: [c.hash], newest: c.hash, oldest: c.hash,
+        base: (c.parents || [])[0] || null,
+        metas: [{ h: c.hash, s: c.subject, a: c.author, at: c.at }],
+        label: "commit " + c.hash.slice(0, 10)
+      };
+      bar = insightBarHTML();
+    }
+    target.innerHTML = head + bar + '<div id="commit-diff-host"></div>';
+    if (c) { wireInsightBar(target); paintInsight(); }
     renderDiff("commit-diff-host", text, { title: hash.slice(0, 8), scope: "commit-inner" });
   }
 
@@ -688,11 +794,21 @@
     },
     setBlame: function (data, path) { overlay(null); renderBlame(data, path); },
     setInsight: function (p) {
+      var mine = state.rangeSel && state.rangeSel.newest === p.newest &&
+                 state.insight && state.insight.level === p.level;
+      if (p.level === "ask") {
+        if (mine) {
+          if (p.error) state.insightChat.push({ q: state.insight.question, error: p.error });
+          else state.insightChat.push({ q: state.insight.question, text: p.text, cost: p.cost, cached: p.cached });
+          state.insight = null;
+          paintInsight();
+        }
+        return;
+      }
       var done = p.error ? { level: p.level, status: "error", error: p.error }
                          : { level: p.level, status: "done", text: p.text, cost: p.cost, cached: p.cached };
       if (!p.error) state.insightMem[p.newest + ":" + (state.rangeSel && state.rangeSel.newest === p.newest ? state.rangeSel.hashes.length : "?") + "|" + p.level] = done;
-      if (state.rangeSel && state.rangeSel.newest === p.newest &&
-          state.insight && state.insight.level === p.level) {
+      if (mine) {
         state.insight = done;
         paintInsight();
       }

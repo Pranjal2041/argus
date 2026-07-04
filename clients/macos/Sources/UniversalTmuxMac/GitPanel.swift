@@ -61,7 +61,8 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
                   let newest = body["newest"] as? String else { return }
             runInsight(level: level, hashes: hashes, newest: newest,
                        base: body["base"] as? String,
-                       metaLines: body["metaLines"] as? String ?? "")
+                       metaLines: body["metaLines"] as? String ?? "",
+                       question: body["question"] as? String)
         case "moreLog":
             fetchLog(skip: body["skip"] as? Int ?? 0, all: body["all"] as? Bool ?? false)
         case "blame":
@@ -77,15 +78,16 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
     private var insightInflight = Set<String>()
 
     private func runInsight(level: String, hashes: [String], newest: String,
-                            base: String?, metaLines: String) {
-        let key = GitInsights.key(hashes: hashes, level: level)
+                            base: String?, metaLines: String, question: String? = nil) {
+        let key = GitInsights.key(hashes: hashes, level: level, question: question)
         guard !insightInflight.contains(key) else { return }
         insightInflight.insert(key)
         Task { [weak self] in
             guard let self else { return }
             let outcome = await GitInsights.shared.generate(
                 httpBase: self.httpBase, dir: self.dir, level: level,
-                hashes: hashes, newest: newest, base: base, metaLines: metaLines)
+                hashes: hashes, newest: newest, base: base, metaLines: metaLines,
+                question: question)
             self.insightInflight.remove(key)
             var payload: [String: Any] = ["level": level, "newest": newest]
             switch outcome {
@@ -97,6 +99,7 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
                 // record notes whether it cost a model call or came free.
                 var f: [String: Any] = ["level": level, "commits": hashes.count,
                                         "cached": cached, "folder": self.dir]
+                if let q = question { f["question"] = q }   // the user's own words — journal gold
                 if let r = self.ref { f["machineID"] = r.machineID; f["session"] = r.session }
                 ActivityJournal.shared.log("gitInsight", f)
             case .fail(let msg):
