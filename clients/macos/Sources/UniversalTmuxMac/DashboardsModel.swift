@@ -64,6 +64,39 @@ final class DashboardTab: ObservableObject, Identifiable {
     func goBack()   { webView?.goBack() }
     func goForward(){ webView?.goForward() }
     func openInSystemBrowser() { if let u = webView?.url ?? url { NSWorkspace.shared.open(u) } }
+
+    // ---- per-tab auto-refresh (watch a training dashboard hands-free) ----
+    @Published var refreshEvery = 0 {   // seconds; 0 = off
+        didSet { restartAutoRefresh() }
+    }
+    private var refreshTimer: Timer?
+    private func restartAutoRefresh() {
+        refreshTimer?.invalidate(); refreshTimer = nil
+        guard refreshEvery > 0 else { return }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: Double(refreshEvery), repeats: true) { [weak self] _ in
+            DispatchQueue.main.async { self?.reload() }
+        }
+    }
+
+    // ---- page zoom (⌘+/−/0) — owed by the standing zoom rule ----
+    @Published var zoom: CGFloat = 1.0
+    func zoomIn()  { zoom = min(3.0, zoom + 0.1); webView?.pageZoom = zoom }
+    func zoomOut() { zoom = max(0.4, zoom - 0.1); webView?.pageZoom = zoom }
+    func zoomReset() { zoom = 1.0; webView?.pageZoom = 1.0 }
+    func applyZoom() { webView?.pageZoom = zoom }   // re-apply after a webview (re)binds
+
+    // ---- find in page (⌘F) ----
+    @Published var showFind = false
+    @Published var findQuery = ""
+    func find(_ q: String, forward: Bool = true) {
+        guard let wv = webView, !q.isEmpty else { return }
+        let cfg = WKFindConfiguration()
+        cfg.backwards = !forward
+        cfg.caseSensitive = false
+        cfg.wraps = true
+        wv.find(q, configuration: cfg) { _ in }
+    }
+    func clearFind() { webView?.evaluateJavaScript("window.getSelection().removeAllRanges()", completionHandler: nil) }
 }
 
 // MARK: - the window's model (a set of tabs)
@@ -94,6 +127,28 @@ final class DashboardsModel: ObservableObject {
             Task { @MainActor in await self?.poll() }
         }
         refreshForwards()
+        restoreTabs()
+    }
+
+    // ---- persist open tabs across launches (notebooks already do this) ----
+    private struct SavedTab: Codable { let url: String; let host: String; let title: String? }
+    private let tabsKey = "ut.dash.tabs.v1"
+    func saveTabs() {
+        let saved = tabs.compactMap { t -> SavedTab? in
+            guard let u = t.url?.absoluteString, !u.isEmpty else { return nil }
+            return SavedTab(url: u, host: t.host, title: t.customTitle)
+        }
+        if let d = try? JSONEncoder().encode(saved) { UserDefaults.standard.set(d, forKey: tabsKey) }
+    }
+    private func restoreTabs() {
+        guard let d = UserDefaults.standard.data(forKey: tabsKey),
+              let saved = try? JSONDecoder().decode([SavedTab].self, from: d) else { return }
+        for st in saved {
+            let t = DashboardTab(title: st.title ?? (URL(string: st.url)?.host ?? st.url), host: st.host, url: URL(string: st.url))
+            t.customTitle = st.title
+            tabs.append(t)
+        }
+        activeID = tabs.first?.id
     }
 
     private func poll() async {
@@ -205,11 +260,13 @@ final class DashboardsModel: ObservableObject {
     func close(_ id: UUID) {
         tabs.removeAll { $0.id == id }
         if activeID == id { activeID = tabs.last?.id }
+        saveTabs()
     }
 
     private func add(_ t: DashboardTab) {
         tabs.append(t)
         activeID = t.id
+        saveTabs()
     }
 
     // MARK: forwards (talk to the local broker's forward agent)
