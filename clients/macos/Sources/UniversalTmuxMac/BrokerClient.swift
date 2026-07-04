@@ -75,8 +75,34 @@ final class BrokerClient {
     /// it will never error out on its own. Recycle it.
     private var firstFrameWork: DispatchWorkItem?
 
+    /// HIDDEN panes reconnect lazily (60s backoff cap, 45s watchdog) instead of
+    /// hot-recycling every few seconds: with a flapping broker, N background
+    /// panes churning connection state was enough continuous invalidation to
+    /// pin SwiftUI layout on macOS 26 (the whole-Mac "hanging" storms). The
+    /// visible pane keeps the snappy caps, and unhiding nudges an immediate dial.
+    var relaxed = false
+    private var backoffCap: Double { relaxed ? 60 : 10 }
+    private var watchdogDelay: Double { relaxed ? 45 : 6 }
+
+    /// Un-hidden and not live → dial NOW (skip whatever long backoff remains).
+    func nudge() {
+        guard !closed, !live else { return }
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        backoff = 0.5
+        start()
+    }
+
     func start() {
         guard !closed else { return }
+        // NO GHOSTS: a superseded dial/socket must die here, not linger. start()
+        // used to just overwrite `task`; during restart churn (updateURL fires as
+        // /sessions refreshes tmux ids, while a pacing gate-retry is pending) that
+        // orphaned LIVE sockets — open on the broker, frames ignored client-side,
+        // never cancelled — inflating the very per-pair flow pressure that causes
+        // the babel blackhole. Cancel first, always.
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
         // Re-entry safety (found by the git-insights review): updateURL — and any
         // future caller — can restart mid-dial while this client still holds a
         // pacing slot; the abandoned dial's callbacks bail on the epoch check and
@@ -87,9 +113,15 @@ final class BrokerClient {
         let inFlight = Self.dialing[host] ?? 0
         if inFlight >= Self.maxDialingPerHost {
             Self.paceLock.unlock()
-            // Too many conns to this host mid-dial — wait a beat and retry the gate.
+            // Too many conns to this host mid-dial — wait a beat and retry the
+            // gate. STALENESS GUARD: only if nothing superseded this attempt
+            // (epoch unchanged) and the pane didn't connect meanwhile — a stale
+            // retry used to tear down a healthy connection and redial it, which
+            // showed as a pane flipping to "reconnecting" for no reason.
+            let retryEpoch = epoch
             DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.4...1.2)) { [weak self] in
-                self?.start()
+                guard let self, !self.closed, self.epoch == retryEpoch, !self.live else { return }
+                self.start()
             }
             return
         }
@@ -119,7 +151,7 @@ final class BrokerClient {
             self.task?.cancel(with: .goingAway, reason: nil)
         }
         firstFrameWork = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDelay, execute: watchdog)
         receiveLoop(myEpoch)
     }
 
@@ -169,7 +201,7 @@ final class BrokerClient {
 
     private func scheduleReconnect(_ myEpoch: Int) {
         let delay = backoff * Double.random(in: 0.7...1.3)   // jitter: no synchronized waves
-        backoff = min(backoff * 2, 10) // 0.5,1,2,4,8,10,10…
+        backoff = min(backoff * 2, backoffCap) // 0.5,1,2,4,8,… capped (60s when hidden)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.closed, myEpoch == self.epoch else { return }
             self.start()
