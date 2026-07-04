@@ -763,6 +763,8 @@
     el("overlay").style.display = msg ? "flex" : "none";
     el("overlay-msg").textContent = msg || "";
   }
+  // A loading/error overlay must never be a prison: click dismisses.
+  el("overlay").addEventListener("click", function () { overlay(null); });
 
   // ---- bridge --------------------------------------------------------------
   window.UTGit = {
@@ -820,7 +822,7 @@
       overlay(msg || "loading…");
     },
     setRepo: function (name) { el("repo").textContent = name || ""; },
-    setError: function (msg) { overlay(msg || "error"); },
+    setError: function (msg) { overlay("⚠ " + (msg || "error") + " — click to dismiss"); },
     showView: showView
   };
 
