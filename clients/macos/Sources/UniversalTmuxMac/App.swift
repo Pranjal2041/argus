@@ -92,7 +92,7 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("w", modifiers: [.control, .command])
                 Button("Git Panel ⇄ Terminal") {
                     if let sel = state.selection, let m = state.machines.first(where: { $0.id == sel.machineID }) {
-                        terminals.toggleGit(sel, httpBase: m.httpBase, dir: state.session(for: sel)?.path)
+                        terminals.toggleGit(sel, httpBase: m.httpBase, dir: state.resolveBase(for: sel))
                     }
                 }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
@@ -865,11 +865,11 @@ struct RootView: View {
                         onRevealFiles: (s.path?.isEmpty == false)
                             ? { files.addTab(m, startPath: state.resolveBase(for: ref)); openWindow(id: "files") }
                             : nil,
-                        onGit: (s.path?.isEmpty == false)
+                        onGit: !state.resolveBase(for: ref).isEmpty
                             ? {
                                 state.selection = ref; state.showOverview = false
                                 if !terminals.isGitShown(ref) {
-                                    terminals.toggleGit(ref, httpBase: m.httpBase, dir: s.path)
+                                    terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.resolveBase(for: ref))
                                 }
                             }
                             : nil
@@ -972,7 +972,7 @@ struct RootView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     } else if let m = state.machines.first(where: { $0.id == ref.machineID }),
-                              let dir = state.session(for: ref)?.path, !dir.isEmpty {
+                              case let dir = state.resolveBase(for: ref), !dir.isEmpty {
                         GitPaneView(panel: gitPanels.panel(
                             for: ref, httpBase: m.httpBase, dir: dir,
                             onLazygit: { terminals.openLazygitTerminal(ref, httpBase: m.httpBase, dir: dir) },
@@ -1150,7 +1150,7 @@ struct RootView: View {
                     IconButton(system: terminals.isGitShown(ref) ? "terminal" : "arrow.triangle.branch",
                                help: terminals.isGitShown(ref) ? "Back to terminal (⇧⌘G)" : "Git panel — lazygit (⇧⌘G)") {
                         if let m = state.machines.first(where: { $0.id == ref.machineID }) {
-                            terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.session(for: ref)?.path)
+                            terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.resolveBase(for: ref))
                         }
                     }
                 }
