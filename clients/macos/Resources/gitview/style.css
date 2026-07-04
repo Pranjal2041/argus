@@ -288,3 +288,17 @@ button { font: inherit; }
 .d2h-code-side-linenumber, .d2h-code-linenumber { vertical-align: top; }
 /* blame code lines wrap the same way */
 .blame-code pre, .blame-code code { white-space: pre-wrap; word-break: break-all; }
+
+/* ---- insight ask box + chat ---- */
+#insightask { display: flex; gap: 7px; margin-bottom: 10px; }
+#insightask input { flex: 1; background: var(--surface); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 11px; font-size: 12px;
+  outline: none; transition: border-color .12s, box-shadow .12s; }
+#insightask input:focus { border-color: var(--accent); box-shadow: 0 0 0 2.5px rgba(122,162,247,.15); }
+#insightask input::placeholder { color: var(--fg3); }
+#insightask button { background: var(--accent); color: #10121a; border: none; border-radius: 8px;
+  padding: 6px 16px; font-size: 12px; font-weight: 600; cursor: pointer; transition: transform .06s; }
+#insightask button:active { transform: scale(.96); }
+.ichat-q { margin: 12px 0 6px; padding: 8px 12px; border-radius: 10px 10px 10px 3px;
+  background: rgba(122,162,247,.12); border: 1px solid rgba(122,162,247,.25);
+  color: var(--fg); font-size: 12.5px; -webkit-user-select: text; user-select: text; }

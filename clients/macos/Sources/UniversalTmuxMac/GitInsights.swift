@@ -16,10 +16,11 @@ final class GitInsights {
             .appendingPathComponent("Argus/git-insights", isDirectory: true)
     }
 
-    // "v2": prompt revision — bumping regenerates insights written by older,
-    // weaker prompts instead of serving them from cache forever.
-    static func key(hashes: [String], level: String) -> String {
-        let joined = "v3|" + hashes.joined(separator: ",") + "|" + level
+    // "v3": prompt revision — bumping regenerates insights written by older,
+    // weaker prompts instead of serving them from cache forever. Free-form
+    // questions cache too (commits are immutable): the question joins the key.
+    static func key(hashes: [String], level: String, question: String? = nil) -> String {
+        let joined = "v3|" + hashes.joined(separator: ",") + "|" + level + "|" + (question ?? "")
         return SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -48,8 +49,8 @@ final class GitInsights {
     /// diff is fetched from the owning broker, so this works for any machine.
     func generate(httpBase: String, dir: String, level: String,
                   hashes: [String], newest: String, base: String?,
-                  metaLines: String) async -> Outcome {
-        let key = Self.key(hashes: hashes, level: level)
+                  metaLines: String, question: String? = nil) async -> Outcome {
+        let key = Self.key(hashes: hashes, level: level, question: question)
         if let hit = cached(key) { return .ok(text: hit.text, cost: hit.cost, cached: true) }
 
         // The steps matter, not just the destination: fetch each commit's own
@@ -80,6 +81,28 @@ final class GitInsights {
         input += "\n=== COMBINED DIFF (net effect of the whole range) ===\n" + diffText
 
         let folder = (dir as NSString).lastPathComponent
+        // Free-form question mode: same input (steps + net diff), Q&A prompt.
+        if let q = question, !q.isEmpty {
+            let qPrompt = """
+            You are a senior engineer who has just reviewed the commits in the repository "\(folder)" \
+            (the commit list, each commit's individual diff, and the combined net diff are attached). \
+            The repository's owner — who did not watch this work happen — asks you a QUESTION about \
+            this selection. Answer it directly and concretely: anchor every claim to files and \
+            functions in the diffs, quote the relevant hunk briefly when it carries the answer, and \
+            if the diffs cannot answer the question, say exactly what is missing instead of guessing. \
+            Plain English, markdown, no preamble — the first character of your reply starts the answer.
+
+            QUESTION: \(q)
+            """
+            guard let outer = await Self.runClaude(
+                args: ["--dangerously-skip-permissions", "-p", qPrompt,
+                       "--model", "sonnet", "--output-format", "json"],
+                stdin: input)
+            else { return .fail("claude did not produce output (timeout or non-zero exit)") }
+            guard let env = Self.envelope(outer) else { return .fail("claude returned an error envelope") }
+            store(key, Cached(text: env.result, cost: env.cost))
+            return .ok(text: env.result, cost: env.cost, cached: false)
+        }
         let levelSpec: String
         switch level {
         case "brief":

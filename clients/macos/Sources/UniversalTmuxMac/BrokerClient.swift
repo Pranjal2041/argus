@@ -161,6 +161,10 @@ final class BrokerClient {
     deinit {
         firstFrameWork?.cancel()
         paceRelease()
+        // URLSession owns the task independently of this object — without an
+        // explicit cancel a dealloc'd client leaves the socket running against
+        // the broker (found by the insights ask-review of this very fix).
+        task?.cancel(with: .goingAway, reason: nil)
     }
 
     func stop() {
