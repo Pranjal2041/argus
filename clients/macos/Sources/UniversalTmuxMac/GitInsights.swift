@@ -103,29 +103,7 @@ final class GitInsights {
             store(key, Cached(text: env.result, cost: env.cost))
             return .ok(text: env.result, cost: env.cost, cached: false)
         }
-        let levelSpec: String
-        switch level {
-        case "brief":
-            levelSpec = """
-            LEVEL = BRIEF. "What was done": 3-6 bullets. "Worth your attention": 1-3 bullets (or the \
-            one-line all-clear). Total under ~150 words. Every bullet earns its place.
-            """
-        case "detailed":
-            levelSpec = """
-            LEVEL = DETAILED. Same two sections at full depth. "What was done": walk each changed \
-            area — what changed, how it is implemented, and how the work actually unfolded when the \
-            per-commit steps tell a story (false starts, rewrites). "Worth your attention": every \
-            risk and leftover — dead code, churn scars, hollow tests, silent behavior changes, \
-            duplicated logic — each with enough detail to act on; end it with "Review order:" — a \
-            numbered list of what to read carefully, what to skim, what to trust.
-            """
-        default:
-            levelSpec = """
-            LEVEL = MEDIUM. Same two sections, one step deeper than brief: "What was done" covers \
-            every significant change (a bullet per area or commit, 1-2 sentences each); "Worth your \
-            attention" gives each risk enough detail to act on. ~300-400 words.
-            """
-        }
+        let levelSpec = Self.levelSpec(level)
         let prompt = """
         You are a senior engineer reviewing a batch of commits in the repository "\(folder)". Most or \
         all of the commits were written by CODING AGENTS working under light supervision. The reader \
@@ -171,6 +149,111 @@ final class GitInsights {
         guard let env = Self.envelope(outer) else { return .fail("claude returned an error envelope") }
 
         store(key, Cached(text: env.result, cost: env.cost))
+        return .ok(text: env.result, cost: env.cost, cached: false)
+    }
+
+    /// The three depth specs, shared by commit-range and PR insights.
+    static func levelSpec(_ level: String) -> String {
+        switch level {
+        case "brief":
+            return """
+            LEVEL = BRIEF. "What was done": 3-6 bullets. "Worth your attention": 1-3 bullets (or the \
+            one-line all-clear). Total under ~150 words. Every bullet earns its place.
+            """
+        case "detailed":
+            return """
+            LEVEL = DETAILED. Same two sections at full depth. "What was done": walk each changed \
+            area — what changed, how it is implemented, and how the work actually unfolded. "Worth \
+            your attention": every risk and leftover — dead code, churn scars, hollow tests, silent \
+            behavior changes, duplicated logic — each with enough detail to act on; end it with \
+            "Review order:" — a numbered list of what to read carefully, what to skim, what to trust.
+            """
+        default:
+            return """
+            LEVEL = MEDIUM. Same two sections, one step deeper than brief: "What was done" covers \
+            every significant change (a bullet per area, 1-2 sentences each); "Worth your attention" \
+            gives each risk enough detail to act on. ~300-400 words.
+            """
+        }
+    }
+
+    /// Insight for a whole pull request: fed the PR's combined diff + commit list.
+    /// Cache keys on the diff content, so an updated PR regenerates automatically.
+    func generatePR(httpBase: String, dir: String, num: Int, level: String, question: String?) async -> Outcome {
+        guard let enc = dir.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return .fail("bad folder")
+        }
+        // combined PR diff
+        guard let diffURL = URL(string: "\(httpBase)/git/pr/diff?dir=\(enc)&num=\(num)"),
+              let (dd, _) = try? await URLSession.shared.data(from: diffURL) else {
+            return .fail("could not fetch the PR diff")
+        }
+        var diffText = String(decoding: dd, as: UTF8.self)
+        if diffText.hasPrefix("{"), diffText.contains("\"error\"") { return .fail("PR review unavailable (gh)") }
+        // commit list for context (best-effort)
+        var meta = ""
+        if let vURL = URL(string: "\(httpBase)/git/pr?dir=\(enc)&num=\(num)"),
+           let (vd, _) = try? await URLSession.shared.data(from: vURL),
+           let obj = (try? JSONSerialization.jsonObject(with: vd)) as? [String: Any] {
+            if let title = obj["title"] as? String { meta += "TITLE: \(title)\n" }
+            if let commits = obj["commits"] as? [[String: Any]] {
+                meta += "COMMITS (\(commits.count)):\n"
+                for c in commits.prefix(60) {
+                    let m = (c["messageHeadline"] as? String) ?? ((c["message"] as? String) ?? "")
+                    meta += "  - \(m)\n"
+                }
+            }
+        }
+        // cache key ties to the diff content (PR updates → new diff → fresh insight)
+        let ck = Self.key(hashes: ["pr", String(num), String(diffText.hashValue)], level: level, question: question)
+        if let hit = cached(ck) { return .ok(text: hit.text, cost: hit.cost, cached: true) }
+
+        if diffText.utf8.count > 180_000 {
+            diffText = String(diffText.prefix(180_000)) + "\n[diff truncated — judge from what is shown]"
+        }
+        let input = meta + "\n=== PULL REQUEST DIFF ===\n" + diffText
+        let folder = (dir as NSString).lastPathComponent
+        let prompt: String
+        if let q = question, !q.isEmpty {
+            prompt = """
+            You are a senior engineer who has reviewed pull request #\(num) in the repository \
+            "\(folder)" (its commit list and full diff are attached). The repository's owner asks a \
+            QUESTION about this PR. Answer directly and concretely: anchor every claim to files and \
+            functions in the diff, quote the relevant hunk when it carries the answer, and if the diff \
+            cannot answer, say what is missing instead of guessing. Plain English, markdown, no \
+            preamble — the first character of your reply starts the answer.
+
+            QUESTION: \(q)
+            """
+        } else {
+            prompt = """
+            You are a senior engineer reviewing pull request #\(num) in the repository "\(folder)", \
+            likely authored by a CODING AGENT. The reader is the repo owner deciding whether to merge \
+            it and what to check first. Input: the PR's commit list and full diff.
+
+            Rules: judge from the DIFF, never just restate commit messages; INSIGHT not summary; name \
+            files/functions; call out agent tells (dead ends, hollow tests, churn, accidental \
+            deletions, silent behavior changes); a trivial PR gets one honest line.
+
+            Structure — ALWAYS exactly these two sections:
+            ## What was done
+            What this PR actually changes, by area, from the diff.
+            ## Worth your attention
+            Risks, leftovers, things to verify before merging — each anchored to a file/function. If \
+            nothing, say so in one line.
+
+            Format: markdown (- bullets, **bold**). First character is "#" of "## What was done" — no \
+            preamble, no filler.
+
+            \(Self.levelSpec(level))
+            """
+        }
+        guard let outer = await Self.runClaude(
+            args: ["--dangerously-skip-permissions", "-p", prompt, "--model", "sonnet", "--output-format", "json"],
+            stdin: input)
+        else { return .fail("claude did not produce output (timeout or non-zero exit)") }
+        guard let env = Self.envelope(outer) else { return .fail("claude returned an error envelope") }
+        store(ck, Cached(text: env.result, cost: env.cost))
         return .ok(text: env.result, cost: env.cost, cached: false)
     }
 

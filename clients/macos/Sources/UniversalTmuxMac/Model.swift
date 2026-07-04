@@ -468,6 +468,7 @@ final class AppState: ObservableObject {
     // MARK: Notes Hub — free-form, time-grouped notes (synced like todos/workflows).
 
     @Published var showNotes = false
+    @Published var showLedger = false   // in-app Activity Ledger (⇧⌘J), a fleet-wide top-level view
     @Published var notes: [Note] = AppState.loadNotes() {
         // Save locally + stamp on a local edit; the periodic reconcile pushes it (no POST
         // per keystroke). Adopting a remote copy sets applyingRemoteNotes to skip the stamp.

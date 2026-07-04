@@ -7,9 +7,15 @@
 package fsvc
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -19,11 +25,11 @@ import (
 // Entry is one directory member.
 type Entry struct {
 	Name    string `json:"name"`
-	Path    string `json:"path"`           // absolute, platform-native
+	Path    string `json:"path"` // absolute, platform-native
 	IsDir   bool   `json:"isDir"`
 	Size    int64  `json:"size"`
-	MTime   int64  `json:"mtime"`          // unix seconds
-	Mode    string `json:"mode"`           // e.g. "drwxr-xr-x"
+	MTime   int64  `json:"mtime"` // unix seconds
+	Mode    string `json:"mode"`  // e.g. "drwxr-xr-x"
 	Symlink bool   `json:"symlink,omitempty"`
 	Target  string `json:"target,omitempty"`
 }
@@ -46,8 +52,8 @@ type HomeResult struct {
 // guessing remote filesystem semantics (relative vs absolute, ~, $VAR, the OS
 // separator).
 type StatResult struct {
-	Path   string `json:"path"`   // absolute, cleaned, platform-native
-	Name   string `json:"name"`   // base name
+	Path   string `json:"path"` // absolute, cleaned, platform-native
+	Name   string `json:"name"` // base name
 	IsDir  bool   `json:"isDir"`
 	Exists bool   `json:"exists"`
 	Size   int64  `json:"size"`
@@ -298,4 +304,195 @@ func Write(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// ---- content search (grep) ------------------------------------------------
+
+// GrepMatch is one matching line.
+type GrepMatch struct {
+	Path string `json:"path"`
+	Line int    `json:"line"` // 1-based
+	Text string `json:"text"` // the matched line, trimmed to a sane length
+}
+
+// GrepResult is the response for a content search.
+type GrepResult struct {
+	Root      string      `json:"root"`
+	Matches   []GrepMatch `json:"matches"`
+	Truncated bool        `json:"truncated"` // hit the match cap or the time budget
+	Tool      string      `json:"tool"`      // "rg" or "walk" (diagnostic)
+}
+
+const grepMaxMatches = 2000
+const grepMaxLineLen = 400
+const grepMaxFileBytes = 2 * 1024 * 1024 // skip files bigger than this
+const grepBudget = 6 * time.Second
+
+// Grep searches file CONTENTS under root for `query`. It prefers ripgrep (fast,
+// respects .gitignore, skips binaries) and falls back to a bounded Go walk that
+// mirrors Find's discipline (ignore heavy dirs, time budget, match cap). Case
+// -insensitive substring by default; `regex=true` treats query as a regex.
+func Grep(root, query string, regex bool) GrepResult {
+	res := GrepResult{Root: root, Matches: []GrepMatch{}}
+	query = strings.TrimSpace(query)
+	if query == "" || strings.TrimSpace(root) == "" {
+		return res
+	}
+	if rg, err := exec.LookPath("rg"); err == nil {
+		if grepRipgrep(rg, root, query, regex, &res) {
+			res.Tool = "rg"
+			return res
+		}
+	}
+	res.Tool = "walk"
+	grepWalk(root, query, regex, &res)
+	return res
+}
+
+func grepRipgrep(rg, root, query string, regex bool, res *GrepResult) bool {
+	args := []string{"--json", "--max-count", "50", "--max-filesize", "2M",
+		"--no-messages", "--smart-case"}
+	if !regex {
+		args = append(args, "--fixed-strings")
+	}
+	args = append(args, "--", query, root)
+	ctx, cancel := context.WithTimeout(context.Background(), grepBudget)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, rg, args...)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return false
+	}
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	sc := bufio.NewScanner(out)
+	sc.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	for sc.Scan() {
+		if len(res.Matches) >= grepMaxMatches {
+			res.Truncated = true
+			break
+		}
+		var ev struct {
+			Type string `json:"type"`
+			Data struct {
+				Path struct {
+					Text string `json:"text"`
+				} `json:"path"`
+				LineNumber int `json:"line_number"`
+				Lines      struct {
+					Text string `json:"text"`
+				} `json:"lines"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(sc.Bytes(), &ev) != nil || ev.Type != "match" {
+			continue
+		}
+		res.Matches = append(res.Matches, GrepMatch{
+			Path: ev.Data.Path.Text,
+			Line: ev.Data.LineNumber,
+			Text: clampLine(ev.Data.Lines.Text),
+		})
+	}
+	_ = cmd.Wait()
+	if ctx.Err() == context.DeadlineExceeded {
+		res.Truncated = true
+	}
+	return true
+}
+
+func grepWalk(root, query string, regex bool, res *GrepResult) {
+	var re *regexp.Regexp
+	needle := strings.ToLower(query)
+	if regex {
+		if r, err := regexp.Compile("(?i)" + query); err == nil {
+			re = r
+		}
+	}
+	deadline := time.Now().Add(grepBudget)
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if len(res.Matches) >= grepMaxMatches || time.Now().After(deadline) {
+			res.Truncated = true
+			return
+		}
+		if depth > 40 {
+			return
+		}
+		dirents, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, d := range dirents {
+			if len(res.Matches) >= grepMaxMatches || time.Now().After(deadline) {
+				res.Truncated = true
+				return
+			}
+			name := d.Name()
+			if d.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			if d.IsDir() {
+				if !findIgnoredDir(name) {
+					walk(filepath.Join(dir, name), depth+1)
+				}
+				continue
+			}
+			info, err := d.Info()
+			if err != nil || info.Size() > grepMaxFileBytes {
+				continue
+			}
+			grepFile(filepath.Join(dir, name), needle, re, res, deadline)
+		}
+	}
+	walk(root, 0)
+}
+
+func grepFile(path, needle string, re *regexp.Regexp, res *GrepResult, deadline time.Time) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	// skip binary: a NUL byte in the first 8KB
+	head := data
+	if len(head) > 8192 {
+		head = head[:8192]
+	}
+	if bytes.IndexByte(head, 0) >= 0 {
+		return
+	}
+	lineNo := 0
+	perFile := 0
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		lineNo++
+		line := sc.Text()
+		hit := false
+		if re != nil {
+			hit = re.MatchString(line)
+		} else {
+			hit = strings.Contains(strings.ToLower(line), needle)
+		}
+		if !hit {
+			continue
+		}
+		if len(res.Matches) >= grepMaxMatches || time.Now().After(deadline) {
+			res.Truncated = true
+			return
+		}
+		res.Matches = append(res.Matches, GrepMatch{Path: path, Line: lineNo, Text: clampLine(line)})
+		perFile++
+		if perFile >= 50 { // cap per file, like rg --max-count
+			return
+		}
+	}
+}
+
+func clampLine(s string) string {
+	s = strings.TrimRight(s, "\r\n")
+	if len(s) > grepMaxLineLen {
+		return s[:grepMaxLineLen] + "…"
+	}
+	return s
 }

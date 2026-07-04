@@ -56,13 +56,17 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
                 fetchDiff(scope: "range", hash: a, hash2: b, path: nil)
             }
         case "insight":
-            guard let level = body["level"] as? String,
-                  let hashes = body["hashes"] as? [String], !hashes.isEmpty,
-                  let newest = body["newest"] as? String else { return }
-            runInsight(level: level, hashes: hashes, newest: newest,
-                       base: body["base"] as? String,
-                       metaLines: body["metaLines"] as? String ?? "",
-                       question: body["question"] as? String)
+            guard let level = body["level"] as? String, let key = body["key"] as? String else { return }
+            let question = body["question"] as? String
+            if let prNum = body["prNum"] as? Int {
+                runPRInsight(num: prNum, level: level, question: question, key: key)
+            } else if let hashes = body["hashes"] as? [String], !hashes.isEmpty,
+                      let newest = body["newest"] as? String {
+                runInsight(level: level, hashes: hashes, newest: newest,
+                           base: body["base"] as? String,
+                           metaLines: body["metaLines"] as? String ?? "",
+                           question: question, key: key)
+            }
         case "moreLog":
             fetchLog(skip: body["skip"] as? Int ?? 0, all: body["all"] as? Bool ?? false)
         case "blame":
@@ -71,6 +75,22 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
             onLazygit?()
         case "openFile":
             if let p = body["path"] as? String { onOpenFile?(p) }
+        case "prs":
+            fetchPRs()
+        case "pr":
+            if let n = body["num"] as? Int { fetchPRDetail(n) }
+        case "prReview":
+            if let n = body["num"] as? Int {
+                prAction("/git/pr/review?dir=\(enc(dir))&num=\(n)&event=\(enc((body["event"] as? String) ?? ""))&body=\(enc((body["body"] as? String) ?? ""))")
+            }
+        case "prMerge":
+            if let n = body["num"] as? Int {
+                prAction("/git/pr/merge?dir=\(enc(dir))&num=\(n)&method=\(enc((body["method"] as? String) ?? "squash"))")
+            }
+        case "prComment":
+            if let n = body["num"] as? Int {
+                prAction("/git/pr/comment?dir=\(enc(dir))&num=\(n)&body=\(enc((body["body"] as? String) ?? ""))")
+            }
         default: break
         }
     }
@@ -78,37 +98,52 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
     private var insightInflight = Set<String>()
 
     private func runInsight(level: String, hashes: [String], newest: String,
-                            base: String?, metaLines: String, question: String? = nil) {
-        let key = GitInsights.key(hashes: hashes, level: level, question: question)
-        guard !insightInflight.contains(key) else { return }
-        insightInflight.insert(key)
+                            base: String?, metaLines: String, question: String? = nil, key: String) {
+        let inflightKey = key + "|" + level + "|" + (question ?? "")
+        guard !insightInflight.contains(inflightKey) else { return }
+        insightInflight.insert(inflightKey)
         Task { [weak self] in
             guard let self else { return }
             let outcome = await GitInsights.shared.generate(
                 httpBase: self.httpBase, dir: self.dir, level: level,
                 hashes: hashes, newest: newest, base: base, metaLines: metaLines,
                 question: question)
-            self.insightInflight.remove(key)
-            var payload: [String: Any] = ["level": level, "newest": newest]
-            switch outcome {
-            case .ok(let text, let cost, let cached):
-                payload["text"] = text
-                payload["cost"] = cost
-                payload["cached"] = cached
-                // Activity journal: asking for insight is a REVIEW act — and the
-                // record notes whether it cost a model call or came free.
-                var f: [String: Any] = ["level": level, "commits": hashes.count,
-                                        "cached": cached, "folder": self.dir]
-                if let q = question { f["question"] = q }   // the user's own words — journal gold
-                if let r = self.ref { f["machineID"] = r.machineID; f["session"] = r.session }
-                ActivityJournal.shared.log("gitInsight", f)
-            case .fail(let msg):
-                payload["error"] = msg
-            }
-            if let d = try? JSONSerialization.data(withJSONObject: payload),
-               let json = String(data: d, encoding: .utf8) {
-                self.eval("window.UTGit.setInsight && window.UTGit.setInsight(\(json))")
-            }
+            self.insightInflight.remove(inflightKey)
+            self.deliverInsight(outcome, level: level, key: key, question: question, commits: hashes.count)
+        }
+    }
+
+    /// Insights for a whole PR: same levels/ask, fed the PR's combined diff.
+    private func runPRInsight(num: Int, level: String, question: String?, key: String) {
+        let inflightKey = key + "|" + level + "|" + (question ?? "")
+        guard !insightInflight.contains(inflightKey) else { return }
+        insightInflight.insert(inflightKey)
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await GitInsights.shared.generatePR(
+                httpBase: self.httpBase, dir: self.dir, num: num, level: level, question: question)
+            self.insightInflight.remove(inflightKey)
+            self.deliverInsight(outcome, level: level, key: key, question: question, commits: 0, prNum: num)
+        }
+    }
+
+    private func deliverInsight(_ outcome: GitInsights.Outcome, level: String, key: String,
+                                question: String?, commits: Int, prNum: Int? = nil) {
+        var payload: [String: Any] = ["level": level, "key": key]
+        switch outcome {
+        case .ok(let text, let cost, let cached):
+            payload["text"] = text; payload["cost"] = cost; payload["cached"] = cached
+            var f: [String: Any] = ["level": level, "cached": cached, "folder": dir]
+            if let p = prNum { f["pr"] = p } else { f["commits"] = commits }
+            if let q = question { f["question"] = q }
+            if let r = ref { f["machineID"] = r.machineID; f["session"] = r.session }
+            ActivityJournal.shared.log("gitInsight", f)
+        case .fail(let msg):
+            payload["error"] = msg
+        }
+        if let d = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: d, encoding: .utf8) {
+            eval("window.UTGit.setInsight && window.UTGit.setInsight(\(json))")
         }
     }
 
@@ -184,6 +219,44 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         }
     }
 
+    // MARK: pull requests (via broker → gh)
+
+    private func fetchPRs() {
+        eval("window.UTGit.setLoading('loading pull requests…')")
+        fetch("/git/prs?dir=\(enc(dir))") { [weak self] json in
+            // gh pr list returns a bare array; a classified error is an object.
+            let payload = json.hasPrefix("[") ? "{prs:\(json)}" : json
+            self?.eval("window.UTGit.setPRs(\(payload))")
+        }
+    }
+
+    private func fetchPRDetail(_ num: Int) {
+        // fetch detail + diff, then hand both to the page together.
+        fetch("/git/pr?dir=\(enc(dir))&num=\(num)") { [weak self] prJson in
+            guard let self else { return }
+            if prJson.contains("\"error\"") { self.eval("window.UTGit.setPRs(\(prJson))"); return }
+            self.fetchText("/git/pr/diff?dir=\(self.enc(self.dir))&num=\(num)") { diff in
+                var diff = diff
+                if diff.hasPrefix("{") && diff.contains("\"error\"") { diff = "" } // error object, not a diff
+                if diff.utf8.count > 3_000_000 { diff = String(diff.prefix(2_000_000)) + "\n[diff truncated]\n" }
+                self.eval("window.UTGit.setPRDetail(\(prJson), \(self.js(diff)))")
+            }
+        }
+    }
+
+    private func prAction(_ pathAndQuery: String) {
+        request(pathAndQuery, method: "POST") { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let data):
+                let json = String(data: data, encoding: .utf8) ?? "{}"
+                self.eval("window.UTGit.prActionResult(\(json))")
+            case .failure(let e):
+                self.eval("window.UTGit.prActionResult({error:\(self.js(e.msg))})")
+            }
+        }
+    }
+
     // MARK: broker fetch plumbing
 
     private func enc(_ s: String) -> String {
@@ -212,11 +285,11 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func request(_ pathAndQuery: String, done: @escaping (Result<Data, StringError>) -> Void) {
+    private func request(_ pathAndQuery: String, method: String = "GET", done: @escaping (Result<Data, StringError>) -> Void) {
         guard let url = URL(string: httpBase + pathAndQuery) else {
             done(.failure(StringError("bad url"))); return
         }
-        var req = URLRequest(url: url); req.timeoutInterval = 30
+        var req = URLRequest(url: url); req.timeoutInterval = 30; req.httpMethod = method
         URLSession.shared.dataTask(with: req) { data, resp, err in
             DispatchQueue.main.async {
                 if let err { done(.failure(StringError(err.localizedDescription))); return }

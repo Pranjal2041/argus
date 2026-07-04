@@ -17,6 +17,7 @@ struct PortInfo: Codable, Identifiable {
     let address: String
     let process: String
     let pid: Int
+    var web: Bool = false   // set by /ports?probe=1 — the port answered an HTTP request
     var id: Int { port }
 }
 

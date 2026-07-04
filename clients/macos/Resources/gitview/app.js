@@ -84,6 +84,12 @@
     allBranches: false,
     compareWith: null,
     selCommit: null,
+    prs: null,            // null = not fetched; [] = fetched empty; array = PRs
+    prErr: null,
+    prFilter: "",
+    prState: "open",
+    selPR: null,
+    prInsight: null,      // {num, headSha} when a PR is the insight scope
     rangeSel: null,       // {hashes, newest, oldest, base, metas, label?} — range/branch/single selection
     insight: null,        // {level, status: running|done|error, text, cost, cached, t0, question?}
     insightChat: [],      // asked questions + answers for the current selection
@@ -94,7 +100,7 @@
   // ---- view switching ------------------------------------------------------
   function showView(name) {
     state.view = name;
-    ["changes", "history", "blame"].forEach(function (v) {
+    ["changes", "history", "blame", "prs"].forEach(function (v) {
       var node = el("view-" + v);
       var show = v === name;
       if (show && node.style.display === "none") {
@@ -106,11 +112,22 @@
     });
     el("tab-changes").classList.toggle("active", name === "changes");
     el("tab-history").classList.toggle("active", name === "history");
+    el("tab-prs").classList.toggle("active", name === "prs");
   }
   el("tab-changes").onclick = function () { showView("changes"); };
   el("tab-history").onclick = function () {
     showView("history");
     if (!state.log.length) post("moreLog", { skip: 0, all: state.allBranches });
+  };
+  el("tab-prs").onclick = function () {
+    showView("prs");
+    if (!state.prs) post("prs", { state: state.prState });   // fetch once; Refresh re-fetches
+  };
+  el("pr-state").onchange = function () {
+    state.prState = this.value;
+    state.prs = null; state.selPR = null;
+    el("pr-detail").innerHTML = '<div class="empty"><span class="big">⇅</span>Select a pull request</div>';
+    post("prs", { state: state.prState });
   };
   el("btn-refresh").onclick = function () { post("refresh"); };
   el("btn-lazygit").onclick = function () { post("lazygit"); };
@@ -147,6 +164,7 @@
   });
   el("log-filter").oninput = function () { state.logFilter = this.value.toLowerCase(); paintLog(); };
   el("files-filter").oninput = function () { state.fileFilter = this.value.toLowerCase(); paintFiles(); };
+  el("pr-filter").oninput = function () { state.prFilter = this.value.toLowerCase(); paintPRs(); };
 
   // keyboard nav in History: ↑/↓ moves the selected commit
   document.addEventListener("keydown", function (ev) {
@@ -442,7 +460,7 @@
           if (i1 !== -1 && i2 !== -1) {
             var lo = Math.min(i1, i2), hi = Math.max(i1, i2);
             var range = state.log.slice(lo, hi + 1);   // newest → oldest
-            state.rangeSel = {
+            state.prInsight = null; state.rangeSel = {
               hashes: range.map(function (c) { return c.hash; }),
               newest: range[0].hash,
               oldest: range[range.length - 1].hash,
@@ -495,7 +513,11 @@
 
 
   // ---- agent insights (range selection) ------------------------------------
+  // Insight scope is either a commit RANGE selection or a PR. Both funnel through
+  // the same bar/chat; the key distinguishes them and is echoed by Swift so a
+  // result routes only to its own scope.
   function insightKey() {
+    if (state.prInsight) return "pr:" + state.prInsight.num + ":" + (state.prInsight.headSha || "");
     var rs = state.rangeSel;
     return rs ? rs.newest + ":" + rs.hashes.length : "";
   }
@@ -517,7 +539,7 @@
     var members = state.log.filter(function (c) { return set[c.hash]; });
     if (!members.length) return;
     var oldest = members[members.length - 1];
-    state.rangeSel = {
+    state.prInsight = null; state.rangeSel = {
       hashes: members.map(function (c) { return c.hash; }),
       newest: tipHash,
       oldest: oldest.hash,
@@ -591,26 +613,34 @@
     }).join("\n");
   }
 
-  function requestInsight(level) {
+  // Build the insight request for the current scope (range or PR).
+  function insightReq(extra) {
+    var key = insightKey();
+    if (state.prInsight) {
+      return Object.assign({ key: key, prNum: state.prInsight.num }, extra);
+    }
     var rs = state.rangeSel;
-    if (!rs) return;
+    return Object.assign({ key: key, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: selMetaLines() }, extra);
+  }
+
+  function requestInsight(level) {
+    if (!state.prInsight && !state.rangeSel) return;
     var mem = state.insightMem[insightKey() + "|" + level];
     if (mem) { state.insight = mem; paintInsight(); return; }
     if (state.insight && state.insight.status === "running") return;
     state.insight = { level: level, status: "running", t0: Date.now() };
     paintInsight();
-    post("insight", { level: level, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: selMetaLines() });
+    post("insight", insightReq({ level: level }));
   }
 
-  // Free-form question about the current selection (single commit, range, or
-  // branch). Each answer is cached like a level — commits are immutable.
+  // Free-form question about the current scope (commit, range, branch, or PR).
+  // Each answer is cached like a level.
   function requestAsk(q) {
-    var rs = state.rangeSel;
-    if (!rs) return;
+    if (!state.prInsight && !state.rangeSel) return;
     if (state.insight && state.insight.status === "running") return;
     state.insight = { level: "ask", question: q, status: "running", t0: Date.now() };
     paintInsight();
-    post("insight", { level: "ask", question: q, hashes: rs.hashes, newest: rs.newest, base: rs.base, metaLines: selMetaLines() });
+    post("insight", insightReq({ level: "ask", question: q }));
   }
 
   var insightTick = null;
@@ -700,7 +730,7 @@
     var bar = "";
     if (c) {
       // Insights for a SINGLE commit too: selection = just this commit.
-      state.rangeSel = {
+      state.prInsight = null; state.rangeSel = {
         hashes: [c.hash], newest: c.hash, oldest: c.hash,
         base: (c.parents || [])[0] || null,
         metas: [{ h: c.hash, s: c.subject, a: c.author, at: c.at }],
@@ -766,8 +796,159 @@
   // A loading/error overlay must never be a prison: click dismisses.
   el("overlay").addEventListener("click", function () { overlay(null); });
 
+  // ---- Pull Requests -------------------------------------------------------
+  function prStateBadge(pr) {
+    if (pr.isDraft) return '<span class="pr-badge draft">draft</span>';
+    var d = pr.reviewDecision;
+    if (d === "APPROVED") return '<span class="pr-badge ok">approved</span>';
+    if (d === "CHANGES_REQUESTED") return '<span class="pr-badge warn">changes</span>';
+    if (d === "REVIEW_REQUIRED") return '<span class="pr-badge">review</span>';
+    return "";
+  }
+  function checksDot(pr) {
+    var roll = pr.statusCheckRollup || [];
+    if (!roll.length) return "";
+    var bad = 0, pending = 0, ok = 0;
+    roll.forEach(function (c) {
+      var s = (c.conclusion || c.state || c.status || "").toUpperCase();
+      if (s === "FAILURE" || s === "ERROR" || s === "CANCELLED" || s === "TIMED_OUT") bad++;
+      else if (s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED") ok++;
+      else pending++;
+    });
+    var cls = bad ? "bad" : (pending ? "pending" : "ok");
+    var title = ok + " passed" + (bad ? ", " + bad + " failed" : "") + (pending ? ", " + pending + " pending" : "");
+    return '<span class="pr-checks ' + cls + '" title="' + title + '">●</span>';
+  }
+  function paintPRs() {
+    var box = el("pr-list");
+    if (state.prErr) {
+      var e = state.prErr;
+      var hint = e.needsAuth ? "Run <code>gh auth login</code> on this machine."
+        : e.noGH ? "Install GitHub CLI (<code>gh</code>) on this machine."
+        : e.notRepo ? "This folder has no GitHub remote." : "";
+      box.innerHTML = '<div class="empty" style="padding:32px 18px"><span class="big">⇅</span>' +
+        esc(e.error) + (hint ? '<div class="hint">' + hint + "</div>" : "") + "</div>";
+      el("pr-detail").innerHTML = '<div class="empty"><span class="big">⇅</span>Pull requests unavailable</div>';
+      return;
+    }
+    var prs = state.prs || [];
+    var f = state.prFilter;
+    if (f) prs = prs.filter(function (p) {
+      return (p.title || "").toLowerCase().indexOf(f) >= 0 ||
+             ("#" + p.number).indexOf(f) >= 0 ||
+             ((p.author && p.author.login) || "").toLowerCase().indexOf(f) >= 0 ||
+             (p.headRefName || "").toLowerCase().indexOf(f) >= 0;
+    });
+    if (!prs.length) {
+      box.innerHTML = '<div class="empty" style="padding:32px 18px"><span class="big">✓</span>No open pull requests</div>';
+      return;
+    }
+    box.innerHTML = prs.map(function (p) {
+      return '<div class="prrow' + (state.selPR === p.number ? " sel" : "") + '" data-num="' + p.number + '">' +
+        '<div class="pr-top">' + avatar((p.author && p.author.login) || "?") +
+        '<span class="pr-title">' + esc(p.title) + "</span>" + checksDot(p) + "</div>" +
+        '<div class="pr-sub"><span class="pr-num">#' + p.number + "</span>" +
+        '<span class="pr-branch">' + esc(p.headRefName) + " → " + esc(p.baseRefName) + "</span>" +
+        prStateBadge(p) +
+        '<span class="pr-stat"><span class="p">+' + (p.additions || 0) + '</span><span class="m">−' + (p.deletions || 0) + "</span></span>" +
+        "</div></div>";
+    }).join("");
+    box.querySelectorAll(".prrow").forEach(function (row) {
+      row.onclick = function () {
+        state.selPR = parseInt(row.dataset.num, 10);
+        paintPRs();
+        el("pr-detail").innerHTML = '<div class="empty"><span class="big">⇅</span>Loading PR #' + state.selPR + "…</div>";
+        post("pr", { num: state.selPR });
+      };
+    });
+  }
+  function relTime(iso) { try { return rel(Math.floor(new Date(iso).getTime() / 1000)); } catch (e) { return ""; } }
+  function renderPRDetail(pr, diffText) {
+    var t = el("pr-detail");
+    var roll = pr.statusCheckRollup || [];
+    var checksHTML = roll.length ? '<div class="pr-checkrow">' + roll.map(function (c) {
+      var s = (c.conclusion || c.state || c.status || "").toUpperCase();
+      var cls = (s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED") ? "ok"
+        : (s === "FAILURE" || s === "ERROR" || s === "CANCELLED" || s === "TIMED_OUT") ? "bad" : "pending";
+      return '<span class="pr-check ' + cls + '" title="' + esc(s) + '">' + esc(c.name || c.context || "check") + "</span>";
+    }).join("") + "</div>" : "";
+    var reviews = (pr.reviews || []).filter(function (r) { return r.state && r.state !== "COMMENTED" || (r.body && r.body.trim()); });
+    var revHTML = reviews.length ? '<div class="pr-reviews">' + reviews.map(function (r) {
+      return '<div class="pr-rev"><b>' + esc((r.author && r.author.login) || "?") + "</b> " +
+        '<span class="pr-badge ' + (r.state === "APPROVED" ? "ok" : r.state === "CHANGES_REQUESTED" ? "warn" : "") + '">' + esc((r.state || "").toLowerCase().replace("_", " ")) + "</span>" +
+        (r.body ? '<div class="pr-revbody">' + esc(r.body) + "</div>" : "") + "</div>";
+    }).join("") + "</div>" : "";
+    t.innerHTML =
+      '<div class="commit-card"><div class="s">' + esc(pr.title) + ' <span class="pr-num">#' + pr.number + "</span></div>" +
+      '<div class="meta">' + avatar((pr.author && pr.author.login) || "?") + "<span>" + esc((pr.author && pr.author.login) || "") + "</span>" +
+      "<span>" + esc(pr.headRefName) + " → " + esc(pr.baseRefName) + "</span>" +
+      "<span>" + relTime(pr.updatedAt) + " ago</span>" + prStateBadge(pr) + "</div>" +
+      (pr.body ? '<div class="pr-body">' + esc(pr.body).slice(0, 4000) + "</div>" : "") +
+      checksHTML + revHTML +
+      '<div class="pr-actions">' +
+      '<button class="pr-act ok" data-act="APPROVE">Approve</button>' +
+      '<button class="pr-act warn" data-act="REQUEST_CHANGES">Request changes</button>' +
+      '<button class="pr-act" data-act="COMMENT">Comment</button>' +
+      '<button class="pr-act" data-act="MERGE">Merge…</button>' +
+      '<a class="pr-act link" href="' + esc(pr.url) + '" target="_blank">Open on GitHub ↗</a>' +
+      "</div>" +
+      '<div id="pr-actionbar"></div>' +
+      "</div>" +
+      insightBarHTML() +
+      '<div id="pr-diff"></div>';
+    // agent insights for the PR as a whole (same Brief/Medium/Detailed + ask)
+    var headSha = pr.commits && pr.commits.length ? (pr.commits[pr.commits.length - 1].oid || "") : "";
+    state.prInsight = { num: pr.number, headSha: headSha };
+    state.rangeSel = null;
+    state.insight = null;
+    state.insightChat = [];
+    wireInsightBar(t);
+    paintInsight();
+    renderDiff("pr-diff", diffText, { title: "PR #" + pr.number });
+    t.querySelectorAll(".pr-act[data-act]").forEach(function (b) {
+      b.onclick = function () { prAction(pr.number, b.dataset.act); };
+    });
+  }
+  function prAction(num, act) {
+    var bar = el("pr-actionbar");
+    if (act === "APPROVE") {
+      bar.innerHTML = '<span class="pr-confirm">Approve PR #' + num + '? <button class="go">Approve</button> <button class="no">Cancel</button> <input class="pr-note" placeholder="optional note"></span>';
+      bar.querySelector(".go").onclick = function () { post("prReview", { num: num, event: "APPROVE", body: bar.querySelector(".pr-note").value }); bar.innerHTML = "submitting…"; };
+    } else if (act === "REQUEST_CHANGES" || act === "COMMENT") {
+      var label = act === "COMMENT" ? "Comment" : "Request changes";
+      bar.innerHTML = '<div class="pr-form"><textarea class="pr-note" placeholder="Your ' + (act === "COMMENT" ? "comment" : "review") + '…"></textarea><div><button class="go">' + label + '</button> <button class="no">Cancel</button></div></div>';
+      bar.querySelector(".go").onclick = function () {
+        var body = bar.querySelector(".pr-note").value.trim();
+        if (!body) { bar.querySelector(".pr-note").focus(); return; }
+        post(act === "COMMENT" ? "prComment" : "prReview", { num: num, event: "REQUEST_CHANGES", body: body }); bar.innerHTML = "submitting…";
+      };
+    } else if (act === "MERGE") {
+      bar.innerHTML = '<span class="pr-confirm">Merge PR #' + num + ' by <select class="pr-method"><option value="squash">squash</option><option value="merge">merge commit</option><option value="rebase">rebase</option></select> <button class="go">Merge</button> <button class="no">Cancel</button></span>';
+      bar.querySelector(".go").onclick = function () { post("prMerge", { num: num, method: bar.querySelector(".pr-method").value }); bar.innerHTML = "merging…"; };
+    }
+    var no = bar.querySelector(".no"); if (no) no.onclick = function () { bar.innerHTML = ""; };
+  }
+
   // ---- bridge --------------------------------------------------------------
   window.UTGit = {
+    setPRs: function (payload) {
+      overlay(null);
+      if (payload && payload.error) { state.prErr = payload; state.prs = []; }
+      else { state.prErr = null; state.prs = (payload && payload.prs) || []; }
+      paintPRs();
+    },
+    setPRDetail: function (pr, diffText) {
+      if (!pr || pr.number !== state.selPR) return;
+      renderPRDetail(pr, diffText || "");
+    },
+    prActionResult: function (r) {
+      var bar = el("pr-actionbar");
+      if (r && r.error) { if (bar) bar.innerHTML = '<span class="pr-err">' + esc(r.error) + "</span>"; return; }
+      if (bar) bar.innerHTML = '<span class="pr-ok">done ✓</span>';
+      state.prs = null;                    // force a refresh of the list + detail
+      post("prs", { state: state.prState });
+      if (state.selPR) post("pr", { num: state.selPR });
+    },
     setTheme: function (t) {
       var r = document.documentElement.style;
       if (t.bg) r.setProperty("--bg", t.bg);
@@ -796,7 +977,9 @@
     },
     setBlame: function (data, path) { overlay(null); renderBlame(data, path); },
     setInsight: function (p) {
-      var mine = state.rangeSel && state.rangeSel.newest === p.newest &&
+      // Route by the scope key Swift echoes back (range or PR) — a result only
+      // applies if the user is still on that scope with that level running.
+      var mine = p.key && p.key === insightKey() &&
                  state.insight && state.insight.level === p.level;
       if (p.level === "ask") {
         if (mine) {
@@ -809,7 +992,7 @@
       }
       var done = p.error ? { level: p.level, status: "error", error: p.error }
                          : { level: p.level, status: "done", text: p.text, cost: p.cost, cached: p.cached };
-      if (!p.error) state.insightMem[p.newest + ":" + (state.rangeSel && state.rangeSel.newest === p.newest ? state.rangeSel.hashes.length : "?") + "|" + p.level] = done;
+      if (!p.error && p.key) state.insightMem[p.key + "|" + p.level] = done;
       if (mine) {
         state.insight = done;
         paintInsight();

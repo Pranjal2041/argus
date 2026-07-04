@@ -16,6 +16,7 @@
       <div id="tabs">
         <button id="tab-changes" class="tab active"><svg viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>Changes</button>
         <button id="tab-history" class="tab"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/></svg>History</button>
+        <button id="tab-prs" class="tab"><svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>Pull Requests</button>
       </div>
       <div id="actions">
         <button id="btn-mode" title="side-by-side ⇄ inline"><svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></button>
@@ -51,6 +52,23 @@
         <span id="blame-path"></span>
       </div>
       <div class="content full" id="blame-body"></div>
+    </div>
+
+    <div id="view-prs" class="view" style="display:none">
+      <div class="sidebar wide">
+        <div class="filterbar">
+          <span class="searchwrap"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input id="pr-filter" placeholder="Filter pull requests…" /></span>
+          <select id="pr-state" class="toggle" title="Which pull requests to show">
+            <option value="open">Open</option>
+            <option value="merged">Merged</option>
+            <option value="closed">Closed</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+        <div class="scroll" id="pr-list"></div>
+      </div>
+      <div class="drag" data-for="prs"></div>
+      <div class="content" id="pr-detail"><div class="empty"><span class="big">⇅</span>Select a pull request</div></div>
     </div>
 
     <div id="overlay" style="display:none"><div id="overlay-msg"></div></div>

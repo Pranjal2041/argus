@@ -21,10 +21,56 @@ type PortInfo struct {
 	Address string `json:"address"`
 	Process string `json:"process"`
 	PID     int    `json:"pid"`
+	Web     bool   `json:"web,omitempty"` // set by ProbeWeb: the port answered an HTTP request
 }
 
 // ListeningPorts returns the host's listening TCP ports (platform-specific).
 func ListeningPorts() []PortInfo { return listeningPorts() }
+
+// ProbeWeb marks which ports actually speak HTTP, by opening each loopback port
+// and checking whether it answers "HTTP/…". This is the deterministic signal for
+// "is this a browsable web service" (vs guessing from the process name) — a plain
+// listening port might be a database, an app's IPC socket, etc. Concurrent with a
+// short per-port timeout so scanning ~dozens of ports stays sub-second.
+func ProbeWeb(ports []PortInfo) []PortInfo {
+	type res struct {
+		i   int
+		web bool
+	}
+	ch := make(chan res, len(ports))
+	sem := make(chan struct{}, 24) // cap concurrency
+	for i, p := range ports {
+		go func(i, port int) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ch <- res{i, speaksHTTP(port)}
+		}(i, p.Port)
+	}
+	for range ports {
+		r := <-ch
+		ports[r.i].Web = r.web
+	}
+	return ports
+}
+
+// speaksHTTP opens 127.0.0.1:port, sends a minimal GET, and reports whether the
+// reply begins with "HTTP/". Loopback only; ~400ms budget.
+func speaksHTTP(port int) bool {
+	d := net.Dialer{Timeout: 350 * time.Millisecond}
+	conn, err := d.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		conn, err = d.Dial("tcp", "[::1]:"+strconv.Itoa(port))
+		if err != nil {
+			return false
+		}
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(400 * time.Millisecond))
+	_, _ = conn.Write([]byte("GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+	buf := make([]byte, 16)
+	n, _ := io.ReadFull(conn, buf)
+	return n >= 5 && string(buf[:5]) == "HTTP/"
+}
 
 // ValidPort reports whether s is a usable TCP port number.
 func ValidPort(s string) bool {

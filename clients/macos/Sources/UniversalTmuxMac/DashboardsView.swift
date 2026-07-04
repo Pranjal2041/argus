@@ -39,6 +39,7 @@ struct WebTabView: NSViewRepresentable {
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
+        if wv.pageZoom != tab.zoom { wv.pageZoom = tab.zoom }   // keep page zoom in sync (⌘+/−/0)
         // Persist tabs (notebooks) are driven ONLY by DashboardTab.load() — never reload here
         // (an unrelated SwiftUI invalidation, or a URL the page rewrote itself, must not wipe
         // a live notebook). Non-persist (dashboards) keep address-bar/forward reload-on-change.
@@ -125,6 +126,7 @@ struct WebTabView: NSViewRepresentable {
 
 struct DashboardsView: View {
     @EnvironmentObject var model: DashboardsModel
+    @EnvironmentObject var state: AppState
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     @State private var showAdd = false
     @State private var newURL = ""
@@ -136,11 +138,16 @@ struct DashboardsView: View {
         VStack(spacing: 0) {
             tabStrip
             Divider().overlay(Theme.border)
-            if let tab = model.active { chrome(tab) ; Divider().overlay(Theme.border) }
+            if let tab = model.active {
+                chrome(tab)
+                if tab.showFind { findBar(tab) }
+                Divider().overlay(Theme.border)
+            }
             content
         }
         .background(Theme.appBackground)
         .frame(minWidth: 640, minHeight: 420)
+        .background(zoomFindShortcuts)
         .alert("Rename tab", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Name", text: $renameText)
             Button("Rename") {
@@ -156,6 +163,24 @@ struct DashboardsView: View {
     private func startRename(_ tab: DashboardTab) {
         renameText = tab.displayTitle
         renaming = tab
+    }
+
+    // ⌘F find bar over the active tab's web content.
+    @ViewBuilder private func findBar(_ tab: DashboardTab) -> some View {
+        FindBar(tab: tab)
+    }
+
+    // Zoom (⌘+/−/0) + find (⌘F) shortcuts, scoped to this window.
+    private var zoomFindShortcuts: some View {
+        Group {
+            Button("") { if let t = model.active { t.showFind = true } }
+                .keyboardShortcut("f", modifiers: .command)
+            Button("") { model.active?.zoomIn() }.keyboardShortcut("+", modifiers: .command)
+            Button("") { model.active?.zoomIn() }.keyboardShortcut("=", modifiers: .command)
+            Button("") { model.active?.zoomOut() }.keyboardShortcut("-", modifiers: .command)
+            Button("") { model.active?.zoomReset() }.keyboardShortcut("0", modifiers: .command)
+        }
+        .opacity(0).frame(width: 0, height: 0)
     }
 
     // MARK: tab strip
@@ -263,6 +288,18 @@ struct DashboardsView: View {
                 tab.isLoading ? tab.webView?.stopLoading() : tab.reload()
             }
             addressField(tab)
+            Menu {
+                Button("Off") { tab.refreshEvery = 0 }
+                Button("Every 5s") { tab.refreshEvery = 5 }
+                Button("Every 15s") { tab.refreshEvery = 15 }
+                Button("Every 30s") { tab.refreshEvery = 30 }
+                Button("Every 60s") { tab.refreshEvery = 60 }
+            } label: {
+                Image(systemName: tab.refreshEvery > 0 ? "timer.circle.fill" : "timer")
+                    .foregroundStyle(tab.refreshEvery > 0 ? Theme.accent : Flat.dim)
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            .help(tab.refreshEvery > 0 ? "Auto-refresh every \(tab.refreshEvery)s" : "Auto-refresh off")
             navBtn("safari", enabled: true) { tab.openInSystemBrowser() }.help("Open in default browser")
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -296,12 +333,7 @@ struct DashboardsView: View {
 
     @ViewBuilder private var content: some View {
         if model.tabs.isEmpty {
-            VStack(spacing: 12) {
-                Image(systemName: "rectangle.on.rectangle.angled").font(.system(size: s(30), weight: .light)).foregroundStyle(.tertiary)
-                Text("No dashboards open").font(.system(size: s(13))).foregroundStyle(.secondary)
-                Text("⌘-click a localhost URL in a session, open an active forward with +, or type a URL.")
-                    .font(.system(size: s(11))).foregroundStyle(.tertiary).multilineTextAlignment(.center).frame(maxWidth: s(320))
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            ServiceCatalogView().environmentObject(model).environmentObject(state)
         } else {
             ZStack {
                 ForEach(model.tabs) { tab in
@@ -318,6 +350,147 @@ struct DashboardsView: View {
                     .allowsHitTesting(tab.id == model.activeID)
                 }
             }
+        }
+    }
+}
+
+/// The ⌘F find bar: a focused field that searches the active tab's web content,
+/// Enter = next, Esc = close.
+private struct FindBar: View {
+    @ObservedObject var tab: DashboardTab
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
+            TextField("Find in page…", text: $tab.findQuery)
+                .textFieldStyle(.plain).font(.system(size: 13))
+                .focused($focused)
+                .frame(width: 240)
+                .onSubmit { tab.find(tab.findQuery, forward: true) }
+            Button { tab.find(tab.findQuery, forward: false) } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.borderless).help("Previous")
+            Button { tab.find(tab.findQuery, forward: true) } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.borderless).help("Next")
+            Spacer()
+            Button { tab.showFind = false; tab.clearFind() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.borderless).help("Close (Esc)")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Theme.sidebarBackground)
+        .onAppear { focused = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true } }
+        .onExitCommand { tab.showFind = false; tab.clearFind() }
+    }
+}
+
+/// The Dashboards start page: for each known machine, its listening web services
+/// as clickable cards (from the broker's /ports). Turns the browser from a URL
+/// box into fleet discovery. Clicking a card opens it (auto-forwarding remotes).
+private struct ServiceCatalogView: View {
+    @EnvironmentObject var model: DashboardsModel
+    @EnvironmentObject var state: AppState
+    @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    @State private var portsByHost: [String: [PortInfo]] = [:]
+    @State private var loading: Set<String> = []
+    @State private var showAll = false
+    private func s(_ v: CGFloat) -> CGFloat { v * uiScale }
+
+    // Desktop-app / OS services that answer HTTP but aren't dashboards you'd browse.
+    // Hidden by default; Show all reveals them (so a wrongly-hidden service is one
+    // click away — the escape hatch keeps this heuristic safe).
+    private func isDesktopNoise(_ p: PortInfo) -> Bool {
+        if p.port == 8722 { return true } // our own broker
+        let proc = p.process.lowercased()
+        for n in ["controlce", "rapportd", "logi", "raycast", "sharingd", "spotify",
+                  "google", "dropbox", "figma", "ipnext", "adprivacy", "identityservice",
+                  "trustd", "cloudd", "nsurlsession", "corespeech", "airplay"] {
+            if proc.contains(n) { return true }
+        }
+        return false
+    }
+    // The default view: services that actually speak HTTP and aren't desktop noise.
+    private func isEssential(_ p: PortInfo) -> Bool { p.web && !isDesktopNoise(p) }
+    private func label(_ p: PortInfo) -> String {
+        switch p.port {
+        case 6006: return "TensorBoard"
+        case 8888, 8889: return "Jupyter"
+        case 3000: return "Dev server"
+        case 8080, 8000, 5000, 5173, 4200: return "Web app"
+        default: return p.process.isEmpty ? "Service" : p.process
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Text("Services on your machines").font(.system(size: s(16), weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Toggle("Show all ports", isOn: $showAll).toggleStyle(.switch).controlSize(.small)
+                        .foregroundStyle(Theme.textSecondary)
+                }.padding(.bottom, 2)
+                ForEach(state.machines) { m in
+                    let all = portsByHost[m.id] ?? []
+                    let ports = showAll ? all.filter { $0.port != 8722 } : all.filter { isEssential($0) }
+                    let hiddenCount = all.count - ports.count
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 7) {
+                            Circle().fill(m.isLocal ? Color.green : Color.blue).frame(width: 7, height: 7)
+                            Text(m.name).font(.system(size: s(13), weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                            if loading.contains(m.id) { ProgressView().controlSize(.small) }
+                            Spacer()
+                            Button { m.isLocal ? model.openJupyter(on: m) : model.openJupyter(on: m) } label: {
+                                Label("JupyterLab", systemImage: "book").font(.system(size: s(11)))
+                            }.buttonStyle(.borderless).foregroundStyle(Theme.accent)
+                        }
+                        if ports.isEmpty {
+                            Text(loading.contains(m.id) ? "Scanning…"
+                                 : hiddenCount > 0 ? "No dashboards — \(hiddenCount) other port\(hiddenCount == 1 ? "" : "s") (Show all)"
+                                 : "No web services listening")
+                                .font(.system(size: s(11))).foregroundStyle(Theme.textTertiary)
+                        } else {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: s(180)), spacing: 10)], alignment: .leading, spacing: 10) {
+                                ForEach(ports) { p in
+                                    Button { model.openLocalhost(on: m, port: p.port, path: "", scheme: "http") } label: {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "globe").font(.system(size: s(11))).foregroundStyle(Theme.accent)
+                                                Text(label(p)).font(.system(size: s(12.5), weight: .medium)).foregroundStyle(Theme.textPrimary)
+                                            }
+                                            Text(":\(p.port)" + (p.process.isEmpty ? "" : " · \(p.process)"))
+                                                .font(.system(size: s(10.5), design: .monospaced)).foregroundStyle(Theme.textTertiary).lineLimit(1)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(10)
+                                        .background(RoundedRectangle(cornerRadius: 9).fill(Theme.sidebarBackground))
+                                        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.border, lineWidth: 1))
+                                    }.buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.appBackground.opacity(0.4)))
+                }
+                Text("⌘-click a localhost URL in a session, or type a URL in the + panel, to open anything else.")
+                    .font(.system(size: s(11))).foregroundStyle(Theme.textTertiary).padding(.top, 4)
+            }
+            .padding(22)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { scanAll() }
+    }
+
+    private func scanAll() {
+        for m in state.machines {
+            loading.insert(m.id)
+            guard let url = URL(string: m.httpBase + "/ports?probe=1") else { loading.remove(m.id); continue }
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                struct R: Codable { let ports: [PortInfo]? }
+                let ports = (data.flatMap { try? JSONDecoder().decode(R.self, from: $0) }?.ports ?? [])
+                    .sorted { $0.port < $1.port }
+                DispatchQueue.main.async { portsByHost[m.id] = ports; loading.remove(m.id) }
+            }.resume()
         }
     }
 }

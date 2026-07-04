@@ -76,7 +76,7 @@ func main() {
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
 	fwdMgr := forward.NewManager()                                 // port-hub agent (used when this broker is the local agent)
 	jupyterMgr := jupyter.NewManager()                             // ensures a JupyterLab on this host for the notebook feature
-	mgr.SetHistoryLimit(100000) // large scrollback for new sessions
+	mgr.SetHistoryLimit(100000)                                    // large scrollback for new sessions
 	if *session != "" {
 		if err := mgr.Ensure(*session); err != nil {
 			log.Printf("warn: warming session %q: %v", *session, err)
@@ -380,7 +380,11 @@ func main() {
 	mux.HandleFunc("/ports", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ports": portfwd.ListeningPorts()})
+		ports := portfwd.ListeningPorts()
+		if r.URL.Query().Get("probe") == "1" { // mark which ports actually speak HTTP
+			ports = portfwd.ProbeWeb(ports)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ports": ports})
 	})
 	mux.HandleFunc("/forward", func(w http.ResponseWriter, r *http.Request) {
 		port := r.URL.Query().Get("port")
@@ -521,6 +525,55 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write(out)
 	})
+	// Pull-request review via gh (see internal/gitsvc/prsvc.go). All keyed by
+	// ?dir=; write actions (review/merge/comment) are POST. Errors carry
+	// needsAuth/noGH/notRepo flags so the UI can guide.
+	prJSON := func(w http.ResponseWriter, body []byte, e *gitsvc.PRError) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if e != nil {
+			w.WriteHeader(http.StatusOK) // a classified error, not an HTTP failure
+			_, _ = w.Write(prErrorJSON(e))
+			return
+		}
+		_, _ = w.Write(body)
+	}
+	mux.HandleFunc("/git/prs", func(w http.ResponseWriter, r *http.Request) {
+		out, e := gitsvc.ListPRs(r.URL.Query().Get("dir"), r.URL.Query().Get("state"))
+		prJSON(w, out, e)
+	})
+	mux.HandleFunc("/git/pr", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		out, e := gitsvc.ViewPR(q.Get("dir"), q.Get("num"))
+		prJSON(w, out, e)
+	})
+	mux.HandleFunc("/git/pr/diff", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		out, e := gitsvc.PRDiff(q.Get("dir"), q.Get("num"))
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if e != nil {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(prErrorJSON(e))
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(out)
+	})
+	mux.HandleFunc("/git/pr/review", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		e := gitsvc.ReviewPR(q.Get("dir"), q.Get("num"), q.Get("event"), q.Get("body"))
+		prActionResult(w, e)
+	})
+	mux.HandleFunc("/git/pr/merge", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		e := gitsvc.MergePR(q.Get("dir"), q.Get("num"), q.Get("method"))
+		prActionResult(w, e)
+	})
+	mux.HandleFunc("/git/pr/comment", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		e := gitsvc.CommentPR(q.Get("dir"), q.Get("num"), q.Get("body"))
+		prActionResult(w, e)
+	})
 	// File service: browse this host's filesystem (as the broker's user) and
 	// stream file contents. /fs/home → starting points, /fs/list → a directory,
 	// /fs/read → a file (Range + content-type, so large files and media stream).
@@ -550,6 +603,14 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		_ = json.NewEncoder(w).Encode(fsvc.Find(r.URL.Query().Get("path"), limit))
+	})
+	// /fs/grep → content search under a root (ripgrep if present, else a bounded
+	// walk), for the Files "search in folder" panel. query=, regex=1 optional.
+	mux.HandleFunc("/fs/grep", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		q := r.URL.Query()
+		_ = json.NewEncoder(w).Encode(fsvc.Grep(q.Get("path"), q.Get("query"), q.Get("regex") == "1"))
 	})
 	// /fs/stat → resolve+classify a (possibly relative/~/$VAR) path against a base
 	// cwd, so a terminal-clicked path routes into Files on the right host.
@@ -650,6 +711,21 @@ func portOf(hostport string) string {
 }
 
 // fsResult writes {"ok":true} or a 400 with {"error":...} for an /fs mutation.
+func prErrorJSON(e *gitsvc.PRError) []byte {
+	b, _ := json.Marshal(e)
+	return b
+}
+
+func prActionResult(w http.ResponseWriter, e *gitsvc.PRError) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	if e != nil {
+		_, _ = w.Write(prErrorJSON(e))
+		return
+	}
+	_, _ = w.Write([]byte(`{"ok":true}`))
+}
+
 func fsResult(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {

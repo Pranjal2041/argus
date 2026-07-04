@@ -10,6 +10,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
     @StateObject private var gitPanels = GitPanels()          // read-only git viewer webviews (kept alive per session)
+    @StateObject private var ledgerHost = LedgerPanelHost()    // in-app Activity Ledger webview (kept alive)
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
 
@@ -23,6 +24,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(notebooks)
                 .environmentObject(wandb)
                 .environmentObject(gitPanels)
+                .environmentObject(ledgerHost)
                 .environmentObject(commandCenter)
                 .environmentObject(themeStore)
                 .frame(minWidth: 980, minHeight: 600)
@@ -54,14 +56,16 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showTodos = false; state.showNotes = false } }
+                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showTodos = false; state.showNotes = false; state.showLedger = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
-                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showNotes = false } }
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showNotes = false; state.showLedger = false } }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
-                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showTodos = false } }
+                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showTodos = false; state.showLedger = false } }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false } }
+                    .keyboardShortcut("j", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
@@ -133,6 +137,7 @@ struct UniversalTmuxApp: App {
         Window("Dashboards", id: "dashboards") {
             DashboardsView()
                 .environmentObject(dashboards)
+                .environmentObject(state)
                 .preferredColorScheme(.dark)
                 .allowsFullScreen()
         }
@@ -514,6 +519,10 @@ struct RootView: View {
     @EnvironmentObject var notebooks: NotebooksModel
     @EnvironmentObject var wandb: WandbController
     @EnvironmentObject var gitPanels: GitPanels
+    @EnvironmentObject var ledgerHost: LedgerPanelHost
+    @ViewBuilder private var ledgerPane: some View {
+        LedgerView(panel: ledgerHost.panel).onAppear { ledgerHost.panel.refresh() }
+    }
     @Environment(\.displayScale) private var displayScale
     @Environment(\.openWindow) private var openWindow
     @State private var newName = ""
@@ -552,7 +561,9 @@ struct RootView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             Group {
-                if state.showNotes {
+                if state.showLedger {
+                    ledgerPane
+                } else if state.showNotes {
                     NotesHubView()
                 } else if state.showTodos {
                     TodoCenterView()
@@ -731,6 +742,10 @@ struct RootView: View {
             IconButton(system: "cable.connector", help: "Port forwards") { openWindow(id: "ports") }
             IconButton(system: "folder", help: "Files") { openWindow(id: "files") }
             IconButton(system: "rectangle.on.rectangle.angled", help: "Dashboards") { openWindow(id: "dashboards") }
+            IconButton(system: "book.closed", help: "Activity Ledger (⇧⌘J)") {
+                state.showLedger.toggle()
+                if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false }
+            }
         }
         .frame(height: 34)
         .padding(.horizontal, 12)

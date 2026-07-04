@@ -36,12 +36,28 @@ struct FilesView: View {
         .frame(minWidth: 760, minHeight: 480)
         .background(quickOpenShortcut)
         .overlay { quickOpenOverlay }
+        .overlay { grepOverlay }
+        .background(grepShortcut)
         .onAppear { if model.tabs.isEmpty, let m = (machines.first { $0.isLocal } ?? machines.first) { model.addTab(m) } }
     }
 
     private var quickOpenShortcut: some View {
         Button("") { model.active?.openQuickOpen() }
             .keyboardShortcut("p", modifiers: .command).opacity(0).frame(width: 0, height: 0)
+    }
+
+    private var grepShortcut: some View {
+        Button("") { model.active?.openGrep() }
+            .keyboardShortcut("f", modifiers: [.command, .shift]).opacity(0).frame(width: 0, height: 0)
+    }
+
+    @ViewBuilder private var grepOverlay: some View {
+        if let tab = model.active, tab.showGrep {
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.18).ignoresSafeArea().onTapGesture { tab.closeGrep() }
+                GrepView(tab: tab).padding(.top, 60)
+            }
+        }
     }
 
     @ViewBuilder private var quickOpenOverlay: some View {
@@ -385,6 +401,16 @@ private struct FileRow: View {
             .contextMenu { menu }
     }
 
+    private var gitStatus: String? { tab.gitStatusFor(node.entry.path, isDir: node.entry.isDir) }
+    private var gitTint: Color? {
+        switch gitStatus {
+        case "M", "R": return Color(red: 0.90, green: 0.70, blue: 0.30)   // amber: modified
+        case "A", "U": return Color(red: 0.42, green: 0.78, blue: 0.47)   // green: new/untracked
+        case "D": return Color(red: 0.88, green: 0.42, blue: 0.45)        // red: deleted
+        default: return nil
+        }
+    }
+
     private func rowLabel(sel: Bool) -> some View {
         HStack(spacing: 5) {
             if node.entry.isDir {
@@ -395,8 +421,15 @@ private struct FileRow: View {
             }
             Image(systemName: icon).font(.system(size: s(12))).foregroundStyle(iconColor).frame(width: s(16))
             Text(node.entry.name).font(.system(size: s(12.5)))
-                .foregroundStyle(sel ? Flat.text : Flat.text.opacity(0.82)).lineLimit(1)
+                .foregroundStyle(gitTint ?? (sel ? Flat.text : Flat.text.opacity(0.82))).lineLimit(1)
+            if let g = gitStatus, g != "•" {
+                Text(g).font(.system(size: s(9.5), weight: .bold, design: .monospaced))
+                    .foregroundStyle(gitTint ?? Flat.faint)
+            }
             Spacer(minLength: 6)
+            if let g = gitStatus, g == "•" {
+                Circle().fill(Color(red: 0.90, green: 0.70, blue: 0.30)).frame(width: s(5), height: s(5))
+            }
             if !node.entry.isDir {
                 Text(byteSize(node.entry.size)).font(.system(size: s(10), design: .monospaced)).foregroundStyle(Flat.faint)
             }
@@ -605,6 +638,119 @@ struct QuickOpenView: View {
         }
     }
     private func removeKeys() { if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil } }
+}
+
+/// Content search across the open folder (⇧⌘F). Results grouped by file, each
+/// matched line clickable to open that file at that line. Debounced live search.
+struct GrepView: View {
+    @ObservedObject var tab: FileTab
+    @FocusState private var focused: Bool
+    @State private var debounce: DispatchWorkItem?
+
+    private func relative(_ p: String) -> String {
+        let root = tab.rootPath
+        guard p.hasPrefix(root) else { return p }
+        var r = String(p.dropFirst(root.count))
+        if r.hasPrefix(tab.sep) { r.removeFirst() }
+        return r.isEmpty ? p : r
+    }
+
+    // group matches by file, preserving first-seen order
+    private var groups: [(path: String, rows: [GrepMatch])] {
+        var order: [String] = []
+        var by: [String: [GrepMatch]] = [:]
+        for m in tab.grepMatches {
+            if by[m.path] == nil { order.append(m.path) }
+            by[m.path, default: []].append(m)
+        }
+        return order.map { ($0, by[$0] ?? []) }
+    }
+
+    private func scheduleSearch() {
+        debounce?.cancel()
+        let w = DispatchWorkItem { tab.runGrep() }
+        debounce = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "text.magnifyingglass").font(.system(size: 14)).foregroundStyle(Theme.textTertiary)
+                TextField("Search in \((tab.rootPath as NSString).lastPathComponent)…", text: $tab.grepQuery)
+                    .textFieldStyle(.plain).font(.system(size: 15)).foregroundStyle(Theme.textPrimary)
+                    .focused($focused)
+                    .onChange(of: tab.grepQuery) { _ in scheduleSearch() }
+                    .onSubmit { tab.runGrep() }
+                if tab.grepRunning { ProgressView().controlSize(.small) }
+                Toggle(".*", isOn: $tab.grepRegex)
+                    .toggleStyle(.button).controlSize(.small)
+                    .help("Regular expression")
+                    .onChange(of: tab.grepRegex) { _ in tab.runGrep() }
+            }
+            .padding(.horizontal, 14).frame(height: 46)
+            Rectangle().fill(Theme.border).frame(height: 1)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(groups, id: \.path) { g in
+                        HStack(spacing: 7) {
+                            Image(systemName: iconForFile((g.path as NSString).lastPathComponent))
+                                .font(.system(size: 11)).foregroundStyle(Theme.textTertiary)
+                            Text((g.path as NSString).lastPathComponent)
+                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                            Text(relative((g.path as NSString).deletingLastPathComponent))
+                                .font(.system(size: 10)).foregroundStyle(Theme.textTertiary).lineLimit(1).truncationMode(.head)
+                            Spacer(minLength: 0)
+                            Text("\(g.rows.count)").font(.system(size: 10)).foregroundStyle(Theme.textTertiary)
+                        }
+                        .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 3)
+                        ForEach(g.rows) { m in
+                            HStack(spacing: 8) {
+                                Text("\(m.line)").font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(Theme.textTertiary).frame(width: 40, alignment: .trailing)
+                                highlighted(m.text)
+                                    .font(.system(size: 12, design: .monospaced)).lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12).frame(height: 24)
+                            .contentShape(Rectangle())
+                            .onTapGesture { tab.openMatch(m); tab.closeGrep() }
+                            .onHover { h in if h { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+                        }
+                    }
+                    if tab.grepRan && tab.grepMatches.isEmpty && !tab.grepRunning {
+                        Text("No matches").font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
+                            .frame(maxWidth: .infinity).padding(.vertical, 20)
+                    }
+                    if tab.grepTruncated {
+                        Text("Showing the first results — narrow the search for more")
+                            .font(.system(size: 10)).foregroundStyle(Theme.textTertiary)
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                    }
+                }
+                .padding(.bottom, 8)
+            }
+            .frame(height: 420)
+        }
+        .frame(width: 680)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.sidebarBackground))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
+        .onAppear { focused = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true } }
+        .onExitCommand { tab.closeGrep() }
+    }
+
+    // bold the matched substring (plain-substring mode only; regex shows plain)
+    @ViewBuilder private func highlighted(_ line: String) -> some View {
+        let q = tab.grepQuery.trimmingCharacters(in: .whitespaces)
+        if !tab.grepRegex, !q.isEmpty, let r = line.range(of: q, options: .caseInsensitive) {
+            (Text(String(line[line.startIndex..<r.lowerBound])).foregroundColor(Theme.textSecondary)
+             + Text(String(line[r])).foregroundColor(Theme.accent).bold()
+             + Text(String(line[r.upperBound...])).foregroundColor(Theme.textSecondary))
+        } else {
+            Text(line).foregroundColor(Theme.textSecondary)
+        }
+    }
 }
 
 func iconForFile(_ name: String) -> String {
