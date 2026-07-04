@@ -165,6 +165,16 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         if let path { url += "&path=\(enc(path))" }
         fetchText(url) { [weak self] text in
             guard let self else { return }
+            // Never eval a huge blob into the webview — a 100MB range diff
+            // wedges the page permanently (stuck overlay until app restart).
+            // New brokers cap server-side; this guards against old ones.
+            var text = text
+            if text.utf8.count > 3_000_000 {
+                let mb = Double(text.utf8.count) / 1024 / 1024
+                text = String(text.prefix(2_000_000))
+                if let nl = text.lastIndex(of: "\n") { text = String(text[..<nl]) }
+                text += "\n[diff truncated: \(String(format: "%.1f", mb)) MB total — too large to render fully]\n"
+            }
             var meta = "{scope:\(self.js(scope))"
             if let hash { meta += ",hash:\(self.js(hash))" }
             if let hash2 { meta += ",hash2:\(self.js(hash2))" }

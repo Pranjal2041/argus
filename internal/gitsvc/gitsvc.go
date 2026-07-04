@@ -18,6 +18,63 @@ import (
 
 const cmdTimeout = 15 * time.Second
 
+// A big range diff wedges the client renderer (diff2html builds DOM for every
+// hunk SYNCHRONOUSLY on the webview main thread — 616 files froze it for 6s;
+// bigger freezes indefinitely). Cap by FILE COUNT first (the real cost driver,
+// like GitHub's "too many files"), then by bytes as a backstop — whichever hits
+// first. diff2html handles ~50 files smoothly (<1s).
+const maxDiffFiles = 50
+const maxDiffBytes = 700 * 1024
+
+func capDiff(b []byte) []byte {
+	files, cut := 0, -1
+	// find the byte offset of the (maxDiffFiles+1)-th "diff --git" (start of line)
+	for i := 0; i+10 < len(b); i++ {
+		if (i == 0 || b[i-1] == '\n') && string(b[i:i+11]) == "diff --git " {
+			files++
+			if files == maxDiffFiles+1 {
+				cut = i
+				break
+			}
+		}
+	}
+	byteCut := -1
+	if len(b) > maxDiffBytes {
+		byteCut = maxDiffBytes
+		for byteCut > 0 && b[byteCut-1] != '\n' {
+			byteCut--
+		}
+	}
+	// take the earliest applicable cut
+	end := len(b)
+	truncated := ""
+	if cut >= 0 {
+		end = cut
+		truncated = fmt.Sprintf("\n[diff truncated: showing the first %d of %d changed files — too large to render fully]\n", maxDiffFiles, countFiles(b))
+	}
+	if byteCut >= 0 && byteCut < end {
+		end = byteCut
+		truncated = fmt.Sprintf("\n[diff truncated at %d KB — too large to render fully]\n", maxDiffBytes/1024)
+	}
+	if truncated == "" {
+		return b
+	}
+	out := make([]byte, 0, end+len(truncated))
+	out = append(out, b[:end]...)
+	out = append(out, truncated...)
+	return out
+}
+
+func countFiles(b []byte) int {
+	n := 0
+	for i := 0; i < len(b); i++ {
+		if (i == 0 || b[i-1] == '\n') && i+11 <= len(b) && string(b[i:i+11]) == "diff --git " {
+			n++
+		}
+	}
+	return n
+}
+
 // run executes git -C dir with the given args, returning stdout. Stderr rides the
 // error so the client sees git's actual complaint ("not a git repository", …).
 func run(dir string, args ...string) ([]byte, error) {
@@ -153,7 +210,8 @@ func GetDiff(dir, scope, hash, hash2, path string) ([]byte, error) {
 	if path != "" {
 		args = append(args, "--", path)
 	}
-	return run(dir, args...)
+	out, err := run(dir, args...)
+	return capDiff(out), err
 }
 
 // Commit is one log entry.
