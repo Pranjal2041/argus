@@ -890,7 +890,7 @@
       '<button class="pr-act warn" data-act="REQUEST_CHANGES">Request changes</button>' +
       '<button class="pr-act" data-act="COMMENT">Comment</button>' +
       '<button class="pr-act" data-act="MERGE">Merge…</button>' +
-      '<a class="pr-act link" href="' + esc(pr.url) + '" target="_blank">Open on GitHub ↗</a>' +
+      '<button class="pr-act link" data-url="' + esc(pr.url) + '">Open on GitHub ↗</button>' +
       "</div>" +
       '<div id="pr-actionbar"></div>' +
       "</div>" +
@@ -908,6 +908,8 @@
     t.querySelectorAll(".pr-act[data-act]").forEach(function (b) {
       b.onclick = function () { prAction(pr.number, b.dataset.act); };
     });
+    var gh = t.querySelector(".pr-act[data-url]");
+    if (gh) gh.onclick = function () { post("openURL", { url: gh.dataset.url }); };  // WKWebView can't target=_blank
   }
   function prAction(num, act) {
     var bar = el("pr-actionbar");

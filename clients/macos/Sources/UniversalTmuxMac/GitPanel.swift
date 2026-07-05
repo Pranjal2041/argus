@@ -76,9 +76,11 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
         case "openFile":
             if let p = body["path"] as? String { onOpenFile?(p) }
         case "prs":
-            fetchPRs()
+            fetchPRs(state: body["state"] as? String ?? "open")
         case "pr":
             if let n = body["num"] as? Int { fetchPRDetail(n) }
+        case "openURL":
+            if let u = body["url"] as? String, let url = URL(string: u) { NSWorkspace.shared.open(url) }
         case "prReview":
             if let n = body["num"] as? Int {
                 prAction("/git/pr/review?dir=\(enc(dir))&num=\(n)&event=\(enc((body["event"] as? String) ?? ""))&body=\(enc((body["body"] as? String) ?? ""))")
@@ -221,9 +223,9 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
 
     // MARK: pull requests (via broker → gh)
 
-    private func fetchPRs() {
+    private func fetchPRs(state: String = "open") {
         eval("window.UTGit.setLoading('loading pull requests…')")
-        fetch("/git/prs?dir=\(enc(dir))") { [weak self] json in
+        fetch("/git/prs?dir=\(enc(dir))&state=\(enc(state))") { [weak self] json in
             // gh pr list returns a bare array; a classified error is an object.
             let payload = json.hasPrefix("[") ? "{prs:\(json)}" : json
             self?.eval("window.UTGit.setPRs(\(payload))")
