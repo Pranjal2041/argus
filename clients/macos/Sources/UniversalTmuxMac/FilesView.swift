@@ -37,7 +37,9 @@ struct FilesView: View {
         .background(quickOpenShortcut)
         .overlay { quickOpenOverlay }
         .overlay { grepOverlay }
+        .overlay { goToOverlay }
         .background(grepShortcut)
+        .background(goToShortcut)
         .onAppear { if model.tabs.isEmpty, let m = (machines.first { $0.isLocal } ?? machines.first) { model.addTab(m) } }
     }
 
@@ -49,6 +51,20 @@ struct FilesView: View {
     private var grepShortcut: some View {
         Button("") { model.active?.openGrep() }
             .keyboardShortcut("f", modifiers: [.command, .shift]).opacity(0).frame(width: 0, height: 0)
+    }
+
+    private var goToShortcut: some View {
+        Button("") { model.active?.openGoTo() }
+            .keyboardShortcut("g", modifiers: [.command, .shift]).opacity(0).frame(width: 0, height: 0)
+    }
+
+    @ViewBuilder private var goToOverlay: some View {
+        if let tab = model.active, tab.showGoTo {
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.18).ignoresSafeArea().onTapGesture { tab.closeGoTo() }
+                GoToFolderView(tab: tab).padding(.top, 70)
+            }
+        }
     }
 
     @ViewBuilder private var grepOverlay: some View {
@@ -751,6 +767,109 @@ struct GrepView: View {
             Text(line).foregroundColor(Theme.textSecondary)
         }
     }
+}
+
+/// Go to Folder (⌘G): type or paste an absolute path (~, $VAR, and relative are
+/// resolved by the broker) and jump the tree there. Live directory completion,
+/// ↑/↓ to pick, ⇥ to complete, ↩ to go, Esc to cancel.
+struct GoToFolderView: View {
+    @ObservedObject var tab: FileTab
+    @State private var text = ""
+    @State private var sel = -1
+    @State private var invalid = false
+    @FocusState private var focused: Bool
+    @State private var keyMonitor: Any?
+    private var comps: [String] { tab.goToCompletions }   // observed via @ObservedObject; re-renders on change
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.right.to.line").font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
+                TextField("Go to folder…", text: $text)
+                    .textFieldStyle(.plain).font(.system(size: 15, design: .monospaced))
+                    .foregroundStyle(invalid ? Theme.waiting : Theme.textPrimary)
+                    .focused($focused)
+                    .onChange(of: text) { _ in invalid = false; sel = -1; tab.refreshGoToCompletions(text) }
+                    .onSubmit { go() }
+                if invalid { Text("not found").font(.system(size: 11)).foregroundStyle(Theme.waiting) }
+            }
+            .padding(.horizontal, 14).frame(height: 46)
+            if !comps.isEmpty {
+                Rectangle().fill(Theme.border).frame(height: 1)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 1) {
+                            // Identity = the path string ONLY. A previous `.id(i)` (row index)
+                            // fought the ForEach identity and made SwiftUI reuse stale rows, so
+                            // the list kept showing the old folder after the query changed.
+                            ForEach(Array(comps.enumerated()), id: \.element) { i, c in
+                                HStack(spacing: 8) {
+                                    Image(systemName: c.hasSuffix(tab.sep) ? "folder" : iconForFile(c))
+                                        .font(.system(size: 12)).foregroundStyle(i == sel ? Theme.accent : Theme.textTertiary).frame(width: 16)
+                                    Text(lastSeg(c)).font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(Theme.textPrimary).lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12).frame(height: 30)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(i == sel ? Theme.accent.opacity(0.16) : .clear))
+                                .contentShape(Rectangle())
+                                .onTapGesture { text = c; go() }
+                            }
+                        }.padding(8)
+                    }
+                    .frame(maxHeight: 320)
+                    .onChange(of: sel) { i in
+                        if i >= 0, i < comps.count { withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(comps[i]) } }
+                    }
+                }
+            }
+        }
+        .frame(width: 620)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.sidebarBackground))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
+        .onAppear {
+            // Start EMPTY (not prefilled with the current path): typing "/compute"
+            // then anchors at root, "~/…" at home, a bare name stays relative to the
+            // current folder. Prefilling forced every path to append to the current
+            // folder. The completion list still shows the current folder while empty.
+            text = ""; sel = -1
+            installKeys(); focusSoon(); tab.refreshGoToCompletions("")
+        }
+        .onChange(of: tab.goToCompletions) { _ in sel = -1 }
+        .onDisappear { removeKeys() }
+        .onExitCommand { tab.closeGoTo() }
+    }
+
+    private func lastSeg(_ p: String) -> String {
+        let t = p.hasSuffix(tab.sep) ? String(p.dropLast()) : p
+        return t.range(of: tab.sep, options: .backwards).map { String(t[$0.upperBound...]) } ?? t
+    }
+    private func go() {
+        let target = (sel >= 0 && sel < comps.count) ? comps[sel] : text
+        Task {
+            if await tab.goTo(target) { tab.closeGoTo() }
+            else { invalid = true }
+        }
+    }
+    private func focusSoon() {
+        focused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true }
+    }
+    private func installKeys() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            let n = comps.count
+            switch e.keyCode {
+            case 125: if n > 0 { sel = (sel + 1) % n; text = comps[sel] }; return nil            // ↓
+            case 126: if n > 0 { sel = (sel - 1 + n) % n; text = comps[sel] }; return nil        // ↑
+            case 48: if n > 0 { sel = max(0, sel); text = comps[sel] }; return nil               // ⇥ complete
+            case 36, 76: go(); return nil                                                        // ↩
+            case 53: tab.closeGoTo(); return nil                                                 // Esc
+            default: return e
+            }
+        }
+    }
+    private func removeKeys() { if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil } }
 }
 
 func iconForFile(_ name: String) -> String {

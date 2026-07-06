@@ -539,6 +539,65 @@ final class FileTab: ObservableObject, Identifiable {
     func parentOf(_ path: String) -> String { parentPath(path) }
     func setRootPath(_ path: String) { Task { await setRoot(path) } }
 
+    // ---- Go to Folder (⌘G): jump to a typed/pasted path ----
+    @Published var showGoTo = false
+    func openGoTo() { showGoTo = true }
+    func closeGoTo() { showGoTo = false }
+
+    /// Resolve `raw` (absolute, ~, $VAR, or relative to the current root) via the
+    /// broker and navigate there — a directory roots the tree, a file roots at its
+    /// parent and opens. Returns false if the path doesn't exist.
+    func goTo(_ raw: String) async -> Bool {
+        let q = raw.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty, var c = URLComponents(string: httpBase + "/fs/stat") else { return false }
+        c.queryItems = [.init(name: "path", value: q), .init(name: "base", value: rootPath)]
+        guard let url = c.url,
+              let (d, _) = try? await fsSession.data(from: url),
+              let s = try? JSONDecoder().decode(StatResp.self, from: d), s.exists else { return false }
+        await openResolved(s.path, isDir: s.isDir, exists: s.exists, name: s.name, size: s.size, line: nil)
+        return true
+    }
+
+    // Completions live on the model (a @MainActor reference type) so "latest query
+    // wins" is reliable — the same logic in @State inside the struct View let the
+    // slow initial current-folder fetch overwrite a later query (the bug where
+    // typing /compute still showed the current folder).
+    @Published var goToCompletions: [String] = []
+    private var compGen = 0
+    func refreshGoToCompletions(_ raw: String) {
+        compGen += 1
+        let gen = compGen
+        Task {
+            let r = await pathCompletions(raw)
+            if gen == compGen { goToCompletions = r }   // ignore superseded (stale) results
+        }
+    }
+
+    /// Directory-entry completions for the last path segment of `raw` (dirs first),
+    /// so ⌘G feels like Finder's Go-to-Folder. Returns full paths.
+    func pathCompletions(_ raw: String) async -> [String] {
+        // Split at the last path separator. Split on EITHER "/" or "\" regardless
+        // of the tab's `sep`: if we split on `sep` alone and `sep` doesn't match
+        // what the user typed (e.g. sep="\" on a Windows tab, or an empty sep),
+        // range(of:) finds nothing and `dir` wrongly stays = current folder — the
+        // "it only filters the current folder" bug.
+        let s = sep.first ?? "/"
+        var dir = rootPath, frag = raw
+        if let r = raw.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\"), options: .backwards) {
+            dir = String(raw[..<r.lowerBound]); frag = String(raw[r.upperBound...])
+        }
+        if dir.isEmpty { dir = String(s) }   // "/foo" → list root
+        guard var c = URLComponents(string: httpBase + "/fs/list") else { return [] }
+        c.queryItems = [.init(name: "path", value: dir)]
+        guard let url = c.url,
+              let (d, _) = try? await fsSession.data(from: url),
+              let res = try? JSONDecoder().decode(ListResp.self, from: d) else { return [] }
+        let lf = frag.lowercased()
+        let matched = res.entries.filter { lf.isEmpty || $0.name.lowercased().hasPrefix(lf) }
+            .sorted { ($0.isDir ? 0 : 1, $0.name.lowercased()) < ($1.isDir ? 0 : 1, $1.name.lowercased()) }
+        return matched.prefix(40).map { $0.path + ($0.isDir ? sep : "") }
+    }
+
     /// Toggle a directory open/closed (loading children on first open) and select it.
     /// Bumps `treeRevision` so the flattened visible-row list recomputes.
     func toggleExpand(_ node: FileNode) {
