@@ -1496,14 +1496,17 @@ private struct CommandPalette: View {
                             .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
                                 .fill(i == sel ? Theme.accent.opacity(0.16) : .clear))
                             .contentShape(Rectangle())
-                            .id(i)
+                            // Identity is the item's own id (the ForEach id). A prior
+                            // `.id(i)` (row index) fought that identity, so SwiftUI reused
+                            // rows by position and kept STALE content when the filtered
+                            // list changed — filtering (incl. commands) looked broken.
                             .onTapGesture { sel = i; run() }
                         }
                     }
                     .padding(8)
                 }
                 .frame(height: 360)
-                .onChange(of: sel) { i in withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(i) } }
+                .onChange(of: sel) { i in if i >= 0, i < items.count { withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(items[i].id) } } }
             }
         }
         .frame(width: 560)

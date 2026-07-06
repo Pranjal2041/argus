@@ -603,7 +603,7 @@ struct QuickOpenView: View {
                             }
                             .padding(.horizontal, 12).frame(height: 32)
                             .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(i == sel ? Theme.accent.opacity(0.16) : .clear))
-                            .contentShape(Rectangle()).id(i)
+                            .contentShape(Rectangle())   // no `.id(i)`: it fought the ForEach id and rendered stale rows on filter
                             .onTapGesture { sel = i; open() }
                         }
                         if matches.isEmpty {
@@ -614,7 +614,7 @@ struct QuickOpenView: View {
                     .padding(8)
                 }
                 .frame(height: 380)
-                .onChange(of: sel) { i in withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(i) } }
+                .onChange(of: sel) { i in if i >= 0, i < matches.count { withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(matches[i].id) } } }
             }
         }
         .frame(width: 600)
