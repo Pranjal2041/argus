@@ -128,20 +128,3 @@ struct UtteranceParser {
     }
 }
 
-// MARK: - Echo-based secret rule
-
-/// If what was typed never appears back in the pane, the terminal treated it as
-/// secret input (a password prompt), so the journal must too. Both sides are
-/// reduced to their alphanumerics before comparing, so line wrapping, input-box
-/// borders (│…│), and padding can't hide a genuine echo; the trailing fragment
-/// is enough to confirm.
-func echoConfirms(said: String, tail: String) -> Bool {
-    func strip(_ s: String) -> String {
-        String(String.UnicodeScalarView(s.unicodeScalars.filter {
-            CharacterSet.alphanumerics.contains($0)
-        }))
-    }
-    let needle = strip(said)
-    guard !needle.isEmpty else { return true }
-    return strip(tail).contains(String(needle.suffix(12)))
-}
