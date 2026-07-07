@@ -36,7 +36,12 @@ enum WrappedStats {
         ]
 
         let utter = evs.filter { $0.kind == "utterance" }
-        let saidUtter = utter.filter { !($0.bool("redacted")) && !($0.str("said").isEmpty) }
+        // Canonical de-noised message list — see cleanedMessages(). "Messages you sent"
+        // must be real messages to agents, so this drops raw-input noise that was inflating
+        // the count: empty keystrokes (bare Enter), pure app slash-commands (/model, /resume…),
+        // cumulative-typing prefixes ("c" superseded by "claude …"), and exact repeats.
+        let messages = cleanedMessages(utter)
+        let saidUtter = messages
         func k(_ kind: String) -> [Event] { evs.filter { $0.kind == kind } }
 
         // ---- canonical W&B run ids ----
@@ -51,7 +56,7 @@ enum WrappedStats {
         let chars = saidUtter.reduce(0) { $0 + $1.str("said").count }
         var totals: [String: Any] = [:]
         totals["events"] = evs.count
-        totals["utterances"] = utter.count
+        totals["utterances"] = messages.count
         totals["chars"] = chars
         totals["agents"] = Set(evs.compactMap { $0.sessionKey }).count
         totals["machines"] = Set(evs.compactMap { $0.strOrNil("machine") }).count
@@ -63,8 +68,7 @@ enum WrappedStats {
         totals["workflows"] = k("workflowRun").count
         totals["todos"] = k("todo").count
         totals["fileSaves"] = k("fileSave").count
-        totals["redacted"] = utter.filter { $0.bool("redacted") }.count
-        totals["phoneMsgs"] = utter.filter { $0.str("src") == "phone" }.count
+        totals["phoneMsgs"] = messages.filter { $0.str("src") == "phone" }.count
         totals["corrections"] = k("manualStatus").count
         totals["outcomes"] = k("outcome").count
         totals["viewedMinutes"] = Int(k("viewed").reduce(0.0) { $0 + $1.dbl("dwellSec") } / 60)
@@ -104,7 +108,7 @@ enum WrappedStats {
 
         // ---- agents leaderboard ----
         var agents: [String: (session: String, machine: String, msgs: Int, firstT: Date, lastT: Date)] = [:]
-        for e in utter {
+        for e in messages {
             guard let key = e.sessionKey, let d = e.date else { continue }
             if var a = agents[key] { a.msgs += 1; a.firstT = min(a.firstT, d); a.lastT = max(a.lastT, d); agents[key] = a }
             else { agents[key] = (e.str("session"), e.str("machine"), 1, d, d) }
@@ -350,7 +354,6 @@ enum WrappedStats {
         if i(r, "nightScore") >= 30 { add("🦉", "Night Owl", "\(i(r, "nightScore"))% of activity after midnight") }
         if i(t, "phoneMsgs") > 0 { add("📱", "Phone Warrior", "\(i(t, "phoneMsgs")) messages sent from your phone") }
         if i(t, "chars") >= 100_000 { add("✍️", "Novelist", "≈\(i(t, "chars") / 1800) pages typed to agents") }
-        if i(t, "redacted") >= 50 { add("🔒", "Vault Keeper", "\(i(t, "redacted")) secrets auto-redacted") }
         if i(t, "wandbRuns") >= 5 { add("🧪", "Experimentalist", "\(i(t, "wandbRuns")) experiments launched") }
         if i(t, "gitPanels") >= 20 { add("🔍", "Code Reviewer", "\(i(t, "gitPanels")) diffs opened") }
         if let s = out["streak"] as? [String: Any], let lg = s["longest"] as? Int, lg >= 3 { add("🔥", "On a Roll", "\(lg)-day active streak") }
@@ -368,6 +371,49 @@ enum WrappedStats {
         if ratio >= 4 { return ["name": "The Delegator", "blurb": "You point; your agents do. Leverage is your love language."] }
         if machines >= 6 { return ["name": "The Fleet Admiral", "blurb": "Your reach spans laptops, clusters, and the cloud."] }
         return ["name": "The Orchestrator", "blurb": "One mind, many machines, one baton."]
+    }
+
+    // MARK: message de-noising
+
+    /// The raw `utterance` stream is input events, not messages. Turn it into the real
+    /// messages the user sent to agents by dropping, per session in time order:
+    ///  • empty entries (bare Enter / stray keys with no text),
+    ///  • pure app slash-commands (/model, /resume, /exit …) — client commands, not messages,
+    ///  • cumulative-typing prefixes (a short entry that the very next entry supersedes),
+    ///  • a fragment immediately continued by the next entry within two minutes (a single
+    ///    message the capture split into pieces — merged, not double-counted),
+    ///  • exact repeats of the previous kept message within two minutes.
+    private static func cleanedMessages(_ utter: [Event]) -> [Event] {
+        var bySession: [String: [Event]] = [:]
+        for e in utter { bySession[e.sessionKey ?? "?", default: []].append(e) }
+        var kept: [Event] = []
+        for (_, raw) in bySession {
+            let list = raw.sorted { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
+            var lastSaid: String?, lastDate: Date?
+            for (i, e) in list.enumerated() {
+                let said = e.str("said").trimmingCharacters(in: .whitespacesAndNewlines)
+                if said.isEmpty { continue }                    // no text = not a message
+                if isSlashCommand(said) { continue }            // app command, not a message
+                if i + 1 < list.count, let d0 = e.date, let d1 = list[i + 1].date,
+                   d1.timeIntervalSince(d0) < 120 {             // same message split across entries
+                    let nsaid = list[i + 1].str("said").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if nsaid != said, nsaid.hasPrefix(said) { continue }  // this entry is superseded by the next
+                }
+                if let ls = lastSaid, ls == said, let ld = lastDate,      // exact repeat
+                   let d = e.date, d.timeIntervalSince(ld) < 120 { continue }
+                kept.append(e); lastSaid = said; lastDate = e.date
+            }
+        }
+        return kept
+    }
+
+    /// A pure client slash-command: "/model", "/resume <id>", "/exit". Not a path like
+    /// "/Users/…" (the token after "/" would contain a slash) and not a message that merely
+    /// starts with a slash.
+    private static func isSlashCommand(_ s: String) -> Bool {
+        guard s.first == "/" else { return false }
+        let head = s.dropFirst().prefix { $0 != " " }
+        return !head.isEmpty && head.count <= 15 && head.allSatisfy { $0.isLetter || $0 == "-" }
     }
 
     // MARK: journal loading

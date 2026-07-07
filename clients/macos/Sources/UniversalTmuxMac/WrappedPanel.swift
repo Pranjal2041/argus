@@ -55,13 +55,50 @@ final class WrappedPanel: NSObject, WKScriptMessageHandler {
 
     private func compute() {
         let days = windowDays
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let stats = WrappedStats.compute(days: days)
             guard let data = try? JSONSerialization.data(withJSONObject: stats),
                   let json = String(data: data, encoding: .utf8) else { return }
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async {
                 self?.webView.evaluateJavaScript("window.UTWrapped.setData(\(json))", completionHandler: nil)
+                self?.loadPersona(stats: stats, days: days)
             }
+        }
+    }
+
+    // MARK: Claude-generated persona (the finale). Cached so it doesn't re-spend on
+    // every open; regenerated only when the picture has meaningfully changed.
+
+    private func loadPersona(stats: [String: Any], days: Int) {
+        let utter = (stats["totals"] as? [String: Any])?["utterances"] as? Int ?? 0
+        if let cached = Self.cachedPersona(days: days, utterances: utter) { inject(cached); return }
+        Task.detached(priority: .userInitiated) {
+            guard let p = await WrappedPersona.generate(stats: stats) else { return }
+            Self.cache(p, days: days, utterances: utter)
+            await MainActor.run { self.inject(p) }
+        }
+    }
+
+    private func inject(_ p: WrappedPersona.Persona) {
+        guard let data = try? JSONEncoder().encode(p), let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.UTWrapped.setPersona(\(json))", completionHandler: nil)
+    }
+
+    private struct Cached: Codable { let persona: WrappedPersona.Persona; let days: Int; let utterances: Int }
+    nonisolated private static let cacheKey = "ut.wrapped.persona.v1"
+
+    /// Reuse the cached persona when it was made for the same window and the message
+    /// count is within 20% (so a couple new messages don't trigger a fresh model call).
+    nonisolated private static func cachedPersona(days: Int, utterances: Int) -> WrappedPersona.Persona? {
+        guard let d = UserDefaults.standard.data(forKey: cacheKey),
+              let c = try? JSONDecoder().decode(Cached.self, from: d), c.days == days else { return nil }
+        let lo = Double(c.utterances) * 0.8, hi = Double(c.utterances) * 1.2 + 20
+        return (Double(utterances) >= lo && Double(utterances) <= hi) ? c.persona : nil
+    }
+
+    nonisolated private static func cache(_ p: WrappedPersona.Persona, days: Int, utterances: Int) {
+        if let d = try? JSONEncoder().encode(Cached(persona: p, days: days, utterances: utterances)) {
+            UserDefaults.standard.set(d, forKey: cacheKey)
         }
     }
 }

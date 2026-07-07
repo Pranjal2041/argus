@@ -118,9 +118,11 @@ function listCard(cls, kick, title, items, note) {
   c.body.appendChild(col); if (note) c.body.appendChild(el('div', 'footnote', note)); return c;
 }
 
-// crisp single-stat slide: kicker + one giant number + one line
-function bigCard(kick, huge, subHTML) {
+// crisp single-stat slide: kicker + one giant number + one line, with a faint
+// oversized echo of the number behind it for depth
+function bigCard(kick, huge, subHTML, ghost) {
   const c = card(); kicker(c, kick);
+  c.appendChild(el('div', 'ghost', esc(ghost != null ? ghost : huge)));
   c.body.appendChild(el('div', 'huge', huge));
   c.body.appendChild(el('div', 'sub', subHTML));
   return c;
@@ -327,12 +329,13 @@ function buildCards(D) {
     c.body.appendChild(g); push(c);
   }
 
-  // archetype finale
+  // archetype finale (persona name/blurb/narrative come from Claude; falls back to rules)
   (() => {
     const a = D.archetype || { name: 'The Orchestrator', blurb: 'One mind, many machines.' };
-    const c = card('hero'); kicker(c, 'You are');
+    const c = card('hero finale'); kicker(c, 'You are');
     c.body.appendChild(el('h1', null, esc(a.name)));
-    c.body.appendChild(el('p', null, esc(a.blurb)));
+    if (a.blurb) c.body.appendChild(el('div', 'sub', esc(a.blurb)));
+    if (a.narrative) c.body.appendChild(el('div', 'narrative', esc(a.narrative)));
     const row = el('div', 'statrow');
     row.appendChild(el('span', 'chip', `<b>${fmt(T.utterances)}</b> messages`));
     row.appendChild(el('span', 'chip', `<b>${fmt(T.agents)}</b> agents`));
@@ -368,23 +371,24 @@ function go(i) { state.idx = Math.max(0, Math.min(state.cards.length - 1, i)); r
 function next() { if (state.idx < state.cards.length - 1) go(state.idx + 1); }
 function prev() { if (state.idx > 0) go(state.idx - 1); }
 
+function populateGrid() {
+  const g = $('#grid'); g.innerHTML = '';
+  const W = (state.data && state.data.window) || {};
+  const head = el('div', null, ''); head.id = 'gridHead';
+  head.appendChild(el('h1', null, 'Argus Wrapped'));
+  head.appendChild(el('span', null, `${pretty(W.startDay)} – ${pretty(W.endDay)} · ${W.activeDays || 0} active days`));
+  g.appendChild(head);
+  buildCards(state.data).forEach(c => g.appendChild(c));
+  const back = el('button', 'mode', '<span class="ico">◂</span> Back to story'); back.id = 'backBtn';
+  back.onclick = toggleGrid; g.appendChild(back);
+  g.scrollTop = 0;
+}
 function toggleGrid() {
   state.grid = !state.grid;
   $('#deck').hidden = state.grid;
   $('#chrome').hidden = state.grid;
-  const g = $('#grid'); g.hidden = !state.grid;
-  if (state.grid) {
-    g.innerHTML = '';
-    const W = (state.data && state.data.window) || {};
-    const head = el('div', null, ''); head.id = 'gridHead';
-    head.appendChild(el('h1', null, 'Argus Wrapped'));
-    head.appendChild(el('span', null, `${pretty(W.startDay)} – ${pretty(W.endDay)} · ${W.activeDays || 0} active days`));
-    g.appendChild(head);
-    buildCards(state.data).forEach(c => g.appendChild(c));
-    const back = el('button', 'mode', '<span class="ico">◂</span> Back to story'); back.id = 'backBtn';
-    back.onclick = toggleGrid; g.appendChild(back);
-    g.scrollTop = 0;
-  }
+  $('#grid').hidden = !state.grid;
+  if (state.grid) populateGrid();
 }
 
 function show(data) {
@@ -420,6 +424,17 @@ window.addEventListener('keydown', e => {
 // ---------- Swift bridge ----------
 window.UTWrapped = {
   setData(obj) { try { show(typeof obj === 'string' ? JSON.parse(obj) : obj); } catch (e) { $('#loading').textContent = 'Error: ' + e.message; $('#loading').hidden = false; } },
+  // Claude's persona arrives after the deck is already showing — fold it into the
+  // finale and rebuild in place (keeps the current slide), without a flash.
+  setPersona(p) {
+    if (!p || !p.name || !state.data) return;
+    state.data.archetype = { name: p.name, blurb: p.blurb || '', narrative: p.narrative || '' };
+    if (state.grid) { populateGrid(); return; }
+    const idx = state.idx;
+    state.cards = buildCards(state.data);
+    state.idx = Math.min(idx, state.cards.length - 1);
+    render();
+  },
   setTheme(t) { const r = document.documentElement.style; if (t.bg) r.setProperty('--bg', t.bg); if (t.fg) r.setProperty('--ink', t.fg); }
 };
 // tell Swift we are ready for data
