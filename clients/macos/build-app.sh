@@ -17,6 +17,7 @@ cp -R Resources/monaco "$APP/Contents/Resources/" 2>/dev/null || true       # Mo
 cp -R Resources/render "$APP/Contents/Resources/" 2>/dev/null || true      # offline marked+KaTeX+hljs bundle for Renders (⇧⌘P)
 cp -R Resources/gitview "$APP/Contents/Resources/" 2>/dev/null || true
 cp -R Resources/ledger "$APP/Contents/Resources/" 2>/dev/null || true    # activity ledger viewer
+cp -R Resources/wrapped "$APP/Contents/Resources/" 2>/dev/null || true   # Argus Wrapped deck/dashboard
 
 echo "Built $(pwd)/$APP"
 

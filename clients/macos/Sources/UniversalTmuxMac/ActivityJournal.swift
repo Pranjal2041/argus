@@ -178,13 +178,6 @@ final class UtteranceSession {
     private var outcomeWork: DispatchWorkItem?
 
     static let idleGap: TimeInterval = 8        // silence that ends an utterance
-    // The secret rule (typed text never echoed = hidden input, e.g. a sudo
-    // password → drop it) needs PATIENCE: claude-code clears its input box on
-    // submit and renders the message into the transcript a beat later, so a
-    // single early look wrongly redacted ~15% of real messages. Look up to
-    // three times; echo found at ANY look keeps the text; only silent-at-all
-    // redacts — which leaves the rule firing solely on truly hidden input.
-    static let echoLooks: [TimeInterval] = [1.5, 4, 8]
     static let outcomeDelay: TimeInterval = 480 // input → consequence pairing snapshot
 
     func feed(_ bytes: [UInt8], view v: TerminalView) {
@@ -222,35 +215,12 @@ final class UtteranceSession {
         // nudge a pager, an accidental tap) is noise, not an interaction.
         if said.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && keys.isEmpty { return }
         let mySaw = saw, myID = id, t0 = started
-        let v = view
         var f = ActivityJournal.shared.ctx(ref)
         f["id"] = myID
         f["saw"] = mySaw
         if !keys.isEmpty { f["keys"] = keys }
-        if said.isEmpty {
-            ActivityJournal.shared.log("utterance", f, date: t0)
-        } else {
-            // Patient echo check: look at each deadline with a FRESH capture
-            // (the echo may render late); write as soon as it's found.
-            func look(_ i: Int) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.echoLooks[i]
-                                              - (i > 0 ? Self.echoLooks[i - 1] : 0)) { [weak v] in
-                    let tail = v.map { Self.tail($0, max: 60).joined(separator: "\n") } ?? ""
-                    if echoConfirms(said: said, tail: tail) {
-                        f["said"] = said
-                        ActivityJournal.shared.log("utterance", f, date: t0)
-                    } else if i + 1 < Self.echoLooks.count {
-                        look(i + 1)
-                    } else {
-                        // Silent at every look → genuinely hidden input (a password).
-                        f["redacted"] = true
-                        f["saidChars"] = said.count
-                        ActivityJournal.shared.log("utterance", f, date: t0)
-                    }
-                }
-            }
-            look(0)
-        }
+        if !said.isEmpty { f["said"] = said }
+        ActivityJournal.shared.log("utterance", f, date: t0)
         // One outcome snapshot per pane; a newer utterance supersedes a pending one.
         outcomeWork?.cancel()
         let w = DispatchWorkItem { [weak self] in

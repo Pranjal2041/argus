@@ -11,6 +11,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
     @StateObject private var gitPanels = GitPanels()          // read-only git viewer webviews (kept alive per session)
     @StateObject private var ledgerHost = LedgerPanelHost()    // in-app Activity Ledger webview (kept alive)
+    @StateObject private var wrappedHost = WrappedPanelHost()  // Argus Wrapped deck/dashboard webview (kept alive)
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
 
@@ -66,6 +67,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false } }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
+                Button("Argus Wrapped…") { state.openWindowRequest = "wrapped" }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
@@ -142,6 +145,14 @@ struct UniversalTmuxApp: App {
                 .allowsFullScreen()
         }
         .defaultSize(width: 1100, height: 760)
+        .windowStyle(.hiddenTitleBar)
+
+        Window("Argus Wrapped", id: "wrapped") {
+            WrappedWindowView(host: wrappedHost)
+                .preferredColorScheme(.dark)
+                .allowsFullScreen()
+        }
+        .defaultSize(width: 980, height: 900)
         .windowStyle(.hiddenTitleBar)
 
 
@@ -1463,6 +1474,7 @@ private struct CommandPalette: View {
             ("folder", "Open Files", "", { state.openWindowRequest = "files" }),
             ("chart.line.uptrend.xyaxis", "Open Dashboards", "", { state.openWindowRequest = "dashboards" }),
             ("network", "Open Port Forwards", "", { state.openWindowRequest = "ports" }),
+            ("sparkles", "Argus Wrapped", "", { state.openWindowRequest = "wrapped" }),
         ]
         for (ic, t, hint, a) in actions where match(t) {
             out.append(Item(id: "a:" + t, icon: ic, title: t, subtitle: hint, run: a))

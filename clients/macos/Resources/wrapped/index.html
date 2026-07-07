@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argus Wrapped</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="stage">
+    <div id="loading">Reading your journal…</div>
+
+    <!-- full-bleed story deck -->
+    <div id="deck" hidden></div>
+
+    <!-- deck chrome (progress, arrows, counter, mode toggle) -->
+    <div id="chrome" hidden>
+      <div id="bars"></div>
+      <button id="prev" class="nav" aria-label="Previous">‹</button>
+      <button id="next" class="nav" aria-label="Next">›</button>
+      <div id="counter"></div>
+      <button id="modeBtn" class="mode" title="Overview (G)"><span class="ico">▦</span> Overview</button>
+    </div>
+
+    <!-- dashboard / overview grid -->
+    <div id="grid" hidden></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
