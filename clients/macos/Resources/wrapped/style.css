@@ -1,0 +1,146 @@
+:root{
+  --bg:#0b0c10; --ink:#f4f5fa; --ink2:#b9bdd0; --ink3:#7a7f96;
+  --ca:#ffb454;                 /* per-card accent (overridden by theme classes) */
+  --good:#7ee0a6; --bad:#ff8098;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",system-ui,sans-serif;
+  --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+/* id-selector display rules below would otherwise beat the UA [hidden] rule,
+   leaving #loading / #grid painting as invisible full-screen overlays that
+   swallow clicks on the deck. Make hidden always win. */
+[hidden]{display:none!important}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--ink); font-family:var(--font);
+  overflow:hidden; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+#stage{position:fixed; inset:0}
+#loading{position:absolute; inset:0; display:grid; place-items:center; color:var(--ink3); font-size:15px; letter-spacing:.02em}
+
+/* ============ full-bleed story deck ============ */
+#deck{position:fixed; inset:0}
+.card{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  background:var(--bg); overflow:hidden;
+  opacity:0; pointer-events:none; transition:opacity .5s ease;
+}
+.card.active{opacity:1; pointer-events:auto; z-index:2}
+/* soft vignette so text always reads */
+.card::after{content:""; position:absolute; inset:0; pointer-events:none;
+  background:radial-gradient(120% 90% at 50% 0%, transparent 40%, rgba(0,0,0,.35) 100%)}
+
+.inner{position:relative; z-index:1; width:min(880px,84vw); display:flex; flex-direction:column;
+  gap:22px; padding:40px 0; max-height:100%; }
+.card .kicker{color:var(--ca); font-size:13px; font-weight:700; letter-spacing:.18em; text-transform:uppercase}
+.card h1{font-size:clamp(40px,7vw,76px); font-weight:800; line-height:1.02; letter-spacing:-.02em}
+.card h2{font-size:clamp(24px,3.2vw,34px); font-weight:700; line-height:1.1; letter-spacing:-.01em}
+.card p{color:var(--ink2); font-size:clamp(16px,1.7vw,20px); line-height:1.55; max-width:46ch}
+.card .huge{font-size:clamp(96px,20vw,240px); font-weight:800; line-height:.86; letter-spacing:-.04em;
+  background:linear-gradient(150deg,#fff 0%, var(--ca) 130%);
+  -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; padding-bottom:.04em}
+.card .sub{color:var(--ink2); font-size:clamp(17px,1.9vw,22px); line-height:1.5; max-width:44ch}
+.card .sub b{color:var(--ink); font-weight:700}
+.card .footnote{color:var(--ink3); font-size:13px; letter-spacing:.01em}
+
+/* chips + badges */
+.statrow{display:flex; flex-wrap:wrap; gap:10px; margin-top:4px}
+.chip{background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.12); border-radius:999px;
+  padding:9px 16px; font-size:15px; color:var(--ink2)}
+.chip b{color:var(--ink); font-weight:700; margin-right:2px}
+.awards{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+.badge{background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12);
+  border-radius:14px; padding:13px 15px; display:flex; gap:13px; align-items:center}
+.badge .ico{width:38px; height:38px; flex:0 0 auto; display:grid; place-items:center;
+  background:rgba(255,255,255,.06); border-radius:11px; font-size:20px}
+.badge .btext{display:flex; flex-direction:column; gap:2px; min-width:0}
+.badge .bname{color:var(--ink); font-weight:700; font-size:15px}
+.badge .bdetail{color:var(--ink3); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+/* todo checkmarks */
+.li.todo{border-bottom:0; padding:9px 2px}
+.li .check{min-width:22px; color:var(--ink3); font-size:16px}
+.li .check.on{color:var(--good)}
+.li .name.done{text-decoration:line-through; opacity:.55}
+
+/* fleet-state donut + legend */
+.donutwrap{display:flex; align-items:center; gap:34px; margin-top:6px; flex-wrap:wrap}
+.donutsvg{width:210px; flex:0 0 auto}
+.legend{display:flex; flex-direction:column; gap:12px; flex:1; min-width:180px}
+.legrow{display:flex; align-items:center; gap:11px; font-size:16px}
+.legdot{width:12px; height:12px; border-radius:3px; flex:0 0 auto}
+.legname{color:var(--ink2)}
+.legpct{margin-left:auto; color:var(--ink); font-weight:700; font-variant-numeric:tabular-nums; font-family:var(--mono)}
+
+/* lists */
+.listcol{display:flex; flex-direction:column; gap:2px}
+.li{display:flex; gap:14px; align-items:baseline; font-size:17px; color:var(--ink2);
+  padding:11px 2px; border-bottom:1px solid rgba(255,255,255,.07)}
+.li:last-child{border-bottom:0}
+.li .rank{color:var(--ink3); font-variant-numeric:tabular-nums; min-width:22px; font-weight:700}
+.li .name{color:var(--ink); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.li .val{margin-left:auto; color:var(--ca); font-variant-numeric:tabular-nums; font-family:var(--mono); white-space:nowrap}
+.quote{font-size:17px; color:var(--ink); line-height:1.5; border-left:3px solid var(--ca);
+  padding:4px 0 4px 16px; margin:4px 0}
+.quote b{color:var(--ca)}
+
+/* charts */
+.chartwrap{width:100%; margin-top:4px}
+svg{width:100%; height:auto; display:block; overflow:visible}
+.axis{fill:var(--ink3); font-size:11px; font-family:var(--mono)}
+.bar{fill:rgba(255,255,255,.82)}
+.bar.warm{fill:var(--ca)}
+.dotline{fill:none; stroke-width:2.5}
+
+/* ============ chrome ============ */
+#chrome{position:fixed; inset:0; pointer-events:none; z-index:10}
+#bars{position:fixed; top:0; left:0; right:0; display:flex; gap:5px; padding:14px 18px; pointer-events:auto}
+#bars .seg{flex:1; height:3px; border-radius:3px; background:rgba(255,255,255,.16); cursor:pointer; overflow:hidden}
+#bars .seg i{display:block; height:100%; width:0; background:var(--ink); border-radius:3px; transition:width .35s ease}
+#bars .seg.done i{width:100%}
+#bars .seg.on i{width:100%; background:var(--ca)}
+
+.nav{position:fixed; top:50%; transform:translateY(-50%); width:46px; height:46px; border-radius:50%;
+  background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.14); color:var(--ink2);
+  font-size:24px; line-height:1; cursor:pointer; pointer-events:auto; backdrop-filter:blur(10px);
+  display:grid; place-items:center; transition:.18s}
+.nav:hover{background:rgba(255,255,255,.12); color:var(--ink); border-color:var(--ca)}
+#prev{left:26px} #next{right:26px}
+#counter{position:fixed; bottom:24px; left:50%; transform:translateX(-50%); color:var(--ink3);
+  font-size:13px; font-family:var(--mono); letter-spacing:.06em; pointer-events:none}
+.mode{position:fixed; bottom:20px; right:24px; display:flex; gap:8px; align-items:center;
+  padding:9px 15px; border-radius:11px; background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.14); color:var(--ink2); cursor:pointer; pointer-events:auto;
+  font-size:13px; font-weight:600; font-family:var(--font); transition:.18s}
+.mode:hover{background:rgba(255,255,255,.12); color:var(--ink)}
+.mode .ico{font-size:14px}
+
+/* ============ dashboard / overview grid ============ */
+#grid{position:absolute; inset:0; overflow:auto; padding:64px 32px 90px;
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:16px; align-content:start}
+#gridHead{grid-column:1/-1; display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:6px}
+#gridHead h1{font-size:30px; font-weight:800; letter-spacing:-.01em}
+#gridHead span{color:var(--ink3); font-size:15px}
+#grid .card{position:relative; inset:auto; display:block; height:auto; min-height:180px; opacity:1;
+  pointer-events:auto; border-radius:18px; border:1px solid rgba(255,255,255,.09);
+  box-shadow:0 14px 34px rgba(0,0,0,.4); padding:0}
+#grid .card::after{border-radius:18px}
+#grid .inner{width:auto; padding:22px 24px; gap:14px; max-height:none}
+#grid .card h1{font-size:26px}
+#grid .card .huge{font-size:64px}
+#grid .card .sub,#grid .card p{font-size:15px}
+#grid .card.span2{grid-column:span 2}
+#grid .card .li{font-size:15px; padding:8px 0}
+
+/* back-to-story button lives in the grid */
+#backBtn{position:fixed; bottom:20px; right:24px; z-index:20}
+
+/* ============ per-card color themes (bold, dark enough for white text) ============ */
+.t0{--ca:#ffb454} .t0,.t0.card{background:radial-gradient(130% 120% at 12% 8%, #3a2410 0%, #0d0a06 58%)}
+.t1{--ca:#b79bff} .t1,.t1.card{background:radial-gradient(130% 120% at 12% 8%, #2a1c4a 0%, #0c0916 58%)}
+.t2{--ca:#57e6c9} .t2,.t2.card{background:radial-gradient(130% 120% at 12% 8%, #0d3330 0%, #07120f 58%)}
+.t3{--ca:#ff8fb0} .t3,.t3.card{background:radial-gradient(130% 120% at 12% 8%, #3a1424 0%, #14090d 58%)}
+.t4{--ca:#7db4ff} .t4,.t4.card{background:radial-gradient(130% 120% at 12% 8%, #12294d 0%, #070c15 58%)}
+.t5{--ca:#c3f06b} .t5,.t5.card{background:radial-gradient(130% 120% at 12% 8%, #23330f 0%, #0c0f06 58%)}
+.t6{--ca:#ff9d5c} .t6,.t6.card{background:radial-gradient(130% 120% at 12% 8%, #3d1e0c 0%, #120a05 58%)}
+.t7{--ca:#67d9ff} .t7,.t7.card{background:radial-gradient(130% 120% at 12% 8%, #0a3040 0%, #06111a 58%)}
