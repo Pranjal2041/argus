@@ -539,7 +539,7 @@ final class FileTab: ObservableObject, Identifiable {
     func parentOf(_ path: String) -> String { parentPath(path) }
     func setRootPath(_ path: String) { Task { await setRoot(path) } }
 
-    // ---- Go to Folder (⌘G): jump to a typed/pasted path ----
+    // ---- Go to Folder (⇧⌘G): jump to a typed/pasted path ----
     @Published var showGoTo = false
     func openGoTo() { showGoTo = true }
     func closeGoTo() { showGoTo = false }
@@ -574,21 +574,29 @@ final class FileTab: ObservableObject, Identifiable {
     }
 
     /// Directory-entry completions for the last path segment of `raw` (dirs first),
-    /// so ⌘G feels like Finder's Go-to-Folder. Returns full paths.
+    /// so ⇧⌘G feels like Finder's Go-to-Folder. Returns full absolute paths.
+    ///
+    /// The client only splits off the fragment used for prefix-filtering; the
+    /// directory part (absolute, ~, $VAR, or relative) goes to the broker, which
+    /// resolves it against the tab's current root — the SAME resolution `goTo`'s
+    /// /fs/stat applies on ↩. Resolving client-side (or not at all) is how the
+    /// old list broke for relative and ~ paths: /fs/list fell back to the broker
+    /// process's cwd, which differs per machine, so completions showed another
+    /// folder's entries or nothing.
     func pathCompletions(_ raw: String) async -> [String] {
-        // Split at the last path separator. Split on EITHER "/" or "\" regardless
-        // of the tab's `sep`: if we split on `sep` alone and `sep` doesn't match
-        // what the user typed (e.g. sep="\" on a Windows tab, or an empty sep),
-        // range(of:) finds nothing and `dir` wrongly stays = current folder — the
-        // "it only filters the current folder" bug.
-        let s = sep.first ?? "/"
+        // Split at the last separator, accepting BOTH "/" and "\" regardless of
+        // the tab's `sep`: splitting on `sep` alone broke when it didn't match
+        // what the user typed (e.g. sep="\" on a Windows tab) and silently kept
+        // dir = current folder — the "it only filters the current folder" bug.
         var dir = rootPath, frag = raw
         if let r = raw.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\"), options: .backwards) {
             dir = String(raw[..<r.lowerBound]); frag = String(raw[r.upperBound...])
+            if dir.isEmpty { dir = String(sep.first ?? "/") }   // "/foo" → the filesystem root
+        } else if raw == "~" || raw == ".." || raw.hasPrefix("$") {
+            dir = raw; frag = ""   // a bare ~ / .. / $VAR names a folder, not a filter
         }
-        if dir.isEmpty { dir = String(s) }   // "/foo" → list root
         guard var c = URLComponents(string: httpBase + "/fs/list") else { return [] }
-        c.queryItems = [.init(name: "path", value: dir)]
+        c.queryItems = [.init(name: "path", value: dir), .init(name: "base", value: rootPath)]
         guard let url = c.url,
               let (d, _) = try? await fsSession.data(from: url),
               let res = try? JSONDecoder().decode(ListResp.self, from: d) else { return [] }

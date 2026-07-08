@@ -575,7 +575,8 @@ func main() {
 		prActionResult(w, e)
 	})
 	// File service: browse this host's filesystem (as the broker's user) and
-	// stream file contents. /fs/home → starting points, /fs/list → a directory,
+	// stream file contents. /fs/home → starting points, /fs/list → a directory
+	// (path may be relative/~/$VAR, resolved against an optional base cwd),
 	// /fs/read → a file (Range + content-type, so large files and media stream).
 	mux.HandleFunc("/fs/home", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -585,7 +586,8 @@ func main() {
 	mux.HandleFunc("/fs/list", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		res, err := fsvc.List(r.URL.Query().Get("path"))
+		q := r.URL.Query()
+		res, err := fsvc.List(q.Get("path"), q.Get("base"))
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})

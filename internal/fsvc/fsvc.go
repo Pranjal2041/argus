@@ -59,61 +59,93 @@ type StatResult struct {
 	Size   int64  `json:"size"`
 }
 
-// Stat resolves `path` (which may be relative, or start with ~ or $VAR) against
-// `base` (the clicking session's working directory), cleans it to an absolute
-// platform-native path, and reports whether it exists and is a directory. All
-// resolution happens on the host that owns the path, so Windows `\` vs Unix `/`,
-// symlinks, and the user's real $HOME/$VAR are handled correctly.
-func Stat(path, base string) StatResult {
-	p := strings.TrimSpace(path)
-	// ~ and ~/… → the broker user's home.
-	if p == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			p = home
-		}
-	} else if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(home, p[2:])
-		}
+// expandUser rewrites a leading ~ (alone, or ~/… and ~\…) to the broker user's
+// home directory. Other users' homes (~bob) are left untouched.
+func expandUser(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
 	}
-	// $VAR / ${VAR} (the implicit-link detector matches these).
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		return filepath.Join(home, p[2:])
+	}
+	return p
+}
+
+// resolveCandidates expands ~ and $VAR/${VAR} in path and returns the cleaned
+// candidate paths to try, in priority order:
+//   - an absolute path stands alone;
+//   - a Windows driveless-rooted path (`/foo` or `\foo` — the terminal's link
+//     detector matches `X:/path` starting at the `/`, dropping the drive
+//     letter) is probed on every drive root, then against base;
+//   - anything else is relative: against base first (the Files root or the
+//     session cwd), then against the broker process's cwd as a last resort.
+//
+// The list is never empty; its first element is the best-effort answer when
+// nothing exists.
+func resolveCandidates(path, base string) []string {
+	p := expandUser(strings.TrimSpace(path))
 	if strings.Contains(p, "$") {
 		p = os.ExpandEnv(p)
 	}
+	base = strings.TrimSpace(base)
 
-	// Build resolution candidates, in priority order, then return the first that
-	// exists (or the first as a best-effort path if none do).
 	var cands []string
 	rooted := strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
-	base = strings.TrimSpace(base)
 	switch {
 	case filepath.IsAbs(p):
 		cands = []string{p}
 	case runtime.GOOS == "windows" && rooted:
-		// On Windows the terminal's link detector matches `X:/path` starting at the
-		// `/`, dropping the drive letter — so we receive a driveless-rooted path.
-		// It's rooted on SOME drive: probe each drive root, then fall back to the cwd.
 		for _, root := range systemRoots() {
 			cands = append(cands, filepath.Join(root, p))
 		}
 		if base != "" {
 			cands = append(cands, filepath.Join(base, p))
 		}
-	default: // relative → resolve against the session cwd
+	default:
 		if base != "" {
 			cands = append(cands, filepath.Join(base, p))
 		}
+		if a, err := filepath.Abs(p); err == nil {
+			p = a // the cwd fallback, made absolute per the Path contract
+		}
 		cands = append(cands, p)
 	}
+	for i, c := range cands {
+		cands[i] = filepath.Clean(c)
+	}
+	return cands
+}
 
+// resolve returns the first existing candidate for path-against-base with its
+// FileInfo, or (best-effort) the first candidate with ok=false if none exist.
+func resolve(path, base string) (resolved string, fi os.FileInfo, ok bool) {
+	cands := resolveCandidates(path, base)
 	for _, c := range cands {
-		c = filepath.Clean(c)
 		if fi, err := os.Stat(c); err == nil {
-			return StatResult{Path: c, Name: filepath.Base(c), IsDir: fi.IsDir(), Exists: true, Size: fi.Size()}
+			return c, fi, true
 		}
 	}
-	best := filepath.Clean(cands[0])
-	return StatResult{Path: best, Name: filepath.Base(best)}
+	return cands[0], nil, false
+}
+
+// Stat resolves `path` (which may be relative, or start with ~ or $VAR) against
+// `base` (the clicking session's working directory), cleans it to an absolute
+// platform-native path, and reports whether it exists and is a directory. All
+// resolution happens on the host that owns the path, so Windows `\` vs Unix `/`,
+// symlinks, and the user's real $HOME/$VAR are handled correctly.
+func Stat(path, base string) StatResult {
+	p, fi, ok := resolve(path, base)
+	res := StatResult{Path: p, Name: filepath.Base(p)}
+	if ok {
+		res.IsDir = fi.IsDir()
+		res.Exists = true
+		res.Size = fi.Size()
+	}
+	return res
 }
 
 // Home returns the user's home dir, the platform's filesystem roots, and the
@@ -124,8 +156,11 @@ func Home() HomeResult {
 }
 
 // List returns a directory's entries (directories first, then case-insensitive
-// by name). An empty path returns the roots as directory entries.
-func List(path string) (ListResult, error) {
+// by name). `path` may be relative, ~-prefixed, or contain $VAR — it is resolved
+// against `base` exactly like Stat, and ListResult.Path echoes the resolved
+// absolute directory so the client learns where it actually landed. An empty
+// path returns the roots as directory entries.
+func List(path, base string) (ListResult, error) {
 	if strings.TrimSpace(path) == "" {
 		roots := systemRoots()
 		entries := make([]Entry, 0, len(roots))
@@ -140,13 +175,14 @@ func List(path string) (ListResult, error) {
 		return ListResult{Path: "", Entries: entries}, nil
 	}
 
-	dirents, err := os.ReadDir(path)
+	dir, _, _ := resolve(path, base)
+	dirents, err := os.ReadDir(dir) // a missing or non-dir path errors naturally here
 	if err != nil {
 		return ListResult{}, err
 	}
 	entries := make([]Entry, 0, len(dirents))
 	for _, d := range dirents {
-		full := filepath.Join(path, d.Name())
+		full := filepath.Join(dir, d.Name())
 		e := Entry{Name: d.Name(), Path: full, IsDir: d.IsDir()}
 		if d.Type()&os.ModeSymlink != 0 {
 			e.Symlink = true
@@ -170,7 +206,7 @@ func List(path string) (ListResult, error) {
 		}
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
-	return ListResult{Path: path, Entries: entries}, nil
+	return ListResult{Path: dir, Entries: entries}, nil
 }
 
 // FindResult is the response for /fs/find: the files under a root, for the editor's

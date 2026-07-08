@@ -769,9 +769,10 @@ struct GrepView: View {
     }
 }
 
-/// Go to Folder (⌘G): type or paste an absolute path (~, $VAR, and relative are
-/// resolved by the broker) and jump the tree there. Live directory completion,
-/// ↑/↓ to pick, ⇥ to complete, ↩ to go, Esc to cancel.
+/// Go to Folder (⇧⌘G): type or paste a path (absolute, ~, $VAR, or relative —
+/// all resolved by the broker against the current folder) and jump the tree
+/// there. Live directory completion, ↑/↓ to pick, ⇥ to complete, ↩ to go,
+/// Esc to cancel.
 struct GoToFolderView: View {
     @ObservedObject var tab: FileTab
     @State private var text = ""
