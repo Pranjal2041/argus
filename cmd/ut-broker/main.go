@@ -31,6 +31,7 @@ import (
 	"universal-tmux/internal/gitsvc"
 	"universal-tmux/internal/gitui"
 	"universal-tmux/internal/jupyter"
+	"universal-tmux/internal/labsvc"
 	"universal-tmux/internal/mesh"
 	"universal-tmux/internal/portfwd"
 	sess "universal-tmux/internal/session" // aliased: the `session` flag var below shadows the package name
@@ -642,6 +643,297 @@ func main() {
 		fsResult(w, fsvc.Write(r.URL.Query().Get("path"), data))
 	})
 
+	// Argus Lab (LAB-DESIGN.md): read routes for the hub plus key decisions for
+	// the phone. The `ut lab` CLI operates on the store directly; these serve
+	// remote viewers. The hub passes agentView=false and sees hidden content.
+	mux.HandleFunc("/lab/sets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		sets, _ := st.Sets()
+		_ = json.NewEncoder(w).Encode(map[string]any{"sets": sets})
+	})
+	mux.HandleFunc("/lab/keys", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		ks, _ := st.Keys()
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": ks})
+	})
+	mux.HandleFunc("/lab/decide", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		k, err := st.Decide(q.Get("key"), q.Get("approve") == "1", q.Get("project"), q.Get("note"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(k)
+	})
+	mux.HandleFunc("/lab/brief", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		b, err := st.Brief(r.URL.Query().Get("set"), false)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(b)
+	})
+	mux.HandleFunc("/lab/proposals", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		ps, _ := st.PendingProposals()
+		_ = json.NewEncoder(w).Encode(map[string]any{"proposals": ps})
+	})
+	mux.HandleFunc("/lab/decide-run", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		if err := st.DecideRun(q.Get("set"), q.Get("run"), q.Get("approve") == "1", q.Get("note")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/lab/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		dir := st.SetDir(q.Get("set"))
+		if run := q.Get("run"); run != "" {
+			dir = st.RunDir(q.Get("set"), run)
+		}
+		evs, err := st.Events(dir, false)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": evs})
+	})
+	// Curation (human channel): hide an event, write a scoped human note.
+	mux.HandleFunc("/lab/hide", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		// scope-level notes (global/machine/project) live outside sets;
+		// ?scope routes the hide to the right notes directory
+		var hideErr error
+		if sc := q.Get("scope"); sc != "" {
+			hideErr = st.HideNote(sc, q.Get("project"), q.Get("target"))
+		} else {
+			hideErr = st.Hide(q.Get("set"), q.Get("target"))
+		}
+		if hideErr != nil {
+			http.Error(w, hideErr.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	// Archive view-state for a set or one run: a recorded, reversible human
+	// event; agents are unaffected and nothing is deleted.
+	mux.HandleFunc("/lab/archive", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		if err := st.SetArchived(q.Get("set"), q.Get("run"), q.Get("on") == "1"); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	// Scope-level notes (global, this machine, each project) for the hub's
+	// Notes view. Hidden ones are included and flagged: the human sees what
+	// they hid, agents never do.
+	mux.HandleFunc("/lab/notes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		ns, err := st.ListNotes()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// store identity lets the hub write store-wide notes once per store,
+		// not once per broker (cluster nodes share one NFS store)
+		_ = json.NewEncoder(w).Encode(map[string]any{"store": st.StoreID(), "notes": ns})
+	})
+	mux.HandleFunc("/lab/note", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		if err := st.HumanNote(q.Get("scope"), q.Get("project"), q.Get("set"), q.Get("run"), q.Get("text")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	// A run's stored files (the params copy, the code diff, the log, the env
+	// freeze), so the hub can show the substance of an experiment. ?tail=N
+	// serves only the last N bytes (for logs).
+	mux.HandleFunc("/lab/files", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": st.RunFiles(q.Get("set"), q.Get("run"))})
+	})
+	mux.HandleFunc("/lab/file", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		p, err := st.RunFile(q.Get("set"), q.Get("run"), q.Get("name"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if tail, _ := strconv.Atoi(q.Get("tail")); tail > 0 {
+			f, err := os.Open(p)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			defer f.Close()
+			if fi, err := f.Stat(); err == nil && fi.Size() > int64(tail) {
+				_, _ = f.Seek(fi.Size()-int64(tail), 0)
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.Copy(w, f)
+			return
+		}
+		http.ServeFile(w, r, p)
+	})
+	// Human-only set controls for the hub: change the approval policy, revoke
+	// the key.
+	mux.HandleFunc("/lab/policy", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		if !labsvc.ValidPolicy(q.Get("policy")) {
+			http.Error(w, "policy must be all, full-only, or none", http.StatusBadRequest)
+			return
+		}
+		if err := st.SetPolicy(q.Get("set"), q.Get("policy")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/lab/revoke", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := st.Revoke(r.URL.Query().Get("key")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	// The permanent mirror this machine keeps of other machines' lab stores.
+	mux.HandleFunc("/lab/mirror", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		ms, _ := st.ReadMirror()
+		_ = json.NewEncoder(w).Encode(map[string]any{"mirror": ms})
+	})
+
 	ln, where, ts, err := listener(ctx, *listen, *tsHost, *tsDir)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
@@ -661,6 +953,12 @@ func main() {
 	mux.HandleFunc("/mesh/proxy", func(w http.ResponseWriter, r *http.Request) {
 		meshRouter.Proxy(w, r)
 	})
+
+	// Argus Lab mirror: the hub machine (the Mac by default) keeps a permanent
+	// copy of every peer's lab store, so records outlive cluster jobs.
+	if labMirrorEnabled() {
+		go labMirrorLoop(ctx)
+	}
 
 	srv := &http.Server{Handler: mux}
 	// Disable HTTP/2: over the tsnet TLS listener the server would otherwise

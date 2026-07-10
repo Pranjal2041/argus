@@ -18,6 +18,7 @@ cp -R Resources/render "$APP/Contents/Resources/" 2>/dev/null || true      # off
 cp -R Resources/gitview "$APP/Contents/Resources/" 2>/dev/null || true
 cp -R Resources/ledger "$APP/Contents/Resources/" 2>/dev/null || true    # activity ledger viewer
 cp -R Resources/wrapped "$APP/Contents/Resources/" 2>/dev/null || true   # Argus Wrapped deck/dashboard
+cp -R Resources/lab "$APP/Contents/Resources/" 2>/dev/null || true       # the Lab experiments hub (â§âL)
 
 echo "Built $(pwd)/$APP"
 

@@ -54,10 +54,33 @@ func exeDir() string {
 
 func brokerLog(name string) string { return filepath.Join(os.TempDir(), name) }
 
+// The verbs the broker binary handles in client mode — keep in sync with the
+// dispatch list at the top of the unix `ut` script.
+var clientVerbs = map[string]bool{
+	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
+	"tail": true, "send": true, "cp": true, "lab": true,
+	"help": true, "--help": true, "-h": true,
+}
+
 func main() {
 	args := os.Args[1:]
 	if len(args) >= 2 && args[0] == "-L" { // socket arg is accepted but single-broker for now
 		args = args[2:]
+	}
+	// CLI verbs go to the broker binary in client mode, mirroring the unix
+	// `ut` script's dispatch. Without this, `ut lab brief` would attach a
+	// ConPTY session literally named "lab" (the unix script had the same bug).
+	if len(args) >= 1 && clientVerbs[args[0]] {
+		cmd := exec.Command(filepath.Join(exeDir(), "ut-broker.exe"), args...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		cmd.Env = append(os.Environ(), "UT_PORT="+port)
+		if err := cmd.Run(); err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				os.Exit(ee.ExitCode())
+			}
+			fatal("run %s: %v", args[0], err)
+		}
+		return
 	}
 	explicit := ""
 	if len(args) >= 1 {
