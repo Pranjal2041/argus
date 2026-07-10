@@ -49,10 +49,32 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     func clearBadge() { NSApp.dockTile.badgeLabel = nil }
 
+    /// Post a banner for a new Lab approval item (a pending key request or a
+    /// gated run proposal). Tapping it opens the Lab pane.
+    func labApprovalNeeded(id: String, title: String, body: String) {
+        guard NotifyPrefs.enabled else { return }
+        let c = UNMutableNotificationContent()
+        c.title = title
+        c.body = body
+        c.sound = .default
+        c.userInfo = ["lab": true]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "ut.lab." + id, content: c, trigger: nil))
+    }
+
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let u = response.notification.request.content.userInfo
+        if u["lab"] as? Bool == true {
+            Task { @MainActor in
+                NSApp.activate(ignoringOtherApps: true)
+                guard let st = self.state else { return }
+                st.showLab = true
+                st.showOverview = false; st.showTodos = false; st.showNotes = false; st.showLedger = false
+            }
+            completionHandler()
+            return
+        }
         if let m = u["m"] as? String, let s = u["s"] as? String {
             Task { @MainActor in
                 NSApp.activate(ignoringOtherApps: true)

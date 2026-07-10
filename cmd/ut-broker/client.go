@@ -20,7 +20,8 @@ import (
 
 var meshVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
-	"tail": true, "send": true, "cp": true, "help": true, "--help": true, "-h": true,
+	"tail": true, "send": true, "cp": true, "lab": true,
+	"help": true, "--help": true, "-h": true,
 }
 
 func isMeshVerb(s string) bool { return meshVerbs[s] }
@@ -55,6 +56,8 @@ func runClient(args []string) int {
 		return cmdTail(rest)
 	case "cp":
 		return cmdCp(rest)
+	case "lab":
+		return cmdLab(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ut: unknown command %q (try `ut help`)\n", verb)
 		return 2
@@ -476,6 +479,8 @@ USAGE
   ut tail  @<machine>:<session>         stream a session's live output (Ctrl-C to stop)
   ut send  @<machine>:<shell> <text...> type text into a shell (no output captured)
   ut cp    <src> <dst>                  copy a file; either side may be <machine>:<path>
+  ut lab   <subcommand>                 run experiments through the recorded, human-
+                                        approved lab protocol (see ` + "`ut lab help`" + `)
 
 ADDRESSING
   @<machine>          a target host, e.g. @babel-p9-16   (the leading @ is optional)

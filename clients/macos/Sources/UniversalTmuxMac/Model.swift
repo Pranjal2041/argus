@@ -469,6 +469,9 @@ final class AppState: ObservableObject {
 
     @Published var showNotes = false
     @Published var showLedger = false   // in-app Activity Ledger (⇧⌘J), a fleet-wide top-level view
+    // Argus Lab (⇧⌘L). UT_OPEN_LAB=1 opens it on launch — the hook the
+    // screenshot-verification harness uses to capture the real pane.
+    @Published var showLab = ProcessInfo.processInfo.environment["UT_OPEN_LAB"] == "1"
     @Published var notes: [Note] = AppState.loadNotes() {
         // Save locally + stamp on a local edit; the periodic reconcile pushes it (no POST
         // per keystroke). Adopting a remote copy sets applyingRemoteNotes to skip the stamp.
