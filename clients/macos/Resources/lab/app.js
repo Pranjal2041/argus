@@ -6,7 +6,16 @@ const Lab = {
   selection: null,
   details: Object.create(null),
   detailRequestedAt: Object.create(null),
-  uiScale: 1,
+  hostScale: 1,
+  manualScale: (() => {
+    try {
+      const saved = Number(localStorage.getItem("argus.lab.text-scale.v1") || 1);
+      return Number.isFinite(saved) ? Math.max(.8, Math.min(1.4, saved)) : 1;
+    }
+    catch (_) { return 1; }
+  })(),
+  autoScale: 1,
+  uiScale: 1.3,
   initialized: false,
   drawerOpen: false,
   researchQuery: "",
@@ -15,6 +24,7 @@ const Lab = {
   runTab: "summary",
   compareMode: false,
   comparePicks: [],
+  artifactSelection: Object.create(null),
   guidanceScope: 0,
   showHiddenNotes: false,
   accessOpen: false,
@@ -73,6 +83,18 @@ function bytes(value) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function displayPath(value) {
+  const full = String(value || "");
+  if (!full) return "—";
+  let shown = full.replace(/^\/Users\/[^/]+\//, "~/");
+  if (shown.length <= 34) return shown;
+  const separator = shown.includes("\\") ? "\\" : "/";
+  const parts = shown.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 3) return shown;
+  const prefix = shown.startsWith("~/") ? "~/" : shown.startsWith("/") ? "/" : "";
+  return `${prefix}${parts[0]}${separator}…${separator}${parts[parts.length - 1]}`;
 }
 
 function statusInfo(raw) {
@@ -240,6 +262,11 @@ function renderMasthead() {
     </div>
     <nav class="primary-nav" aria-label="Lab destinations">${tabs}</nav>
     <span class="mast-spacer"></span>
+    <div class="type-controls" role="group" aria-label="Lab text size">
+      <button type="button" data-action="font-down" aria-label="Decrease Lab text size" title="Decrease text size (⌘−)">A−</button>
+      <button class="type-readout" type="button" data-action="font-reset" aria-label="Reset Lab text size" title="Reset adaptive text size">${Math.round(Lab.uiScale * 100)}%</button>
+      <button type="button" data-action="font-up" aria-label="Increase Lab text size" title="Increase text size (⌘+)">A+</button>
+    </div>
     <span class="sync-state"><span class="lamp"></span>${Lab.syncAt ? `synced ${ago(Lab.syncAt.toISOString())}` : "waiting for brokers"}</span>
     <button class="icon-button" type="button" data-action="refresh" aria-label="Refresh Lab" title="Refresh Lab">${icon("refresh")}</button>`;
 }
@@ -317,9 +344,11 @@ function renderResearchContext() {
       ${sets.sort((a,b) => String(b.created || "").localeCompare(String(a.created || ""))).map(card => {
         const selected = Lab.selection && Lab.selection.card === card.id;
         const active = card.runs.filter(run => ["running","needs","approved"].includes(statusInfo(run.status).key) && !run.archived).length;
+        const runCount = card.runs.length;
+        const state = card.offline ? "offline" : card.archived ? "archived" : active ? `${active} active` : `${runCount} run${runCount === 1 ? "" : "s"}`;
         return `<button class="set-row ${selected ? "active" : ""}" type="button" data-select-set="${esc(card.id)}">
-          <span class="set-row-top"><span class="status-sliver ${setTone(card)}"></span><span class="set-name">${esc(card.machineName)}</span><span class="set-state">${card.offline ? "offline" : card.archived ? "archived" : active ? `${active} active` : `${card.runs.length} runs`}</span></span>
-          <span class="set-meta">${esc(card.setID)} · ${esc(card.cwd)}</span>
+          <span class="set-row-top"><span class="status-sliver ${setTone(card)}"></span><span class="set-name" title="${esc(card.machineName)}">${esc(card.machineName)}</span><span class="set-state">${state}</span></span>
+          <span class="set-meta"><span class="set-id">${esc(card.setID)}</span><span class="set-path" title="${esc(card.cwd)}">${esc(displayPath(card.cwd))}</span></span>
         </button>`;
       }).join("")}
     </section>`).join("")}
@@ -694,11 +723,48 @@ function renderLog(folded, card, run) {
     <div class="secondary" style="margin-top:10px;font-size:.72rem">This view shows the fetched tail. The capped full record remains with the run on its source machine.</div>` : emptyState("No log available", "The source machine may be offline or this run did not write a log.");
 }
 
+function artifactKind(name) {
+  const path = String(name || "").toLowerCase();
+  if (path.endsWith("log.txt")) return "run log";
+  if (path.endsWith("diff.patch")) return "code diff";
+  if (path.endsWith("events.jsonl")) return "event record";
+  if (path.endsWith(".tar.gz")) return "binary archive";
+  if (path.endsWith("env.txt")) return "environment";
+  if (path.startsWith("files/") || path.includes("/files/")) return "parameters";
+  return "artifact";
+}
+
+function artifactPayload(name, folded) {
+  const path = String(name || "");
+  const lowerPath = path.toLowerCase();
+  if (lowerPath.endsWith("log.txt") && folded.files.log != null) return { text: folded.files.log, mode: "" };
+  if (lowerPath.endsWith("diff.patch") && folded.files.diff != null) return { text: colorDiff(folded.files.diff), mode: "html" };
+  if (lowerPath.endsWith("env.txt") && folded.files.env != null) return { text: folded.files.env, mode: "wrap" };
+  if (lowerPath.endsWith("events.jsonl")) {
+    return { text: (folded.events || []).map(event => JSON.stringify(event)).join("\n"), mode: "wrap" };
+  }
+  const basename = path.split(/[\\/]/).pop();
+  const param = (folded.files.params || []).find(item => String(item.path || "").split(/[\\/]/).pop() === basename);
+  if (param) return { text: param.text || "", mode: "wrap" };
+  if (lowerPath.endsWith(".tar.gz")) return { message: "This is a binary snapshot archive. It is retained by the broker for recovery and provenance, but is not rendered as text." };
+  return { message: "The broker lists this artifact, but no text preview is available in the current record." };
+}
+
+function renderArtifactPreview(name, folded, card, run) {
+  const payload = artifactPayload(name, folded);
+  return `<div class="artifact-preview" data-artifact-preview>
+    ${payload.message ? `<div class="artifact-message"><span class="artifact-message-label">${esc(artifactKind(name))}</span>${esc(payload.message)}</div>`
+      : renderEvidenceBlock(name, payload.text, `artifact:${card.id}:${run.id}:${name}`, payload.mode)}
+  </div>`;
+}
+
 function renderProvenance(folded, card, run) {
   const envText = folded.files.env || "";
+  const artifactKey = detailKey(card.id, run.id);
+  const selectedArtifact = Lab.artifactSelection[artifactKey] || "";
   return `<div class="summary-grid"><div><div class="section-head" style="margin-top:0"><h2>Event record</h2></div><div class="timeline">${folded.events.filter(event => event.kind !== "hide").map(event => `<div class="timeline-event"><div class="timeline-kind">${esc(eventLabel(event.kind))}<span class="timeline-time">${esc(ago(event.time))} ago</span></div><div class="timeline-detail selectable">${esc(event.text || eventSummary(event))}</div></div>`).join("")}</div></div>
     <aside class="summary-stack"><section><div class="section-head" style="margin-top:0"><h2>Approval binding</h2></div><div class="command-line selectable" style="white-space:pre-wrap">${esc(folded.env.bind || "No bind recorded")}</div></section>
-      ${folded.manifest.length ? `<section><div class="section-head"><h2>Stored artifacts</h2><span class="section-kicker">broker manifest</span></div><div class="result-ledger">${folded.manifest.map(file => `<div class="result-row"><span class="result-copy mono selectable">${esc(file.name)}</span><span class="result-time">${esc(bytes(file.size))}</span></div>`).join("")}</div></section>` : ""}
+      ${folded.manifest.length ? `<section><div class="section-head"><h2>Stored artifacts</h2><span class="section-kicker">select to inspect</span></div><div class="artifact-list">${folded.manifest.map(file => `<button class="artifact-row ${selectedArtifact === file.name ? "active" : ""}" type="button" data-action="artifact" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-name="${esc(file.name)}" aria-expanded="${selectedArtifact === file.name}"><span class="artifact-name">${esc(file.name)}</span><span class="artifact-kind">${esc(artifactKind(file.name))}</span><span class="artifact-size">${esc(bytes(file.size))}</span>${icon("chevron")}</button>`).join("")}</div>${selectedArtifact ? renderArtifactPreview(selectedArtifact, folded, card, run) : ""}</section>` : ""}
       ${envText ? `<section><div class="section-head"><h2>Environment freeze</h2></div>${renderEvidenceBlock("files/env.txt", envText, `env:${card.id}:${run.id}`, "")}</section>` : ""}
     </aside></div>`;
 }
@@ -890,11 +956,29 @@ document.addEventListener("click", event => {
   if (!action) return;
   const kind = action.dataset.action;
   if (kind === "drawer") { Lab.drawerOpen = !Lab.drawerOpen; render(); return; }
+  if (kind === "font-down") { setManualScale(Lab.manualScale - .1); return; }
+  if (kind === "font-up") { setManualScale(Lab.manualScale + .1); return; }
+  if (kind === "font-reset") { setManualScale(1); return; }
   if (kind === "refresh") { post({ type: "refresh" }); toast("Refreshing Lab…"); return; }
   if (kind === "terminal") { post({ type: "openTerminal", machineID: action.dataset.machine, session: action.dataset.session }); return; }
   if (kind === "files") { post({ type: "openFiles", card: action.dataset.card, cwd: action.dataset.cwd }); return; }
   if (kind === "wandb") { post({ type: "openWandb", card: action.dataset.card, session: action.dataset.session, run: action.dataset.runRef }); return; }
   if (kind === "copy") { copyText(action.dataset.copy || ""); return; }
+  if (kind === "artifact") {
+    const key = detailKey(action.dataset.card, action.dataset.run);
+    Lab.artifactSelection[key] = Lab.artifactSelection[key] === action.dataset.name ? "" : action.dataset.name;
+    render();
+    if (Lab.artifactSelection[key]) setTimeout(() => {
+      const preview = document.querySelector("[data-artifact-preview]");
+      const main = $("#main");
+      if (preview && main) {
+        const target = preview.getBoundingClientRect(), frame = main.getBoundingClientRect();
+        if (target.bottom > frame.bottom) main.scrollBy({ top: target.bottom - frame.bottom + 18, behavior: "smooth" });
+        else if (target.top < frame.top) main.scrollBy({ top: target.top - frame.top - 18, behavior: "smooth" });
+      }
+    }, 40);
+    return;
+  }
   if (kind === "decide-key") {
     const id = action.dataset.id;
     startAction("decideKey", { id, approve: action.dataset.approve === "1", project: draft(`key-project:${id}`) }, action.dataset.approve === "1" ? "Access approved" : "Access denied", `key-project:${id}`); return;
@@ -958,6 +1042,11 @@ document.addEventListener("toggle", event => {
 
 document.addEventListener("keydown", event => {
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement && document.activeElement.tagName);
+  if (event.metaKey || event.ctrlKey) {
+    if (event.key === "+" || event.key === "=") { setManualScale(Lab.manualScale + .1); event.preventDefault(); return; }
+    if (event.key === "-") { setManualScale(Lab.manualScale - .1); event.preventDefault(); return; }
+    if (event.key === "0") { setManualScale(1); event.preventDefault(); return; }
+  }
   if (event.key === "Escape") {
     if (Lab.drawerOpen) { Lab.drawerOpen = false; render(); event.preventDefault(); return; }
     if (Lab.compareMode) { Lab.compareMode = false; Lab.comparePicks = []; render(); event.preventDefault(); return; }
@@ -972,20 +1061,41 @@ document.addEventListener("keydown", event => {
   }
 });
 
+function automaticTextScale() {
+  const widthProgress = clamp((window.innerWidth - 680) / 720, 0, 1);
+  const heightProgress = clamp((window.innerHeight - 560) / 440, 0, 1);
+  return .94 + Math.min(widthProgress, heightProgress) * .1;
+}
+
+function applyTextScale() {
+  Lab.autoScale = automaticTextScale();
+  Lab.uiScale = clamp(1.3 * Lab.hostScale * Lab.manualScale * Lab.autoScale, .9, 2.5);
+  document.documentElement.style.setProperty("--ui-scale", Lab.uiScale);
+  const readout = document.querySelector(".type-readout");
+  if (readout) readout.textContent = `${Math.round(Lab.uiScale * 100)}%`;
+}
+
+function setManualScale(value) {
+  Lab.manualScale = Math.round(clamp(value, .8, 1.4) * 10) / 10;
+  try { localStorage.setItem("argus.lab.text-scale.v1", String(Lab.manualScale)); } catch (_) {}
+  layout();
+}
+
 function layout() {
+  applyTextScale();
   const effectiveWidth = window.innerWidth / Lab.uiScale;
-  document.body.classList.toggle("compact", effectiveWidth < 900);
+  document.body.classList.toggle("compact", effectiveWidth < 800);
+  document.body.classList.toggle("medium", effectiveWidth < 980);
   document.body.classList.toggle("narrow", effectiveWidth < 760);
   document.body.classList.toggle("ultra-compact", effectiveWidth < 520);
-  if (effectiveWidth >= 900 && Lab.drawerOpen) { Lab.drawerOpen = false; document.body.classList.remove("context-open"); }
+  if (effectiveWidth >= 800 && Lab.drawerOpen) { Lab.drawerOpen = false; document.body.classList.remove("context-open"); }
 }
 window.addEventListener("resize", layout);
 
 window.UTLab = {
   setTheme() {},
   setFontSize(px) {
-    Lab.uiScale = clamp(Number(px || 24) / 24, .8, 2);
-    document.documentElement.style.setProperty("--ui-scale", Lab.uiScale);
+    Lab.hostScale = clamp(Number(px || 24) / 24, .8, 2);
     layout();
   },
   setData(input) {

@@ -34,7 +34,7 @@ The existing hub is functionally broad, but its presentation obscures what makes
 
 The visual concept is a midnight scientific ledger: part lab notebook, part precision instrument, part mission log.
 
-It is dark, but not "dark Material." The canvas is near-black green graphite. Hairlines and a very faint graph-paper texture establish measured space. Warm ivory is used for reading. Color is sparse and semantic: saffron for a human decision, cyan for live execution, chartreuse for verified completion, and coral for failure or drift.
+It is dark, but not "dark Material." The canvas is neutral charcoal with a cool-gray structure; it deliberately avoids a terminal-green cast. Hairlines and a very faint graph-paper texture establish measured space. Warm ivory is used for reading. Color is sparse and semantic: saffron for a human decision, cyan for live execution, silver-blue for verified completion, and coral for failure or drift.
 
 The interface's memorable element is the **evidence spine**. Every run shows its lifecycle as one continuous line:
 
@@ -54,23 +54,23 @@ The spine is compact on a table row and expands on the run page. It makes the ap
 
 ### Visual tokens
 
-Initial palette, to be tuned against real screenshots:
+Final palette, tuned against real-pane screenshots:
 
 | Token | Value | Use |
 |---|---:|---|
-| Canvas | `#0b0f0d` | Main background |
-| Canvas grid | `rgba(177, 205, 184, .035)` | 24px graph-paper texture |
-| Surface | `#121815` | Navigation and grouped regions |
-| Raised surface | `#18201b` | Decision dossier and active selection |
-| Hairline | `#2a352e` | Structure, tables, separators |
-| Primary text | `#ece7da` | Warm reading color |
-| Secondary text | `#9ca49d` | Metadata and explanations |
-| Quiet text | `#69736c` | Inactive and archived state |
-| Decision | `#f2b84b` | Needs-human-attention, approve focus |
-| Live | `#65d7e8` | Running and streaming |
-| Verified | `#b8df70` | Successful and unchanged evidence |
-| Danger | `#ff6b5f` | Failure, rejection, drift, revoke |
-| Link | `#9fc7ff` | Navigation to Terminal, Files, W&B |
+| Canvas | `#111319` | Main background |
+| Canvas grid | `rgba(167, 176, 192, .025)` | 24px graph-paper texture |
+| Surface | `#181b22` | Navigation and grouped regions |
+| Raised surface | `#20242c` | Decision dossier and active selection |
+| Hairline | `#333943` | Structure, tables, separators |
+| Primary text | `#f0ede6` | Warm reading color |
+| Secondary text | `#adb3bc` | Metadata and explanations |
+| Quiet text | `#747d89` | Inactive and archived state |
+| Decision | `#e8ad4c` | Needs-human-attention, approve focus |
+| Live | `#64bfd2` | Running and streaming |
+| Verified | `#a5b7c6` | Successful and unchanged evidence |
+| Danger | `#e7736a` | Failure, rejection, drift, revoke |
+| Link | `#8fb8e8` | Navigation to Terminal, Files, W&B |
 
 Status color must never be the only carrier of meaning.
 
@@ -80,6 +80,9 @@ Status color must never be the only carrier of meaning.
 - Interface and tables: SF Pro/SF Compact, with deliberate use of condensed uppercase labels rather than generic large headings.
 - Commands, paths, hashes, run IDs, and parameters: bundled `MesloLGS NF`.
 - No network font dependency. The entire Lab pane remains offline-capable.
+- The default type scale is approximately 1.25–1.35× and adapts to both pane width and height.
+- `A−`/`A+`, `⌘−`/`⌘+`, and reset controls provide a persistent 0.8–1.4× personal adjustment on top of the adaptive scale.
+- Responsive breakpoints use effective width after scaling, so increasing text triggers reflow instead of horizontal clipping.
 
 ### Shape and depth
 
@@ -124,7 +127,7 @@ It never contains every run in the fleet.
 
 ### Compact layout
 
-Below roughly 900 CSS pixels of Lab-pane width:
+Below roughly 800 effective CSS pixels of Lab-pane width:
 
 - Keep the masthead and primary destinations.
 - Replace the contextual left column with a toolbar button and an overlay drawer.
@@ -251,6 +254,8 @@ Use tabs rather than a long stack of equal cards:
 5. **Provenance** — complete event timeline, environment freeze, fingerprints, bind hash.
 
 The chosen tab persists through polling. Code/log regions have their own stable scroll positions.
+
+Stored artifact rows in Provenance are controls, not passive labels. Selecting a log, diff, event record, environment freeze, or captured parameter file opens an inline text preview; binary archives clearly explain why they cannot be rendered in place.
 
 ### Human curation
 

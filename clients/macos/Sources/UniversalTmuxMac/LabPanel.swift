@@ -23,7 +23,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         let cfg = WKWebViewConfiguration()
         cfg.userContentController = WKUserContentController()
         webView = WKWebView(frame: .zero, configuration: cfg)
-        webView.underPageBackgroundColor = NSColor(red: 0.043, green: 0.059, blue: 0.051, alpha: 1) // page canvas #0b0f0d
+        webView.underPageBackgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.098, alpha: 1) // page canvas #111319
         webView.setValue(false, forKey: "drawsBackground")
         super.init()
         cfg.userContentController.add(self, name: "ut")
