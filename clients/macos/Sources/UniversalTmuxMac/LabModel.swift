@@ -6,7 +6,7 @@ import SwiftUI
 // human's decisions and curation back to the machine that owns them. Polls
 // app-wide (20s) so approval notifications fire with the pane closed, and
 // faster (5s) while the pane is visible. Presentation lives entirely in
-// Resources/lab/index.html; this file never styles anything.
+// Resources/lab; this file never styles anything.
 
 // MARK: wire structs (labsvc JSON)
 
@@ -40,6 +40,11 @@ struct LabEventInfo: Codable, Hashable, Identifiable {
 struct LabFileRef: Codable, Hashable {
     let path: String
     var sha256: String?
+}
+
+struct LabRunFileInfo: Codable, Hashable {
+    let name: String
+    let size: Int64
 }
 
 struct LabSnapshotInfo: Codable, Hashable {
@@ -239,7 +244,7 @@ final class LabModel: ObservableObject {
                         if k.status == "pending" {
                             newKeys.append(PendingKey(machineID: m.id, machineName: m.name, httpBase: m.httpBase, key: k))
                         } else if k.status == "active", let set = k.set {
-                            newActive[set] = k.key
+                            newActive[m.id + "/" + set] = k.key
                         }
                     }
                     for p in proposals {
@@ -302,21 +307,21 @@ final class LabModel: ObservableObject {
 
     // MARK: decisions and curation (the human channel)
 
-    func decideKey(_ k: PendingKey, approve: Bool, project: String, state: AppState) {
+    func decideKeyNow(_ k: PendingKey, approve: Bool, project: String) async -> Bool {
         var q = [URLQueryItem(name: "key", value: String(k.key.key.prefix(8))),
                  URLQueryItem(name: "approve", value: approve ? "1" : "0")]
-        let p = project.trimmingCharacters(in: .whitespaces)
+        let p = project.trimmingCharacters(in: .whitespacesAndNewlines)
         if approve, !p.isEmpty, p != k.key.project { q.append(URLQueryItem(name: "project", value: p)) }
-        post(k.httpBase + "/lab/decide", q, state)
+        return await postNow(k.httpBase + "/lab/decide", q)
     }
 
-    func decideRun(_ card: SetCard, run: String, approve: Bool, note: String, state: AppState) {
+    func decideRunNow(_ card: SetCard, run: String, approve: Bool, note: String) async -> Bool {
         var q = [URLQueryItem(name: "set", value: card.brief.set.id),
                  URLQueryItem(name: "run", value: run),
                  URLQueryItem(name: "approve", value: approve ? "1" : "0")]
-        let n = note.trimmingCharacters(in: .whitespaces)
+        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
         if !n.isEmpty { q.append(URLQueryItem(name: "note", value: n)) }
-        post(card.httpBase + "/lab/decide-run", q, state)
+        return await postNow(card.httpBase + "/lab/decide-run", q)
     }
 
     @discardableResult
@@ -326,88 +331,106 @@ final class LabModel: ObservableObject {
                        URLQueryItem(name: "target", value: target)])
     }
 
-    func postNote(_ card: SetCard, scope: String, text: String, state: AppState) {
+    func postNoteNow(_ card: SetCard, scope: String, run: String, text: String) async -> Bool {
         var q = [URLQueryItem(name: "scope", value: scope),
                  URLQueryItem(name: "text", value: text)]
         switch scope {
         case "set": q.append(URLQueryItem(name: "set", value: card.brief.set.id))
+        case "run":
+            q.append(URLQueryItem(name: "set", value: card.brief.set.id))
+            q.append(URLQueryItem(name: "run", value: run))
         case "project": q.append(URLQueryItem(name: "project", value: card.brief.set.project))
         default: break
         }
-        post(card.httpBase + "/lab/note", q, state)
+        return await postNow(card.httpBase + "/lab/note", q)
     }
 
     /// "Everywhere" write: one copy of a global note into every reachable
     /// store — the honest form of "all my agents"; stores never sync. Brokers
     /// sharing a store (cluster nodes on NFS) get exactly one copy.
-    func postHubNoteAll(text: String, state: AppState) {
+    func postHubNoteAllNow(text: String) async -> Bool {
         var seen = Set<String>()
         var bases: [String] = []
         for g in hubNotes {
             let key = g.storeID.isEmpty ? g.httpBase : g.storeID
             if seen.insert(key).inserted { bases.append(g.httpBase) }
         }
-        Task {
-            for base in bases {
-                _ = await postNow(base + "/lab/note",
-                                  [URLQueryItem(name: "scope", value: "global"),
-                                   URLQueryItem(name: "text", value: text)])
+        guard !bases.isEmpty else { return false }
+        var success = true
+        for base in bases {
+            if !(await postNow(base + "/lab/note",
+                               [URLQueryItem(name: "scope", value: "global"),
+                                URLQueryItem(name: "text", value: text)])) {
+                success = false
             }
-            self.refresh(state)
         }
+        return success
     }
 
     /// Notes-view write: a note at global/machine/project scope on one machine.
-    func postHubNote(machineID: String, scope: String, project: String, text: String, state: AppState) {
-        guard let g = hubNotes.first(where: { $0.machineID == machineID }) else { return }
+    func postHubNoteNow(machineID: String, scope: String, project: String, text: String) async -> Bool {
+        guard let g = hubNotes.first(where: { $0.machineID == machineID }) else { return false }
         var q = [URLQueryItem(name: "scope", value: scope),
                  URLQueryItem(name: "text", value: text)]
         if scope == "project" { q.append(URLQueryItem(name: "project", value: project)) }
-        post(g.httpBase + "/lab/note", q, state)
+        return await postNow(g.httpBase + "/lab/note", q)
     }
 
     /// Notes-view hide: scope-level notes live outside sets, so the hide
     /// carries the scope instead of a set id.
-    func hideHubNote(machineID: String, scope: String, project: String, target: String, state: AppState) {
-        guard let g = hubNotes.first(where: { $0.machineID == machineID }) else { return }
+    func hideHubNoteNow(machineID: String, scope: String, project: String, target: String) async -> Bool {
+        guard let g = hubNotes.first(where: { $0.machineID == machineID }) else { return false }
         var q = [URLQueryItem(name: "scope", value: scope),
                  URLQueryItem(name: "target", value: target)]
         if scope == "project" { q.append(URLQueryItem(name: "project", value: project)) }
-        post(g.httpBase + "/lab/hide", q, state)
+        return await postNow(g.httpBase + "/lab/hide", q)
     }
 
     /// Archive view-state for a set (run empty) or one run — recorded, reversible.
-    func setArchived(_ card: SetCard, run: String, on: Bool, state: AppState) {
+    func setArchivedNow(_ card: SetCard, run: String, on: Bool) async -> Bool {
         var q = [URLQueryItem(name: "set", value: card.brief.set.id),
                  URLQueryItem(name: "on", value: on ? "1" : "0")]
         if !run.isEmpty { q.append(URLQueryItem(name: "run", value: run)) }
-        post(card.httpBase + "/lab/archive", q, state)
+        return await postNow(card.httpBase + "/lab/archive", q)
     }
 
-    func setPolicy(_ card: SetCard, policy: String, state: AppState) {
-        post(card.httpBase + "/lab/policy",
-             [URLQueryItem(name: "set", value: card.brief.set.id),
-              URLQueryItem(name: "policy", value: policy)], state)
+    func setPolicyNow(_ card: SetCard, policy: String) async -> Bool {
+        await postNow(card.httpBase + "/lab/policy",
+                      [URLQueryItem(name: "set", value: card.brief.set.id),
+                       URLQueryItem(name: "policy", value: policy)])
     }
 
-    func revokeKey(_ card: SetCard, state: AppState) {
-        guard let key = activeKeyBySet[card.brief.set.id] else { return }
-        post(card.httpBase + "/lab/revoke",
-             [URLQueryItem(name: "key", value: String(key.prefix(8)))], state)
+    func revokeKeyNow(_ card: SetCard) async -> Bool {
+        guard let key = activeKeyBySet[card.id] else { return false }
+        return await postNow(card.httpBase + "/lab/revoke",
+                             [URLQueryItem(name: "key", value: String(key.prefix(8)))])
     }
 
     // MARK: reads for the run page
 
     func runEvents(_ card: SetCard, run: String) async -> [LabEventItem] {
         var c = URLComponents(string: card.httpBase + "/lab/events")
-        c?.queryItems = [URLQueryItem(name: "set", value: card.brief.set.id),
-                         URLQueryItem(name: "run", value: run)]
+        var q = [URLQueryItem(name: "set", value: card.brief.set.id),
+                 URLQueryItem(name: "run", value: run)]
+        if card.offline { q.append(URLQueryItem(name: "machine", value: card.machineName)) }
+        c?.queryItems = q
         guard let url = c?.url?.absoluteString,
               let resp = await Self.get(url, as: EventsResp.self) else { return [] }
         return resp.events ?? []
     }
 
+    func runFiles(_ card: SetCard, run: String) async -> [LabRunFileInfo] {
+        guard !card.offline else { return [] } // the permanent mirror stores events, not artifacts
+        var c = URLComponents(string: card.httpBase + "/lab/files")
+        c?.queryItems = [URLQueryItem(name: "set", value: card.brief.set.id),
+                         URLQueryItem(name: "run", value: run)]
+        guard let url = c?.url?.absoluteString,
+              let resp = await Self.get(url, as: FilesResp.self) else { return [] }
+        return resp.files ?? []
+    }
+
     func runFileText(_ card: SetCard, run: String, name: String, tailBytes: Int? = nil) async -> String? {
+        guard !card.offline else { return nil }
         var c = URLComponents(string: card.httpBase + "/lab/file")
         var q = [URLQueryItem(name: "set", value: card.brief.set.id),
                  URLQueryItem(name: "run", value: run),
@@ -423,13 +446,6 @@ final class LabModel: ObservableObject {
     }
 
     // MARK: plumbing
-
-    private func post(_ base: String, _ query: [URLQueryItem], _ state: AppState) {
-        Task {
-            _ = await postNow(base, query)
-            self.refresh(state)
-        }
-    }
 
     private func postNow(_ base: String, _ query: [URLQueryItem]) async -> Bool {
         guard var c = URLComponents(string: base) else { return false }
@@ -460,6 +476,7 @@ final class LabModel: ObservableObject {
     private struct ProposalsResp: Decodable { var proposals: [LabProposal]? }
     private struct MirrorResp: Decodable { var mirror: [LabMirrored]? }
     private struct EventsResp: Decodable { var events: [LabEventItem]? }
+    private struct FilesResp: Decodable { var files: [LabRunFileInfo]? }
 
     private static func fetchBriefs(_ m: Machine) async -> [LabBrief] {
         guard let resp = await get(m.httpBase + "/lab/sets", as: SetsResp.self), let metas = resp.sets else { return [] }

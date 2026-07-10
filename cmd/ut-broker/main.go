@@ -741,11 +741,16 @@ func main() {
 			return
 		}
 		q := r.URL.Query()
-		dir := st.SetDir(q.Get("set"))
-		if run := q.Get("run"); run != "" {
-			dir = st.RunDir(q.Get("set"), run)
+		var evs []labsvc.Event
+		if machine := q.Get("machine"); machine != "" {
+			evs, err = st.MirrorEvents(machine, q.Get("set"), q.Get("run"))
+		} else {
+			dir := st.SetDir(q.Get("set"))
+			if run := q.Get("run"); run != "" {
+				dir = st.RunDir(q.Get("set"), run)
+			}
+			evs, err = st.Events(dir, false)
 		}
-		evs, err := st.Events(dir, false)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
