@@ -34,7 +34,7 @@ The existing hub is functionally broad, but its presentation obscures what makes
 
 The visual concept is a midnight scientific ledger: part lab notebook, part precision instrument, part mission log.
 
-It is dark, but not "dark Material." The canvas is neutral charcoal with a cool-gray structure; it deliberately avoids a terminal-green cast. Hairlines and a very faint graph-paper texture establish measured space. Warm ivory is used for reading. Color is sparse and semantic: saffron for a human decision, cyan for live execution, silver-blue for verified completion, and coral for failure or drift.
+It is dark by default, but not "dark Material." The canvas is a restrained derivative of the selected Argus theme, preserving the neutral instrument surface instead of flooding the page with the theme hue. Hairlines and a very faint graph-paper texture establish measured space. Color is semantic: orange for work awaiting judgment or launch, blue for live execution, green for verified completion, and red/coral for failure or drift.
 
 The interface's memorable element is the **evidence spine**. Every run shows its lifecycle as one continuous line:
 
@@ -54,7 +54,7 @@ The spine is compact on a table row and expands on the run page. It makes the ap
 
 ### Visual tokens
 
-Final palette, tuned against real-pane screenshots:
+The fallback palette below is used by static fixtures. In the app, the Theme Picker is the source of truth: Lab derives its surfaces from the selected palette and maps the theme's status colors consistently.
 
 | Token | Value | Use |
 |---|---:|---|
@@ -66,18 +66,20 @@ Final palette, tuned against real-pane screenshots:
 | Primary text | `#f0ede6` | Warm reading color |
 | Secondary text | `#adb3bc` | Metadata and explanations |
 | Quiet text | `#747d89` | Inactive and archived state |
-| Decision | `#e8ad4c` | Needs-human-attention, approve focus |
+| Accent | `#8fb8e8` | Selection, focus, navigation, links |
+| Decision | `#e8ad4c` | Needs-human-attention |
+| Queued | `#d88b5b` | Approved and awaiting launch |
 | Live | `#64bfd2` | Running and streaming |
-| Verified | `#a5b7c6` | Successful and unchanged evidence |
+| Verified | `#72c98c` | Successful and unchanged evidence |
 | Danger | `#e7736a` | Failure, rejection, drift, revoke |
 | Link | `#8fb8e8` | Navigation to Terminal, Files, W&B |
 
-Status color must never be the only carrier of meaning.
+The runtime mapping is `accent → navigation`, `attached → verified`, `running → live`, `waiting → needs approval`, `unseen → queued`, and `unreachable → failure`. Status color is never the only carrier of meaning: table rows retain explicit labels, lifecycle nodes retain text, and set rows show an ordered multi-signal cluster with accessible descriptions.
 
 ### Typography
 
-- Hypotheses, intent, and conclusions: `ui-serif`, preferring New York/Iowan Old Style. These are the human-readable scientific narrative.
-- Interface and tables: SF Pro/SF Compact, with deliberate use of condensed uppercase labels rather than generic large headings.
+- Titles, intent, conclusions, and body copy: SF Pro Display/Text with controlled weight rather than an editorial serif.
+- Interface and tables: SF Pro/SF Compact, with deliberate use of condensed uppercase labels for structure.
 - Commands, paths, hashes, run IDs, and parameters: bundled `MesloLGS NF`.
 - No network font dependency. The entire Lab pane remains offline-capable.
 - The default type scale is approximately 1.25–1.35× and adapts to both pane width and height.

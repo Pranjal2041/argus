@@ -97,6 +97,94 @@ function displayPath(value) {
   return `${prefix}${parts[0]}${separator}…${separator}${parts[parts.length - 1]}`;
 }
 
+function colorChannels(value) {
+  const raw = String(value || "").trim();
+  const short = /^#([0-9a-f]{3})$/i.exec(raw);
+  const full = /^#([0-9a-f]{6})$/i.exec(raw);
+  const hex = full ? full[1] : short ? short[1].split("").map(char => char + char).join("") : "";
+  if (!hex) return null;
+  return [Number.parseInt(hex.slice(0, 2), 16), Number.parseInt(hex.slice(2, 4), 16), Number.parseInt(hex.slice(4, 6), 16)];
+}
+
+function mixColor(color, target, amount) {
+  const from = colorChannels(color), to = colorChannels(target);
+  if (!from || !to) return color;
+  const ratio = clamp(Number(amount || 0), 0, 1);
+  return `#${from.map((channel, index) => Math.round(channel + (to[index] - channel) * ratio).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function alphaColor(color, opacity) {
+  const channels = colorChannels(color);
+  return channels ? `rgba(${channels.join(", ")}, ${clamp(Number(opacity || 0), 0, 1)})` : color;
+}
+
+function applyTheme(input) {
+  let theme = input;
+  if (typeof theme === "string") {
+    try { theme = JSON.parse(theme); } catch (_) { return; }
+  }
+  if (!theme || typeof theme !== "object") return;
+  const root = document.documentElement;
+  const isLight = theme.isLight === true;
+  const shade = (color, amount) => isLight ? color : mixColor(color, "#000000", amount);
+  const canvas = shade(theme.canvas, .45);
+  const deep = shade(theme.sidebar, .48);
+  const surface = shade(theme.surface, .38);
+  const raised = shade(theme.selection, .26);
+  const soft = shade(theme.sidebar, .38);
+  const tokens = {
+    "--canvas": canvas,
+    "--canvas-deep": deep,
+    "--surface": surface,
+    "--surface-raised": raised,
+    "--surface-soft": soft,
+    "--line": shade(theme.border, .10),
+    "--line-soft": alphaColor(theme.textSecondary, isLight ? .18 : .13),
+    "--text": theme.text,
+    "--text-secondary": theme.textSecondary,
+    "--text-quiet": theme.textQuiet,
+    "--accent": theme.accent,
+    "--accent-soft": alphaColor(theme.accent, isLight ? .10 : .13),
+    "--decision": theme.waiting,
+    "--decision-soft": alphaColor(theme.waiting, isLight ? .11 : .14),
+    "--queued": theme.unseen || theme.waiting,
+    "--queued-soft": alphaColor(theme.unseen || theme.waiting, isLight ? .10 : .13),
+    "--live": theme.running,
+    "--live-soft": alphaColor(theme.running, isLight ? .10 : .13),
+    "--verified": theme.success,
+    "--verified-soft": alphaColor(theme.success, isLight ? .10 : .12),
+    "--danger": theme.danger,
+    "--danger-soft": alphaColor(theme.danger, isLight ? .09 : .12),
+    "--link": theme.accent,
+    "--diff-add": theme.success,
+    "--grid": alphaColor(theme.textSecondary, isLight ? .045 : .028),
+    "--ambient": alphaColor(theme.accent, isLight ? .07 : .10),
+    "--mast-bg": alphaColor(canvas, isLight ? .95 : .96),
+    "--context-bg": alphaColor(deep, .96),
+    "--row-hover": alphaColor(theme.accent, isLight ? .08 : .07),
+    "--selection-soft": alphaColor(theme.accent, isLight ? .20 : .28),
+    "--on-accent": isLight ? "#ffffff" : canvas,
+    "--on-decision": isLight ? "#ffffff" : canvas,
+    "--on-success": isLight ? "#ffffff" : canvas,
+    "--control-hover-border": theme.textQuiet,
+    "--focus-surface": raised,
+    "--dossier-start": surface,
+    "--dossier-end": soft,
+    "--dock-bg": alphaColor(canvas, isLight ? .96 : .97),
+    "--shadow": alphaColor("#000000", isLight ? .16 : .38),
+    "--scrim": alphaColor("#000000", .52),
+    "--code-text": theme.text,
+    "--skeleton-highlight": raised,
+    "--toast-bg": surface,
+    "--scrollbar": alphaColor(theme.textQuiet, isLight ? .42 : .58),
+    "--scrollbar-hover": alphaColor(theme.textSecondary, isLight ? .58 : .72),
+  };
+  for (const [name, value] of Object.entries(tokens)) if (value) root.style.setProperty(name, value);
+  root.style.colorScheme = isLight ? "light" : "dark";
+  root.dataset.theme = String(theme.id || "custom");
+  document.body.classList.toggle("light-theme", isLight);
+}
+
 function statusInfo(raw) {
   const s = String(raw || "recorded");
   if (s.startsWith("running")) return { key: "running", label: s.replace(/^running\s*/i, "Running ").trim(), tone: "live" };
@@ -308,13 +396,17 @@ function searchMatchesSet(card, query) {
   return haystack.includes(query.toLowerCase());
 }
 
-function setTone(card) {
-  const runs = card.runs.filter(run => !run.archived);
-  if (runs.some(run => statusInfo(run.status).key === "failed")) return "danger";
-  if (runs.some(run => statusInfo(run.status).key === "needs")) return "decision";
-  if (runs.some(run => statusInfo(run.status).key === "running")) return "live";
-  if (runs.some(run => statusInfo(run.status).key === "finished")) return "verified";
-  return "";
+function setSignals(card) {
+  const present = new Map();
+  for (const run of card.runs.filter(run => !run.archived)) {
+    const status = statusInfo(run.status);
+    if (!present.has(status.key)) present.set(status.key, status);
+  }
+  const ordered = ["needs", "approved", "running", "failed", "rejected", "finished", "recorded"]
+    .map(key => present.get(key)).filter(Boolean);
+  if (!ordered.length) return `<span class="status-cluster empty" aria-label="No runs recorded"><span class="status-dot status-recorded" title="No runs recorded"></span></span>`;
+  const label = ordered.map(status => status.label).join(", ");
+  return `<span class="status-cluster" aria-label="${esc(label)}">${ordered.map(status => `<span class="status-dot status-${status.key}" title="${esc(status.label)}"></span>`).join("")}</span>`;
 }
 
 function researchCards() {
@@ -347,7 +439,7 @@ function renderResearchContext() {
         const runCount = card.runs.length;
         const state = card.offline ? "offline" : card.archived ? "archived" : active ? `${active} active` : `${runCount} run${runCount === 1 ? "" : "s"}`;
         return `<button class="set-row ${selected ? "active" : ""}" type="button" data-select-set="${esc(card.id)}">
-          <span class="set-row-top"><span class="status-sliver ${setTone(card)}"></span><span class="set-name" title="${esc(card.machineName)}">${esc(card.machineName)}</span><span class="set-state">${state}</span></span>
+          <span class="set-row-top">${setSignals(card)}<span class="set-name" title="${esc(card.machineName)}">${esc(card.machineName)}</span><span class="set-state">${state}</span></span>
           <span class="set-meta"><span class="set-id">${esc(card.setID)}</span><span class="set-path" title="${esc(card.cwd)}">${esc(displayPath(card.cwd))}</span></span>
         </button>`;
       }).join("")}
@@ -493,7 +585,7 @@ function decisionDock(kind, data) {
       ? `<div class="secondary human-copy">One key · one isolated set · this machine only</div>`
       : `<input class="text-input" data-draft="${esc(key)}" value="${esc(value)}" placeholder="Optional message back to the agent" aria-label="Message to agent">`}
     <button class="button danger" type="button" data-action="${isKey ? "decide-key" : "decide-run"}" data-approve="0" data-id="${esc(data.id || "")}" data-card="${esc(data.card || "")}" data-run="${esc(data.run || "")}">${isKey ? "Deny" : "Reject"}</button>
-    <button class="button primary" type="button" data-action="${isKey ? "decide-key" : "decide-run"}" data-approve="1" data-id="${esc(data.id || "")}" data-card="${esc(data.card || "")}" data-run="${esc(data.run || "")}">Approve</button>
+    <button class="button primary approve" type="button" data-action="${isKey ? "decide-key" : "decide-run"}" data-approve="1" data-id="${esc(data.id || "")}" data-card="${esc(data.card || "")}" data-run="${esc(data.run || "")}">Approve</button>
   </div>`;
 }
 
@@ -505,6 +597,25 @@ function renderResearchMain() {
   return renderResearchOverview();
 }
 
+function renderSignalStrip(entries) {
+  const counts = { needs: 0, approved: 0, running: 0, failed: 0, finished: 0 };
+  for (const entry of entries) {
+    const run = entry && entry.run ? entry.run : entry;
+    if (!run || run.archived) continue;
+    const rawKey = statusInfo(run.status).key;
+    const key = rawKey === "rejected" ? "failed" : rawKey;
+    if (Object.prototype.hasOwnProperty.call(counts, key)) counts[key] += 1;
+  }
+  const signals = [
+    ["needs", "Needs approval"],
+    ["approved", "Queued"],
+    ["running", "Running"],
+    ["failed", "Failed"],
+    ["finished", "Finished"],
+  ];
+  return `<div class="signal-strip" aria-label="Run status overview">${signals.map(([key, label]) => `<div class="signal signal-${key} ${counts[key] ? "" : "zero"}"><span class="signal-mark" aria-hidden="true"></span><span class="signal-count">${counts[key]}</span><span class="signal-label">${label}</span></div>`).join("")}</div>`;
+}
+
 function renderResearchOverview() {
   const runs = allRuns(false);
   const active = runs.filter(({run}) => ["running","needs","approved"].includes(statusInfo(run.status).key));
@@ -513,6 +624,7 @@ function renderResearchOverview() {
   return `<div class="main-content wide">
     <div class="eyebrow">Research ledger</div><h1 class="display-title">The record, not the recollection.</h1>
     <p class="lede">Every wrapped run across ${Lab.model.sets.length} isolated set${Lab.model.sets.length === 1 ? "" : "s"}: intent, exact code, parameters, declared data, environment, logs, and findings.</p>
+    ${renderSignalStrip(runs)}
     <div class="section-head"><h2>In motion</h2><span class="section-kicker">${active.length} active or awaiting launch</span></div>
     ${active.length ? renderRunLedger(active, false, true) : `<div class="guidance-strip">No experiments are currently running or awaiting launch.</div>`}
     ${failures.length ? `<div class="section-head"><h2>Failures worth inspecting</h2></div>${renderRunLedger(failures, false, true)}` : ""}
@@ -551,6 +663,7 @@ function renderSetPage() {
         ${card.keyActive ? `<button class="button danger small" type="button" data-action="revoke" data-card="${esc(card.id)}">Revoke agent access</button>` : ""}
       </div></details>`}
     </div>
+    ${renderSignalStrip(card.runs)}
     <div class="research-toolbar">
       <div class="segmented">${[["all","All"],["active","Active"],["failed","Failed"],["finished","Finished"],["archived","Archive"]].map(([key,label]) => `<button class="segment ${Lab.runFilter === key ? "active" : ""}" type="button" data-run-filter="${key}">${label}</button>`).join("")}</div>
       <span style="flex:1"></span>
@@ -653,7 +766,7 @@ function evidenceSpine(folded, run, card) {
   const policy = card.policy || "full-only";
   const decisionRequired = policy === "all" || (policy === "full-only" && tier === "full");
   const decisionState = rejected ? "rejected" : approved ? "complete"
-    : proposed && !startedEvidence ? "current" : startedEvidence && !decision && !decisionRequired ? "bypassed" : "";
+    : proposed && !startedEvidence ? "attention" : startedEvidence && !decision && !decisionRequired ? "bypassed" : "";
   const decisionNote = rejected ? "rejected" : approved ? "approved"
     : proposed && !startedEvidence ? "awaiting human" : startedEvidence && !decision && !decisionRequired ? "not required by policy"
     : "not recorded";
@@ -661,7 +774,7 @@ function evidenceSpine(folded, run, card) {
   return `<div class="evidence-spine" aria-label="Run lifecycle">
     ${node("Proposed", proposed, proposed ? "complete" : "", proposed && proposed.text)}
     ${node("Decision", decision, decisionState, decisionNote)}
-    ${node("Started", startedEvidence, startedEvidence ? "complete" : approved ? "current" : "", started ? card.machineName : startedEvidence ? "summary record" : "")}
+    ${node("Started", startedEvidence, startedEvidence ? "complete" : approved ? "queued" : "", started ? card.machineName : startedEvidence ? "summary record" : "")}
     ${node("Ended", ended, failed ? "failed" : ended ? "complete" : phase === "finished" ? "complete" : startedEvidence ? "current" : "", ended ? `exit ${ended.data && ended.data.exit != null ? ended.data.exit : run.exitCode}` : phase === "finished" ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : failed ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : startedEvidence ? "in progress" : "")}
   </div>`;
 }
@@ -849,7 +962,7 @@ function renderGuidanceMain() {
   return `<div class="main-content wide"><div class="eyebrow">Human channel</div><h1 class="display-title">Guidance</h1>
     <p class="lede">These are instructions, not observations. Agents receive them as human-authored ground truth when they read their Lab brief.</p>
     <section class="audience-card" style="margin-top:25px"><div class="audience-row">
-      <div><div class="fact-label">Audience</div><div style="margin-top:6px;font-family:var(--serif)">${esc(scope.label)}</div></div>
+      <div><div class="fact-label">Audience</div><div style="margin-top:6px;font-family:var(--display);font-weight:600">${esc(scope.label)}</div></div>
       <textarea class="text-area" data-draft="${esc(draftKey)}" placeholder="Write guidance your agents should carry forward…" aria-label="Guidance text">${esc(copy)}</textarea>
       <button class="button primary" type="button" data-action="guidance-note" data-scope-index="${Lab.guidanceScope}">Publish guidance</button>
     </div><div class="audience-explain">${esc(scopeExplanation(scope))}</div></section>
@@ -1093,7 +1206,7 @@ function layout() {
 window.addEventListener("resize", layout);
 
 window.UTLab = {
-  setTheme() {},
+  setTheme(theme) { applyTheme(theme); },
   setFontSize(px) {
     Lab.hostScale = clamp(Number(px || 24) / 24, .8, 2);
     layout();

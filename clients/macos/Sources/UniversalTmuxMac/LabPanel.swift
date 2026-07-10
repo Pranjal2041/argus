@@ -3,10 +3,10 @@ import SwiftUI
 import WebKit
 
 // The Lab pane (⇧⌘L) hosts Resources/lab/index.html in the Git panel's mold:
-// the page owns all presentation (it has its own designed palette and does
-// NOT take the app theme — pushing the theme over it kept collapsing every
-// design into the same slate), Swift owns data and actions. The page's base
-// font size follows the app's interface-scale setting via UTLab.setFontSize.
+// the page owns layout and presentation while Swift owns data and actions.
+// The host pushes the selected app palette as semantic tokens, so Lab keeps
+// its instrument-ledger hierarchy while matching every ThemePicker choice.
+// The page's base font size also follows the app's interface-scale setting.
 
 @MainActor
 final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -23,7 +23,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         let cfg = WKWebViewConfiguration()
         cfg.userContentController = WKUserContentController()
         webView = WKWebView(frame: .zero, configuration: cfg)
-        webView.underPageBackgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.098, alpha: 1) // page canvas #111319
+        webView.underPageBackgroundColor = Theme.nsAppBackground
         webView.setValue(false, forKey: "drawsBackground")
         super.init()
         cfg.userContentController.add(self, name: "ut")
@@ -56,6 +56,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         self.files = files
         self.terminals = terminals
         self.wandb = wandb
+        applyTheme()
         applyScale()
         pushData()
     }
@@ -63,6 +64,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
             self.loaded = true
+            self.applyTheme()
             self.applyScale()
             self.pushData()
             // dev hook (like UT_OPEN_LAB): land on a specific view at launch
@@ -80,9 +82,50 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         return String(arr.dropFirst().dropLast())
     }
 
-    /// Carries the app's interface-scale to the page as 24 * uiScale; the page
-    /// derives uiScale = pushed/24 and multiplies its per-region sizes with it
-    /// (RAIL_ZOOM / PAGE_ZOOM in the page — the user's preferred proportions).
+    private func hex(_ color: NSColor) -> String {
+        let value = color.usingColorSpace(.sRGB) ?? color
+        return String(format: "#%02x%02x%02x",
+                      Int(value.redComponent * 255),
+                      Int(value.greenComponent * 255),
+                      Int(value.blueComponent * 255))
+    }
+
+    private func hex(_ color: SwiftUI.Color) -> String { hex(NSColor(color)) }
+
+    /// Pushes both chrome colors and semantic status colors. The web page derives
+    /// restrained Lab surfaces from these values while preserving the theme's
+    /// green/success, blue/running, orange/waiting, and red/failure signals.
+    func applyTheme() {
+        let palette = Theme.current
+        webView.underPageBackgroundColor = palette.nsAppBackground
+        guard loaded else { return }
+        let spec: [String: Any] = [
+            "id": palette.id,
+            "name": palette.name,
+            "isLight": palette.isLight,
+            "canvas": hex(palette.nsAppBackground),
+            "sidebar": hex(palette.sidebarBackground),
+            "surface": hex(palette.surface),
+            "border": hex(palette.border),
+            "accent": hex(palette.accent),
+            "selection": hex(palette.selection),
+            "text": hex(palette.textPrimary),
+            "textSecondary": hex(palette.textSecondary),
+            "textQuiet": hex(palette.textTertiary),
+            "success": hex(palette.attached),
+            "running": hex(palette.running),
+            "waiting": hex(palette.waiting),
+            "unseen": hex(palette.unseen),
+            "danger": hex(palette.unreachable),
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: spec),
+           let json = String(data: data, encoding: .utf8) {
+            eval("window.UTLab.setTheme(\(json))")
+        }
+    }
+
+    /// Carries the app's interface scale as 24 * uiScale. The page combines that
+    /// host preference with its viewport-adaptive scale and Lab-specific A−/A+ setting.
     func applyScale() {
         guard loaded else { return }
         let scale = UserDefaults.standard.object(forKey: "ut.uiScale") as? Double ?? 1.0
@@ -369,6 +412,9 @@ struct LabCenterView: View {
             }
             .onDisappear { lab.setPaneVisible(false) }
             .onChange(of: uiScale) { _ in LabWebPanel.shared.applyScale() }
+            .onReceive(NotificationCenter.default.publisher(for: .utThemeChanged)) { _ in
+                LabWebPanel.shared.applyTheme()
+            }
             // push AFTER the published values settle (onReceive fires on willSet)
             .onReceive(lab.$sets) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$pendingKeys) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
