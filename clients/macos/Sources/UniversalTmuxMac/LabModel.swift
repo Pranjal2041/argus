@@ -35,6 +35,7 @@ struct LabEventInfo: Codable, Hashable, Identifiable {
     let author: String
     let kind: String
     var text: String?
+    var data: LabEventData?
 }
 
 struct LabFileRef: Codable, Hashable {

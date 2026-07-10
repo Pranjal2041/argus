@@ -142,6 +142,8 @@
         ],
         setNotes: [
           { id: "n-2", time: iso(84), author: "agent", kind: "note", text: "The calibration sweep is now varying jitter and panel conditioning independently." },
+          { id: "hn-set-1", time: iso(72), author: "human", kind: "hnote", scope: "set", text: "Use R3 as this set's comparison anchor; do not mix in the archived baseline split.", hidden: false },
+          { id: "hn-set-old", time: iso(1800), author: "human", kind: "hnote", scope: "set", text: "Prefer the v1 baseline for this set.", hidden: true },
         ],
         runs: [
           { id: "R1", status: "done", tier: "quick", group: "baseline", latest: "Baseline reproduced: macro F1 0.812; east-camera false-negative rate 14.8%.", started: iso(410), exitCode: 0, archived: true },

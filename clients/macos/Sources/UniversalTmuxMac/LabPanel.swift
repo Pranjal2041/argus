@@ -136,10 +136,16 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     func pushData() {
         guard loaded, let lab else { return }
-        func notes(_ ns: [LabEventInfo]?) -> [[String: Any]] {
-            (ns ?? []).map {
-                ["id": $0.id, "time": $0.time, "author": $0.author,
-                 "kind": $0.kind, "text": $0.text ?? ""]
+        func notes(_ ns: [LabEventInfo]?, scope: String? = nil) -> [[String: Any]] {
+            let events = ns ?? []
+            let hidden = Set(events.filter { $0.kind == "hide" }.compactMap { $0.data?.target })
+            return events.filter { $0.kind == "note" || $0.kind == "hnote" }.map {
+                var note: [String: Any] = [
+                    "id": $0.id, "time": $0.time, "author": $0.author,
+                    "kind": $0.kind, "text": $0.text ?? "", "hidden": hidden.contains($0.id),
+                ]
+                if let scope { note["scope"] = scope }
+                return note
             }
         }
         let sets: [[String: Any]] = lab.sets.map { c in
@@ -152,7 +158,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 "archived": c.brief.archived ?? false,
                 "keyActive": lab.activeKeyBySet[c.id] != nil,
                 "notes": notes(c.brief.notes),
-                "setNotes": notes(c.brief.setEvents?.filter { $0.kind == "note" || $0.kind == "hnote" }),
+                "setNotes": notes(c.brief.setEvents, scope: "set"),
             ]
             if !c.mirroredAt.isEmpty { d["mirroredAt"] = c.mirroredAt }
             d["runs"] = (c.brief.runs ?? []).map { r -> [String: Any] in
@@ -333,11 +339,23 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                     await lab.hide(c, target: target)
                 }
             } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
+        case "hideSetGuidance":
+            if let c = card() {
+                performAction(id: actionID, success: "Guidance hidden from agent briefs") {
+                    await lab.hide(c, target: str("target"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "note":
             if let c = card() {
                 let run = str("run")
                 performAction(id: actionID, success: "Human note added", detail: (c.id, run)) {
                     await lab.postNoteNow(c, scope: str("scope"), run: run, text: str("text"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
+        case "setGuidance":
+            if let c = card() {
+                performAction(id: actionID, success: "Set guidance published") {
+                    await lab.postNoteNow(c, scope: "set", run: "", text: str("text"))
                 }
             } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "hubNote":

@@ -297,7 +297,9 @@ Guidance treats notes as instructions with an audience.
 - Everywhere
 - One machine/store
 - One project on a machine
-- Contextual set and run scopes when opened from Research
+- One writable experiment set, with an inheritance trail back through project, machine, and network guidance
+
+Run-specific human notes remain on the run record. Group scope stays out of the UI until the broker implements the group audience promised by `LAB-DESIGN.md`; the interface must not offer a selector that silently writes at a broader scope.
 
 The composer always states in plain language exactly who will read the note before it is submitted.
 
@@ -403,6 +405,7 @@ Extend the Swift-to-page model with data that already exists but is currently om
 Add UI-only bridge behavior:
 
 - Run-scoped human notes.
+- Set-scoped guidance, including hidden-state folding from set event logs.
 - Refresh visible pending/running details.
 - Open W&B in the in-app W&B view when possible.
 - Coalesce the four independent published-value pushes into one visual update.
@@ -448,7 +451,7 @@ Add deterministic fixture destinations for:
 - Failed run
 - Offline mirrored run
 - Two-run comparison
-- Guidance with global/machine/project notes and hidden notes
+- Guidance with global/machine/project/set notes, inherited notes, and hidden notes
 - Empty Lab
 - Loading, partial-data, and request-error states
 

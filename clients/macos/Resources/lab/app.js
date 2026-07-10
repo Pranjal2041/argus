@@ -26,6 +26,7 @@ const Lab = {
   comparePicks: [],
   artifactSelection: Object.create(null),
   guidanceScope: 0,
+  guidanceScopeKey: "all",
   showHiddenNotes: false,
   accessOpen: false,
   drafts: Object.create(null),
@@ -448,24 +449,47 @@ function renderResearchContext() {
 }
 
 function guidanceScopes() {
-  const scopes = [{ type: "all", label: "Everywhere", sub: "all reachable stores" }];
+  const scopes = [{ key: "all", type: "all", kind: "Network", depth: 0, label: "Everywhere", sub: "all reachable stores" }];
+  const includedSets = new Set();
+  const setScope = (card, machineID, machineName, depth) => ({ key: `set:${card.id}`, type: "set", kind: "Set", depth, machineID, machineName, project: card.project, card: card.id, setID: card.setID, label: card.setID, sub: `${card.project} · ${displayPath(card.cwd)}` });
   for (const group of Lab.model.hubNotes) {
-    scopes.push({ type: "machine", machineID: group.machineID, label: group.machineName, sub: "all agents on this store" });
-    const projects = [...new Set(Lab.model.sets.filter(card => card.machineID === group.machineID
-      || card.machineID === `mirror/${group.machineID}` || card.machineName === group.machineName).map(card => card.project))].sort();
-    for (const project of projects) scopes.push({ type: "project", machineID: group.machineID, project, label: project, sub: group.machineName });
+    const cards = Lab.model.sets.filter(card => !card.offline && (card.machineID === group.machineID || card.machineName === group.machineName));
+    scopes.push({ key: `machine:${group.machineID}`, type: "machine", kind: "Machine", depth: 0, machineID: group.machineID, machineName: group.machineName, label: group.machineName, sub: "all agents on this store" });
+    const projects = [...new Set(cards.map(card => card.project))].sort();
+    for (const project of projects) {
+      scopes.push({ key: `project:${group.machineID}:${project}`, type: "project", kind: "Project", depth: 1, machineID: group.machineID, machineName: group.machineName, project, label: project, sub: group.machineName });
+      for (const card of cards.filter(item => item.project === project).sort((a,b) => String(b.created || "").localeCompare(String(a.created || "")))) {
+        scopes.push(setScope(card, group.machineID, group.machineName, 2));
+        includedSets.add(card.id);
+      }
+    }
+  }
+  // A partial /lab/notes response must never make the direct Research link fall
+  // back to a broader audience. Set writes use the card's own broker, so they
+  // remain valid even when its broad-scope note index is temporarily absent.
+  for (const card of Lab.model.sets.filter(card => !card.offline && !includedSets.has(card.id))) {
+    scopes.push(setScope(card, card.machineID, card.machineName, 0));
   }
   return scopes;
 }
 
+function selectedGuidanceScope(scopes) {
+  let index = scopes.findIndex(scope => scope.key === Lab.guidanceScopeKey);
+  if (index < 0) index = clamp(Lab.guidanceScope, 0, Math.max(0, scopes.length - 1));
+  const scope = scopes[index] || scopes[0];
+  Lab.guidanceScope = index;
+  Lab.guidanceScopeKey = scope ? scope.key : "all";
+  return { scope, index };
+}
+
 function renderGuidanceContext() {
   const scopes = guidanceScopes();
-  Lab.guidanceScope = clamp(Lab.guidanceScope, 0, Math.max(0, scopes.length - 1));
+  const { scope: selected } = selectedGuidanceScope(scopes);
   return `<div class="context-heading"><span class="context-title">Audiences</span><span class="context-count">${scopes.length}</span></div>
-    <div class="context-help">Human-authored guidance is ground truth the next time an agent reads its brief.</div>
+    <div class="context-help">Choose the exact audience: network, machine, project, or experiment set.</div>
     <section class="scope-group">
-      ${scopes.map((scope, index) => `<button class="scope-row ${Lab.guidanceScope === index ? "active" : ""}" type="button" data-guidance-scope="${index}">
-        <span class="queue-row-top"><span class="set-name">${esc(scope.label)}</span></span><span class="set-meta">${esc(scope.sub)}</span>
+      ${scopes.map(scope => `<button class="scope-row scope-depth-${scope.depth} ${selected && selected.key === scope.key ? "active" : ""}" type="button" data-guidance-scope="${esc(scope.key)}">
+        <span class="queue-row-top"><span class="scope-kind">${esc(scope.kind)}</span><span class="set-name">${esc(scope.label)}</span></span><span class="set-meta">${esc(scope.sub)}</span>
       </button>`).join("")}
     </section>`;
 }
@@ -635,9 +659,17 @@ function renderResearchOverview() {
 
 function latestGuidance(card) {
   const notes = [...card.notes, ...card.setNotes]
-    .filter(note => note.text && (note.author === "human" || note.kind === "hnote"))
+    .filter(note => !note.hidden && note.text && (note.author === "human" || note.kind === "hnote"))
     .sort((a,b) => String(a.time || "").localeCompare(String(b.time || "")));
   return notes.length ? notes[notes.length - 1] : null;
+}
+
+function renderSetGuidance(card, guidance) {
+  const copy = guidance ? esc(guidance.text) : card.offline
+    ? "The mirrored record is read-only while its source machine is offline."
+    : "Add a durable instruction for this experiment set without changing the whole project.";
+  return `<div class="guidance-strip set-guidance-strip"><div class="set-guidance-copy"><strong>${guidance ? "Latest applicable guidance" : "No guidance yet"}</strong><span>${copy}</span></div>
+    ${card.offline ? `<span class="tag">source offline</span>` : `<button class="button small" type="button" data-action="open-set-guidance" data-card="${esc(card.id)}">${guidance ? "Edit set guidance" : "Add set guidance"}</button>`}</div>`;
 }
 
 function renderSetPage() {
@@ -651,7 +683,7 @@ function renderSetPage() {
       <div class="meta-line"><span>${esc(card.machineName)}</span><span class="meta-divider">/</span><span class="selectable">${esc(card.cwd)}</span><span class="meta-divider">/</span><span>${card.keyActive ? "key active" : "access closed"}</span>${card.archived ? `<span class="tag">archived set</span>` : ""}</div>
     </div><div class="page-actions">${card.offline ? "" : `<button class="button" type="button" data-action="files" data-card="${esc(card.id)}" data-cwd="${esc(card.cwd)}">${icon("folder")}Files</button>`}</div></div>
     ${card.offline ? offlineBanner(card) : ""}
-    <div class="set-summary-grid"><div>${guidance ? `<div class="guidance-strip"><strong>Current guidance</strong><br>${esc(guidance.text)}</div>` : `<div class="guidance-strip">No human guidance is attached to this set yet. Open Guidance to establish standing context.</div>`}</div>
+    <div class="set-summary-grid"><div>${renderSetGuidance(card, guidance)}</div>
       ${card.offline ? "" : `<details class="access-panel" ${Lab.accessOpen ? "open" : ""}><summary>Access &amp; policy</summary><div class="access-controls">
         <label class="fact-label" for="policy-select">Approval policy</label>
         <select id="policy-select" class="select-input" data-action="policy" data-card="${esc(card.id)}">
@@ -953,21 +985,20 @@ function parameterDelta(a, b, labelA, labelB) {
 
 function renderGuidanceMain() {
   const scopes = guidanceScopes();
-  Lab.guidanceScope = clamp(Lab.guidanceScope, 0, Math.max(0, scopes.length - 1));
-  const scope = scopes[Lab.guidanceScope] || scopes[0];
+  const { scope } = selectedGuidanceScope(scopes);
   const notes = guidanceNotes(scope).sort((a,b) => String(b.note.time || "").localeCompare(String(a.note.time || "")));
   const visible = Lab.showHiddenNotes ? notes : notes.filter(item => !item.note.hidden);
-  const draftKey = `guidance:${Lab.guidanceScope}`;
+  const draftKey = `guidance:${scope.key}`;
   const copy = draft(draftKey, "");
   return `<div class="main-content wide"><div class="eyebrow">Human channel</div><h1 class="display-title">Guidance</h1>
     <p class="lede">These are instructions, not observations. Agents receive them as human-authored ground truth when they read their Lab brief.</p>
     <section class="audience-card" style="margin-top:25px"><div class="audience-row">
-      <div><div class="fact-label">Audience</div><div style="margin-top:6px;font-family:var(--display);font-weight:600">${esc(scope.label)}</div></div>
+      <div><div class="fact-label">Audience</div><div class="audience-name">${esc(scope.type === "set" ? `${scope.project} / ${scope.setID}` : scope.label)}</div>${renderAudienceTrail(scope)}</div>
       <textarea class="text-area" data-draft="${esc(draftKey)}" placeholder="Write guidance your agents should carry forward…" aria-label="Guidance text">${esc(copy)}</textarea>
-      <button class="button primary" type="button" data-action="guidance-note" data-scope-index="${Lab.guidanceScope}">Publish guidance</button>
+      <button class="button primary" type="button" data-action="guidance-note" data-scope-key="${esc(scope.key)}">${scope.type === "set" ? "Publish to set" : "Publish guidance"}</button>
     </div><div class="audience-explain">${esc(scopeExplanation(scope))}</div></section>
     <div class="section-head"><h2>Instruction ledger</h2><span class="section-kicker">${notes.filter(item => !item.note.hidden).length} active</span><span class="section-action"><button class="button small" type="button" data-action="toggle-hidden">${Lab.showHiddenNotes ? "Hide archived notes" : "Show hidden notes"}</button></span></div>
-    ${visible.length ? `<div class="notes-ledger">${visible.map(item => `<div class="note-row"><span class="note-audience">${esc(noteAudience(item.note))}</span><span class="note-copy selectable ${item.note.hidden ? "hidden" : ""}">${esc(item.note.text)}</span><span class="note-origin">${esc(item.group.machineName)}<br>${esc(ago(item.note.time))}</span><span>${item.note.hidden ? `<span class="tag">hidden</span>` : `<button class="row-action" type="button" data-action="hide-guidance" data-machine="${esc(item.group.machineID)}" data-scope="${esc(item.note.scope)}" data-project="${esc(item.note.project || "")}" data-target="${esc(item.note.id)}">hide</button>`}</span></div>`).join("")}</div>` : emptyState("No guidance in this audience", "Write the first durable instruction above.")}
+    ${visible.length ? `<div class="notes-ledger">${visible.map(item => renderGuidanceNote(item, scope)).join("")}</div>` : emptyState("No guidance in this audience", "Write the first durable instruction above.")}
   </div>`;
 }
 
@@ -978,16 +1009,43 @@ function guidanceNotes(scope) {
     const match = scope.type === "all"
       || (scope.type === "machine" && sameMachine && ["global", "machine"].includes(note.scope))
       || (scope.type === "project" && sameMachine && (["global", "machine"].includes(note.scope)
+        || (note.scope === "project" && note.project === scope.project)))
+      || (scope.type === "set" && sameMachine && (["global", "machine"].includes(note.scope)
         || (note.scope === "project" && note.project === scope.project)));
     if (match) out.push({ group, note });
   }
+  if (scope.type === "set") {
+    const card = cardByID(scope.card);
+    if (card) for (const raw of card.setNotes || []) {
+      if (raw.author !== "human" && raw.kind !== "hnote") continue;
+      const note = { ...raw, scope: "set", setID: card.setID, hidden: raw.hidden === true };
+      out.push({ group: { machineID: card.machineID, machineName: card.machineName }, card, note });
+    }
+  }
   return out;
 }
-function noteAudience(note) { return note.scope === "global" ? "all agents" : note.scope === "machine" ? "machine" : note.scope === "project" ? `project / ${note.project || "?"}` : note.scope; }
+function renderAudienceTrail(scope) {
+  if (scope.type === "all") return "";
+  const parts = ["Everywhere"];
+  if (scope.machineName) parts.push(scope.machineName);
+  if (["project", "set"].includes(scope.type)) parts.push(scope.project);
+  if (scope.type === "set") parts.push(scope.setID);
+  return `<div class="audience-path" aria-label="Audience inheritance">${parts.map((part, index) => `${index ? `<span class="audience-separator">›</span>` : ""}<span>${esc(part)}</span>`).join("")}</div>`;
+}
+function renderGuidanceNote(item, scope) {
+  const note = item.note;
+  const inherited = scope.type === "set" && !item.card;
+  const hide = item.card
+    ? `<button class="row-action" type="button" data-action="hide-set-guidance" data-card="${esc(item.card.id)}" data-target="${esc(note.id)}">hide</button>`
+    : `<button class="row-action" type="button" data-action="hide-guidance" data-machine="${esc(item.group.machineID)}" data-scope="${esc(note.scope)}" data-project="${esc(note.project || "")}" data-target="${esc(note.id)}">hide</button>`;
+  return `<div class="note-row"><span class="note-audience">${esc(noteAudience(note))}${inherited ? `<small>inherited</small>` : note.scope === "set" ? `<small>direct</small>` : ""}</span><span class="note-copy selectable ${note.hidden ? "hidden" : ""}">${esc(note.text)}</span><span class="note-origin"><span title="${esc(item.group.machineName)}">${esc(item.group.machineName)}</span>${esc(ago(note.time))}</span><span>${note.hidden ? `<span class="tag">hidden</span>` : hide}</span></div>`;
+}
+function noteAudience(note) { return note.scope === "global" ? "all agents" : note.scope === "machine" ? "machine" : note.scope === "project" ? `project / ${note.project || "?"}` : note.scope === "set" ? `set / ${note.setID || "?"}` : note.scope; }
 function scopeExplanation(scope) {
   if (scope.type === "all") return "One copy is written to every reachable Lab store. Every approved agent, anywhere, will read it.";
   if (scope.type === "machine") return `Every approved agent on ${scope.label} will read it, regardless of project.`;
-  return `Only agents working on ${scope.project} on ${scope.sub} will read it.`;
+  if (scope.type === "project") return `Only agents working on ${scope.project} on ${scope.machineName} will read it.`;
+  return `Guidance written here applies only to experiment set ${scope.setID}. The ledger also shows the network, machine, and project guidance this set inherits.`;
 }
 
 function emptyState(title, copy) { return `<div class="empty-state"><div><div class="empty-symbol"><span>·</span></div><h2>${esc(title)}</h2><p>${esc(copy)}</p></div></div>`; }
@@ -1064,7 +1122,7 @@ document.addEventListener("click", event => {
   const tab = event.target.closest("[data-run-tab]");
   if (tab) { Lab.runTab = tab.dataset.runTab; Lab.scroll.main = $("#main").scrollTop; render(); return; }
   const scope = event.target.closest("[data-guidance-scope]");
-  if (scope) { Lab.guidanceScope = Number(scope.dataset.guidanceScope); Lab.drawerOpen = false; resetMainScroll(); render(); return; }
+  if (scope) { Lab.guidanceScopeKey = scope.dataset.guidanceScope || "all"; Lab.drawerOpen = false; resetMainScroll(); render(); return; }
   const action = event.target.closest("[data-action]");
   if (!action) return;
   const kind = action.dataset.action;
@@ -1072,6 +1130,7 @@ document.addEventListener("click", event => {
   if (kind === "font-down") { setManualScale(Lab.manualScale - .1); return; }
   if (kind === "font-up") { setManualScale(Lab.manualScale + .1); return; }
   if (kind === "font-reset") { setManualScale(1); return; }
+  if (kind === "open-set-guidance") { Lab.area = "guidance"; Lab.selection = null; Lab.guidanceScopeKey = `set:${action.dataset.card}`; Lab.drawerOpen = false; resetMainScroll(); render(); return; }
   if (kind === "refresh") { post({ type: "refresh" }); toast("Refreshing Lab…"); return; }
   if (kind === "terminal") { post({ type: "openTerminal", machineID: action.dataset.machine, session: action.dataset.session }); return; }
   if (kind === "files") { post({ type: "openFiles", card: action.dataset.card, cwd: action.dataset.cwd }); return; }
@@ -1117,13 +1176,15 @@ document.addEventListener("click", event => {
     startAction("note", { card: action.dataset.card, run: action.dataset.run, scope: "run", text }, "Human note added", key); return;
   }
   if (kind === "guidance-note") {
-    const index = Number(action.dataset.scopeIndex), scopes = guidanceScopes(), target = scopes[index];
-    const text = draft(`guidance:${index}`).trim(); if (!target || !text) return;
-    const draftKey = `guidance:${index}`;
+    const scopeKey = action.dataset.scopeKey || "all", scopes = guidanceScopes(), target = scopes.find(scope => scope.key === scopeKey);
+    const text = draft(`guidance:${scopeKey}`).trim(); if (!target || !text) return;
+    const draftKey = `guidance:${scopeKey}`;
     if (target.type === "all") startAction("hubNoteAll", { text }, "Guidance published everywhere", draftKey);
+    else if (target.type === "set") startAction("setGuidance", { card: target.card, run: "", scope: "set", text }, "Set guidance published", draftKey);
     else startAction("hubNote", { machineID: target.machineID, scope: target.type === "project" ? "project" : "machine", project: target.project || "", text }, "Guidance published", draftKey);
     return;
   }
+  if (kind === "hide-set-guidance") { startAction("hideSetGuidance", { card: action.dataset.card, run: "", target: action.dataset.target }, "Guidance hidden from agent briefs"); return; }
   if (kind === "hide-guidance") { startAction("hubHide", { machineID: action.dataset.machine, scope: action.dataset.scope, project: action.dataset.project || "", target: action.dataset.target }, "Guidance hidden from agent briefs"); return; }
   if (kind === "toggle-hidden") { Lab.showHiddenNotes = !Lab.showHiddenNotes; render(); return; }
 });
