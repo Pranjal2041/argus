@@ -13,6 +13,7 @@ type RunSummary struct {
 	Status   string `json:"status"`
 	Started  string `json:"started,omitempty"`
 	Latest   string `json:"latest,omitempty"`
+	LatestAt string `json:"latestAt,omitempty"`
 	ExitCode int    `json:"exitCode"`
 	Archived bool   `json:"archived,omitempty"`
 }
@@ -106,6 +107,7 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 		case "result", "note":
 			if e.Text != "" {
 				sum.Latest = e.Text
+				sum.LatestAt = e.Time
 			}
 		case "archive":
 			if v, ok := e.Data["archived"].(bool); ok {

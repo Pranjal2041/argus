@@ -45,8 +45,8 @@ class LabAggregatorTest {
         assertEquals(n5.id, result.pendingRuns.single().broker.id)
         assertEquals("shared:babel", result.sets.single().storeID)
         assertEquals("active-key", result.activeKeyBySet[result.sets.single().id])
-        assertEquals(listOf(LabAttentionKind.KEY, LabAttentionKind.PROPOSAL), result.attention.map { it.kind })
-        assertEquals("compare router loss", result.attention.last().summary)
+        assertEquals(listOf(LabAttentionKind.PROPOSAL, LabAttentionKind.KEY), result.attention.map { it.kind })
+        assertEquals("compare router loss", result.attention.first().summary)
     }
 
     @Test
@@ -87,6 +87,27 @@ class LabAggregatorTest {
 
         assertEquals(1, result.sets.size)
         assertEquals("shared:babel", result.sets.single().storeID)
+    }
+
+    @Test
+    fun newestResultActivityOrdersSetsAheadOfNewerCreatedButStaleSets() {
+        val alpha = broker("alpha")
+        val stale = brief("s-stale", "alpha").copy(
+            set = brief("s-stale", "alpha").set.copy(created = "2026-07-12T12:00:00Z"),
+            runs = listOf(LabRunSummary(id = "R1", status = "done", started = "2026-07-12T12:10:00Z",
+                latest = "old", latestAt = "2026-07-12T12:20:00Z")),
+        )
+        val updated = brief("s-updated", "alpha").copy(
+            set = brief("s-updated", "alpha").set.copy(created = "2026-07-11T12:00:00Z"),
+            runs = listOf(LabRunSummary(id = "R1", status = "done", started = "2026-07-11T12:10:00Z",
+                latest = "fresh", latestAt = "2026-07-12T13:00:00Z")),
+        )
+
+        val result = LabAggregator.aggregate(listOf(
+            LabBrokerSnapshot(alpha, "alpha-store", listOf(stale, updated), emptyList(), emptyList(), emptyList()),
+        ))
+
+        assertEquals(listOf("s-updated", "s-stale"), result.sets.map { it.brief.set.id })
     }
 
     @Test

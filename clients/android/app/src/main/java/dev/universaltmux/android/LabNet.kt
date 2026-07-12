@@ -187,7 +187,8 @@ object LabNet {
                 LabRunSummary(
                     id = run.optString("id"), group = run.stringOrNull("group"), tier = run.stringOrNull("tier"),
                     status = run.optString("status"), started = run.stringOrNull("started"),
-                    latest = run.stringOrNull("latest"), exitCode = run.optInt("exitCode", -1),
+                    latest = run.stringOrNull("latest"), latestAt = run.stringOrNull("latestAt"),
+                    exitCode = run.optInt("exitCode", -1),
                     archived = run.optBoolean("archived", false),
                 )
             }.orEmpty(),

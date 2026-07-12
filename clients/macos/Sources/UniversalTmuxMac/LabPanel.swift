@@ -47,7 +47,10 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 page = c.url ?? page
             }
         }
-        webView.loadFileURL(page, allowingReadAccessTo: dir)
+        // Lab reuses the app's bundled, offline Markdown parser from Resources/render.
+        // Read access stays inside this signed application bundle; no remote content
+        // or JavaScript dependency is involved.
+        webView.loadFileURL(page, allowingReadAccessTo: Bundle.main.resourceURL!)
     }
 
     func attach(lab: LabModel, state: AppState, files: FilesModel,
@@ -190,6 +193,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 if let v = r.tier { rd["tier"] = v }
                 if let v = r.group { rd["group"] = v }
                 if let v = r.latest { rd["latest"] = v }
+                if let v = r.latestAt { rd["latestAt"] = v }
                 if let v = r.started { rd["started"] = v }
                 return rd
             }
@@ -441,6 +445,10 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             }
         case "openWandb":
             if let c = card() { openWandb(str("run"), card: c, session: str("session")) }
+        case "openURL":
+            if let url = URL(string: str("url")), ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+                NSWorkspace.shared.open(url)
+            }
         case "needRunDetail":
             sendRunDetail(cardID: str("card"), run: str("run"))
         default:

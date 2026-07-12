@@ -44,10 +44,10 @@ final class LabAggregationTests: XCTestCase {
         model.pendingKeys = result.pendingKeys
         model.pendingRuns = result.pendingRuns
         XCTAssertEqual(model.attentionItems.count, 2)
-        XCTAssertEqual(model.attentionItems.map(\.kind), [.key, .proposal])
+        XCTAssertEqual(model.attentionItems.map(\.kind), [.proposal, .key])
         XCTAssertEqual(model.attentionItems.map(\.targetID),
-                       [result.pendingKeys[0].id, result.pendingRuns[0].id])
-        XCTAssertEqual(model.attentionItems[1].summary, "compare router loss")
+                       [result.pendingRuns[0].id, result.pendingKeys[0].id])
+        XCTAssertEqual(model.attentionItems[0].summary, "compare router loss")
     }
 
     func testSameRecordIDOnIndependentStoresRemainsIndependent() {
@@ -83,19 +83,35 @@ final class LabAggregationTests: XCTestCase {
         XCTAssertEqual(result.sets.first?.storeID, "shared:babel")
     }
 
+    func testNewestResultActivityOrdersSetsAheadOfNewerCreatedButStaleSets() {
+        let alpha = machine("alpha")
+        let stale = labBrief(set: "s-stale", machine: "alpha",
+                             created: "2026-07-12T12:00:00Z", latestAt: "2026-07-12T12:20:00Z")
+        let updated = labBrief(set: "s-updated", machine: "alpha",
+                               created: "2026-07-11T12:00:00Z", latestAt: "2026-07-12T13:00:00Z")
+
+        let result = LabModel.aggregate([
+            LabModel.MachineSnapshot(machine: alpha, briefs: [stale, updated], keys: [], proposals: [],
+                                     notes: LabModel.NotesResp(store: "alpha-store", notes: [])),
+        ], mirrored: [], mirrorHTTPBase: "")
+
+        XCTAssertEqual(result.sets.map { $0.brief.set.id }, ["s-updated", "s-stale"])
+    }
+
     private func machine(_ name: String) -> Machine {
         Machine(id: "ut-\(name).example.ts.net", name: name, host: name, isLocal: false,
                 httpBase: "https://\(name):8722", wsBase: "wss://\(name):8722")
     }
 
-    private func labBrief(set: String, machine: String) -> LabBrief {
+    private func labBrief(set: String, machine: String,
+                          created: String = "2026-07-11T15:00:00Z", latestAt: String? = nil) -> LabBrief {
         LabBrief(
             set: LabSetMeta(id: set, project: "vlm_gating", machine: machine,
-                            cwd: "/shared/vlm_gating", created: "2026-07-11T15:00:00Z"),
+                            cwd: "/shared/vlm_gating", created: created),
             policy: "full-only", notes: [], setEvents: [],
             runs: [LabRunSummary(id: "R2", group: "ablation", tier: "full", status: "running",
                                  started: "2026-07-11T16:00:00Z", latest: "healthy",
-                                 exitCode: -1, archived: false)],
+                                 latestAt: latestAt, exitCode: -1, archived: false)],
             archived: false
         )
     }

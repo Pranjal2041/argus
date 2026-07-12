@@ -187,7 +187,7 @@ func TestBriefAssembly(t *testing.T) {
 	run, _ := s.NewRun(ap.Set)
 	s.Append(s.RunDir(ap.Set, run), Event{Author: "machine", Kind: "run-start",
 		Data: map[string]any{"tier": "full", "group": "sweep"}})
-	s.Append(s.RunDir(ap.Set, run), Event{Author: "agent", Kind: "result", Text: "loss 0.42"})
+	result, _ := s.Append(s.RunDir(ap.Set, run), Event{Author: "agent", Kind: "result", Text: "loss 0.42"})
 	s.Append(s.RunDir(ap.Set, run), Event{Author: "machine", Kind: "run-end",
 		Data: map[string]any{"exit": float64(0), "durationSec": float64(3)}})
 
@@ -199,7 +199,7 @@ func TestBriefAssembly(t *testing.T) {
 		t.Fatalf("want 3 notes, got %d", len(b.Notes))
 	}
 	if len(b.Runs) != 1 || b.Runs[0].Status != "done" || b.Runs[0].Latest != "loss 0.42" ||
-		b.Runs[0].Tier != "full" || b.Runs[0].Group != "sweep" {
+		b.Runs[0].LatestAt != result.Time || b.Runs[0].Tier != "full" || b.Runs[0].Group != "sweep" {
 		t.Fatalf("run summary wrong: %+v", b.Runs)
 	}
 }

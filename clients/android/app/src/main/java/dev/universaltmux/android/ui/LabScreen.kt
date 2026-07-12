@@ -144,7 +144,7 @@ private fun LabInbox(vm: AppViewModel) {
             Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
-            item { LabSectionLabel("OLDEST REQUEST FIRST", detail = "${items.size} blocked") }
+            item { LabSectionLabel("NEWEST REQUEST FIRST", detail = "${items.size} blocked") }
             items(items, key = { it.id }) { item ->
                 LabDecisionRow(item) { vm.openLabAttention(item.kind, item.targetID) }
             }
@@ -321,7 +321,7 @@ private fun LabResearch(vm: AppViewModel) {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 cards.groupBy { it.brief.set.project }.toSortedMap().forEach { (project, projectCards) ->
                     item("project:$project") { LabSectionLabel(project.uppercase(), detail = "${projectCards.size} sets") }
-                    items(projectCards.sortedByDescending { it.brief.set.created }, key = { it.id }) { card ->
+                    items(projectCards.sortedByDescending(::labCardActivityAt), key = { it.id }) { card ->
                         LabSetRow(card) { vm.openLabSet(card.id) }
                     }
                 }
@@ -363,7 +363,10 @@ private fun LabSetPage(vm: AppViewModel, cardID: String) {
     if (card == null) { LabResolved { vm.setLabArea(LabArea.RESEARCH) }; return }
     var note by remember(card.id) { mutableStateOf("") }
     var policyOpen by remember { mutableStateOf(false) }
-    val orderedRuns = card.brief.runs.sortedByDescending { runNumber(it.id) }
+    val orderedRuns = card.brief.runs.sortedWith(
+        compareByDescending<LabRunSummary> { labRunActivityAt(it, card.brief.set.created) }
+            .thenByDescending { runNumber(it.id) },
+    )
     var compareA by remember(card.id, orderedRuns.size) {
         mutableStateOf(orderedRuns.getOrNull(1)?.id ?: orderedRuns.firstOrNull()?.id.orEmpty())
     }
@@ -482,7 +485,8 @@ private fun LabRunRow(run: LabRunSummary, onClick: () -> Unit) {
             Spacer(Modifier.weight(1f)); Text(label.uppercase(), color = color, fontSize = 10.sp)
         }
         run.latest?.takeIf(String::isNotEmpty)?.let {
-            Text(it, color = labDim, fontSize = 13.sp, maxLines = 3, modifier = Modifier.padding(top = 7.dp, start = 16.dp))
+            Text(labMarkdownPlainText(it), color = labDim, fontSize = 13.sp, maxLines = 3,
+                modifier = Modifier.padding(top = 7.dp, start = 16.dp))
         }
     }
 }
@@ -508,12 +512,14 @@ private fun LabRunPage(vm: AppViewModel, cardID: String, runID: String, onOpenTe
                     Spacer(Modifier.width(9.dp)); LabTag(label.uppercase(), color)
                 }
                 LabMetaLine(card, run.tier, run.group)
-                run.latest?.let { Text(it, color = labDim, fontSize = 15.sp, modifier = Modifier.padding(top = 12.dp)) }
+                run.latest?.let {
+                    LabMarkdown(it, labText, labFaint, labPanel, Modifier.fillMaxWidth().padding(top = 12.dp))
+                }
             }
             if (detail == null) item { LinearProgressIndicator(Modifier.fillMaxWidth(), color = labAccent) }
             detail?.let { d ->
                 item {
-                    LabSectionLabel("RESULT LOG", detail = "append-only")
+                    LabSectionLabel("RESULT LOG", detail = "newest first · append-only")
                     val visible = visibleResultEvents(d.events)
                     if (visible.isEmpty()) Text("No result has been reported yet.", color = labFaint, fontSize = 12.sp)
                     visible.forEach { event ->
@@ -702,8 +708,9 @@ private fun firstParameterText(detail: LabRunDetail): String? {
 }
 
 private fun latestResult(detail: LabRunDetail, run: LabRunSummary): String =
-    detail.events.lastOrNull { it.kind == "result" && !it.text.isNullOrBlank() }?.text
-        ?: run.latest.orEmpty().ifEmpty { "—" }
+    labMarkdownPlainText(detail.events.filter { it.kind == "result" && !it.text.isNullOrBlank() }
+        .maxWithOrNull(compareBy<LabEvent> { it.time }.thenBy { it.id })?.text
+        ?: run.latest.orEmpty().ifEmpty { "—" })
 
 private fun codeState(snapshot: LabSnapshotInfo?): String = when {
     snapshot == null -> "—"
@@ -950,7 +957,7 @@ private fun LabGuidanceNote(vm: AppViewModel, entry: GuidanceNote) {
         Text(if (entry.note.scope == "global") "EVERYWHERE" else entry.note.scope.uppercase(), color = labAccent, fontSize = 9.sp, fontWeight = FontWeight.Bold,
             modifier = Modifier.width(62.dp))
         Column(Modifier.weight(1f)) {
-            Text(entry.note.text, color = if (entry.note.hidden) labFaint else labText, fontSize = 13.sp)
+            LabMarkdown(entry.note.text, if (entry.note.hidden) labFaint else labText, labFaint, labSurface)
             val origin = entry.replicas.takeIf { it.isNotEmpty() }
                 ?.let { "${it.size} store${if (it.size == 1) "" else "s"} · " }.orEmpty()
             Text(origin + ago(entry.note.time), color = labFaint, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
@@ -1067,7 +1074,7 @@ private fun LabMetaLine(card: LabSetCard, tier: String?, group: String?) {
 private fun LabNoteLine(text: String, time: String, hidden: Boolean, onHide: (() -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.Top) {
         Text(ago(time), color = labFaint, fontSize = 9.sp, modifier = Modifier.width(40.dp))
-        Text(text, color = if (hidden) labFaint else labDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        LabMarkdown(text, if (hidden) labFaint else labDim, labFaint, labPanel, Modifier.weight(1f))
         if (onHide != null) Text("HIDE", color = labFaint, fontSize = 9.sp, modifier = Modifier.clickable(onClick = onHide).padding(4.dp))
     }
     HorizontalDivider(color = labBorder.copy(alpha = 0.45f))
@@ -1117,10 +1124,12 @@ private fun runStatus(run: LabRunSummary): Pair<String, Color> {
 private fun visibleResultEvents(events: List<LabEvent>): List<LabEvent> {
     val hidden = events.filter { it.kind == "hide" }.mapNotNull { it.data?.target }.toSet()
     return events.filter { it.kind in setOf("result", "note", "hnote") && it.id !in hidden }
+        .sortedWith(compareByDescending<LabEvent> { it.time }.thenByDescending { it.id })
 }
 
 private fun visibleEventNotes(events: List<LabEvent>): List<LabEvent> =
     events.filter { it.kind == "hnote" || (it.kind == "note" && it.author == "human") }
+        .sortedWith(compareByDescending<LabEvent> { it.time }.thenByDescending { it.id })
 
 private fun LabEvent.hiddenBy(events: List<LabEvent>): Boolean =
     events.any { it.kind == "hide" && it.data?.target == id }
