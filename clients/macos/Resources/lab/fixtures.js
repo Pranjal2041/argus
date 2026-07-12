@@ -77,6 +77,19 @@
     "torch==2.7.1",
     "wandb==0.20.1",
   ].join("\n");
+  const markdownResult = [
+    "## Illumination sweep",
+    "",
+    "**Status:** completed",
+    "",
+    "| Metric | Baseline | Low jitter |",
+    "|---|---:|---:|",
+    "| Macro F1 | 0.812 | **0.831** |",
+    "| East-camera FNR | 14.8% | **11.2%** |",
+    "",
+    "- The primary guardrail improved.",
+    "- No data drift was detected.",
+  ].join("\n");
 
   const model = {
     pendingKeys: [
@@ -151,7 +164,7 @@
         runs: [
           { id: "R1", status: "done", tier: "quick", group: "baseline", latest: "Baseline reproduced: macro F1 0.812; east-camera false-negative rate 14.8%.", started: iso(410), exitCode: 0, archived: true },
           { id: "R2", status: "approved (launch with --proposal R2)", tier: "full", group: "illumination-sweep", latest: "Approved; the agent has not started it yet.", started: iso(260), exitCode: -1, archived: false },
-          { id: "R3", status: "done", tier: "quick", group: "illumination-sweep", latest: "Lower jitter lifts macro F1 to 0.831 and cuts east-camera false negatives to 11.2%.", started: iso(146), exitCode: 0, archived: false },
+          { id: "R3", status: "done", tier: "quick", group: "illumination-sweep", latest: markdownResult, latestAt: iso(101), started: iso(146), exitCode: 0, archived: false },
           { id: "R4", status: "proposed (awaiting approval)", tier: "full", group: "illumination-sweep", latest: "", started: iso(38), exitCode: -1, archived: false },
           { id: "R5", status: "running (12m)", tier: "full", group: "panel-calibration", latest: "Epoch 7/18 · validation macro F1 0.839", started: iso(12), exitCode: -1, archived: false },
           { id: "R6", status: "failed (exit 137)", tier: "quick", group: "stress-check", latest: "Process was killed during validation after memory climbed past the local limit.", started: iso(74), exitCode: 137, archived: false },
@@ -238,7 +251,7 @@
       events: [
         { id: "r3-start", kind: "run-start", time: iso(146), author: "machine", data: { ...baseEnvelope, argv: ["uv", "run", "python", "train.py", "--config", "configs/retina-low-jitter.yaml"] } },
         { id: "r3-end", kind: "run-end", time: iso(103), author: "machine", data: { exit: 0, durationSec: 2584, wandb: ["vision-lab/retina-calibration/runs/3k92w8fd"] } },
-        { id: "r3-result", kind: "result", time: iso(101), author: "agent", text: "Lower jitter lifts macro F1 to 0.831 and cuts east-camera false negatives to 11.2%." },
+        { id: "r3-result", kind: "result", time: iso(101), author: "agent", text: markdownResult },
         { id: "r3-note", kind: "hnote", time: iso(96), author: "human", text: "The east-camera gain is meaningful; verify it survives panel conditioning." },
       ],
       files: { params: [{ path: `${projectRoot}/configs/retina-low-jitter.yaml`, text: paramB }], diff, log: "epoch 22/24 | val/f1 0.829\nepoch 24/24 | val/f1 0.831 | east/fnr 0.112\nrun complete\n", env: environment },

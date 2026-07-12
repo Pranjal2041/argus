@@ -396,6 +396,29 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .result-copy { color: var(--text); font-family: var(--sans); font-size: .8rem; line-height: 1.5; }
 .report-paragraph { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
 .report-paragraph + .report-paragraph { margin-top: .72em; }
+.markdown-report { min-width: 0; color: inherit; font: inherit; line-height: 1.58; overflow-wrap: anywhere; }
+.markdown-report > :first-child { margin-top: 0; }
+.markdown-report > :last-child { margin-bottom: 0; }
+.markdown-report h1, .markdown-report h2, .markdown-report h3, .markdown-report h4, .markdown-report h5, .markdown-report h6 {
+  margin: 1.15em 0 .5em; color: var(--text); font-family: var(--display); font-weight: 680; line-height: 1.25; letter-spacing: -.015em;
+}
+.markdown-report h1 { font-size: 1.38em; padding-bottom: .28em; border-bottom: 1px solid var(--line); }
+.markdown-report h2 { font-size: 1.24em; }
+.markdown-report h3 { font-size: 1.1em; }
+.markdown-report p { margin: .62em 0; }
+.markdown-report ul, .markdown-report ol { margin: .58em 0; padding-left: 1.45em; }
+.markdown-report li { margin: .28em 0; }
+.markdown-report blockquote { margin: .7em 0; padding: .05em 0 .05em 1em; border-left: 2px solid var(--accent); color: var(--text-secondary); }
+.markdown-report code { border-radius: 3px; background: var(--canvas-deep); padding: .08em .3em; color: var(--code-text); font: .88em/1.45 var(--mono); }
+.markdown-report pre { max-width: 100%; overflow: auto; margin: .75em 0; border: 1px solid var(--line); border-radius: 5px; background: var(--canvas-deep); padding: 11px 13px; }
+.markdown-report pre code { background: transparent; padding: 0; font-size: .78rem; }
+.markdown-report table { width: 100%; min-width: 520px; border-collapse: collapse; margin: .8em 0; font-size: .9em; }
+.markdown-report thead { background: var(--surface-raised); }
+.markdown-report th, .markdown-report td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+.markdown-report tbody tr:nth-child(2n) { background: var(--surface-soft); }
+.markdown-report a { color: var(--link); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.markdown-report hr { height: 1px; margin: 1.1em 0; border: 0; background: var(--line); }
+.run-result-text .markdown-report { overflow-x: auto; }
 .result-preview {
   min-width: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box;
   -webkit-box-orient: vertical; -webkit-line-clamp: 4;

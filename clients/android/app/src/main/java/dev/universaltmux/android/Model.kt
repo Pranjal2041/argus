@@ -418,6 +418,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val aggregate = LabAggregator.aggregate(snapshots, mirrored, mirrorBroker)
                 if (generation != labGeneration) return@launch
+                val previousSummaries = labSets.flatMap { card ->
+                    card.brief.runs.map { run -> labDetailKey(card, run.id) to labSummaryFingerprint(run) }
+                }.toMap()
+                val changedDetails = aggregate.sets.flatMap { card ->
+                    card.brief.runs.mapNotNull { run ->
+                        val key = labDetailKey(card, run.id)
+                        key.takeIf { previousSummaries[key]?.let { it != labSummaryFingerprint(run) } == true }
+                    }
+                }.toSet()
                 labSets.clear(); labSets.addAll(aggregate.sets)
                 labPendingKeys.clear(); labPendingKeys.addAll(aggregate.pendingKeys)
                 labPendingRuns.clear(); labPendingRuns.addAll(aggregate.pendingRuns)
@@ -443,7 +452,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 labLoaded = true
                 labError = null
-                refreshVisibleLabDetails()
+                val routeKey = labRoute.runID.takeIf { it.isNotEmpty() }?.let { "${labRoute.cardID}/$it" }
+                refreshVisibleLabDetails(force = routeKey != null && routeKey in changedDetails)
             } finally {
                 labRefreshInFlight = false
                 labRefreshing = false
@@ -471,7 +481,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun openLabRun(cardID: String, runID: String) {
         labRoute = LabRoute(area = LabArea.RESEARCH, cardID = cardID, runID = runID)
         requestedScreen = SCREEN_LAB
-        labSets.firstOrNull { it.id == cardID }?.let { loadLabDetail(it, runID) }
+        labSets.firstOrNull { it.id == cardID }?.let { loadLabDetail(it, runID, force = true) }
     }
 
     fun openLabCompare(cardID: String, runA: String, runB: String) {
@@ -484,8 +494,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         )
         requestedScreen = SCREEN_LAB
         labSets.firstOrNull { it.id == cardID }?.let { card ->
-            loadLabDetail(card, runA)
-            loadLabDetail(card, runB)
+            loadLabDetail(card, runA, force = true)
+            loadLabDetail(card, runB, force = true)
         }
     }
 
@@ -502,6 +512,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun clearLabError() { labError = null }
 
     fun labDetailKey(card: LabSetCard, run: String) = "${card.id}/$run"
+
+    private fun labSummaryFingerprint(run: LabRunSummary) = listOf(
+        run.status, run.started.orEmpty(), run.latest.orEmpty(), run.latestAt.orEmpty(),
+        run.exitCode.toString(), run.archived.toString(),
+    ).joinToString("\u0000")
 
     fun loadLabDetail(card: LabSetCard, run: String, force: Boolean = false) {
         val key = labDetailKey(card, run)

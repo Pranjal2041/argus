@@ -98,6 +98,7 @@ struct LabRunSummary: Codable, Hashable, Identifiable {
     let status: String
     var started: String?
     var latest: String?
+    var latestAt: String? = nil
     let exitCode: Int
     var archived: Bool?
 }
@@ -227,7 +228,7 @@ final class LabModel: ObservableObject {
     @Published var refreshing = false
     @Published var loadedOnce = false
 
-    /// Oldest first, matching the Lab decision queue. Everything in this list
+    /// Newest first, matching the Lab decision queue. Everything in this list
     /// is blocked on a human action and therefore belongs in Command Center's
     /// top "Needs you" band.
     var attentionItems: [AttentionItem] {
@@ -246,7 +247,7 @@ final class LabModel: ObservableObject {
                                  summary: intent.isEmpty ? "Review this experiment before it starts." : intent,
                                  created: item.proposal.created)
         }
-        return (keys + runs).sorted { ($0.created, $0.id) < ($1.created, $1.id) }
+        return (keys + runs).sorted { ($0.created, $0.id) > ($1.created, $1.id) }
     }
 
     private weak var boundState: AppState?
@@ -429,9 +430,15 @@ final class LabModel: ObservableObject {
                                             offline: true, mirroredAt: item.updated)
         }
 
+        func activity(_ card: SetCard) -> String {
+            card.brief.runs?.map { $0.latestAt ?? $0.started ?? card.brief.set.created }.max()
+                ?? card.brief.set.created
+        }
         let cards = cardsByRecord.values.sorted {
-            ($0.brief.set.project, $0.brief.set.created, $0.id) <
-            ($1.brief.set.project, $1.brief.set.created, $1.id)
+            if $0.brief.set.project != $1.brief.set.project {
+                return $0.brief.set.project < $1.brief.set.project
+            }
+            return (activity($0), $0.id) > (activity($1), $1.id)
         }
         var active: [String: String] = [:]
         for (record, key) in activeByRecord {
@@ -439,8 +446,8 @@ final class LabModel: ObservableObject {
         }
         return AggregatedState(
             sets: cards,
-            pendingKeys: pendingByRecord.values.sorted { ($0.key.created, $0.id) < ($1.key.created, $1.id) },
-            pendingRuns: proposalsByRecord.values.sorted { ($0.proposal.created, $0.id) < ($1.proposal.created, $1.id) },
+            pendingKeys: pendingByRecord.values.sorted { ($0.key.created, $0.id) > ($1.key.created, $1.id) },
+            pendingRuns: proposalsByRecord.values.sorted { ($0.proposal.created, $0.id) > ($1.proposal.created, $1.id) },
             hubNotes: notes.sorted { ($0.machineName.lowercased(), $0.machineID) < ($1.machineName.lowercased(), $1.machineID) },
             activeKeyBySet: active
         )

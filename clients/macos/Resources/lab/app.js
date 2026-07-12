@@ -112,12 +112,61 @@ function reportParagraphs(value) {
     .split("\n").map(part => part.trim()).filter(Boolean);
 }
 
+function reportMarkdownSource(value) {
+  const text = normalizedReportText(value);
+  if (!text || text.includes("\n") || text.length < 360) return text;
+  return reportParagraphs(text).join("\n\n");
+}
+
+function sanitizeMarkdown(html) {
+  const template = document.createElement("template");
+  template.innerHTML = String(html || "");
+  const allowed = new Set([
+    "A", "BLOCKQUOTE", "BR", "CODE", "DEL", "EM", "H1", "H2", "H3", "H4", "H5", "H6",
+    "HR", "LI", "OL", "P", "PRE", "S", "STRONG", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL",
+  ]);
+  const dangerous = new Set(["BASE", "BUTTON", "EMBED", "FORM", "IFRAME", "INPUT", "LINK", "META", "OBJECT", "SCRIPT", "SELECT", "STYLE", "SVG", "TEXTAREA"]);
+  for (const node of [...template.content.querySelectorAll("*")]) {
+    if (dangerous.has(node.tagName)) { node.remove(); continue; }
+    if (!allowed.has(node.tagName)) { node.replaceWith(document.createTextNode(node.textContent || "")); continue; }
+    const href = node.tagName === "A" ? node.getAttribute("href") || "" : "";
+    for (const attribute of [...node.attributes]) node.removeAttribute(attribute.name);
+    if (node.tagName === "A") {
+      if (/^(https?:|mailto:)/i.test(href)) {
+        node.setAttribute("href", href);
+        node.setAttribute("rel", "noopener noreferrer");
+      }
+    }
+  }
+  return template.innerHTML;
+}
+
 function renderReportText(value) {
-  return reportParagraphs(value).map(part => `<span class="report-paragraph">${esc(part)}</span>`).join("");
+  const source = reportMarkdownSource(value);
+  if (!source) return "";
+  if (window.marked && typeof window.marked.parse === "function") {
+    try { return `<div class="markdown-report">${sanitizeMarkdown(window.marked.parse(source, { gfm: true, breaks: false }))}</div>`; }
+    catch (_) {}
+  }
+  return reportParagraphs(source).map(part => `<span class="report-paragraph">${esc(part)}</span>`).join("");
+}
+
+function markdownPlainText(value) {
+  return normalizedReportText(value)
+    .replace(/^\s*(```|~~~).*$/gm, " ")
+    .replace(/^\s*\|?[\s:|-]+\|?\s*$/gm, " ")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*(?:[-+*]|\d+\.)\s+/gm, "")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\*\*|__|~~|`/g, "")
+    .replace(/\|/g, " · ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function reportPreview(value, limit = 360) {
-  const text = normalizedReportText(value).replace(/\s+/g, " ");
+  const text = markdownPlainText(value);
   if (text.length <= limit) return text;
   const cut = text.slice(0, limit + 1);
   const boundary = cut.lastIndexOf(" ");
@@ -245,7 +294,15 @@ function normalizeModel(input) {
 function pendingItems() {
   const keys = Lab.model.pendingKeys.map(item => ({ type: "key", id: item.id, item }));
   const runs = Lab.model.pendingRuns.map(item => ({ type: "proposal", id: item.id, item }));
-  return [...runs, ...keys].sort((a, b) => String(a.item.created || "").localeCompare(String(b.item.created || "")));
+  return [...runs, ...keys].sort((a, b) => String(b.item.created || "").localeCompare(String(a.item.created || "")) || String(b.id).localeCompare(String(a.id)));
+}
+
+function runActivityAt(run, card) { return run.latestAt || run.started || card && card.created || ""; }
+function cardActivityAt(card) {
+  return (card.runs || []).reduce((latest, run) => {
+    const activity = runActivityAt(run, card);
+    return activity > latest ? activity : latest;
+  }, card.created || "");
 }
 
 function allRuns(includeArchived = true) {
@@ -257,7 +314,8 @@ function allRuns(includeArchived = true) {
       out.push({ card, run });
     }
   }
-  return out;
+  return out.sort((a, b) => String(runActivityAt(b.run, b.card)).localeCompare(String(runActivityAt(a.run, a.card)))
+    || runNumber(b.run.id) - runNumber(a.run.id) || String(b.card.id).localeCompare(String(a.card.id)));
 }
 
 function cardByID(id) { return Lab.model.sets.find(card => card.id === id); }
@@ -268,6 +326,23 @@ function cardForProposal(proposal) {
 
 function detailKey(cardID, run) { return `${cardID}/${run}`; }
 function detailFor(cardID, run) { return Lab.details[detailKey(cardID, run)]; }
+function runSummaryFingerprint(run) {
+  return JSON.stringify([run.status || "", run.started || "", run.latest || "", run.latestAt || "", run.exitCode, run.archived === true]);
+}
+function invalidateChangedRunDetails(nextModel) {
+  const previous = new Map();
+  for (const card of Lab.model.sets || []) for (const run of card.runs || []) {
+    previous.set(detailKey(card.id, run.id), runSummaryFingerprint(run));
+  }
+  for (const card of nextModel.sets || []) for (const run of card.runs || []) {
+    const key = detailKey(card.id, run.id);
+    const before = previous.get(key);
+    if (before != null && before !== runSummaryFingerprint(run)) {
+      delete Lab.details[key];
+      delete Lab.detailRequestedAt[key];
+    }
+  }
+}
 
 function foldDetail(detail) {
   const events = detail && Array.isArray(detail.events) ? detail.events : [];
@@ -444,7 +519,7 @@ function renderInboxContext() {
       }).join("")}
     </section>` : "";
   return `<div class="context-heading"><span class="context-title">Decision queue</span><span class="context-count">${items.length}</span></div>
-    <div class="context-help">Oldest request first. J/K moves through the queue; the evidence follows your selection.</div>
+    <div class="context-help">Newest request first. J/K moves through the queue; the evidence follows your selection.</div>
     ${rows(proposals, "Experiment approvals")}${rows(keys, "Access requests")}
     ${items.length ? "" : `<div class="context-empty">Nothing needs a decision. Running and recently finished work remains in Research.</div>`}`;
 }
@@ -493,7 +568,7 @@ function renderResearchContext() {
     </div>
     ${[...groups.entries()].sort((a,b) => a[0].localeCompare(b[0])).map(([project, sets]) => `<section class="project-group">
       <div class="project-name">${esc(project)}</div>
-      ${sets.sort((a,b) => String(b.created || "").localeCompare(String(a.created || ""))).map(card => {
+      ${sets.sort((a,b) => cardActivityAt(b).localeCompare(cardActivityAt(a)) || String(b.id).localeCompare(String(a.id))).map(card => {
         const selected = Lab.selection && Lab.selection.card === card.id;
         const active = card.runs.filter(run => ["running","needs","approved"].includes(statusInfo(run.status).key) && !run.archived).length;
         const runCount = card.runs.length;
@@ -577,14 +652,14 @@ function renderInboxMain() {
 
 function renderInboxClear() {
   const running = allRuns(false).filter(({ run }) => statusInfo(run.status).key === "running");
-  const recent = allRuns(false).filter(({ run }) => statusInfo(run.status).key === "finished" && run.latest).sort((a,b) => String(b.run.started || "").localeCompare(String(a.run.started || ""))).slice(0,4);
+  const recent = allRuns(false).filter(({ run }) => statusInfo(run.status).key === "finished" && run.latest).slice(0,4);
   return `<div class="main-content"><div class="inbox-clear"><div>
       <div class="clear-mark">✓</div><div class="eyebrow">Decision queue clear</div>
       <div class="clear-title">Nothing is waiting on you.</div>
       <div class="clear-copy">${running.length ? `${running.length} experiment${running.length === 1 ? " is" : "s are"} still running. Research keeps their live record.` : "Every recorded experiment is either underway or resolved."}</div>
       <div style="margin-top:20px"><button class="button" type="button" data-nav="research">Open Research</button></div>
     </div></div>
-    ${recent.length ? `<div class="section-head"><h2>Recent findings</h2></div><div class="result-ledger">${recent.map(({card,run}) => `<button class="queue-row" style="border-left-color:var(--verified)" type="button" data-open-run="${esc(card.id)}" data-run="${esc(run.id)}"><span class="queue-row-top"><span class="queue-id">${esc(run.id)}</span><span class="queue-age">${esc(ago(run.started))}</span></span><span class="queue-intent">${esc(run.latest)}</span><span class="queue-meta">${esc(card.project)} · ${esc(card.machineName)}</span></button>`).join("")}</div>` : ""}
+    ${recent.length ? `<div class="section-head"><h2>Recent findings</h2></div><div class="result-ledger">${recent.map(({card,run}) => `<button class="queue-row" style="border-left-color:var(--verified)" type="button" data-open-run="${esc(card.id)}" data-run="${esc(run.id)}"><span class="queue-row-top"><span class="queue-id">${esc(run.id)}</span><span class="queue-age">${esc(ago(run.started))}</span></span><span class="queue-intent">${esc(reportPreview(run.latest, 240))}</span><span class="queue-meta">${esc(card.project)} · ${esc(card.machineName)}</span></button>`).join("")}</div>` : ""}
     </div>`;
 }
 
@@ -702,8 +777,8 @@ function renderSignalStrip(entries) {
 function renderResearchOverview() {
   const runs = allRuns(false);
   const active = runs.filter(({run}) => ["running","needs","approved"].includes(statusInfo(run.status).key));
-  const failures = runs.filter(({run}) => statusInfo(run.status).key === "failed").sort((a,b) => String(b.run.started || "").localeCompare(String(a.run.started || ""))).slice(0,5);
-  const findings = runs.filter(({run}) => statusInfo(run.status).key === "finished" && run.latest).sort((a,b) => String(b.run.started || "").localeCompare(String(a.run.started || ""))).slice(0,6);
+  const failures = runs.filter(({run}) => statusInfo(run.status).key === "failed").slice(0,5);
+  const findings = runs.filter(({run}) => statusInfo(run.status).key === "finished" && run.latest).slice(0,6);
   return `<div class="main-content wide">
     <div class="eyebrow">Research ledger</div><h1 class="display-title">The record, not the recollection.</h1>
     <p class="lede">Every wrapped run across ${Lab.model.sets.length} isolated set${Lab.model.sets.length === 1 ? "" : "s"}: intent, exact code, parameters, declared data, environment, logs, and findings.</p>
@@ -772,7 +847,8 @@ function filteredRuns(card) {
   if (Lab.runFilter === "active") runs = runs.filter(({run}) => ["running","needs","approved"].includes(statusInfo(run.status).key));
   if (Lab.runFilter === "failed") runs = runs.filter(({run}) => statusInfo(run.status).key === "failed");
   if (Lab.runFilter === "finished") runs = runs.filter(({run}) => statusInfo(run.status).key === "finished");
-  return runs.sort((a,b) => runNumber(b.run.id) - runNumber(a.run.id));
+  return runs.sort((a,b) => runActivityAt(b.run, b.card).localeCompare(runActivityAt(a.run, a.card))
+    || runNumber(b.run.id) - runNumber(a.run.id));
 }
 
 function runNumber(id) { const match = /^R(\d+)$/.exec(id || ""); return match ? Number(match[1]) : -1; }
@@ -887,7 +963,7 @@ function renderSummary(folded, card, run) {
   const dataFiles = env.dataFiles || [];
   const noteDraft = draft(`run-note:${card.id}/${run.id}`, "");
   return `<div class="summary-grid"><div class="summary-stack">
-    <section><div class="section-head" style="margin-top:0"><h2>Reported results</h2><span class="section-kicker">agent claims remain attributable</span></div>
+    <section><div class="section-head" style="margin-top:0"><h2>Reported results</h2><span class="section-kicker">newest first · agent claims remain attributable</span></div>
       ${visible.length ? `<div class="result-ledger">${visible.map(event => `<div class="result-row"><span class="result-time">${esc(ago(event.time))}</span><span class="result-copy selectable">${renderReportText(event.text || "")}</span><span class="row-actions">${!card.offline && event.author === "agent" ? `<button class="row-action" type="button" data-action="hide-result" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-target="${esc(event.id)}">hide</button>` : `<span class="tag">${event.author === "human" ? "human" : event.author}</span>`}</span></div>`).join("")}</div>` : run.latest ? `<div class="result-ledger"><div class="result-row"><span class="result-time">summary</span><span class="result-copy selectable">${renderReportText(run.latest)}</span><span class="tag">run summary</span></div></div>` : `<div class="secondary human-copy">No result has been reported yet.</div>`}
       ${card.offline ? "" : `<div class="note-composer"><input class="text-input" data-draft="run-note:${esc(card.id)}/${esc(run.id)}" value="${esc(noteDraft)}" placeholder="Add a human note to this run" aria-label="Human note"><button class="button" type="button" data-action="run-note" data-card="${esc(card.id)}" data-run="${esc(run.id)}">${icon("note")}Add note</button></div>`}
     </section>
@@ -966,7 +1042,7 @@ function renderProvenance(folded, card, run) {
   const envText = folded.files.env || "";
   const artifactKey = detailKey(card.id, run.id);
   const selectedArtifact = Lab.artifactSelection[artifactKey] || "";
-  return `<div class="summary-grid"><div><div class="section-head" style="margin-top:0"><h2>Event record</h2></div><div class="timeline">${folded.events.filter(event => event.kind !== "hide").map(event => `<div class="timeline-event"><div class="timeline-kind">${esc(eventLabel(event.kind))}<span class="timeline-time">${esc(ago(event.time))} ago</span></div><div class="timeline-detail selectable">${esc(event.text || eventSummary(event))}</div></div>`).join("")}</div></div>
+  return `<div class="summary-grid"><div><div class="section-head" style="margin-top:0"><h2>Event record</h2><span class="section-kicker">newest first</span></div><div class="timeline">${folded.events.filter(event => event.kind !== "hide").reverse().map(event => `<div class="timeline-event"><div class="timeline-kind">${esc(eventLabel(event.kind))}<span class="timeline-time">${esc(ago(event.time))} ago</span></div><div class="timeline-detail selectable">${esc(markdownPlainText(event.text || eventSummary(event)))}</div></div>`).join("")}</div></div>
     <aside class="summary-stack"><section><div class="section-head" style="margin-top:0"><h2>Approval binding</h2></div><div class="command-line selectable" style="white-space:pre-wrap">${esc(folded.env.bind || "No bind recorded")}</div></section>
       ${folded.manifest.length ? `<section><div class="section-head"><h2>Stored artifacts</h2><span class="section-kicker">select to inspect</span></div><div class="artifact-list">${folded.manifest.map(file => `<button class="artifact-row ${selectedArtifact === file.name ? "active" : ""}" type="button" data-action="artifact" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-name="${esc(file.name)}" aria-expanded="${selectedArtifact === file.name}"><span class="artifact-name">${esc(file.name)}</span><span class="artifact-kind">${esc(artifactKind(file.name))}</span><span class="artifact-size">${esc(bytes(file.size))}</span>${icon("chevron")}</button>`).join("")}</div>${selectedArtifact ? renderArtifactPreview(selectedArtifact, folded, card, run) : ""}</section>` : ""}
       ${envText ? `<section><div class="section-head"><h2>Environment freeze</h2></div>${renderEvidenceBlock("files/env.txt", envText, `env:${card.id}:${run.id}`, "")}</section>` : ""}
@@ -1220,9 +1296,17 @@ function preferredRunTab(cardID, runID) {
   const run = card && card.runs.find(item => item.id === runID);
   return run && statusInfo(run.status).key === "failed" ? "log" : "summary";
 }
-function openRun(card, run) { Lab.area = "research"; Lab.selection = { type: "run", card, run }; Lab.drawerOpen = false; Lab.runTab = preferredRunTab(card, run); resetMainScroll(); render(); }
+function openRun(card, run) {
+  const key = detailKey(card, run);
+  delete Lab.details[key];
+  delete Lab.detailRequestedAt[key];
+  Lab.area = "research"; Lab.selection = { type: "run", card, run }; Lab.drawerOpen = false;
+  Lab.runTab = preferredRunTab(card, run); resetMainScroll(); render();
+}
 
 document.addEventListener("click", event => {
+  const markdownLink = event.target.closest(".markdown-report a[href]");
+  if (markdownLink) { event.preventDefault(); post({ type: "openURL", url: markdownLink.href }); return; }
   const nav = event.target.closest("[data-nav]");
   if (nav) { setArea(nav.dataset.nav); return; }
   const pending = event.target.closest("[data-select-pending]");
@@ -1405,6 +1489,7 @@ window.UTLab = {
   setData(input) {
     const model = normalizeModel(input);
     const key = JSON.stringify(model);
+    invalidateChangedRunDetails(model);
     Lab.model = model;
     Lab.syncAt = new Date();
     if (!Lab.initialized) {

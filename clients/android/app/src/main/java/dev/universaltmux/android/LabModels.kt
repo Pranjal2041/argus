@@ -62,6 +62,7 @@ data class LabRunSummary(
     val status: String,
     val started: String? = null,
     val latest: String? = null,
+    val latestAt: String? = null,
     val exitCode: Int = -1,
     val archived: Boolean = false,
 )
@@ -203,6 +204,12 @@ data class LabRunDetail(
     val end: LabEventData? get() = events.lastOrNull { it.kind == "run-end" }?.data
 }
 
+internal fun labRunActivityAt(run: LabRunSummary, fallback: String = ""): String =
+    run.latestAt ?: run.started ?: fallback
+
+internal fun labCardActivityAt(card: LabSetCard): String =
+    card.brief.runs.maxOfOrNull { labRunActivityAt(it, card.brief.set.created) } ?: card.brief.set.created
+
 enum class LabArea { INBOX, RESEARCH, GUIDANCE }
 
 /** Navigation is state owned by the view model so notification and Command
@@ -300,11 +307,15 @@ object LabAggregator {
             )
         }
 
-        val sortedCards = cards.values.sortedWith(compareBy({ it.brief.set.project }, { it.brief.set.created }, { it.id }))
+        val sortedCards = cards.values.sortedWith(
+            compareBy<LabSetCard> { it.brief.set.project }
+                .thenByDescending { labCardActivityAt(it) }
+                .thenByDescending { it.id },
+        )
         val activeByCard = linkedMapOf<String, String>()
         activeKeys.forEach { (record, key) -> cards[record]?.let { activeByCard[it.id] = key.key } }
-        val sortedKeys = pendingKeys.values.sortedWith(compareBy({ it.key.created }, { it.id }))
-        val sortedRuns = pendingRuns.values.sortedWith(compareBy({ it.proposal.created }, { it.id }))
+        val sortedKeys = pendingKeys.values.sortedWith(compareByDescending<LabPendingKey> { it.key.created }.thenByDescending { it.id })
+        val sortedRuns = pendingRuns.values.sortedWith(compareByDescending<LabPendingRun> { it.proposal.created }.thenByDescending { it.id })
         val attention = buildList {
             sortedKeys.forEach {
                 add(LabAttentionItem(
@@ -319,7 +330,7 @@ object LabAggregator {
                     it.proposal.created,
                 ))
             }
-        }.sortedWith(compareBy({ it.created }, { it.id }))
+        }.sortedWith(compareByDescending<LabAttentionItem> { it.created }.thenByDescending { it.id })
 
         return LabAggregate(
             sortedCards,
