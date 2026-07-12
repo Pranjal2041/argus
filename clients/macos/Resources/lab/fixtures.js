@@ -108,6 +108,7 @@
       {
         machineID: "local",
         machineName: "Mara's MacBook Pro",
+        storeID: "store:local",
         notes: [
           { scope: "global", id: "hn-1", time: iso(4320), author: "human", text: "Fix the random seed and report it with every comparative result.", hidden: false },
           { scope: "machine", id: "hn-2", time: iso(860), author: "human", text: "Keep local sweeps under 48 GB unified memory; queue larger work on Babel.", hidden: false },
@@ -118,7 +119,9 @@
       {
         machineID: "babel-q9-24",
         machineName: "babel-q9-24",
+        storeID: "store:babel",
         notes: [
+          { scope: "global", id: "hn-1-replica", time: iso(4320), author: "human", text: "Fix the random seed and report it with every comparative result.", hidden: false },
           { scope: "global", id: "hn-5", time: iso(1220), author: "human", text: "Checkpoints belong under /data/user_data, never a login-node home folder.", hidden: false },
           { scope: "project", project: "pause-prediction", id: "hn-6", time: iso(740), author: "human", text: "Report cohort-level hit rate and p95 pause time together.", hidden: false },
         ],
