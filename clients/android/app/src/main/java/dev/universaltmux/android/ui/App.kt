@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VpnKey
@@ -84,6 +85,16 @@ fun App(vm: AppViewModel) {
         var showFind by remember { mutableStateOf(false) }
         var renderText by remember { mutableStateOf<String?>(null) }  // non-nil → Renders overlay
 
+        // Notifications and Command Center own navigation through the view model;
+        // consume requests here because the selected top-level screen is UI state.
+        val requestedScreen = vm.requestedScreen
+        LaunchedEffect(requestedScreen) {
+            if (requestedScreen != null) {
+                screen = requestedScreen
+                vm.consumeScreenRequest()
+            }
+        }
+
         // Continuously refresh sessions WHILE THE APP IS IN THE FOREGROUND so a missed or
         // slow poll self-heals instead of leaving the list frozen/missing (the previous
         // behavior — refresh only on launch + the manual button). repeatOnLifecycle stops
@@ -96,7 +107,9 @@ fun App(vm: AppViewModel) {
                 while (true) {
                     if (TsnetCore.isUp && tick % 5 == 0) vm.refreshAll() else vm.pollKnown()
                     vm.refreshCC()   // pull the Mac-published statuses for the command center
-                    if (tick % 2 == 0) { vm.enrichOs(); vm.syncUserData(); vm.flushJournal() }  // sync Workflows + Todo Maps + phone journal
+                    if (tick % 2 == 0) {
+                        vm.enrichOs(); vm.syncUserData(); vm.flushJournal(); vm.refreshLab()
+                    }  // sync user data, journal, and Lab protocol state every ~6s
                     tick++
                     delay(3000)
                 }
@@ -134,6 +147,7 @@ fun App(vm: AppViewModel) {
                                     screen == 1 -> "Files"
                                     screen == 2 -> "Ports"
                                     screen == 3 -> "Argus"
+                                    screen == SCREEN_LAB -> "Lab"
                                     sel != null -> "${sel.second}  ·  ${sel.first.name}"
                                     else -> "Argus"
                                 },
@@ -170,6 +184,19 @@ fun App(vm: AppViewModel) {
                             IconButton(onClick = { screen = if (screen == 3) 0 else 3 }) {
                                 Icon(Icons.Filled.GridView, "Command Center", tint = if (screen == 3) accent else cText)
                             }
+                            IconButton(onClick = {
+                                if (screen == SCREEN_LAB) screen = 0 else vm.requestLab()
+                            }) {
+                                BadgedBox(
+                                    badge = {
+                                        if (vm.labAttention.isNotEmpty()) Badge {
+                                            Text("${vm.labAttention.size}", fontSize = 9.sp)
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Filled.Science, "Lab", tint = if (screen == SCREEN_LAB) accent else cText)
+                                }
+                            }
                             IconButton(onClick = { screen = if (screen == 1) 0 else 1 }) {
                                 Icon(if (screen == 1) Icons.Filled.Terminal else Icons.Filled.Folder,
                                     "Files", tint = if (screen == 1) accent else cText)
@@ -200,6 +227,8 @@ fun App(vm: AppViewModel) {
                         PortsScreen(vm)
                     } else if (screen == 3) {
                         CommandCenterScreen(vm) { b, s -> vm.selected = b to s; screen = 0 }
+                    } else if (screen == SCREEN_LAB) {
+                        LabScreen(vm) { b, s -> vm.selected = b to s; screen = 0 }
                     } else if (screen == 4) {
                         WorkflowsScreen(vm) { screen = 0 }
                     } else if (screen == 5) {

@@ -9,6 +9,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -169,11 +172,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var todosTs = 0L
     private var notesTs = 0L
 
+    // --- Argus Lab ----------------------------------------------------------
+    // Store-owned records are reduced through LabAggregator before reaching
+    // these observable lists, so every Babel NFS store appears exactly once.
+    val labSets = mutableStateListOf<LabSetCard>()
+    val labPendingKeys = mutableStateListOf<LabPendingKey>()
+    val labPendingRuns = mutableStateListOf<LabPendingRun>()
+    val labNotes = mutableStateListOf<LabNotesGroup>()
+    val labAttention = mutableStateListOf<LabAttentionItem>()
+    val labActiveKeyBySet = mutableStateMapOf<String, String>()
+    val labDetails = mutableStateMapOf<String, LabRunDetail>()
+    val labDetailLoading = mutableStateListOf<String>()
+    var labRoute by mutableStateOf(LabRoute())
+    var labRefreshing by mutableStateOf(false)
+        private set
+    var labActionBusy by mutableStateOf(false)
+        private set
+    var labLoaded by mutableStateOf(false)
+        private set
+    var labError by mutableStateOf<String?>(null)
+        private set
+    var requestedScreen by mutableStateOf<Int?>(null)
+        private set
+    private var labRefreshInFlight = false
+    private var labGeneration = 0
+    private val labNotified = (prefs.getStringSet("ut.lab.notified.v1", emptySet()) ?: emptySet()).toMutableSet()
+
     init {
         loadBrokers()
         loadWandb()
         loadUserData()
         refreshAll()
+        refreshLab()
         if (authKey.isNotEmpty()) joinTailnet(authKey) // auto-join + auto-discover on startup
     }
 
@@ -279,6 +309,235 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 recomputeAttention()
             }
         }
+    }
+
+    // --- Lab refresh, navigation, and human actions -------------------------
+
+    fun refreshLab() {
+        if (labRefreshInFlight) return
+        val current = brokers.toList()
+        if (current.isEmpty()) {
+            labLoaded = true
+            return
+        }
+        labRefreshInFlight = true
+        labRefreshing = true
+        val generation = ++labGeneration
+        viewModelScope.launch {
+            try {
+                val snapshots = coroutineScope {
+                    current.map { broker -> async(Dispatchers.IO) { LabNet.snapshot(broker) } }.awaitAll()
+                }
+                val mirrorBroker = current.firstOrNull { it.isMac }
+                val mirrored = if (mirrorBroker == null) emptyList() else
+                    withContext(Dispatchers.IO) { LabNet.mirror(mirrorBroker) }
+                val answered = snapshots.any {
+                    it.notes != null || it.briefs.isNotEmpty() || it.keys.isNotEmpty() || it.proposals.isNotEmpty()
+                }
+                if (!answered) {
+                    labError = "Lab brokers are temporarily unreachable. Showing the last complete view."
+                    return@launch
+                }
+                val aggregate = LabAggregator.aggregate(snapshots, mirrored, mirrorBroker)
+                if (generation != labGeneration) return@launch
+                labSets.clear(); labSets.addAll(aggregate.sets)
+                labPendingKeys.clear(); labPendingKeys.addAll(aggregate.pendingKeys)
+                labPendingRuns.clear(); labPendingRuns.addAll(aggregate.pendingRuns)
+                labNotes.clear(); labNotes.addAll(aggregate.notes)
+                labActiveKeyBySet.clear(); labActiveKeyBySet.putAll(aggregate.activeKeyBySet)
+                labAttention.clear(); labAttention.addAll(aggregate.attention)
+                val liveTargets = aggregate.attention.mapTo(hashSetOf()) { it.targetID }
+                // Notifications survive process death. Clear every persisted request
+                // that is no longer live, not only requests seen by this process.
+                labNotified.filter { it !in liveTargets }.forEach {
+                    AttentionNotifier.clearLab(getApplication(), it)
+                }
+                var changed = false
+                aggregate.attention.filter { it.targetID !in labNotified }.forEach { item ->
+                    AttentionNotifier.postLab(getApplication(), item)
+                    labNotified += item.targetID
+                    changed = true
+                }
+                if (changed) {
+                    val trimmed = labNotified.toList().takeLast(1000).toSet()
+                    labNotified.clear(); labNotified.addAll(trimmed)
+                    prefs.edit().putStringSet("ut.lab.notified.v1", trimmed).apply()
+                }
+                labLoaded = true
+                labError = null
+                refreshVisibleLabDetails()
+            } finally {
+                labRefreshInFlight = false
+                labRefreshing = false
+            }
+        }
+    }
+
+    fun requestLab(area: LabArea = LabArea.INBOX) {
+        labRoute = LabRoute(area = area)
+        requestedScreen = SCREEN_LAB
+        refreshLab()
+    }
+
+    fun openLabAttention(kind: LabAttentionKind, targetID: String) {
+        labRoute = LabRoute(area = LabArea.INBOX, attentionKind = kind, targetID = targetID)
+        requestedScreen = SCREEN_LAB
+        refreshLab()
+    }
+
+    fun openLabSet(cardID: String) {
+        labRoute = LabRoute(area = LabArea.RESEARCH, cardID = cardID)
+        requestedScreen = SCREEN_LAB
+    }
+
+    fun openLabRun(cardID: String, runID: String) {
+        labRoute = LabRoute(area = LabArea.RESEARCH, cardID = cardID, runID = runID)
+        requestedScreen = SCREEN_LAB
+        labSets.firstOrNull { it.id == cardID }?.let { loadLabDetail(it, runID) }
+    }
+
+    fun openLabCompare(cardID: String, runA: String, runB: String) {
+        if (runA == runB) return
+        labRoute = LabRoute(
+            area = LabArea.RESEARCH,
+            cardID = cardID,
+            compareRunA = runA,
+            compareRunB = runB,
+        )
+        requestedScreen = SCREEN_LAB
+        labSets.firstOrNull { it.id == cardID }?.let { card ->
+            loadLabDetail(card, runA)
+            loadLabDetail(card, runB)
+        }
+    }
+
+    fun openLabGuidance(key: String = "all") {
+        labRoute = LabRoute(area = LabArea.GUIDANCE, guidanceKey = key)
+        requestedScreen = SCREEN_LAB
+    }
+
+    fun setLabArea(area: LabArea) {
+        labRoute = LabRoute(area = area)
+    }
+
+    fun consumeScreenRequest() { requestedScreen = null }
+    fun clearLabError() { labError = null }
+
+    fun labDetailKey(card: LabSetCard, run: String) = "${card.id}/$run"
+
+    fun loadLabDetail(card: LabSetCard, run: String, force: Boolean = false) {
+        val key = labDetailKey(card, run)
+        if (key in labDetailLoading || (!force && labDetails.containsKey(key))) return
+        labDetailLoading += key
+        viewModelScope.launch {
+            val detail = withContext(Dispatchers.IO) { LabNet.runDetail(card, run) }
+            labDetails[key] = detail
+            labDetailLoading.remove(key)
+        }
+    }
+
+    fun loadLabArtifact(card: LabSetCard, run: String, name: String) {
+        val key = labDetailKey(card, run)
+        if (labDetails[key]?.textByName?.containsKey(name) == true || key in labDetailLoading) return
+        labDetailLoading += key
+        viewModelScope.launch {
+            val text = withContext(Dispatchers.IO) { LabNet.artifact(card, run, name) }
+            if (text != null) {
+                val current = labDetails[key] ?: LabRunDetail()
+                labDetails[key] = current.copy(textByName = current.textByName + (name to text))
+            }
+            labDetailLoading.remove(key)
+        }
+    }
+
+    private fun refreshVisibleLabDetails(force: Boolean = false) {
+        val route = labRoute
+        val card = (labSets.firstOrNull { it.id == route.cardID }
+            ?: if (route.attentionKind == LabAttentionKind.PROPOSAL) {
+                labPendingRuns.firstOrNull { it.id == route.targetID }?.let { pending ->
+                    labSets.firstOrNull {
+                        it.storeID == pending.storeID && it.brief.set.id == pending.proposal.set
+                    }
+                }
+            } else null) ?: return
+        val runs = buildSet {
+            if (route.runID.isNotEmpty()) add(route.runID)
+            if (route.compareRunA.isNotEmpty()) add(route.compareRunA)
+            if (route.compareRunB.isNotEmpty()) add(route.compareRunB)
+            if (route.attentionKind == LabAttentionKind.PROPOSAL) {
+                labPendingRuns.firstOrNull { it.id == route.targetID }?.proposal?.run?.let(::add)
+            }
+        }
+        runs.forEach { runID ->
+            val status = card.brief.runs.firstOrNull { it.id == runID }?.status.orEmpty().lowercase()
+            val live = status.startsWith("running") || status.startsWith("proposed") || status.startsWith("approved")
+            if (force || live) loadLabDetail(card, runID, force = true)
+        }
+    }
+
+    private fun labAction(operation: suspend () -> Boolean) {
+        if (labActionBusy) return
+        labActionBusy = true
+        labError = null
+        viewModelScope.launch {
+            val ok = operation()
+            labActionBusy = false
+            if (ok) {
+                refreshLab()
+                refreshVisibleLabDetails(force = true)
+            } else labError = "The Lab broker did not accept this change."
+        }
+    }
+
+    fun decideLabKey(item: LabPendingKey, approve: Boolean, project: String, note: String = "") =
+        labAction { withContext(Dispatchers.IO) { LabNet.decideKey(item, approve, project, note) } }
+
+    fun decideLabRun(card: LabSetCard, run: String, approve: Boolean, note: String) =
+        labAction { withContext(Dispatchers.IO) { LabNet.decideRun(card, run, approve, note) } }
+
+    fun setLabPolicy(card: LabSetCard, policy: String) =
+        labAction { withContext(Dispatchers.IO) { LabNet.policy(card, policy) } }
+
+    fun setLabArchived(card: LabSetCard, run: String = "", on: Boolean) =
+        labAction { withContext(Dispatchers.IO) { LabNet.archive(card, run, on) } }
+
+    fun revokeLabKey(card: LabSetCard) {
+        val key = labActiveKeyBySet[card.id] ?: return
+        labAction { withContext(Dispatchers.IO) { LabNet.revoke(card, key) } }
+    }
+
+    fun postLabSetNote(card: LabSetCard, text: String) = labAction {
+        withContext(Dispatchers.IO) {
+            LabNet.postNote(card.broker, "set", text, set = card.brief.set.id)
+        }
+    }
+
+    fun postLabRunNote(card: LabSetCard, run: String, text: String) = labAction {
+        withContext(Dispatchers.IO) {
+            LabNet.postNote(card.broker, "run", text, set = card.brief.set.id, run = run)
+        }
+    }
+
+    fun postLabScopeNote(group: LabNotesGroup, scope: String, project: String, text: String) = labAction {
+        withContext(Dispatchers.IO) { LabNet.postNote(group.broker, scope, text, project = project) }
+    }
+
+    fun postLabEverywhere(text: String) = labAction {
+        withContext(Dispatchers.IO) {
+            labNotes.distinctBy { it.storeID }.map {
+                LabNet.postNote(it.broker, "global", text)
+            }.all { it }
+        }
+    }
+
+    fun hideLabScopeNote(group: LabNotesGroup, note: LabHubNote) = labAction {
+        withContext(Dispatchers.IO) {
+            LabNet.hide(group.broker, note.id, scope = note.scope, project = note.project.orEmpty())
+        }
+    }
+
+    fun hideLabSetEvent(card: LabSetCard, target: String) = labAction {
+        withContext(Dispatchers.IO) { LabNet.hide(card.broker, target, set = card.brief.set.id) }
     }
 
     // --- command center ----------------------------------------------------

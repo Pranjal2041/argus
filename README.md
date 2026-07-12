@@ -133,6 +133,10 @@ bash dev-install.sh          # builds the debug APK and installs to the connecte
 The phone joins the tailnet itself via an embedded `tsnet` core — paste a Tailscale auth key
 in the app; no system Tailscale client or manual hostnames required.
 
+The native Lab screen includes approvals, research records and artifacts, run comparison,
+scoped guidance, archive/policy/key controls, Babel shared-store deduplication, and Lab items
+in the Command Center. Approval notifications deep-link to the exact evidence dossier.
+
 ### 4 · Windows
 
 Build `ut-broker` for Windows (`GOOS=windows go build ./cmd/ut-broker`) and run it on the

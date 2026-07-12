@@ -2,6 +2,7 @@ package dev.universaltmux.android
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -10,6 +11,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Divider
@@ -27,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -108,7 +111,9 @@ fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
     // (stable). A card only moves when its category actually changes — never ad-hoc.
     fun section(t: CCTile) = if (vm.isBacklogged(t.b, t.s.name)) SEC_BACKLOG else sectionFor(t.s.state, t.st?.label)
     val grouped = tiles.groupBy { section(it) }
-    val needsCount = grouped[SEC_NEEDS].orEmpty().size
+    val labItems = vm.labAttention.toList()
+    val sessionNeeds = grouped[SEC_NEEDS].orEmpty().size
+    val needsCount = sessionNeeds + labItems.size
     val sections = listOf(
         SEC_NEEDS to "Needs you", SEC_DONE to "Done & idle", SEC_WORKING to "Working", SEC_BACKLOG to "Backlog",
     )
@@ -119,12 +124,12 @@ fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
                 Text("Command Center", color = ccText, fontSize = 19.sp)
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    if (needsCount == 0) "all ${tiles.size} quiet" else "$needsCount need you · ${tiles.size - needsCount} other",
+                    if (needsCount == 0) "all ${tiles.size} quiet" else "$needsCount need you · ${tiles.size - sessionNeeds} other",
                     color = if (needsCount == 0) ccFaint else cWaiting, fontSize = 12.sp,
                 )
             }
         }
-        if (tiles.isEmpty()) {
+        if (tiles.isEmpty() && labItems.isEmpty()) {
             item {
                 val engineOff = vm.engineStatus != "up"
                 Text(
@@ -138,8 +143,14 @@ fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
         }
         sections.forEach { (sec, title) ->
             val cards = grouped[sec].orEmpty().sortedBy { it.s.name }
-            if (cards.isNotEmpty()) {
-                item(key = "hdr-$sec") { CCHeader(title, cards.size) }
+            val labCount = if (sec == SEC_NEEDS) labItems.size else 0
+            if (cards.isNotEmpty() || labCount > 0) {
+                item(key = "hdr-$sec") { CCHeader(title, cards.size + labCount) }
+                if (sec == SEC_NEEDS) {
+                    items(labItems, key = { "lab:${it.id}" }) { item ->
+                        LabCCCard(item) { vm.openLabAttention(item.kind, item.targetID) }
+                    }
+                }
                 items(cards, key = { it.b.id + "/" + it.s.name }) {
                     CCCard(vm, it, large = (sec == SEC_NEEDS), dim = (sec == SEC_BACKLOG), onOpen = onOpen)
                 }
@@ -155,6 +166,42 @@ private fun CCHeader(title: String, n: Int) {
         Text(title.uppercase(), color = ccDim, fontSize = 11.sp)
         Spacer(Modifier.width(6.dp))
         Text("$n", color = ccFaint, fontSize = 11.sp)
+    }
+}
+
+/** A deterministic protocol gate, visually related to a large CC card but not
+ * pretending to be an inferred terminal status. */
+@Composable
+private fun LabCCCard(item: LabAttentionItem, onOpen: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            .background(ccPanel, shape)
+            .border(1.dp, cWaiting.copy(alpha = 0.58f), shape)
+            .clickable(onClick = onOpen)
+            .padding(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(9.dp).background(cWaiting, RoundedCornerShape(5.dp)))
+            Spacer(Modifier.width(8.dp))
+            Icon(Icons.Filled.Science, null, tint = cWaiting, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(item.reference, color = ccText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(7.dp))
+            Text(item.project, color = ccFaint, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            Text(
+                if (item.kind == LabAttentionKind.KEY) "Lab access" else "Lab approval",
+                color = cWaiting, fontSize = 11.sp,
+                modifier = Modifier.background(cWaiting.copy(alpha = 0.16f), RoundedCornerShape(50))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            )
+        }
+        Text(item.summary, color = ccDim, fontSize = 13.sp, maxLines = 6,
+            modifier = Modifier.padding(start = 17.dp, top = 8.dp))
+        Row(Modifier.fillMaxWidth().padding(start = 17.dp, top = 7.dp)) {
+            Text(item.machineName, color = ccFaint, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            Text("OPEN DECISION →", color = cWaiting, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
