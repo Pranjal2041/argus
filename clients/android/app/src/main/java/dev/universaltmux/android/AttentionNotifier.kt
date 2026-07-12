@@ -12,9 +12,8 @@ import android.os.Build
 
 /**
  * Closes the attention loop on the phone (mirrors the Mac's AttentionNotifier):
- * a notification when a session transitions INTO "waiting" (the agent is
- * blocked on you), with one-tap steering actions — Yes / No / ↵ — that answer
- * over a one-shot WebSocket without even opening the app.
+ * a notification whenever a terminal session or Lab protocol gate is blocked
+ * on the human. Every notification deep-links to the exact native surface.
  */
 object AttentionNotifier {
     private const val CHANNEL = "ut.attention"
@@ -22,8 +21,8 @@ object AttentionNotifier {
     fun ensureChannel(ctx: Context) {
         val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Agent needs attention", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "An agent session is blocked waiting on your input"
+            NotificationChannel(CHANNEL, "Argus needs attention", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "A session or Lab experiment is waiting on your decision"
             })
     }
 
@@ -65,5 +64,40 @@ object AttentionNotifier {
     fun clear(ctx: Context, broker: Broker, session: String) {
         val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.cancel(notifId(broker, session))
+    }
+
+    private fun labNotifId(targetID: String) = "lab:$targetID".hashCode()
+
+    /** A Lab approval is evidence-bearing, so the notification opens the exact
+     * dossier instead of offering unsafe approve/reject quick actions. */
+    fun postLab(ctx: Context, item: LabAttentionItem) {
+        if (!canPost(ctx)) return
+        ensureChannel(ctx)
+        val open = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("openLab", true)
+            putExtra("labKind", item.kind.name)
+            putExtra("labID", item.targetID)
+        }
+        val openPI = PendingIntent.getActivity(
+            ctx, labNotifId(item.targetID), open,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val title = if (item.kind == LabAttentionKind.KEY) "Lab access request" else "Lab experiment approval"
+        val notification = Notification.Builder(ctx, CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("$title · ${item.reference}")
+            .setContentText("${item.project} on ${item.machineName}: ${item.summary}")
+            .setStyle(Notification.BigTextStyle().bigText(item.summary))
+            .setContentIntent(openPI)
+            .setAutoCancel(true)
+            .build()
+        val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.notify(labNotifId(item.targetID), notification)
+    }
+
+    fun clearLab(ctx: Context, targetID: String) {
+        val mgr = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.cancel(labNotifId(targetID))
     }
 }

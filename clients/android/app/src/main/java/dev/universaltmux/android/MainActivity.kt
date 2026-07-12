@@ -28,8 +28,16 @@ class MainActivity : ComponentActivity() {
         handleAttentionIntent(intent)
     }
 
-    /** A tapped "agent is waiting" notification deep-links to its session. */
+    /** Attention notifications deep-link to either the exact Lab dossier or session. */
     private fun handleAttentionIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra("openLab", false) == true) {
+            val kind = runCatching {
+                LabAttentionKind.valueOf(intent.getStringExtra("labKind") ?: "")
+            }.getOrNull() ?: return
+            val id = intent.getStringExtra("labID") ?: return
+            vm.openLabAttention(kind, id)
+            return
+        }
         val host = intent?.getStringExtra("host") ?: return
         val session = intent.getStringExtra("session") ?: return
         val b = vm.brokers.firstOrNull { it.host == host } ?: return
