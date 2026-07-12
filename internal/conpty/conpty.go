@@ -37,17 +37,18 @@ const (
 
 // winSession is one ConPTY-backed session, owned by the Provider.
 type winSession struct {
-	name    string
-	dir     string
-	cpty    *conpty.ConPty
-	outCh   chan session.Output
-	once    sync.Once
+	name  string
+	dir   string
+	cpty  *conpty.ConPty
+	outCh chan session.Output
+	once  sync.Once
 
-	agent    bool  // created by the mesh (ut spawn): hidden from the UI, idle-reaped
-	reapIdle int   // idle seconds before the reaper removes it (0 = never)
+	agent    bool // created by the mesh (ut spawn): hidden from the UI, idle-reaped
+	reapIdle int  // idle seconds before the reaper removes it (0 = never)
 
 	mu      sync.Mutex
 	ring    []byte
+	modes   modeTracker // DEC private modes, re-emitted in Snapshot so bracketed paste etc. survive attach
 	lastOut int64
 	cols    int // current ConPTY size (the width all output is formatted for)
 	rows    int
@@ -104,8 +105,15 @@ func (s *winSession) Snapshot() []byte {
 		return nil
 	}
 	const prefix = "\x1b[2J\x1b[3J\x1b[H"
-	out := make([]byte, 0, len(prefix)+len(s.ring))
+	// Re-emit the currently-active DEC private modes (bracketed paste, mouse,
+	// cursor, alt-screen, …) so a client attaching to a long-running session
+	// restores them even after the mode-set scrolled out of the ring. Without
+	// this, bracketed paste was silently off → multi-line pastes lost all but
+	// the last line.
+	modeSeq := s.modes.restore()
+	out := make([]byte, 0, len(prefix)+len(modeSeq)+len(s.ring))
 	out = append(out, prefix...)
+	out = append(out, modeSeq...)
 	out = append(out, s.ring...)
 	return out
 }
@@ -132,6 +140,7 @@ func (s *winSession) readLoop() {
 			if len(s.ring) > ringMax {
 				s.ring = s.ring[len(s.ring)-ringMax:]
 			}
+			s.modes.feed(data) // track DEC private modes even as they scroll out of the ring
 			s.lastOut = time.Now().Unix()
 			s.mu.Unlock()
 			select {
