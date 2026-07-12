@@ -451,13 +451,13 @@ function renderResearchContext() {
 function guidanceScopes() {
   const scopes = [{ key: "all", type: "all", kind: "Network", depth: 0, label: "Everywhere", sub: "all reachable stores" }];
   const includedSets = new Set();
-  const setScope = (card, machineID, machineName, depth) => ({ key: `set:${card.id}`, type: "set", kind: "Set", depth, machineID, machineName, project: card.project, card: card.id, setID: card.setID, label: card.setID, sub: `${card.project} · ${displayPath(card.cwd)}` });
+  const setScope = (card, machineID, machineName, depth) => ({ key: `set:${card.id}`, type: "set", kind: "Set", depth, machineID, machineName, storeID: card.storeID, project: card.project, card: card.id, setID: card.setID, label: card.setID, sub: `${card.project} · ${displayPath(card.cwd)}` });
   for (const group of Lab.model.hubNotes) {
     const cards = Lab.model.sets.filter(card => !card.offline && (card.machineID === group.machineID || card.machineName === group.machineName));
-    scopes.push({ key: `machine:${group.machineID}`, type: "machine", kind: "Machine", depth: 0, machineID: group.machineID, machineName: group.machineName, label: group.machineName, sub: "all agents on this store" });
+    scopes.push({ key: `machine:${group.machineID}`, type: "machine", kind: "Machine", depth: 0, machineID: group.machineID, machineName: group.machineName, storeID: group.storeID, label: group.machineName, sub: "all agents on this machine" });
     const projects = [...new Set(cards.map(card => card.project))].sort();
     for (const project of projects) {
-      scopes.push({ key: `project:${group.machineID}:${project}`, type: "project", kind: "Project", depth: 1, machineID: group.machineID, machineName: group.machineName, project, label: project, sub: group.machineName });
+      scopes.push({ key: `project:${group.machineID}:${project}`, type: "project", kind: "Project", depth: 1, machineID: group.machineID, machineName: group.machineName, storeID: group.storeID, project, label: project, sub: group.machineName });
       for (const card of cards.filter(item => item.project === project).sort((a,b) => String(b.created || "").localeCompare(String(a.created || "")))) {
         scopes.push(setScope(card, group.machineID, group.machineName, 2));
         includedSets.add(card.id);
@@ -1004,15 +1004,26 @@ function renderGuidanceMain() {
 
 function guidanceNotes(scope) {
   const out = [];
+  const seen = new Set();
   for (const group of Lab.model.hubNotes) for (const note of group.notes || []) {
     const sameMachine = group.machineID === scope.machineID;
+    const sameStore = group.storeID && scope.storeID ? group.storeID === scope.storeID : sameMachine;
     const match = scope.type === "all"
-      || (scope.type === "machine" && sameMachine && ["global", "machine"].includes(note.scope))
-      || (scope.type === "project" && sameMachine && (["global", "machine"].includes(note.scope)
-        || (note.scope === "project" && note.project === scope.project)))
-      || (scope.type === "set" && sameMachine && (["global", "machine"].includes(note.scope)
-        || (note.scope === "project" && note.project === scope.project)));
-    if (match) out.push({ group, note });
+      || (scope.type === "machine" && ((sameStore && note.scope === "global") || (sameMachine && note.scope === "machine")))
+      || (scope.type === "project" && ((sameStore && note.scope === "global")
+        || (sameMachine && note.scope === "machine")
+        || (sameStore && note.scope === "project" && note.project === scope.project)))
+      || (scope.type === "set" && ((sameStore && note.scope === "global")
+        || (sameMachine && note.scope === "machine")
+        || (sameStore && note.scope === "project" && note.project === scope.project)));
+    if (!match) continue;
+    // Global/project events are repeated by every broker backed by one store;
+    // machine events are genuinely node-specific. Keep those identities apart.
+    const owner = note.scope === "machine" ? `machine:${group.machineID}` : `store:${group.storeID || group.machineID}`;
+    const key = `${owner}/${note.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ group, note });
   }
   if (scope.type === "set") {
     const card = cardByID(scope.card);
@@ -1306,6 +1317,15 @@ window.UTLab = {
     render();
   },
   openView(view) { setArea(view === "notes" ? "guidance" : view === "home" ? "research" : view); },
+  openAttention(kind, id) {
+    const type = kind === "key" ? "key" : "proposal";
+    Lab.area = "inbox";
+    Lab.selection = { type, id };
+    Lab.initialized = true;
+    Lab.drawerOpen = false;
+    resetMainScroll();
+    render();
+  },
   fixtureRoute(area, selection, options = {}) {
     Lab.fixture = true; Lab.area = area; Lab.selection = selection || null; Lab.initialized = true;
     if (options.researchFilter) Lab.researchFilter = options.researchFilter;

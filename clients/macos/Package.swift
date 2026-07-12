@@ -25,5 +25,9 @@ let package = Package(
                 ]),
             ]
         ),
+        .testTarget(
+            name: "UniversalTmuxMacTests",
+            dependencies: ["UniversalTmuxMac"]
+        ),
     ]
 )

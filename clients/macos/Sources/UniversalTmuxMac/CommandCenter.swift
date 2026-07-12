@@ -599,6 +599,7 @@ func ccSection(state: String, status: AgentStatus?) -> Int {
 struct CommandCenterView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var cc: CommandCenterModel
+    @EnvironmentObject var lab: LabModel
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     private func cf(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s * uiScale, weight: w) }
 
@@ -629,16 +630,18 @@ struct CommandCenterView: View {
 
     var body: some View {
         let all = tiles
-        let needsCount = all.filter { displaySection($0) == 0 }.count
+        let sessionNeeds = all.filter { displaySection($0) == 0 }
+        let labNeeds = lab.attentionItems
+        let needsCount = sessionNeeds.count + labNeeds.count
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                glance(needsYou: needsCount, rest: all.count - needsCount)
-                sectionBlock(0, "Needs you",   .large,  360, in: all)
+                glance(needsYou: needsCount, rest: all.count - sessionNeeds.count)
+                needsYouBlock(sessions: sessionNeeds, labItems: labNeeds)
                 sectionBlock(1, "Done & idle", .medium, 270, in: all)
                 sectionBlock(2, "Working",     .medium, 270, in: all)
                 sectionBlock(3, "Backlog",     .medium, 240, in: all)
-                if all.isEmpty {
-                    Text("No sessions.").foregroundStyle(Theme.textTertiary)
+                if all.isEmpty && labNeeds.isEmpty {
+                    Text("Nothing to monitor yet.").foregroundStyle(Theme.textTertiary)
                         .frame(maxWidth: .infinity).padding(.top, 60)
                 }
             }
@@ -650,6 +653,25 @@ struct CommandCenterView: View {
         // The model is started app-wide (App.swift) so it keeps running when this page is
         // not visible. start() is idempotent; we deliberately do NOT stop() on disappear.
         .onAppear { cc.bind(state); cc.start() }
+    }
+
+    /// Deterministic Lab approvals and inferred session statuses share the top
+    /// band, but not a data model: Lab items never masquerade as terminal cards
+    /// and therefore cannot be backlogged or manually relabeled.
+    @ViewBuilder
+    private func needsYouBlock(sessions: [Tile], labItems: [LabModel.AttentionItem]) -> some View {
+        if !sessions.isEmpty || !labItems.isEmpty {
+            header("Needs you", sessions.count + labItems.count)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 10, alignment: .top)],
+                      alignment: .leading, spacing: 10) {
+                ForEach(labItems) { item in
+                    LabAttentionTileView(item: item) {
+                        openLabAttention(in: state, kind: item.kind.rawValue, id: item.targetID)
+                    }
+                }
+                ForEach(sessions) { tile in agentTile(tile, size: .large) }
+            }
+        }
     }
 
     /// One section: header + grid, in fixed position. Cards within are name-ordered (from
@@ -691,18 +713,84 @@ struct CommandCenterView: View {
     private func grid(_ items: [Tile], minWidth: CGFloat, size: AgentTileView.Size) -> some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 10, alignment: .top)],
                   alignment: .leading, spacing: 10) {
-            ForEach(items) { t in
-                AgentTileView(machineName: t.machineName, session: t.session,
-                              unseen: state.unseen.contains(t.ref.id), status: t.status,
-                              inflight: t.inflight, size: size,
-                              backlogged: state.backlog.contains(t.ref.id),
-                              onSetStatus: { cc.setManualLabel(ref: t.ref, label: $0) },
-                              onBacklog: { state.toggleBacklog(t.ref) }) {
-                    state.selection = t.ref
-                    state.showOverview = false
-                }
-            }
+            ForEach(items) { tile in agentTile(tile, size: size) }
         }
+    }
+
+    private func agentTile(_ tile: Tile, size: AgentTileView.Size) -> some View {
+        AgentTileView(machineName: tile.machineName, session: tile.session,
+                      unseen: state.unseen.contains(tile.ref.id), status: tile.status,
+                      inflight: tile.inflight, size: size,
+                      backlogged: state.backlog.contains(tile.ref.id),
+                      onSetStatus: { cc.setManualLabel(ref: tile.ref, label: $0) },
+                      onBacklog: { state.toggleBacklog(tile.ref) }) {
+            state.selection = tile.ref
+            state.showOverview = false
+        }
+    }
+}
+
+/// A deterministic human gate from Lab. Its visual grammar matches a large
+/// Command Center card, while the flask mark and fixed "Lab approval" chip make
+/// clear that this is recorded protocol state—not an AI-inferred session status.
+struct LabAttentionTileView: View {
+    let item: LabModel.AttentionItem
+    let onOpen: () -> Void
+    @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    private func cf(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s * uiScale, weight: w) }
+
+    private var chipText: String { item.kind == .key ? "Lab access" : "Lab approval" }
+
+    private var age: String {
+        guard let date = ISO8601DateFormatter().date(from: item.created) else { return "" }
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86400)d"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6 * uiScale) {
+            HStack(spacing: 7) {
+                Circle().fill(Theme.waiting).frame(width: 9, height: 9)
+                    .help("waiting for your Lab decision")
+                Image(systemName: "testtube.2").font(cf(12, .medium)).foregroundStyle(Theme.waiting)
+                Text(item.reference).font(cf(16, .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                Text(item.project).font(cf(11)).foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1).layoutPriority(-1)
+                Spacer(minLength: 6)
+                HStack(spacing: 3) {
+                    Image(systemName: "checkmark.seal").font(cf(10))
+                    Text(chipText).font(cf(11.5, .medium))
+                }
+                .foregroundStyle(Theme.waiting)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Capsule().fill(Theme.waiting.opacity(0.16)))
+                .fixedSize()
+            }
+            Text(item.summary)
+                .font(cf(13.5)).foregroundStyle(Theme.textSecondary)
+                .lineLimit(5).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 5) {
+                Text(item.machineName).lineLimit(1)
+                if !age.isEmpty { Text("·"); Text(age) }
+                Spacer()
+                Text("Open decision →").foregroundStyle(Theme.waiting)
+            }
+            .font(cf(11)).foregroundStyle(Theme.textTertiary)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 88 * uiScale, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.sidebarBackground.opacity(0.7)))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Theme.waiting.opacity(0.58), lineWidth: 1.6))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+        .accessibilityAddTraits(.isButton)
+        .help("Open this approval in Lab")
     }
 }
 

@@ -18,6 +18,8 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = AttentionNotifier()
     private weak var state: AppState?
     private var asked = false
+    private var waitingCount = 0
+    private var labAttentionCount = 0
     private override init() { super.init() }
 
     func attach(_ s: AppState) {
@@ -34,7 +36,8 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// Post a banner for each session that just entered "waiting"; reflect the
     /// total waiting count on the Dock tile.
     func update(enteredWaiting: [(ref: SessionRef, machine: String)], totalWaiting: Int) {
-        NSApp.dockTile.badgeLabel = (NotifyPrefs.enabled && totalWaiting > 0) ? String(totalWaiting) : nil
+        waitingCount = totalWaiting
+        updateBadge()
         guard NotifyPrefs.enabled else { return }
         let center = UNUserNotificationCenter.current()
         for e in enteredWaiting {
@@ -47,17 +50,34 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func clearBadge() { NSApp.dockTile.badgeLabel = nil }
+    /// Lab and terminal attention share one durable badge/count. A Lab refresh
+    /// supplies the complete current count, so resolved approvals disappear
+    /// without relying on notification delivery state.
+    func updateLabAttention(total: Int) {
+        labAttentionCount = total
+        updateBadge()
+    }
+
+    private func updateBadge() {
+        let total = waitingCount + labAttentionCount
+        NSApp.dockTile.badgeLabel = (NotifyPrefs.enabled && total > 0) ? String(total) : nil
+    }
+
+    func clearBadge() {
+        waitingCount = 0
+        labAttentionCount = 0
+        updateBadge()
+    }
 
     /// Post a banner for a new Lab approval item (a pending key request or a
     /// gated run proposal). Tapping it opens the Lab pane.
-    func labApprovalNeeded(id: String, title: String, body: String) {
+    func labApprovalNeeded(id: String, title: String, body: String, kind: String) {
         guard NotifyPrefs.enabled else { return }
         let c = UNMutableNotificationContent()
         c.title = title
         c.body = body
         c.sound = .default
-        c.userInfo = ["lab": true]
+        c.userInfo = ["lab": true, "labKind": kind, "labID": id]
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "ut.lab." + id, content: c, trigger: nil))
     }
 
@@ -66,11 +86,12 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let u = response.notification.request.content.userInfo
         if u["lab"] as? Bool == true {
+            let kind = u["labKind"] as? String ?? ""
+            let id = u["labID"] as? String ?? ""
             Task { @MainActor in
                 NSApp.activate(ignoringOtherApps: true)
                 guard let st = self.state else { return }
-                st.showLab = true
-                st.showOverview = false; st.showTodos = false; st.showNotes = false; st.showLedger = false
+                openLabAttention(in: st, kind: kind, id: id)
             }
             completionHandler()
             return

@@ -148,6 +148,7 @@ struct LabHubNote: Codable, Hashable, Identifiable {
 @MainActor
 final class LabModel: ObservableObject {
     struct SetCard: Identifiable {
+        let storeID: String
         let machineID: String
         let machineName: String
         let httpBase: String
@@ -157,6 +158,7 @@ final class LabModel: ObservableObject {
         var id: String { machineID + "/" + brief.set.id }
     }
     struct PendingKey: Identifiable {
+        let storeID: String
         let machineID: String
         let machineName: String
         let httpBase: String
@@ -164,6 +166,7 @@ final class LabModel: ObservableObject {
         var id: String { machineID + "/" + key.key }
     }
     struct PendingRun: Identifiable {
+        let storeID: String
         let machineID: String
         let machineName: String
         let httpBase: String
@@ -180,6 +183,42 @@ final class LabModel: ObservableObject {
         var id: String { machineID }
     }
 
+    /// One broker's answer to a Lab refresh. Several brokers may be views of
+    /// the same store (all Babel nodes mount the same NFS home), so these are
+    /// collected first and reduced by store identity before anything reaches
+    /// the UI.
+    struct MachineSnapshot {
+        let machine: Machine
+        let briefs: [LabBrief]
+        let keys: [LabKeyInfo]
+        let proposals: [LabProposal]
+        let notes: NotesResp?
+    }
+
+    struct AggregatedState {
+        var sets: [SetCard]
+        var pendingKeys: [PendingKey]
+        var pendingRuns: [PendingRun]
+        var hubNotes: [HubNotesGroup]
+        var activeKeyBySet: [String: String]
+    }
+
+    /// A human action that belongs in every attention surface, not only inside
+    /// the Lab pane. Keep this typed boundary here so Command Center does not
+    /// have to understand Lab's wire structs (and future approval kinds get one
+    /// obvious place to join the feed).
+    struct AttentionItem: Identifiable {
+        enum Kind: String, Equatable { case key, proposal }
+        let id: String
+        let targetID: String
+        let kind: Kind
+        let reference: String
+        let project: String
+        let machineName: String
+        let summary: String
+        let created: String
+    }
+
     @Published var sets: [SetCard] = []
     @Published var pendingKeys: [PendingKey] = []
     @Published var pendingRuns: [PendingRun] = []
@@ -187,6 +226,28 @@ final class LabModel: ObservableObject {
     @Published var activeKeyBySet: [String: String] = [:]
     @Published var refreshing = false
     @Published var loadedOnce = false
+
+    /// Oldest first, matching the Lab decision queue. Everything in this list
+    /// is blocked on a human action and therefore belongs in Command Center's
+    /// top "Needs you" band.
+    var attentionItems: [AttentionItem] {
+        let keys = pendingKeys.map { item in
+            AttentionItem(id: "key/" + item.id, targetID: item.id, kind: .key,
+                          reference: "ACCESS", project: item.key.project,
+                          machineName: item.machineName,
+                          summary: "Approve agent access to a new isolated experiment set.",
+                          created: item.key.created)
+        }
+        let runs = pendingRuns.map { item in
+            let intent = item.proposal.intent.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AttentionItem(id: "proposal/" + item.id, targetID: item.id, kind: .proposal,
+                                 reference: item.proposal.run, project: item.proposal.project,
+                                 machineName: item.machineName,
+                                 summary: intent.isEmpty ? "Review this experiment before it starts." : intent,
+                                 created: item.proposal.created)
+        }
+        return (keys + runs).sorted { ($0.created, $0.id) < ($1.created, $1.id) }
+    }
 
     private weak var boundState: AppState?
     private var timer: Timer?
@@ -228,55 +289,209 @@ final class LabModel: ObservableObject {
         let gen = generation
         refreshing = true
         Task {
-            var newSets: [SetCard] = []
-            var newKeys: [PendingKey] = []
-            var newRuns: [PendingRun] = []
-            var newActive: [String: String] = [:]
-            var newNotes: [HubNotesGroup] = []
-            await withTaskGroup(of: (Machine, [LabBrief], [LabKeyInfo], [LabProposal], NotesResp?).self) { group in
+            var snapshots: [MachineSnapshot] = []
+            await withTaskGroup(of: MachineSnapshot.self) { group in
                 for m in machines {
-                    group.addTask { (m, await Self.fetchBriefs(m), await Self.fetchKeys(m), await Self.fetchProposals(m), await Self.fetchNotes(m)) }
-                }
-                for await (m, briefs, keys, proposals, notes) in group {
-                    for b in briefs {
-                        newSets.append(SetCard(machineID: m.id, machineName: m.name, httpBase: m.httpBase, brief: b))
-                    }
-                    for k in keys {
-                        if k.status == "pending" {
-                            newKeys.append(PendingKey(machineID: m.id, machineName: m.name, httpBase: m.httpBase, key: k))
-                        } else if k.status == "active", let set = k.set {
-                            newActive[m.id + "/" + set] = k.key
-                        }
-                    }
-                    for p in proposals {
-                        newRuns.append(PendingRun(machineID: m.id, machineName: m.name, httpBase: m.httpBase, proposal: p))
-                    }
-                    // nil = machine unreachable; an empty list is a real answer
-                    if let notes {
-                        newNotes.append(HubNotesGroup(machineID: m.id, machineName: m.name, httpBase: m.httpBase,
-                                                      storeID: notes.store ?? "", notes: notes.notes ?? []))
+                    group.addTask {
+                        async let briefs = Self.fetchBriefs(m)
+                        async let keys = Self.fetchKeys(m)
+                        async let proposals = Self.fetchProposals(m)
+                        async let notes = Self.fetchNotes(m)
+                        return await MachineSnapshot(machine: m, briefs: briefs, keys: keys,
+                                                     proposals: proposals, notes: notes)
                     }
                 }
+                for await snapshot in group { snapshots.append(snapshot) }
             }
-            // offline machines show through the local broker's permanent mirror
-            let onlineHosts = Set(newSets.map { $0.brief.set.machine })
+            var mirrored: [LabMirrored] = []
             if let local = machines.first(where: { $0.isLocal }) {
-                for m in await Self.fetchMirror(local) where !onlineHosts.contains(m.machine) {
-                    newSets.append(SetCard(machineID: "mirror/" + m.machine, machineName: m.machine,
-                                           httpBase: local.httpBase, brief: m.brief,
-                                           offline: true, mirroredAt: m.updated))
-                }
+                mirrored = await Self.fetchMirror(local)
             }
+            let aggregate = Self.aggregate(snapshots, mirrored: mirrored,
+                                           mirrorHTTPBase: machines.first(where: { $0.isLocal })?.httpBase ?? "")
             guard gen == generation else { return }
-            sets = newSets.sorted { ($0.brief.set.project, $0.brief.set.created) < ($1.brief.set.project, $1.brief.set.created) }
-            pendingKeys = newKeys.sorted { $0.key.created < $1.key.created }
-            pendingRuns = newRuns.sorted { $0.proposal.created < $1.proposal.created }
-            hubNotes = newNotes.sorted { $0.machineName < $1.machineName }
-            activeKeyBySet = newActive
+            sets = aggregate.sets
+            pendingKeys = aggregate.pendingKeys
+            pendingRuns = aggregate.pendingRuns
+            hubNotes = aggregate.hubNotes
+            activeKeyBySet = aggregate.activeKeyBySet
             refreshing = false
             loadedOnce = true
+            AttentionNotifier.shared.updateLabAttention(total: attentionItems.count)
             notifyNewPendings()
         }
+    }
+
+    /// Collapse broker responses at the storage boundary. A set, key, or run
+    /// proposal is a store-owned record, not a broker-owned record. Machine
+    /// note groups deliberately remain per broker because machine-scoped notes
+    /// are genuinely different even when global/project data is shared.
+    static func aggregate(_ snapshots: [MachineSnapshot], mirrored: [LabMirrored],
+                          mirrorHTTPBase: String) -> AggregatedState {
+        let ordered = snapshots.sorted {
+            ($0.machine.name.lowercased(), $0.machine.id) < ($1.machine.name.lowercased(), $1.machine.id)
+        }
+        let grouped = Dictionary(grouping: ordered) { snapshot in
+            storeKey(for: snapshot.machine, reported: snapshot.notes?.store)
+        }
+        var cardsByRecord: [String: SetCard] = [:]
+        var pendingByRecord: [String: PendingKey] = [:]
+        var proposalsByRecord: [String: PendingRun] = [:]
+        var activeByRecord: [String: LabKeyInfo] = [:]
+        var notes: [HubNotesGroup] = []
+
+        for storeID in grouped.keys.sorted() {
+            guard let peers = grouped[storeID], let fallback = peers.first else { continue }
+
+            // Union first: two reads a few milliseconds apart can straddle a
+            // write even on a shared store. Prefer the brief carrying more/newer
+            // run state rather than depending on task completion order.
+            var briefs: [String: LabBrief] = [:]
+            var keys: [String: LabKeyInfo] = [:]
+            var proposals: [String: LabProposal] = [:]
+            for peer in peers {
+                for brief in peer.briefs {
+                    if let current = briefs[brief.set.id] {
+                        if prefer(brief, over: current) { briefs[brief.set.id] = brief }
+                    } else {
+                        briefs[brief.set.id] = brief
+                    }
+                }
+                for key in peer.keys {
+                    if let current = keys[key.key] {
+                        if keyStateRank(key.status) > keyStateRank(current.status) { keys[key.key] = key }
+                    } else {
+                        keys[key.key] = key
+                    }
+                }
+                for proposal in peer.proposals {
+                    proposals[proposal.id] = proposals[proposal.id] ?? proposal
+                }
+                // nil means unreachable; an empty note list is a real answer.
+                if let response = peer.notes {
+                    notes.append(HubNotesGroup(machineID: peer.machine.id, machineName: peer.machine.name,
+                                               httpBase: peer.machine.httpBase, storeID: storeID,
+                                               notes: response.notes ?? []))
+                }
+            }
+
+            for brief in briefs.values {
+                let route = peers.first(where: { machine($0.machine, matches: brief.set.machine) }) ?? fallback
+                let record = storeID + "/set/" + brief.set.id
+                cardsByRecord[record] = SetCard(storeID: storeID,
+                                                machineID: route.machine.id,
+                                                machineName: route.machine.name,
+                                                httpBase: route.machine.httpBase,
+                                                brief: brief)
+            }
+            for key in keys.values {
+                let route = peers.first(where: { machine($0.machine, matches: key.machine) }) ?? fallback
+                if key.status == "pending" {
+                    let record = storeID + "/key/" + key.key
+                    pendingByRecord[record] = PendingKey(storeID: storeID,
+                                                         machineID: route.machine.id,
+                                                         machineName: route.machine.name,
+                                                         httpBase: route.machine.httpBase,
+                                                         key: key)
+                } else if key.status == "active", let set = key.set {
+                    activeByRecord[storeID + "/set/" + set] = key
+                }
+            }
+            for proposal in proposals.values {
+                let route = peers.first(where: { machine($0.machine, matches: proposal.machine) }) ?? fallback
+                let record = storeID + "/proposal/" + proposal.id
+                proposalsByRecord[record] = PendingRun(storeID: storeID,
+                                                        machineID: route.machine.id,
+                                                        machineName: route.machine.name,
+                                                        httpBase: route.machine.httpBase,
+                                                        proposal: proposal)
+            }
+        }
+
+        // A mirror can also contain the same shared-store set under more than
+        // one peer directory. Its embedded home machine + set id is the durable
+        // identity; retain only the freshest mirrored copy.
+        let onlineHosts = Set(cardsByRecord.values.map { normalizedMachineName($0.brief.set.machine) })
+        var mirrorByRecord: [String: LabMirrored] = [:]
+        for item in mirrored {
+            let owner = item.brief.set.machine.isEmpty ? item.machine : item.brief.set.machine
+            guard !onlineHosts.contains(normalizedMachineName(owner)) else { continue }
+            let record = normalizedMachineName(owner) + "/set/" + item.brief.set.id
+            if let current = mirrorByRecord[record], current.updated >= item.updated { continue }
+            mirrorByRecord[record] = item
+        }
+        for item in mirrorByRecord.values {
+            let owner = item.brief.set.machine.isEmpty ? item.machine : item.brief.set.machine
+            let record = "mirror/" + normalizedMachineName(owner) + "/set/" + item.brief.set.id
+            cardsByRecord[record] = SetCard(storeID: "mirror/" + normalizedMachineName(owner),
+                                            machineID: "mirror/" + owner, machineName: owner,
+                                            httpBase: mirrorHTTPBase, brief: item.brief,
+                                            offline: true, mirroredAt: item.updated)
+        }
+
+        let cards = cardsByRecord.values.sorted {
+            ($0.brief.set.project, $0.brief.set.created, $0.id) <
+            ($1.brief.set.project, $1.brief.set.created, $1.id)
+        }
+        var active: [String: String] = [:]
+        for (record, key) in activeByRecord {
+            if let card = cardsByRecord[record] { active[card.id] = key.key }
+        }
+        return AggregatedState(
+            sets: cards,
+            pendingKeys: pendingByRecord.values.sorted { ($0.key.created, $0.id) < ($1.key.created, $1.id) },
+            pendingRuns: proposalsByRecord.values.sorted { ($0.proposal.created, $0.id) < ($1.proposal.created, $1.id) },
+            hubNotes: notes.sorted { ($0.machineName.lowercased(), $0.machineID) < ($1.machineName.lowercased(), $1.machineID) },
+            activeKeyBySet: active
+        )
+    }
+
+    /// Babel is a known shared NFS cluster. Its explicit key is also the safe
+    /// fallback when one node answers the Lab routes but its /lab/notes identity
+    /// request transiently fails. Other shared stores use the broker-reported id.
+    static func storeKey(for machine: Machine, reported: String?) -> String {
+        if isBabel(machine) { return "shared:babel" }
+        if let id = reported?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
+            return "store:" + id
+        }
+        return "machine:" + machine.id
+    }
+
+    private static func isBabel(_ machine: Machine) -> Bool {
+        [machine.name, machine.host, machine.id].contains { value in
+            let first = value.lowercased().split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
+            return first.hasPrefix("babel-") || first.hasPrefix("ut-babel-")
+        }
+    }
+
+    private static func normalizedMachineName(_ value: String) -> String {
+        var name = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if name.hasSuffix(".local") { name.removeLast(6) }
+        if name.hasPrefix("ut-") { name.removeFirst(3) }
+        return name
+    }
+
+    private static func machine(_ candidate: Machine, matches owner: String) -> Bool {
+        let target = normalizedMachineName(owner)
+        return [candidate.name, candidate.host, candidate.id].contains {
+            normalizedMachineName($0).split(separator: ".", maxSplits: 1).first.map(String.init) == target
+        }
+    }
+
+    private static func keyStateRank(_ status: String) -> Int {
+        status == "pending" ? 0 : 1
+    }
+
+    private static func prefer(_ candidate: LabBrief, over current: LabBrief) -> Bool {
+        let candidateRuns = candidate.runs ?? []
+        let currentRuns = current.runs ?? []
+        if candidateRuns.count != currentRuns.count { return candidateRuns.count > currentRuns.count }
+        let candidateLatest = candidateRuns.compactMap(\.started).max() ?? ""
+        let currentLatest = currentRuns.compactMap(\.started).max() ?? ""
+        if candidateLatest != currentLatest { return candidateLatest > currentLatest }
+        let candidateEvents = (candidate.notes?.count ?? 0) + (candidate.setEvents?.count ?? 0)
+        let currentEvents = (current.notes?.count ?? 0) + (current.setEvents?.count ?? 0)
+        return candidateEvents > currentEvents
     }
 
     private func notifyNewPendings() {
@@ -284,7 +499,7 @@ final class LabModel: ObservableObject {
         for k in pendingKeys where !notified.contains(k.id) {
             AttentionNotifier.shared.labApprovalNeeded(
                 id: k.id, title: "Lab: key request",
-                body: "\(k.key.project) wants a set on \(k.machineName)")
+                body: "\(k.key.project) wants a set on \(k.machineName)", kind: "key")
             notified.insert(k.id)
             notifiedList.append(k.id)
             added = true
@@ -292,7 +507,8 @@ final class LabModel: ObservableObject {
         for r in pendingRuns where !notified.contains(r.id) {
             AttentionNotifier.shared.labApprovalNeeded(
                 id: r.id, title: "Lab: experiment awaiting approval",
-                body: "\(r.proposal.intent) (\(r.proposal.project) on \(r.machineName))")
+                body: "\(r.proposal.intent) (\(r.proposal.project) on \(r.machineName))",
+                kind: "proposal")
             notified.insert(r.id)
             notifiedList.append(r.id)
             added = true
@@ -469,7 +685,7 @@ final class LabModel: ObservableObject {
     }
 
     private struct SetsResp: Decodable { var sets: [LabSetMeta]? }
-    private struct NotesResp: Decodable {
+    struct NotesResp: Decodable {
         var store: String?
         var notes: [LabHubNote]?
     }

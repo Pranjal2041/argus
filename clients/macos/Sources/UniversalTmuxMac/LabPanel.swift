@@ -18,6 +18,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     private weak var terminals: TerminalController?
     private weak var wandb: WandbController?
     private var loaded = false
+    private var pendingAttention: (kind: String, id: String)?
 
     private override init() {
         let cfg = WKWebViewConfiguration()
@@ -59,6 +60,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         applyTheme()
         applyScale()
         pushData()
+        revealPendingAttention()
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -67,6 +69,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             self.applyTheme()
             self.applyScale()
             self.pushData()
+            self.revealPendingAttention()
             // dev hook (like UT_OPEN_LAB): land on a specific view at launch
             if let v = ProcessInfo.processInfo.environment["UT_LAB_VIEW"], v == "notes" || v == "home" {
                 self.eval("window.UTLab.openView(\(self.jsString(v)))")
@@ -75,6 +78,24 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     }
 
     private func eval(_ js: String) { webView.evaluateJavaScript(js, completionHandler: nil) }
+
+    /// Queue-safe deep link used by Command Center and notification taps. The
+    /// singleton web view can finish loading before its Swift model is attached,
+    /// so retain the destination until both data and page are ready.
+    func openAttention(kind: String, id: String) {
+        guard !kind.isEmpty, !id.isEmpty else { return }
+        pendingAttention = (kind, id)
+        revealPendingAttention()
+    }
+
+    private func revealPendingAttention() {
+        guard loaded, lab != nil, let target = pendingAttention else { return }
+        // pushData() is enqueued immediately before this from attach/didFinish;
+        // WKWebView evaluates the scripts in order, so the selection sees the
+        // current queue instead of the empty boot model.
+        eval("window.UTLab.openAttention(\(jsString(target.kind)), \(jsString(target.id)))")
+        pendingAttention = nil
+    }
 
     private func jsString(_ s: String) -> String {
         let d = try? JSONSerialization.data(withJSONObject: [s])
@@ -151,7 +172,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         let sets: [[String: Any]] = lab.sets.map { c in
             var d: [String: Any] = [
                 "id": c.id, "setID": c.brief.set.id, "machineID": c.machineID,
-                "machineName": c.machineName, "project": c.brief.set.project,
+                "machineName": c.machineName, "storeID": c.storeID,
+                "project": c.brief.set.project,
                 "cwd": c.brief.set.cwd, "created": c.brief.set.created,
                 "policy": c.brief.policy ?? "full-only",
                 "offline": c.offline,
@@ -175,14 +197,16 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         }
         let keys: [[String: Any]] = lab.pendingKeys.map { k in
             var d: [String: Any] = ["id": k.id, "machineID": k.machineID, "machineName": k.machineName,
-                                    "project": k.key.project, "cwd": k.key.cwd, "created": k.key.created]
+                                    "storeID": k.storeID, "project": k.key.project,
+                                    "cwd": k.key.cwd, "created": k.key.created]
             if let s = k.key.session, !s.isEmpty { d["session"] = s }
             return d
         }
         let pruns: [[String: Any]] = lab.pendingRuns.map { r in
             var d: [String: Any] = [
                 "id": r.id, "set": r.proposal.set, "machineID": r.machineID,
-                "machineName": r.machineName, "run": r.proposal.run,
+                "machineName": r.machineName, "storeID": r.storeID,
+                "run": r.proposal.run,
                 "project": r.proposal.project, "intent": r.proposal.intent,
                 "created": r.proposal.created,
             ]
@@ -194,6 +218,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         }
         let hub: [[String: Any]] = lab.hubNotes.map { g in
             ["machineID": g.machineID, "machineName": g.machineName,
+             "storeID": g.storeID,
              "notes": g.notes.map { n -> [String: Any] in
                  var d: [String: Any] = ["scope": n.scope, "id": n.id, "time": n.time,
                                          "author": n.author, "text": n.text, "hidden": n.hidden]
@@ -408,6 +433,19 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             break
         }
     }
+}
+
+/// One navigation path for every external Lab-attention surface. Keeping the
+/// pane flags and exact inbox selection together prevents a Command Center card
+/// or notification from opening whichever Lab page happened to be used last.
+@MainActor
+func openLabAttention(in state: AppState, kind: String, id: String) {
+    state.showLab = true
+    state.showOverview = false
+    state.showTodos = false
+    state.showNotes = false
+    state.showLedger = false
+    if !kind.isEmpty, !id.isEmpty { LabWebPanel.shared.openAttention(kind: kind, id: id) }
 }
 
 // MARK: - the SwiftUI face of the pane
