@@ -110,21 +110,35 @@ type brokerJSON struct {
 	Name   string `json:"name"`
 }
 
+type discoveryJSON struct {
+	OK      bool         `json:"ok"`
+	Brokers []brokerJSON `json:"brokers"`
+}
+
+func discoveryResult(ok bool, brokers []brokerJSON) string {
+	if brokers == nil {
+		brokers = []brokerJSON{}
+	}
+	out, _ := json.Marshal(discoveryJSON{OK: ok, Brokers: brokers})
+	return string(out)
+}
+
 // Discover enumerates online tailnet peers, probes :8722/whoami on each, and
-// returns a JSON array of brokers ([{"host","scheme","name"}, ...]).
+// returns an envelope whose ok bit distinguishes a real empty tailnet from a
+// status-read failure. Android only prunes missing brokers after an ok answer.
 func (e *Engine) Discover() string {
 	if e.srv == nil {
-		return "[]"
+		return discoveryResult(false, nil)
 	}
 	lc, err := e.srv.LocalClient()
 	if err != nil {
-		return "[]"
+		return discoveryResult(false, nil)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	st, err := lc.Status(ctx)
 	if err != nil {
-		return "[]"
+		return discoveryResult(false, nil)
 	}
 	var (
 		mu    sync.Mutex
@@ -150,8 +164,7 @@ func (e *Engine) Discover() string {
 		}(dns)
 	}
 	wg.Wait()
-	out, _ := json.Marshal(found)
-	return string(out)
+	return discoveryResult(true, found)
 }
 
 func (e *Engine) probe(dns string) (brokerJSON, bool) {

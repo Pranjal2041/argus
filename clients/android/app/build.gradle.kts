@@ -70,6 +70,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 
     // Embedded tsnet core (gomobile .aar): joins the tailnet for native peer
     // discovery. Rebuild with: scripts/build-core.sh

@@ -22,6 +22,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("ut", 0)
 
     val brokers = mutableStateListOf<Broker>()
+    private val brokerSources = mutableMapOf<String, BrokerSource>()
+    private val discoveryMisses = mutableMapOf<String, Int>()
+    private var discoveryInFlight = false
+    private var discoveryPruneRequested = false
     val sessions = mutableStateMapOf<String, List<SessionInfo>>()
     /** Sessions whose agent finished a turn while you weren't viewing them → an ORANGE
      *  "done, unseen" dot until you open the pane. Key = "<brokerId> <name>". */
@@ -221,15 +225,49 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun discoverViaTailnet() {
+    private fun discoverViaTailnet(pruneMissing: Boolean = false) {
+        discoveryPruneRequested = discoveryPruneRequested || pruneMissing
+        if (discoveryInFlight) return
+        discoveryInFlight = true
         viewModelScope.launch {
-            val found = withContext(Dispatchers.IO) { TsnetCore.discover() }
-            found.forEach { b ->
-                val i = brokers.indexOfFirst { it.host == b.host }
-                if (i >= 0) brokers[i] = b else brokers.add(b)
+            try {
+                val answer = withContext(Dispatchers.IO) { TsnetCore.discover() }
+                val pruneNow = discoveryPruneRequested
+                discoveryPruneRequested = false
+                val beforeSources = brokerSources.toMap()
+                val result = BrokerDiscoveryPolicy.reconcile(
+                    current = brokers.toList(),
+                    discovered = answer.brokers,
+                    sources = beforeSources,
+                    misses = discoveryMisses,
+                    authoritative = answer.authoritative,
+                    pruneNow = pruneNow,
+                )
+                result.removed.forEach(::forgetBrokerState)
+                val listChanged = result.brokers != brokers.toList()
+                brokerSources.clear(); brokerSources.putAll(result.sources)
+                discoveryMisses.clear(); discoveryMisses.putAll(result.misses)
+                if (listChanged) {
+                    brokers.clear(); brokers.addAll(result.brokers)
+                    saveBrokers()
+                } else if (beforeSources != result.sources) {
+                    saveBrokers()
+                }
+                answer.brokers.forEach { discovered ->
+                    result.brokers.firstOrNull {
+                        BrokerDiscoveryPolicy.key(it.host) == BrokerDiscoveryPolicy.key(discovered.host)
+                    }?.let(::refresh)
+                }
+                if (result.removed.isNotEmpty()) {
+                    recomputeAttention()
+                    labGeneration++ // invalidate any response built from the old fleet
+                    refreshLab()
+                }
+            } finally {
+                discoveryInFlight = false
+                // A manual refresh arriving during a sweep must not be lost.
+                if (discoveryPruneRequested) discoverViaTailnet()
             }
-            if (found.isNotEmpty()) saveBrokers()
-            found.forEach { refresh(it) }
         }
     }
 
@@ -237,13 +275,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val arr = JSONArray(prefs.getString("brokers", "[]") ?: "[]")
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            brokers.add(Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")), o.optString("os", "")))
+            val broker = Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")), o.optString("os", ""))
+            brokers.add(broker)
+            val source = when (o.optString("source")) {
+                "manual" -> BrokerSource.MANUAL
+                "discovered" -> BrokerSource.DISCOVERED
+                else -> BrokerDiscoveryPolicy.legacySource(broker.host)
+            }
+            brokerSources[BrokerDiscoveryPolicy.key(broker.host)] = source
         }
     }
 
     private fun saveBrokers() {
         val arr = JSONArray()
-        brokers.forEach { arr.put(JSONObject().put("host", it.host).put("scheme", it.scheme).put("name", it.name).put("os", it.os)) }
+        brokers.forEach {
+            val source = brokerSources[BrokerDiscoveryPolicy.key(it.host)] ?: BrokerSource.DISCOVERED
+            arr.put(JSONObject().put("host", it.host).put("scheme", it.scheme).put("name", it.name)
+                .put("os", it.os).put("source", if (source == BrokerSource.MANUAL) "manual" else "discovered"))
+        }
         prefs.edit().putString("brokers", arr.toString()).apply()
     }
 
@@ -255,7 +304,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val probed = withContext(Dispatchers.IO) { Net.probe(host) }
             busy = false
             if (probed == null) { lastError = "No broker at $host:8722"; return@launch }
-            val existing = brokers.indexOfFirst { it.host == probed.host }
+            val brokerKey = BrokerDiscoveryPolicy.key(probed.host)
+            brokerSources[brokerKey] = BrokerSource.MANUAL
+            discoveryMisses.remove(brokerKey)
+            val existing = brokers.indexOfFirst { BrokerDiscoveryPolicy.key(it.host) == brokerKey }
             if (existing >= 0) brokers[existing] = probed else brokers.add(probed)
             saveBrokers()
             refresh(probed)
@@ -263,15 +315,35 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun removeBroker(b: Broker) {
+        forgetBrokerState(b)
         brokers.removeAll { it.id == b.id }
-        sessions.remove(b.id)
-        if (selected?.first?.id == b.id) selected = null
+        val brokerKey = BrokerDiscoveryPolicy.key(b.host)
+        brokerSources.remove(brokerKey)
+        discoveryMisses.remove(brokerKey)
+        recomputeAttention()
+        labGeneration++
+        refreshLab()
         saveBrokers()
     }
 
-    fun refreshAll() {
+    fun refreshAll(pruneMissing: Boolean = false) {
         brokers.toList().forEach { refresh(it) }
-        if (TsnetCore.isUp) discoverViaTailnet()
+        if (TsnetCore.isUp) discoverViaTailnet(pruneMissing)
+    }
+
+    private fun forgetBrokerState(b: Broker) {
+        sessions[b.id].orEmpty().forEach { AttentionNotifier.clear(getApplication(), b, it.name) }
+        sessions.remove(b.id)
+        if (selected?.first?.id == b.id) selected = null
+        val sessionPrefix = "${b.id} "
+        unseen.removeAll { it.startsWith(sessionPrefix) }
+        acknowledged.removeAll { it.startsWith(sessionPrefix) }
+        prevState.keys.removeAll { it.startsWith(sessionPrefix) }
+        val ccPrefix = "${b.id}/"
+        ccStatus.keys.filter { it.startsWith(ccPrefix) }.forEach { ccStatus.remove(it) }
+        pendingOverride.keys.removeAll { it.startsWith(ccPrefix) }
+        val backlogChanged = backlog.removeAll { it.startsWith(sessionPrefix) }
+        if (backlogChanged) prefs.edit().putString("backlog", backlog.joinToString("\n")).apply()
     }
 
     /** Refresh sessions for KNOWN brokers without re-running discovery — the cheap
@@ -317,7 +389,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (labRefreshInFlight) return
         val current = brokers.toList()
         if (current.isEmpty()) {
+            labGeneration++
+            labAttention.forEach { AttentionNotifier.clearLab(getApplication(), it.targetID) }
+            labSets.clear(); labPendingKeys.clear(); labPendingRuns.clear(); labNotes.clear()
+            labAttention.clear(); labActiveKeyBySet.clear(); labDetails.clear(); labDetailLoading.clear()
+            labRoute = LabRoute()
             labLoaded = true
+            labError = null
             return
         }
         labRefreshInFlight = true
