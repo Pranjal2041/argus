@@ -779,7 +779,13 @@ private data class GuidanceScope(
     val project: String = "",
     val card: LabSetCard? = null,
 )
-private data class GuidanceNote(val group: LabNotesGroup?, val card: LabSetCard?, val note: LabHubNote)
+private data class GuidanceReplica(val group: LabNotesGroup, val note: LabHubNote)
+private data class GuidanceNote(
+    val group: LabNotesGroup?,
+    val card: LabSetCard?,
+    val note: LabHubNote,
+    val replicas: List<GuidanceReplica> = emptyList(),
+)
 
 @Composable
 private fun LabGuidance(vm: AppViewModel) {
@@ -875,7 +881,7 @@ private fun guidanceNotes(vm: AppViewModel, scope: GuidanceScope): List<Guidance
             val sameStore = group.storeID == scope.storeID
             val sameMachine = group.id == scope.group?.id
             val match = when (scope.type) {
-                GuidanceType.ALL -> true
+                GuidanceType.ALL -> note.scope == "global"
                 GuidanceType.MACHINE -> (sameStore && note.scope == "global") || (sameMachine && note.scope == "machine")
                 GuidanceType.PROJECT -> (sameStore && note.scope == "global") ||
                     (sameMachine && note.scope == "machine") ||
@@ -895,7 +901,44 @@ private fun guidanceNotes(vm: AppViewModel, scope: GuidanceScope): List<Guidance
                 author = event.author, text = event.text.orEmpty(), hidden = event.id in hidden))
         }
     }
-    return out.sortedByDescending { it.note.time }
+    return mergeGlobalGuidance(out).sortedByDescending { it.note.time }
+}
+
+private fun mergeGlobalGuidance(notes: List<GuidanceNote>): List<GuidanceNote> {
+    data class Broadcast(
+        val first: GuidanceNote,
+        val signature: String,
+        val at: Long,
+        val stores: MutableSet<String>,
+        val replicas: MutableList<GuidanceReplica>,
+    )
+    val direct = notes.filter { it.note.scope != "global" }.toMutableList()
+    val broadcasts = mutableListOf<Broadcast>()
+    notes.filter { it.note.scope == "global" }.sortedBy { it.note.time }.forEach { entry ->
+        val group = entry.group ?: return@forEach
+        val signature = "${entry.note.author}\n${entry.note.text.trim().replace(Regex("\\s+"), " ")}"
+        val at = try { Instant.parse(entry.note.time).toEpochMilli() } catch (_: Exception) { Long.MIN_VALUE }
+        val candidate = broadcasts.filter {
+            it.signature == signature && group.storeID !in it.stores && at != Long.MIN_VALUE &&
+                it.at != Long.MIN_VALUE && kotlin.math.abs(at - it.at) <= 120_000
+        }.minByOrNull { kotlin.math.abs(at - it.at) }
+        if (candidate != null) {
+            candidate.stores += group.storeID
+            candidate.replicas += GuidanceReplica(group, entry.note)
+        } else {
+            broadcasts += Broadcast(entry, signature, at, mutableSetOf(group.storeID),
+                mutableListOf(GuidanceReplica(group, entry.note)))
+        }
+    }
+    direct += broadcasts.map { broadcast ->
+        val latest = broadcast.replicas.maxOf { it.note.time }
+        val hidden = broadcast.replicas.all { it.note.hidden }
+        broadcast.first.copy(
+            note = broadcast.first.note.copy(time = latest, hidden = hidden),
+            replicas = broadcast.replicas,
+        )
+    }
+    return direct
 }
 
 @Composable
@@ -904,22 +947,27 @@ private fun LabGuidanceNote(vm: AppViewModel, entry: GuidanceNote) {
         Modifier.fillMaxWidth().background(labPanel, RoundedCornerShape(8.dp)).padding(10.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Text(entry.note.scope.uppercase(), color = labAccent, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+        Text(if (entry.note.scope == "global") "EVERYWHERE" else entry.note.scope.uppercase(), color = labAccent, fontSize = 9.sp, fontWeight = FontWeight.Bold,
             modifier = Modifier.width(62.dp))
         Column(Modifier.weight(1f)) {
             Text(entry.note.text, color = if (entry.note.hidden) labFaint else labText, fontSize = 13.sp)
-            Text(ago(entry.note.time), color = labFaint, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+            val origin = entry.replicas.takeIf { it.isNotEmpty() }
+                ?.let { "${it.size} store${if (it.size == 1) "" else "s"} · " }.orEmpty()
+            Text(origin + ago(entry.note.time), color = labFaint, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
         }
-        if (!entry.note.hidden) Text("HIDE", color = labFaint, fontSize = 9.sp,
+        if (!entry.note.hidden) Text(if (entry.replicas.size > 1) "HIDE ALL" else "HIDE", color = labFaint, fontSize = 9.sp,
             modifier = Modifier.clickable {
                 if (entry.card != null) vm.hideLabSetEvent(entry.card, entry.note.id)
+                else if (entry.replicas.isNotEmpty()) vm.hideLabScopeNotes(
+                    entry.replicas.filterNot { it.note.hidden }.map { it.group to it.note },
+                )
                 else if (entry.group != null) vm.hideLabScopeNote(entry.group, entry.note)
             }.padding(6.dp))
     }
 }
 
 private fun scopeExplanation(scope: GuidanceScope): String = when (scope.type) {
-    GuidanceType.ALL -> "One copy is written to each reachable store. Every approved agent receives it."
+    GuidanceType.ALL -> "One network instruction is replicated to each reachable store and shown here once. Every agent brief receives its store's copy."
     GuidanceType.MACHINE -> "Every approved agent on ${scope.label} receives this, regardless of project."
     GuidanceType.PROJECT -> "Agents working on ${scope.project} in this shared store receive it."
     GuidanceType.SET -> "Only the agent holding this experiment set receives it, plus inherited guidance above."

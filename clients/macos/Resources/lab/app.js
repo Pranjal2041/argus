@@ -15,7 +15,7 @@ const Lab = {
     catch (_) { return 1; }
   })(),
   autoScale: 1,
-  uiScale: 1.3,
+  uiScale: 1.1,
   initialized: false,
   drawerOpen: false,
   researchQuery: "",
@@ -32,6 +32,7 @@ const Lab = {
   drafts: Object.create(null),
   scroll: { main: 0, context: 0, blocks: Object.create(null) },
   action: null,
+  renderPending: false,
   syncAt: null,
   dataKey: "",
   fixture: new URLSearchParams(location.search).has("fixture"),
@@ -96,6 +97,31 @@ function displayPath(value) {
   if (parts.length < 3) return shown;
   const prefix = shown.startsWith("~/") ? "~/" : shown.startsWith("/") ? "/" : "";
   return `${prefix}${parts[0]}${separator}…${separator}${parts[parts.length - 1]}`;
+}
+
+function normalizedReportText(value) {
+  return String(value == null ? "" : value).replace(/\r\n?/g, "\n").trim();
+}
+
+function reportParagraphs(value) {
+  const text = normalizedReportText(value);
+  if (!text) return [];
+  if (text.includes("\n")) return text.split(/\n+/).map(part => part.trim()).filter(Boolean);
+  if (text.length < 360) return [text];
+  return text.replace(/([.!?][)\]"']?)\s+(?=[A-Z])/g, "$1\n")
+    .split("\n").map(part => part.trim()).filter(Boolean);
+}
+
+function renderReportText(value) {
+  return reportParagraphs(value).map(part => `<span class="report-paragraph">${esc(part)}</span>`).join("");
+}
+
+function reportPreview(value, limit = 360) {
+  const text = normalizedReportText(value).replace(/\s+/g, " ");
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit + 1);
+  const boundary = cut.lastIndexOf(" ");
+  return `${cut.slice(0, boundary > limit * .7 ? boundary : limit).trimEnd()}…`;
 }
 
 function colorChannels(value) {
@@ -281,6 +307,37 @@ function captureViewState() {
   });
 }
 
+function editingControl() {
+  const active = document.activeElement;
+  return Boolean(active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName));
+}
+
+function captureFocusState() {
+  const active = document.activeElement;
+  if (!active || !["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return null;
+  return {
+    draft: active.dataset && active.dataset.draft || "",
+    id: active.id || "",
+    start: typeof active.selectionStart === "number" ? active.selectionStart : null,
+    end: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+    scrollTop: active.scrollTop || 0,
+  };
+}
+
+function restoreFocusState(state) {
+  if (!state) return;
+  let target = state.draft
+    ? [...document.querySelectorAll("[data-draft]")].find(node => node.dataset.draft === state.draft)
+    : null;
+  if (!target && state.id) target = document.getElementById(state.id);
+  if (!target || target.disabled) return;
+  target.focus({ preventScroll: true });
+  if (state.start != null && typeof target.setSelectionRange === "function") {
+    target.setSelectionRange(Math.min(state.start, target.value.length), Math.min(state.end, target.value.length));
+  }
+  target.scrollTop = state.scrollTop;
+}
+
 function restoreViewState() {
   const main = $("#main");
   const context = $("#context");
@@ -325,7 +382,9 @@ function ensureSelection() {
 }
 
 function render() {
+  const focus = captureFocusState();
   captureViewState();
+  Lab.renderPending = false;
   ensureSelection();
   $("#masthead").innerHTML = renderMasthead();
   $("#context").innerHTML = renderContext();
@@ -333,7 +392,7 @@ function render() {
   document.body.classList.toggle("context-open", Lab.drawerOpen);
   document.body.classList.toggle("action-busy", Boolean(Lab.action));
   persistLocation();
-  requestAnimationFrame(restoreViewState);
+  requestAnimationFrame(() => { restoreViewState(); restoreFocusState(focus); });
 }
 
 function renderMasthead() {
@@ -653,7 +712,7 @@ function renderResearchOverview() {
     ${active.length ? renderRunLedger(active, false, true) : `<div class="guidance-strip">No experiments are currently running or awaiting launch.</div>`}
     ${failures.length ? `<div class="section-head"><h2>Failures worth inspecting</h2></div>${renderRunLedger(failures, false, true)}` : ""}
     <div class="section-head"><h2>Recent findings</h2></div>
-    ${findings.length ? `<div class="result-ledger">${findings.map(({card,run}) => `<div class="result-row"><span class="result-time">${esc(ago(run.started))}</span><button class="button link human-copy" style="justify-content:flex-start;text-align:left" type="button" data-open-run="${esc(card.id)}" data-run="${esc(run.id)}">${esc(run.latest)}</button><span class="tag">${esc(card.project)} / ${esc(run.id)}</span></div>`).join("")}</div>` : emptyState("No findings yet", "Agent-reported results will collect here as runs finish.")}
+    ${findings.length ? `<div class="result-ledger">${findings.map(({card,run}) => `<div class="result-row finding-row"><span class="result-time">${esc(ago(run.started))}</span><button class="result-open human-copy" type="button" data-open-run="${esc(card.id)}" data-run="${esc(run.id)}"><span class="result-preview">${esc(reportPreview(run.latest))}</span><span class="result-open-cue">Open full finding</span></button><span class="tag">${esc(card.project)} / ${esc(run.id)}</span></div>`).join("")}</div>` : emptyState("No findings yet", "Agent-reported results will collect here as runs finish.")}
   </div>`;
 }
 
@@ -725,7 +784,7 @@ function renderRunLedger(entries, compare, showScope = false) {
       ${compare ? `<td class="compare-col"><input type="checkbox" data-compare-pick="${esc(run.id)}" ${Lab.comparePicks.includes(run.id) ? "checked" : ""} aria-label="Select ${esc(run.id)} for comparison"></td>` : ""}
       <td class="run-col">${esc(run.id)}${showScope ? `<span class="run-scope" title="${esc(`${card.project} · ${card.machineName}`)}">${esc(card.project)}</span>` : ""}</td><td class="status-col">${statusWord(run.status)}</td>
       <td class="tag-col">${run.tier ? `<span class="tag">${esc(run.tier)}</span>` : ""}${run.group ? `<span class="tag" style="margin-left:4px">${esc(run.group)}</span>` : ""}</td>
-      <td class="result-col">${esc(run.latest || (statusInfo(run.status).key === "running" ? "Awaiting the next reported result…" : "No result reported"))}</td>
+      <td class="result-col"><span class="result-preview ledger-result">${esc(reportPreview(run.latest || (statusInfo(run.status).key === "running" ? "Awaiting the next reported result…" : "No result reported"), 440))}</span></td>
       <td class="time-col">${esc(ago(run.started))}</td></tr>`).join("")}
   </tbody></table></div>`;
 }
@@ -757,7 +816,7 @@ function renderRunRecord() {
     </div><div class="page-actions">${runActions(card, run, folded)}</div></div>
     ${card.offline ? offlineBanner(card) : ""}
     ${evidenceSpine(folded, run, card)}
-    <section class="run-result ${st.key === "failed" ? "failed" : pending ? "pending" : ""}"><div class="run-result-label">${resultLabel}</div><div class="run-result-text selectable">${esc(hero)}</div></section>
+    <section class="run-result ${st.key === "failed" ? "failed" : pending ? "pending" : ""}"><div class="run-result-label">${resultLabel}</div><div class="run-result-text selectable ${normalizedReportText(hero).length > 480 ? "long-report" : ""}">${renderReportText(hero)}</div></section>
     ${folded.env.argv && folded.env.argv.length ? `<div class="command-line selectable">${esc(folded.env.argv.join(" "))}</div>` : ""}
     ${detail ? `<nav class="tab-bar" aria-label="Run evidence">${runTabs(folded).map(([key,label]) => `<button class="tab ${Lab.runTab === key ? "active" : ""}" type="button" data-run-tab="${key}">${label}</button>`).join("")}</nav><div class="tab-panel">${renderRunTab(card, run, folded)}</div>` : `<div class="skeleton"></div><div class="skeleton"></div>`}
     ${pending && !card.offline ? decisionDock("run", { card: card.id, run: run.id, message }) : ""}
@@ -829,7 +888,7 @@ function renderSummary(folded, card, run) {
   const noteDraft = draft(`run-note:${card.id}/${run.id}`, "");
   return `<div class="summary-grid"><div class="summary-stack">
     <section><div class="section-head" style="margin-top:0"><h2>Reported results</h2><span class="section-kicker">agent claims remain attributable</span></div>
-      ${visible.length ? `<div class="result-ledger">${visible.map(event => `<div class="result-row"><span class="result-time">${esc(ago(event.time))}</span><span class="result-copy selectable">${esc(event.text || "")}</span><span class="row-actions">${!card.offline && event.author === "agent" ? `<button class="row-action" type="button" data-action="hide-result" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-target="${esc(event.id)}">hide</button>` : `<span class="tag">${event.author === "human" ? "human" : event.author}</span>`}</span></div>`).join("")}</div>` : run.latest ? `<div class="result-ledger"><div class="result-row"><span class="result-time">summary</span><span class="result-copy selectable">${esc(run.latest)}</span><span class="tag">run summary</span></div></div>` : `<div class="secondary human-copy">No result has been reported yet.</div>`}
+      ${visible.length ? `<div class="result-ledger">${visible.map(event => `<div class="result-row"><span class="result-time">${esc(ago(event.time))}</span><span class="result-copy selectable">${renderReportText(event.text || "")}</span><span class="row-actions">${!card.offline && event.author === "agent" ? `<button class="row-action" type="button" data-action="hide-result" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-target="${esc(event.id)}">hide</button>` : `<span class="tag">${event.author === "human" ? "human" : event.author}</span>`}</span></div>`).join("")}</div>` : run.latest ? `<div class="result-ledger"><div class="result-row"><span class="result-time">summary</span><span class="result-copy selectable">${renderReportText(run.latest)}</span><span class="tag">run summary</span></div></div>` : `<div class="secondary human-copy">No result has been reported yet.</div>`}
       ${card.offline ? "" : `<div class="note-composer"><input class="text-input" data-draft="run-note:${esc(card.id)}/${esc(run.id)}" value="${esc(noteDraft)}" placeholder="Add a human note to this run" aria-label="Human note"><button class="button" type="button" data-action="run-note" data-card="${esc(card.id)}" data-run="${esc(run.id)}">${icon("note")}Add note</button></div>`}
     </section>
     ${dataFiles.length ? `<section><div class="section-head"><h2>Declared data integrity</h2></div>${dataFiles.map(ref => { const drift = (end.drift || []).includes(ref.path); const state = drift ? "changed during run" : folded.end ? "unchanged" : "fingerprinted · final check pending"; return `<div class="integrity-row"><span class="integrity-path selectable">${esc(ref.path)}</span><span class="integrity-state ${drift ? "alert" : ""}">${state}</span></div>`; }).join("")}</section>` : ""}
@@ -1002,13 +1061,50 @@ function renderGuidanceMain() {
   </div>`;
 }
 
+function mergeGlobalNoteReplicas(items) {
+  const merged = [];
+  const broadcasts = [];
+  const ordered = [...items].sort((a, b) => String(a.note.time || "").localeCompare(String(b.note.time || "")));
+  for (const item of ordered) {
+    if (item.note.scope !== "global") { merged.push(item); continue; }
+    const signature = `${item.note.author || ""}\n${String(item.note.text || "").trim().replace(/\s+/g, " ")}`;
+    const store = item.group.storeID || item.group.machineID;
+    const at = Date.parse(item.note.time || "");
+    const candidate = broadcasts
+      .filter(entry => entry.signature === signature && !entry.stores.has(store)
+        && Number.isFinite(at) && Number.isFinite(entry.at) && Math.abs(at - entry.at) <= 120000)
+      .sort((a, b) => Math.abs(at - a.at) - Math.abs(at - b.at))[0];
+    const aggregate = candidate || {
+      ...item,
+      note: { ...item.note },
+      replicas: [],
+      stores: new Set(),
+      signature,
+      at,
+    };
+    if (!candidate) { broadcasts.push(aggregate); merged.push(aggregate); }
+    aggregate.replicas.push(item);
+    aggregate.stores.add(store);
+    if (String(item.note.time || "") > String(aggregate.note.time || "")) aggregate.note.time = item.note.time;
+  }
+  for (const item of broadcasts) {
+    const hidden = item.replicas.filter(replica => replica.note.hidden).length;
+    item.note.hidden = hidden === item.replicas.length;
+    item.note.partiallyHidden = hidden > 0 && hidden < item.replicas.length;
+    delete item.stores;
+    delete item.signature;
+    delete item.at;
+  }
+  return merged;
+}
+
 function guidanceNotes(scope) {
   const out = [];
   const seen = new Set();
   for (const group of Lab.model.hubNotes) for (const note of group.notes || []) {
     const sameMachine = group.machineID === scope.machineID;
     const sameStore = group.storeID && scope.storeID ? group.storeID === scope.storeID : sameMachine;
-    const match = scope.type === "all"
+    const match = (scope.type === "all" && note.scope === "global")
       || (scope.type === "machine" && ((sameStore && note.scope === "global") || (sameMachine && note.scope === "machine")))
       || (scope.type === "project" && ((sameStore && note.scope === "global")
         || (sameMachine && note.scope === "machine")
@@ -1033,7 +1129,7 @@ function guidanceNotes(scope) {
       out.push({ group: { machineID: card.machineID, machineName: card.machineName }, card, note });
     }
   }
-  return out;
+  return mergeGlobalNoteReplicas(out);
 }
 function renderAudienceTrail(scope) {
   if (scope.type === "all") return "";
@@ -1046,14 +1142,25 @@ function renderAudienceTrail(scope) {
 function renderGuidanceNote(item, scope) {
   const note = item.note;
   const inherited = scope.type === "set" && !item.card;
+  const replicas = item.replicas || [item];
+  const targets = replicas.filter(replica => !replica.note.hidden).map(replica => ({
+    machineID: replica.group.machineID,
+    scope: replica.note.scope,
+    project: replica.note.project || "",
+    target: replica.note.id,
+  }));
   const hide = item.card
     ? `<button class="row-action" type="button" data-action="hide-set-guidance" data-card="${esc(item.card.id)}" data-target="${esc(note.id)}">hide</button>`
-    : `<button class="row-action" type="button" data-action="hide-guidance" data-machine="${esc(item.group.machineID)}" data-scope="${esc(note.scope)}" data-project="${esc(note.project || "")}" data-target="${esc(note.id)}">hide</button>`;
-  return `<div class="note-row"><span class="note-audience">${esc(noteAudience(note))}${inherited ? `<small>inherited</small>` : note.scope === "set" ? `<small>direct</small>` : ""}</span><span class="note-copy selectable ${note.hidden ? "hidden" : ""}">${esc(note.text)}</span><span class="note-origin"><span title="${esc(item.group.machineName)}">${esc(item.group.machineName)}</span>${esc(ago(note.time))}</span><span>${note.hidden ? `<span class="tag">hidden</span>` : hide}</span></div>`;
+    : item.replicas
+      ? `<button class="row-action" type="button" data-action="hide-guidance-many" data-targets="${esc(encodeURIComponent(JSON.stringify(targets)))}">${targets.length > 1 ? "hide everywhere" : "hide"}</button>`
+      : `<button class="row-action" type="button" data-action="hide-guidance" data-machine="${esc(item.group.machineID)}" data-scope="${esc(note.scope)}" data-project="${esc(note.project || "")}" data-target="${esc(note.id)}">hide</button>`;
+  const origin = item.replicas ? `${item.replicas.length} store${item.replicas.length === 1 ? "" : "s"}` : item.group.machineName;
+  const qualifier = inherited ? "inherited" : note.scope === "set" ? "direct" : note.partiallyHidden ? "partially hidden" : "";
+  return `<div class="note-row"><span class="note-audience">${esc(noteAudience(note))}${qualifier ? `<small>${esc(qualifier)}</small>` : ""}</span><span class="note-copy selectable ${note.hidden ? "hidden" : ""}">${esc(note.text)}</span><span class="note-origin"><span title="${esc(origin)}">${esc(origin)}</span>${esc(ago(note.time))}</span><span>${note.hidden ? `<span class="tag">hidden</span>` : hide}</span></div>`;
 }
-function noteAudience(note) { return note.scope === "global" ? "all agents" : note.scope === "machine" ? "machine" : note.scope === "project" ? `project / ${note.project || "?"}` : note.scope === "set" ? `set / ${note.setID || "?"}` : note.scope; }
+function noteAudience(note) { return note.scope === "global" ? "everywhere" : note.scope === "machine" ? "machine" : note.scope === "project" ? `project / ${note.project || "?"}` : note.scope === "set" ? `set / ${note.setID || "?"}` : note.scope; }
 function scopeExplanation(scope) {
-  if (scope.type === "all") return "One copy is written to every reachable Lab store. Every approved agent, anywhere, will read it.";
+  if (scope.type === "all") return "One network instruction is replicated to every reachable Lab store. The ledger keeps it as one instruction; each agent brief receives the copy in its own store.";
   if (scope.type === "machine") return `Every approved agent on ${scope.label} will read it, regardless of project.`;
   if (scope.type === "project") return `Only agents working on ${scope.project} on ${scope.machineName} will read it.`;
   return `Guidance written here applies only to experiment set ${scope.setID}. The ledger also shows the network, machine, and project guidance this set inherits.`;
@@ -1196,6 +1303,12 @@ document.addEventListener("click", event => {
     return;
   }
   if (kind === "hide-set-guidance") { startAction("hideSetGuidance", { card: action.dataset.card, run: "", target: action.dataset.target }, "Guidance hidden from agent briefs"); return; }
+  if (kind === "hide-guidance-many") {
+    let targets = [];
+    try { targets = JSON.parse(decodeURIComponent(action.dataset.targets || "")); } catch (_) {}
+    if (targets.length) startAction("hubHideMany", { targets }, "Guidance hidden from every agent brief");
+    return;
+  }
   if (kind === "hide-guidance") { startAction("hubHide", { machineID: action.dataset.machine, scope: action.dataset.scope, project: action.dataset.project || "", target: action.dataset.target }, "Guidance hidden from agent briefs"); return; }
   if (kind === "toggle-hidden") { Lab.showHiddenNotes = !Lab.showHiddenNotes; render(); return; }
 });
@@ -1219,6 +1332,12 @@ document.addEventListener("change", event => {
     render(); return;
   }
   if (input.dataset && input.dataset.action === "policy") startAction("policy", { card: input.dataset.card, policy: input.value }, "Approval policy updated");
+});
+
+document.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (Lab.renderPending && !editingControl()) render();
+  }, 0);
 });
 
 document.addEventListener("toggle", event => {
@@ -1254,7 +1373,7 @@ function automaticTextScale() {
 
 function applyTextScale() {
   Lab.autoScale = automaticTextScale();
-  Lab.uiScale = clamp(1.3 * Lab.hostScale * Lab.manualScale * Lab.autoScale, .9, 2.5);
+  Lab.uiScale = clamp(1.1 * Lab.hostScale * Lab.manualScale * Lab.autoScale, .8, 2.2);
   document.documentElement.style.setProperty("--ui-scale", Lab.uiScale);
   const readout = document.querySelector(".type-readout");
   if (readout) readout.textContent = `${Math.round(Lab.uiScale * 100)}%`;
@@ -1298,7 +1417,13 @@ window.UTLab = {
       else if (saved && ["inbox", "research", "guidance"].includes(saved.area)) { Lab.area = saved.area; Lab.selection = saved.selection || null; }
       else Lab.area = "research";
     }
-    if (key !== Lab.dataKey) { Lab.dataKey = key; render(); }
+    if (key !== Lab.dataKey) {
+      Lab.dataKey = key;
+      if (editingControl()) {
+        Lab.renderPending = true;
+        $("#masthead").innerHTML = renderMasthead();
+      } else render();
+    }
     else { $("#masthead").innerHTML = renderMasthead(); }
   },
   setRunDetail(card, run, detail) {

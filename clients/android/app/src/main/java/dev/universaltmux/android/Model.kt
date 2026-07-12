@@ -614,6 +614,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun hideLabScopeNotes(notes: List<Pair<LabNotesGroup, LabHubNote>>) = labAction {
+        withContext(Dispatchers.IO) {
+            notes.isNotEmpty() && notes.map { (group, note) ->
+                LabNet.hide(group.broker, note.id, scope = note.scope, project = note.project.orEmpty())
+            }.all { it }
+        }
+    }
+
     fun hideLabSetEvent(card: LabSetCard, target: String) = labAction {
         withContext(Dispatchers.IO) { LabNet.hide(card.broker, target, set = card.brief.set.id) }
     }

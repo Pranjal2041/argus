@@ -357,6 +357,7 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .ledger .tag-col { width: 116px; }
 .ledger .time-col { width: 100px; color: var(--text-quiet); font: .63rem var(--mono); text-align: right; }
 .ledger .result-col { font-family: var(--sans); font-size: .75rem; line-height: 1.45; }
+.ledger-result { -webkit-line-clamp: 4; }
 .ledger .compare-col { width: 38px; }
 .ledger input[type=checkbox] { accent-color: var(--accent); }
 .set-summary-grid { margin-top: 25px; display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(240px, .8fr); gap: 18px; }
@@ -376,6 +377,7 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .run-result.pending { border-left-color: var(--decision); }
 .run-result-label { color: var(--text-quiet); font: 700 .6rem var(--condensed); letter-spacing: .14em; text-transform: uppercase; }
 .run-result-text { max-width: 900px; margin-top: 7px; font-family: var(--display); font-size: clamp(1.18rem, 1.9vw, 1.65rem); font-weight: 530; line-height: 1.4; letter-spacing: -.015em; }
+.run-result-text.long-report { max-width: 1020px; font-family: var(--sans); font-size: .9rem; font-weight: 450; line-height: 1.62; letter-spacing: 0; }
 .command-line { margin-top: 18px; border: 1px solid var(--line); border-radius: 5px; background: var(--canvas-deep); padding: 11px 13px; color: var(--text-secondary); font: .7rem/1.55 var(--mono); overflow-x: auto; white-space: pre; }
 .tab-bar { display: flex; gap: 18px; margin-top: 32px; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tab { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-quiet); padding: 0 1px 10px; cursor: pointer; white-space: nowrap; font: 700 .67rem var(--condensed); letter-spacing: .08em; text-transform: uppercase; }
@@ -392,6 +394,22 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .result-row { display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 13px; padding: 11px 0; border-bottom: 1px solid var(--line-soft); align-items: start; }
 .result-time { color: var(--text-quiet); font: .61rem var(--mono); text-align: right; padding-top: 3px; }
 .result-copy { color: var(--text); font-family: var(--sans); font-size: .8rem; line-height: 1.5; }
+.report-paragraph { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-paragraph + .report-paragraph { margin-top: .72em; }
+.result-preview {
+  min-width: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 4;
+}
+.result-open {
+  min-width: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text);
+  padding: 2px 5px 5px; text-align: left; cursor: pointer; font-size: .8rem; line-height: 1.5;
+}
+.result-open:hover { background: var(--row-hover); }
+.result-open-cue {
+  display: inline-block; margin-top: 7px; color: var(--link);
+  font: 700 .57rem/1 var(--condensed); letter-spacing: .08em; text-transform: uppercase;
+}
+.result-open:hover .result-open-cue { text-decoration: underline; text-underline-offset: 3px; }
 .row-actions { display: flex; gap: 4px; }
 .row-action { border: 0; background: transparent; color: var(--text-quiet); cursor: pointer; padding: 3px 6px; border-radius: 3px; font-size: .64rem; }
 .row-action:hover { background: var(--surface); color: var(--danger); }
@@ -455,7 +473,7 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .note-row { display: grid; grid-template-columns: 115px minmax(0,1fr) 108px auto; gap: 15px; align-items: start; padding: 14px 6px; border-bottom: 1px solid var(--line-soft); }
 .note-audience { color: var(--link); font: 700 .61rem/1.4 var(--condensed); letter-spacing: .06em; text-transform: uppercase; }
 .note-audience small { display: block; margin-top: 3px; color: var(--text-quiet); font: 650 .52rem/1 var(--condensed); letter-spacing: .08em; }
-.note-copy { color: var(--text); font-family: var(--sans); font-size: .8rem; line-height: 1.5; }
+.note-copy { color: var(--text); font-family: var(--sans); font-size: .8rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .note-copy.hidden { color: var(--text-quiet); text-decoration: line-through; }
 .note-origin { color: var(--text-quiet); font: .6rem/1.45 var(--mono); }
 .note-origin span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

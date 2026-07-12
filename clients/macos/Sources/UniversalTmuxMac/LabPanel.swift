@@ -397,6 +397,20 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 await lab.hideHubNoteNow(machineID: str("machineID"), scope: str("scope"),
                                          project: str("project"), target: str("target"))
             }
+        case "hubHideMany":
+            let targets = d["targets"] as? [[String: Any]] ?? []
+            performAction(id: actionID, success: "Guidance hidden from every agent brief") {
+                guard !targets.isEmpty else { return false }
+                var success = true
+                for target in targets {
+                    func value(_ key: String) -> String { target[key] as? String ?? "" }
+                    if !(await lab.hideHubNoteNow(machineID: value("machineID"), scope: value("scope"),
+                                                  project: value("project"), target: value("target"))) {
+                        success = false
+                    }
+                }
+                return success
+            }
         case "policy":
             if let c = card() {
                 performAction(id: actionID, success: "Approval policy updated") {
