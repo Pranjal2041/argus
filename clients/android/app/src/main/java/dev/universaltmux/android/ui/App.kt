@@ -213,7 +213,7 @@ fun App(vm: AppViewModel) {
                             IconButton(onClick = { screen = if (screen == 6) 0 else 6 }) {
                                 Icon(Icons.Filled.EditNote, "Notes", tint = if (screen == 6) accent else cText)
                             }
-                            IconButton(onClick = { vm.refreshAll() }) { Icon(Icons.Filled.Refresh, "Refresh") }
+                            IconButton(onClick = { vm.refreshAll(pruneMissing = true) }) { Icon(Icons.Filled.Refresh, "Refresh") }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = panel, titleContentColor = cText),
