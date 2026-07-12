@@ -26,6 +26,17 @@ ui_probe_ms() {
   echo $((t1 - t0))
 }
 
+# Instantaneous WindowServer CPU. The AppleEvent probe above only catches
+# CPU/kernel stalls; a compositor-bound "desktop is molasses but mouse is fine"
+# slowdown (WindowServer pegged) does NOT move it. This does.
+ws_inst_cpu() {
+  local wp=$(pgrep -x WindowServer | head -1)
+  [ -z "$wp" ] && { echo 0; return; }
+  top -l 2 -s 1 -pid "$wp" -stats cpu 2>/dev/null | tail -1 | tr -dc '0-9.' | awk '{print int($1)}'
+}
+
+ws_high=0   # consecutive cycles WindowServer has been pegged
+
 while true; do
   DAY=$(date +%F)
   LOG="$LOGDIR/$DAY.log"
@@ -43,13 +54,29 @@ while true; do
 
   echo "$TS ui=${UI_MS}ms load=$LOAD free=${FREE_PCT}% swap=$SWAP ws=${WS_CPU}% argus=${ARGUS:-dead} webkit=${WK_N}p/${WK_MB}MB top:[$TOPCPU]" >> "$LOG"
 
+  WS_INST=$(ws_inst_cpu)
+  if [ "${WS_INST:-0}" -gt 60 ]; then ws_high=$((ws_high + 1)); else ws_high=0; fi
+
   NOW=$(date +%s)
-  if [ "$UI_MS" -gt "$THRESH_MS" ] && [ $((NOW - last_capture)) -gt "$COOLDOWN" ]; then
+  # Trigger on EITHER a CPU/kernel stall (UI probe) OR a sustained compositor
+  # peg (WindowServer >60% for 2+ cycles = the desktop-slow-but-mouse-fine case).
+  if { [ "$UI_MS" -gt "$THRESH_MS" ] || [ "$ws_high" -ge 2 ]; } && [ $((NOW - last_capture)) -gt "$COOLDOWN" ]; then
     last_capture=$NOW
     CAP="$LOGDIR/hang-$(date +%F-%H%M%S).txt"
     {
-      echo "=== HANG DETECTED: ui probe ${UI_MS}ms at $(date) ==="
+      echo "=== HANG DETECTED at $(date) — ui probe ${UI_MS}ms, WindowServer ${WS_INST}% (ws_high=${ws_high}) ==="
       echo "--- second probe (still hung?) ---"; echo "ui2=$(ui_probe_ms)ms"
+      # THE KEY ADDITION: sample the actual busy processes so next time we get
+      # the exact hot call stack (Flow? Argus? something else?) — not a guess.
+      echo "--- sampling the top CPU processes (3s each) ---"
+      for spid in $(top -l 2 -s 1 -n 15 -o cpu -stats pid,command 2>/dev/null | tail -15 | grep -viE "kernel_task|WindowServer|\\bsample\\b|\\btop\\b" | awk 'NF>=2 && $1 ~ /^[0-9]+$/ {print $1}' | head -4); do
+        echo "· sample pid $spid ($(ps -o comm= -p $spid 2>/dev/null | sed 's|.*/||')) ·"
+        sample "$spid" 3 -mayDie 2>/dev/null | sed -n '/Call graph/,/Total number/p' | head -60
+      done
+      # WindowServer's own hot stack needs root; grab it only if passwordless sudo exists.
+      if sudo -n true 2>/dev/null; then
+        echo "--- WindowServer sample (3s) ---"; sudo -n sample $(pgrep -x WindowServer) 3 -mayDie 2>/dev/null | sed -n '/Call graph/,/Total number/p' | head -50
+      fi
       echo "--- memory ---"; memory_pressure 2>/dev/null | head -12; sysctl vm.swapusage; vm_stat
       echo "--- full process table by CPU ---"; ps aux | sort -rnk3 | head -25
       echo "--- full process table by RSS ---"; ps aux | sort -rnk6 | head -25
