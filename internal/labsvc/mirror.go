@@ -69,6 +69,24 @@ func (s *Store) WriteMirrorEvents(machine, set, run string, evs []Event) (int, e
 	return added, nil
 }
 
+// MirrorEvents reads the append-only event record already copied from a peer.
+// Components are single directory names: the hub route accepts these values
+// from a query string, so reject path syntax before resolving the mirror path.
+func (s *Store) MirrorEvents(machine, set, run string) ([]Event, error) {
+	valid := func(v string) bool {
+		return v != "" && v != "." && v != ".." && filepath.Base(v) == v &&
+			!strings.ContainsAny(v, `/\`)
+	}
+	if !valid(machine) || !valid(set) || (run != "" && !valid(run)) {
+		return nil, errors.New("invalid mirror event path")
+	}
+	dir := s.mirrorSetDir(machine, set)
+	if run != "" {
+		dir = filepath.Join(dir, "runs", run)
+	}
+	return s.Events(dir, false)
+}
+
 // MirroredBrief is one set as last seen from one machine.
 type MirroredBrief struct {
 	Machine string          `json:"machine"`

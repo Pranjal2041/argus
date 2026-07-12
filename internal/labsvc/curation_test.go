@@ -126,6 +126,13 @@ func TestMirrorWriteAndRead(t *testing.T) {
 	if len(ents) != 2 {
 		t.Fatalf("want 2 mirrored event files, got %d", len(ents))
 	}
+	gotEvents, err := s.MirrorEvents("babel-x", "s-abc", "R1")
+	if err != nil || len(gotEvents) != 2 || gotEvents[1].Text != "loss 0.4" {
+		t.Fatalf("mirror events: %+v (%v)", gotEvents, err)
+	}
+	if _, err := s.MirrorEvents("..", "s-abc", "R1"); err == nil {
+		t.Fatal("mirror event reads must reject path traversal")
+	}
 }
 
 func TestMirrorPeersOverride(t *testing.T) {

@@ -3,10 +3,10 @@ import SwiftUI
 import WebKit
 
 // The Lab pane (⇧⌘L) hosts Resources/lab/index.html in the Git panel's mold:
-// the page owns all presentation (it has its own designed palette and does
-// NOT take the app theme — pushing the theme over it kept collapsing every
-// design into the same slate), Swift owns data and actions. The page's base
-// font size follows the app's interface-scale setting via UTLab.setFontSize.
+// the page owns layout and presentation while Swift owns data and actions.
+// The host pushes the selected app palette as semantic tokens, so Lab keeps
+// its instrument-ledger hierarchy while matching every ThemePicker choice.
+// The page's base font size also follows the app's interface-scale setting.
 
 @MainActor
 final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -15,42 +15,61 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     private weak var lab: LabModel?
     private weak var state: AppState?
     private weak var files: FilesModel?
+    private weak var terminals: TerminalController?
+    private weak var wandb: WandbController?
     private var loaded = false
+    private var pendingAttention: (kind: String, id: String)?
 
     private override init() {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController = WKUserContentController()
         webView = WKWebView(frame: .zero, configuration: cfg)
-        webView.underPageBackgroundColor = NSColor(red: 0.086, green: 0.094, blue: 0.114, alpha: 1) // page bg #16181d
+        webView.underPageBackgroundColor = Theme.nsAppBackground
         webView.setValue(false, forKey: "drawsBackground")
         super.init()
         cfg.userContentController.add(self, name: "ut")
         webView.navigationDelegate = self
         let dir = Bundle.main.resourceURL!.appendingPathComponent("lab")
         var page = dir.appendingPathComponent("index.html")
-        // dev hook (like UT_OPEN_LAB): land on a specific view at launch. The
-        // view rides the page URL so there is no eval-timing dependence.
-        if let v = ProcessInfo.processInfo.environment["UT_LAB_VIEW"], v == "notes" || v == "home",
-           var c = URLComponents(url: page, resolvingAgainstBaseURL: false) {
-            c.query = "view=" + v
-            page = c.url ?? page
+        // Dev hooks (like UT_OPEN_LAB) ride the page URL so loading order never
+        // affects a fixture or destination. UT_LAB_FIXTURE powers native visual QA.
+        if var c = URLComponents(url: page, resolvingAgainstBaseURL: false) {
+            var query: [URLQueryItem] = []
+            let env = ProcessInfo.processInfo.environment
+            if let fixture = env["UT_LAB_FIXTURE"], !fixture.isEmpty {
+                query.append(URLQueryItem(name: "fixture", value: fixture))
+            }
+            if let view = env["UT_LAB_VIEW"], ["notes", "home", "guidance", "research"].contains(view) {
+                query.append(URLQueryItem(name: "view", value: view))
+            }
+            if !query.isEmpty {
+                c.queryItems = query
+                page = c.url ?? page
+            }
         }
         webView.loadFileURL(page, allowingReadAccessTo: dir)
     }
 
-    func attach(lab: LabModel, state: AppState, files: FilesModel) {
+    func attach(lab: LabModel, state: AppState, files: FilesModel,
+                terminals: TerminalController, wandb: WandbController) {
         self.lab = lab
         self.state = state
         self.files = files
+        self.terminals = terminals
+        self.wandb = wandb
+        applyTheme()
         applyScale()
         pushData()
+        revealPendingAttention()
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
             self.loaded = true
+            self.applyTheme()
             self.applyScale()
             self.pushData()
+            self.revealPendingAttention()
             // dev hook (like UT_OPEN_LAB): land on a specific view at launch
             if let v = ProcessInfo.processInfo.environment["UT_LAB_VIEW"], v == "notes" || v == "home" {
                 self.eval("window.UTLab.openView(\(self.jsString(v)))")
@@ -60,15 +79,74 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     private func eval(_ js: String) { webView.evaluateJavaScript(js, completionHandler: nil) }
 
+    /// Queue-safe deep link used by Command Center and notification taps. The
+    /// singleton web view can finish loading before its Swift model is attached,
+    /// so retain the destination until both data and page are ready.
+    func openAttention(kind: String, id: String) {
+        guard !kind.isEmpty, !id.isEmpty else { return }
+        pendingAttention = (kind, id)
+        revealPendingAttention()
+    }
+
+    private func revealPendingAttention() {
+        guard loaded, lab != nil, let target = pendingAttention else { return }
+        // pushData() is enqueued immediately before this from attach/didFinish;
+        // WKWebView evaluates the scripts in order, so the selection sees the
+        // current queue instead of the empty boot model.
+        eval("window.UTLab.openAttention(\(jsString(target.kind)), \(jsString(target.id)))")
+        pendingAttention = nil
+    }
+
     private func jsString(_ s: String) -> String {
         let d = try? JSONSerialization.data(withJSONObject: [s])
         let arr = d.flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
         return String(arr.dropFirst().dropLast())
     }
 
-    /// Carries the app's interface-scale to the page as 24 * uiScale; the page
-    /// derives uiScale = pushed/24 and multiplies its per-region sizes with it
-    /// (RAIL_ZOOM / PAGE_ZOOM in the page — the user's preferred proportions).
+    private func hex(_ color: NSColor) -> String {
+        let value = color.usingColorSpace(.sRGB) ?? color
+        return String(format: "#%02x%02x%02x",
+                      Int(value.redComponent * 255),
+                      Int(value.greenComponent * 255),
+                      Int(value.blueComponent * 255))
+    }
+
+    private func hex(_ color: SwiftUI.Color) -> String { hex(NSColor(color)) }
+
+    /// Pushes both chrome colors and semantic status colors. The web page derives
+    /// restrained Lab surfaces from these values while preserving the theme's
+    /// green/success, blue/running, orange/waiting, and red/failure signals.
+    func applyTheme() {
+        let palette = Theme.current
+        webView.underPageBackgroundColor = palette.nsAppBackground
+        guard loaded else { return }
+        let spec: [String: Any] = [
+            "id": palette.id,
+            "name": palette.name,
+            "isLight": palette.isLight,
+            "canvas": hex(palette.nsAppBackground),
+            "sidebar": hex(palette.sidebarBackground),
+            "surface": hex(palette.surface),
+            "border": hex(palette.border),
+            "accent": hex(palette.accent),
+            "selection": hex(palette.selection),
+            "text": hex(palette.textPrimary),
+            "textSecondary": hex(palette.textSecondary),
+            "textQuiet": hex(palette.textTertiary),
+            "success": hex(palette.attached),
+            "running": hex(palette.running),
+            "waiting": hex(palette.waiting),
+            "unseen": hex(palette.unseen),
+            "danger": hex(palette.unreachable),
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: spec),
+           let json = String(data: data, encoding: .utf8) {
+            eval("window.UTLab.setTheme(\(json))")
+        }
+    }
+
+    /// Carries the app's interface scale as 24 * uiScale. The page combines that
+    /// host preference with its viewport-adaptive scale and Lab-specific A−/A+ setting.
     func applyScale() {
         guard loaded else { return }
         let scale = UserDefaults.standard.object(forKey: "ut.uiScale") as? Double ?? 1.0
@@ -79,22 +157,35 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     func pushData() {
         guard loaded, let lab else { return }
-        func notes(_ ns: [LabEventInfo]?) -> [[String: Any]] {
-            (ns ?? []).map { ["id": $0.id, "author": $0.author, "text": $0.text ?? ""] }
+        func notes(_ ns: [LabEventInfo]?, scope: String? = nil) -> [[String: Any]] {
+            let events = ns ?? []
+            let hidden = Set(events.filter { $0.kind == "hide" }.compactMap { $0.data?.target })
+            return events.filter { $0.kind == "note" || $0.kind == "hnote" }.map {
+                var note: [String: Any] = [
+                    "id": $0.id, "time": $0.time, "author": $0.author,
+                    "kind": $0.kind, "text": $0.text ?? "", "hidden": hidden.contains($0.id),
+                ]
+                if let scope { note["scope"] = scope }
+                return note
+            }
         }
         let sets: [[String: Any]] = lab.sets.map { c in
             var d: [String: Any] = [
                 "id": c.id, "setID": c.brief.set.id, "machineID": c.machineID,
-                "machineName": c.machineName, "project": c.brief.set.project,
-                "cwd": c.brief.set.cwd, "policy": c.brief.policy ?? "full-only",
+                "machineName": c.machineName, "storeID": c.storeID,
+                "project": c.brief.set.project,
+                "cwd": c.brief.set.cwd, "created": c.brief.set.created,
+                "policy": c.brief.policy ?? "full-only",
                 "offline": c.offline,
                 "archived": c.brief.archived ?? false,
-                "keyActive": lab.activeKeyBySet[c.brief.set.id] != nil,
+                "keyActive": lab.activeKeyBySet[c.id] != nil,
                 "notes": notes(c.brief.notes),
-                "setNotes": notes(c.brief.setEvents?.filter { $0.kind == "note" || $0.kind == "hnote" }),
+                "setNotes": notes(c.brief.setEvents, scope: "set"),
             ]
+            if !c.mirroredAt.isEmpty { d["mirroredAt"] = c.mirroredAt }
             d["runs"] = (c.brief.runs ?? []).map { r -> [String: Any] in
                 var rd: [String: Any] = ["id": r.id, "status": r.status,
+                                         "exitCode": r.exitCode,
                                          "archived": r.archived ?? false]
                 if let v = r.tier { rd["tier"] = v }
                 if let v = r.group { rd["group"] = v }
@@ -106,16 +197,28 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         }
         let keys: [[String: Any]] = lab.pendingKeys.map { k in
             var d: [String: Any] = ["id": k.id, "machineID": k.machineID, "machineName": k.machineName,
-                                    "project": k.key.project, "cwd": k.key.cwd, "created": k.key.created]
+                                    "storeID": k.storeID, "project": k.key.project,
+                                    "cwd": k.key.cwd, "created": k.key.created]
             if let s = k.key.session, !s.isEmpty { d["session"] = s }
             return d
         }
         let pruns: [[String: Any]] = lab.pendingRuns.map { r in
-            ["id": r.id, "set": r.proposal.set, "machineID": r.machineID, "run": r.proposal.run,
-             "project": r.proposal.project, "intent": r.proposal.intent, "created": r.proposal.created]
+            var d: [String: Any] = [
+                "id": r.id, "set": r.proposal.set, "machineID": r.machineID,
+                "machineName": r.machineName, "storeID": r.storeID,
+                "run": r.proposal.run,
+                "project": r.proposal.project, "intent": r.proposal.intent,
+                "created": r.proposal.created,
+            ]
+            if let v = r.proposal.tier { d["tier"] = v }
+            if let v = r.proposal.group { d["group"] = v }
+            if let v = r.proposal.argv { d["argv"] = v }
+            if let v = r.proposal.cwd { d["cwd"] = v }
+            return d
         }
         let hub: [[String: Any]] = lab.hubNotes.map { g in
             ["machineID": g.machineID, "machineName": g.machineName,
+             "storeID": g.storeID,
              "notes": g.notes.map { n -> [String: Any] in
                  var d: [String: Any] = ["scope": n.scope, "id": n.id, "time": n.time,
                                          "author": n.author, "text": n.text, "hidden": n.hidden]
@@ -132,7 +235,9 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     private func sendRunDetail(cardID: String, run: String) {
         guard let lab, let card = lab.sets.first(where: { $0.id == cardID }) else { return }
         Task { @MainActor in
-            let events = await lab.runEvents(card, run: run)
+            async let eventRequest = lab.runEvents(card, run: run)
+            async let manifestRequest = lab.runFiles(card, run: run)
+            let (events, manifest) = await (eventRequest, manifestRequest)
             let env = events.first(where: { $0.kind == "run-start" })?.data
                 ?? events.first(where: { $0.kind == "proposal" })?.data
             var files: [String: Any] = [:]
@@ -162,7 +267,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                     evArr.append(o)
                 }
             }
-            let payload: [String: Any] = ["events": evArr, "files": files]
+            let manifestArr: [[String: Any]] = manifest.map { ["name": $0.name, "size": $0.size] }
+            let payload: [String: Any] = ["events": evArr, "files": files, "manifest": manifestArr]
             if let d = try? JSONSerialization.data(withJSONObject: payload), let s = String(data: d, encoding: .utf8) {
                 self.eval("window.UTLab.setRunDetail(\(self.jsString(cardID)), \(self.jsString(run)), \(s))")
             }
@@ -173,54 +279,144 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     nonisolated func userContentController(_ userContentController: WKUserContentController,
                                            didReceive message: WKScriptMessage) {
-        guard let dict = message.body as? [String: Any], let type = dict["type"] as? String else { return }
-        Task { @MainActor in self.handle(type, dict) }
+        Task { @MainActor [weak self] in
+            guard let self, let dict = message.body as? [String: Any],
+                  let type = dict["type"] as? String else { return }
+            self.handle(type, dict)
+        }
+    }
+
+    private func reportAction(_ id: String, ok: Bool, message: String) {
+        guard !id.isEmpty else { return }
+        eval("window.UTLab.actionResult(\(jsString(id)), \(ok ? "true" : "false"), \(jsString(message)))")
+    }
+
+    private func performAction(id: String, success: String,
+                               detail: (card: String, run: String)? = nil,
+                               _ operation: @escaping @MainActor () async -> Bool) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ok = await operation()
+            if let lab = self.lab, let state = self.state {
+                lab.refresh(state)
+                if ok, let detail, !detail.run.isEmpty {
+                    self.sendRunDetail(cardID: detail.card, run: detail.run)
+                }
+            }
+            self.reportAction(id, ok: ok,
+                              message: ok ? success : "The Lab broker did not accept this change.")
+        }
+    }
+
+    private func openWandb(_ reference: String, card: LabModel.SetCard, session: String) {
+        let rawURL = reference.hasPrefix("http://") || reference.hasPrefix("https://")
+            ? reference : "https://wandb.ai/" + reference
+        guard let url = URL(string: rawURL) else { return }
+        guard !session.isEmpty, let terminals, let wandb, let state else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let path = url.pathComponents
+        let runID: String
+        if let runs = path.firstIndex(of: "runs"), path.indices.contains(runs + 1) {
+            runID = path[runs + 1]
+        } else {
+            runID = path.last ?? reference
+        }
+        let ref = SessionRef(machineID: card.machineID, session: session)
+        let run = WandbRun(url: url, runId: runID, label: runID)
+        terminals.mergeWandb([run], for: ref)
+        terminals.showWandb(ref, run: run)
+        wandb.navigate(to: url)
+        state.selection = ref
+        state.showLab = false
     }
 
     private func handle(_ type: String, _ d: [String: Any]) {
         guard let lab, let state else { return }
         func str(_ k: String) -> String { d[k] as? String ?? "" }
         func card() -> LabModel.SetCard? { lab.sets.first(where: { $0.id == str("card") }) }
+        let actionID = str("actionID")
         switch type {
         case "refresh":
             lab.refresh(state)
         case "decideKey":
             if let k = lab.pendingKeys.first(where: { $0.id == str("id") }) {
-                lab.decideKey(k, approve: d["approve"] as? Bool ?? false, project: str("project"), state: state)
-            }
+                let approve = d["approve"] as? Bool ?? false
+                performAction(id: actionID, success: approve ? "Access approved" : "Access denied") {
+                    await lab.decideKeyNow(k, approve: approve, project: str("project"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That access request is no longer pending.") }
         case "decideRun":
             if let c = card() {
-                lab.decideRun(c, run: str("run"), approve: d["approve"] as? Bool ?? false, note: str("note"), state: state)
                 let run = str("run")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                    self?.sendRunDetail(cardID: c.id, run: run)
+                let approve = d["approve"] as? Bool ?? false
+                performAction(id: actionID, success: approve ? "Experiment approved" : "Experiment rejected",
+                              detail: (c.id, run)) {
+                    await lab.decideRunNow(c, run: run, approve: approve, note: str("note"))
                 }
-            }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "hide":
             if let c = card() {
                 let run = str("run"), target = str("target")
-                Task { @MainActor in
-                    _ = await lab.hide(c, target: target)
-                    lab.refresh(state)
-                    if !run.isEmpty { self.sendRunDetail(cardID: c.id, run: run) }
+                performAction(id: actionID, success: "Agent claim hidden from briefs",
+                              detail: (c.id, run)) {
+                    await lab.hide(c, target: target)
                 }
-            }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
+        case "hideSetGuidance":
+            if let c = card() {
+                performAction(id: actionID, success: "Guidance hidden from agent briefs") {
+                    await lab.hide(c, target: str("target"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "note":
-            if let c = card() { lab.postNote(c, scope: str("scope"), text: str("text"), state: state) }
+            if let c = card() {
+                let run = str("run")
+                performAction(id: actionID, success: "Human note added", detail: (c.id, run)) {
+                    await lab.postNoteNow(c, scope: str("scope"), run: run, text: str("text"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
+        case "setGuidance":
+            if let c = card() {
+                performAction(id: actionID, success: "Set guidance published") {
+                    await lab.postNoteNow(c, scope: "set", run: "", text: str("text"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "hubNote":
-            lab.postHubNote(machineID: str("machineID"), scope: str("scope"),
-                            project: str("project"), text: str("text"), state: state)
+            performAction(id: actionID, success: "Guidance published") {
+                await lab.postHubNoteNow(machineID: str("machineID"), scope: str("scope"),
+                                         project: str("project"), text: str("text"))
+            }
         case "hubNoteAll":
-            lab.postHubNoteAll(text: str("text"), state: state)
+            performAction(id: actionID, success: "Guidance published everywhere") {
+                await lab.postHubNoteAllNow(text: str("text"))
+            }
         case "hubHide":
-            lab.hideHubNote(machineID: str("machineID"), scope: str("scope"),
-                            project: str("project"), target: str("target"), state: state)
+            performAction(id: actionID, success: "Guidance hidden from agent briefs") {
+                await lab.hideHubNoteNow(machineID: str("machineID"), scope: str("scope"),
+                                         project: str("project"), target: str("target"))
+            }
         case "policy":
-            if let c = card() { lab.setPolicy(c, policy: str("policy"), state: state) }
+            if let c = card() {
+                performAction(id: actionID, success: "Approval policy updated") {
+                    await lab.setPolicyNow(c, policy: str("policy"))
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "archive":
-            if let c = card() { lab.setArchived(c, run: str("run"), on: d["on"] as? Bool ?? true, state: state) }
+            if let c = card() {
+                let run = str("run"), on = d["on"] as? Bool ?? true
+                performAction(id: actionID, success: on ? "Moved to archive" : "Restored from archive",
+                              detail: (c.id, run)) {
+                    await lab.setArchivedNow(c, run: run, on: on)
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "revoke":
-            if let c = card() { lab.revokeKey(c, state: state) }
+            if let c = card() {
+                performAction(id: actionID, success: "Agent access revoked") {
+                    await lab.revokeKeyNow(c)
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "openTerminal":
             state.selection = SessionRef(machineID: str("machineID"), session: str("session"))
             state.showLab = false
@@ -230,7 +426,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 state.openWindowRequest = "files"
             }
         case "openWandb":
-            if let u = URL(string: "https://wandb.ai/" + str("run")) { NSWorkspace.shared.open(u) }
+            if let c = card() { openWandb(str("run"), card: c, session: str("session")) }
         case "needRunDetail":
             sendRunDetail(cardID: str("card"), run: str("run"))
         default:
@@ -239,12 +435,27 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     }
 }
 
+/// One navigation path for every external Lab-attention surface. Keeping the
+/// pane flags and exact inbox selection together prevents a Command Center card
+/// or notification from opening whichever Lab page happened to be used last.
+@MainActor
+func openLabAttention(in state: AppState, kind: String, id: String) {
+    state.showLab = true
+    state.showOverview = false
+    state.showTodos = false
+    state.showNotes = false
+    state.showLedger = false
+    if !kind.isEmpty, !id.isEmpty { LabWebPanel.shared.openAttention(kind: kind, id: id) }
+}
+
 // MARK: - the SwiftUI face of the pane
 
 struct LabCenterView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var lab: LabModel
     @EnvironmentObject var files: FilesModel
+    @EnvironmentObject var terminals: TerminalController
+    @EnvironmentObject var wandb: WandbController
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
 
     var body: some View {
@@ -252,10 +463,14 @@ struct LabCenterView: View {
             .onAppear {
                 lab.bind(state)
                 lab.setPaneVisible(true)
-                LabWebPanel.shared.attach(lab: lab, state: state, files: files)
+                LabWebPanel.shared.attach(lab: lab, state: state, files: files,
+                                          terminals: terminals, wandb: wandb)
             }
             .onDisappear { lab.setPaneVisible(false) }
             .onChange(of: uiScale) { _ in LabWebPanel.shared.applyScale() }
+            .onReceive(NotificationCenter.default.publisher(for: .utThemeChanged)) { _ in
+                LabWebPanel.shared.applyTheme()
+            }
             // push AFTER the published values settle (onReceive fires on willSet)
             .onReceive(lab.$sets) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$pendingKeys) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
