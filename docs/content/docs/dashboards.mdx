@@ -10,11 +10,17 @@ host's web service over the same tailnet, plus first-class Jupyter notebooks tha
 
 ## Dashboards
 
-The **Dashboards** window is a small web browser with tabs — back / forward / reload and an address
-bar — pointed at services on your remote hosts. Open a tab against a host and Argus sets up the
-[port-forward](/docs/ports) for you, so a server bound to `localhost:6006` on a cluster node is just
-*there*, no manual tunnel. It is the natural home for anything web: a run dashboard, a TensorBoard, an
-internal tool, or a host's JupyterLab.
+The **Dashboards** window is a small web browser with durable tabs, back/forward/reload, an address
+bar, `⌘F` find-in-page, and independent `⌘+` / `⌘−` / `⌘0` zoom. Open a tab against a host
+and Argus sets up the [port-forward](/docs/ports) for you, so a server bound to
+`localhost:6006` on a cluster node is just *there*, no manual tunnel.
+
+The empty window is a **service catalog** across your machines. Argus inspects listening ports and
+performs an actual HTTP probe before showing a service card; it does not guess from a process or
+port name. Desktop-app noise is hidden by default and available behind **Show all**.
+
+For dashboards that should stay current without interaction, each tab can auto-refresh every 5,
+15, 30, or 60 seconds. Open tabs and their host/port identity persist across app launches.
 
 ## JupyterLab
 

@@ -69,6 +69,17 @@ scheduler's cgroup tears down every process — broker and tmux server alike —
 so recovery is `--requeue`-style auto-rerun plus a **stable socket name** the client transparently
 reattaches to when the job comes back.
 
+## Durable research records
+
+[Argus Lab](/docs/lab) is a separate append-only data plane riding the same broker. Runs are stored
+as one event file per ULID plus immutable captured files rather than one shared append log; this is
+safe when many cluster nodes write through an NFS-mounted home. Each broker reports a stable store
+identity, letting clients collapse several nodes that expose the same physical record.
+
+The Mac broker mirrors remote sets and events idempotently by event ID. That mirror is why completed
+research remains readable when its source node disappears. Lab approval and curation actions still
+route to an online owner; mirrored records are read-only.
+
 ## User-data sync: your Mac is the sync host
 
 [Workflows](/docs/workflows), [Todo Maps](/docs/todo-maps), and the [Notes Hub](/docs/notes) are

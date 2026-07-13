@@ -9,7 +9,9 @@ Windows boxes, your phone — over [Tailscale](https://tailscale.com), peer-to-p
 **no central server**.
 
 Beyond terminals it's a cross-host **file explorer + editor** and a **port-forward hub**:
-one calm pane of glass over a sprawl of agents and compute.
+one calm pane of glass over a sprawl of agents and compute. Argus Lab adds a recorded,
+human-approved protocol for agent-run research, and the Activity Journal turns your own work
+across the fleet into a durable ledger and Wrapped recap.
 
 <Callout title="Formerly universal_tmux">
 Argus is named for **Argus Panoptes**, the hundred-eyed giant of Greek myth who watched over
@@ -32,15 +34,17 @@ each host runs a small broker, and the app dials those brokers directly over you
 
 <Cards>
   <Card title="Command Center" href="/docs/command-center" description="One card per agent, across every machine, telling you what each is doing and which ones need you." />
+  <Card title="Argus Lab" href="/docs/lab" description="Recorded, human-approved experiments: exact provenance, approval gates, comparison, scoped guidance, artifacts, and offline mirrors on macOS and Android." />
   <Card title="Workflows" href="/docs/workflows" description="Saved recipes — machine, folder, command — that spin up an agent in the right place in one click." />
   <Card title="Todo Maps" href="/docs/todo-maps" description="Per-session checklists that outlive the session, plus a Misc board — your plans for an agent, kept with it." />
   <Card title="Notes Hub" href="/docs/notes" description="A running scratchpad of free-form, time-grouped notes, separate from your todos." />
   <Card title="Terminals" href="/docs/terminals" description="Stream any session live — tmux control-mode on Unix, ConPTY on Windows — with reflow, 100k scrollback, hidden panels, and offline Markdown/LaTeX rendering." />
-  <Card title="Files" href="/docs/files" description="Browse any host's filesystem and edit in Monaco, VS Code's editor — per-file tabs, ⌘P quick-open, markdown preview." />
-  <Card title="Git panel" href="/docs/git" description="A GitKraken-style read-only git viewer for any session's repo — diffs, commit graph, blame, on-demand agent insights over any commit range — plus lazygit for write ops." />
-  <Card title="Activity Journal" href="/docs/journal" description="A local, append-only record of every moment you engage with your fleet — what you saw, what you said, what came of it — with a standalone ledger to read it." />
+  <Card title="Files" href="/docs/files" description="Browse and edit any host in Monaco, jump to paths, search file contents, see Git status in the tree, and preview documents or media." />
+  <Card title="Git & PR review" href="/docs/git" description="Working trees, commit graphs, blame, pull-request review and actions, plus on-demand agent insights and free-form questions over commits, branches, ranges, or PRs." />
+  <Card title="Activity Journal" href="/docs/journal" description="A local, append-only record of what you saw, said, and did across Mac and phone, with a first-class in-app ledger." />
+  <Card title="Argus Wrapped" href="/docs/wrapped" description="A visual story and dashboard of your agent fleet, delegation, rhythm, interventions, and shipped work, computed from the local journal." />
   <Card title="Ports" href="/docs/ports" description="Bind a local port and tunnel it over the tailnet to any remote broker — no ssh -L juggling." />
-  <Card title="Dashboards & notebooks" href="/docs/dashboards" description="An in-app browser for remote web UIs, and full JupyterLab rooted at any folder — the kernel runs on the host." />
+  <Card title="Dashboards & notebooks" href="/docs/dashboards" description="Discover remote web services, keep tabbed dashboards refreshed, and run full JupyterLab on the host's environment and GPU." />
   <Card title="Weights & Biases" href="/docs/wandb" description="Open the W&B run an agent just launched, in place, already logged in." />
   <Card title="Session history" href="/docs/history" description="A durable record of every session that has run — survives machine downtime, and a click opens or re-creates it." />
   <Card title="Themes" href="/docs/themes" description="Recolor the whole app — chrome, terminals, and editor — to match how you work." />

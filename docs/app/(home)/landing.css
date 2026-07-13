@@ -206,6 +206,9 @@
 .pill-working { background: rgba(79,155,255,.16); color: var(--blue); }
 .s-milestone .al-card-dot, .pill-mile { background: var(--green); }
 .pill-mile { background: rgba(95,208,122,.14); color: var(--green); }
+.s-lab .al-card-dot { background: var(--violet); box-shadow: 0 0 14px rgba(187,154,247,.45); }
+.pill-lab { background: rgba(187,154,247,.15); color: #d6c2ff; }
+.al-card.s-lab { border-color: rgba(187,154,247,.3); }
 .s-idle .al-card-dot { background: var(--ink-3); }
 .pill-idle { background: rgba(168,170,178,.12); color: var(--ink-2); }
 .al-card.s-needs { border-color: rgba(255,159,64,.35); box-shadow: 0 0 30px -10px rgba(255,159,64,.25); }
@@ -278,6 +281,34 @@
 .al-nb-cell { display: flex; gap: 11px; align-items: flex-start; }
 .al-nb-prompt { color: var(--blue); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; padding-top: 1px; }
 .al-nb-out { margin-top: 13px; padding: 11px 13px; border-radius: 9px; background: var(--bg-2); border: 1px solid var(--line); font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); }
+
+/* Lab approval dossier */
+.al-lab-art { min-height: 250px; display: flex; flex-direction: column; }
+.al-lab-kicker, .al-wrapped-kicker { font-family: var(--font-mono); color: var(--violet); font-size: 10px; letter-spacing: .13em; text-transform: uppercase; }
+.al-lab-title { margin-top: 10px; color: var(--ink); font-family: var(--font-display); font-weight: 600; font-size: clamp(18px, 2vw, 23px); line-height: 1.15; max-width: 20ch; }
+.al-lab-facts { margin-top: 17px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.al-lab-facts span { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); display: grid; gap: 3px; }
+.al-lab-facts small { color: var(--ink-3); font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.al-lab-facts b { color: var(--ink-2); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-lab-bind { margin-top: 11px; padding: 9px 10px; border-radius: 9px; background: rgba(95,208,122,.07); border: 1px solid rgba(95,208,122,.18); color: var(--ink-2); font-size: 11px; display: flex; align-items: center; gap: 8px; }
+.al-lab-bind svg { color: var(--green); flex: none; }
+.al-lab-actions { margin-top: 12px; display: flex; justify-content: flex-end; align-items: center; gap: 9px; font-size: 10.5px; font-family: var(--font-mono); }
+.al-lab-actions span, .al-lab-actions b { padding: 7px 10px; border-radius: 8px; }
+.al-lab-actions span { color: var(--ink-2); border: 1px solid var(--line-2); }
+.al-lab-actions b { color: #06222b; background: var(--accent); font-weight: 600; }
+
+/* Wrapped — a warmer, story-like counterpoint to the operational panels */
+.al-wrapped-art { background: radial-gradient(500px 280px at 85% 15%, rgba(255,159,64,.17), transparent 62%), linear-gradient(145deg, #1d1730, #101c28 65%, #10231f); }
+.al-wrapped-art .al-art-body { min-height: 250px; display: flex; flex-direction: column; justify-content: center; }
+.al-wrapped-kicker { color: var(--orange); }
+.al-wrapped-title { margin-top: 10px; max-width: 18ch; color: var(--ink); font-family: var(--font-display); font-size: clamp(23px, 3vw, 34px); font-weight: 700; line-height: 1.02; letter-spacing: -.025em; }
+.al-wrapped-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 22px; }
+.al-wrapped-stats span { display: grid; gap: 2px; padding: 10px; border-radius: 10px; background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.08); }
+.al-wrapped-stats b { color: var(--ink); font-family: var(--font-display); font-size: 20px; }
+.al-wrapped-stats small { color: var(--ink-3); font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.al-wrapped-meter { position: relative; margin-top: 14px; height: 25px; border-radius: 8px; overflow: hidden; background: rgba(255,255,255,.055); }
+.al-wrapped-meter i { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, rgba(86,182,206,.48), rgba(95,208,122,.5)); }
+.al-wrapped-meter span { position: relative; z-index: 1; display: block; padding: 6px 9px; color: var(--ink); font-family: var(--font-mono); font-size: 9.5px; }
 
 /* ut CLI block in the mesh section */
 .al-cli { margin-top: 20px; padding: 13px 15px; border-radius: 11px; background: var(--panel); border: 1px solid var(--line); line-height: 1.7; white-space: pre; overflow-x: auto; }
@@ -352,6 +383,11 @@
   .al-feat, .al-mesh-wrap { grid-template-columns: 1fr; gap: 32px; }
   .al-feat.rev .al-feat-copy { order: 0; }
   .al-nav-links a:not(.al-nav-cta) { display: none; }
+}
+@media (max-width: 460px) {
+  .al-lab-facts { grid-template-columns: 1fr; }
+  .al-wrapped-stats { grid-template-columns: 1fr 1fr 1fr; }
+  .al-wrapped-stats span { padding: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .argus-landing * { animation: none !important; }

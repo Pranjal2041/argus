@@ -26,6 +26,12 @@ version of this, see the [Command Center](/docs/command-center).
 - **Click to open** — a file path or URL in the output opens on the right host: a file in
   [Files](/docs/files), a local web address in [Dashboards](/docs/dashboards).
 
+Reconnects are visibility-aware. The pane you are reading uses an eager first-frame watchdog and
+retry schedule; background panes back off more calmly so one unhealthy host cannot churn the whole
+sidebar. Revealing a pane nudges it immediately. On Windows, ConPTY snapshots preserve DEC private
+modes such as bracketed paste, so reconnecting after older output leaves the ring does not silently
+change terminal input behavior.
+
 ## Hidden panels
 
 Some sessions are noise — a finished job, a scratch shell. **Hide** one (`⇧⌘B` opens the restore
@@ -58,3 +64,16 @@ lid open, or use an external display on power.
 Everything here works whether or not anything is attached to the session — the broker reads and
 streams from the tmux server (or ConPTY on Windows) directly.
 </Callout>
+
+## Connection and UI diagnostics
+
+The repository includes two opt-in flight recorders for problems that are otherwise hard to catch:
+
+- `tools/reconnectwatch.sh` is the repository's cluster diagnostic: it discovers the current
+  `ut-babel` / `ut-orchard` peers and probes them with the companion `wsprobe`, requiring real
+  frames to arrive. Adapt its discovery filter and tailnet suffix before using it elsewhere.
+- `tools/install-hangwatch.sh` installs the macOS `hangwatch.sh` sampler. It records UI latency,
+  memory and swap, WindowServer and Argus resource use, and captures heavier process evidence when
+  the desktop stalls.
+
+Both write rolling local diagnostics. They are troubleshooting tools, not required services.

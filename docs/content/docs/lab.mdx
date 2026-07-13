@@ -1,0 +1,159 @@
+---
+title: Argus Lab
+description: A recorded, human-approved experiment protocol for agent-run research, with evidence that survives the agent.
+---
+
+Argus Lab is the research layer of Argus. Agents run experiments through the `ut lab` CLI; you
+approve, inspect, compare, guide, and curate them from the Lab hub on macOS or Android.
+
+The premise is deliberately strict: an agent's memory is not a lab notebook. Code state, parameters,
+data fingerprints, environment, logs, and exit status are captured by the tool at execution time.
+Results remain attributable to whoever reported them, while guidance that agents should treat as
+ground truth remains human-authored.
+
+## The protocol
+
+<Cards>
+  <Card title="Mechanical provenance" description="The wrapper records the exact commit, uncommitted tracked diff, untracked snapshot, parameter files, environment, declared data hashes, complete capped log, and exit status." />
+  <Card title="Human gates" description="A set policy decides which experiments require approval. Approved code and parameter hashes are bound to the proposal, so changed inputs require a fresh decision." />
+  <Card title="Append-only record" description="Agents can add results and notes but cannot edit history. Human curation hides or archives; it never deletes." />
+  <Card title="Isolated experiment sets" description="One approved key grants one agent access to one set. A project can have several independent sets without their agents sharing claims." />
+</Cards>
+
+The hierarchy is **project → experiment set → run**. A run may also carry a group label for a sweep
+or ablation. The set is the isolation and access boundary; the group is an organizational label.
+
+## Agent workflow
+
+An agent requests a key once for the experiment set:
+
+```sh
+ut lab login
+export UT_LAB_KEY=<printed-key>
+ut lab brief
+```
+
+The request appears in Lab and in Command Center. Until you approve it, every protected Lab command
+fails. Once approved, `ut lab brief` becomes the agent's durable briefing: applicable human
+guidance, set policy, runs and their latest reported results, and pending or rejected proposals.
+
+Plant the protocol reminder in a project's `CLAUDE.md` or `AGENTS.md` with:
+
+```sh
+ut lab init
+```
+
+Every experiment then goes through the wrapper:
+
+```sh
+ut lab run \
+  --tier full \
+  --group router-ablation \
+  --intent "measure whether the frozen teacher improves routed accuracy" \
+  --params conf/train.yaml \
+  --data-files /shared/eval.jsonl \
+  -- python train.py --config conf/train.yaml
+```
+
+The `--` separator is intentional: Lab flags come before it, and the exact experiment command
+comes after it. Declared data paths must be absolute so Lab can fingerprint them at start and end.
+
+Afterward, the agent appends conclusions to the run rather than leaving the only result buried in a
+terminal log:
+
+```sh
+ut lab note --run R12 "Routed acc@100 improved 11.6pp; dense improved 7.2pp."
+ut lab show R12
+ut lab diff R12
+```
+
+`show` reads the recorded run. `diff` compares the recorded base commit, parameter files, and
+declared data hashes with their current state, and calls out when the run carried an uncommitted
+snapshot—the useful first question when an old result no longer makes sense. The full recorded
+environment remains visible in `show` and the hub.
+
+## Approval policies
+
+Each set has one policy:
+
+| policy | behavior |
+|---|---|
+| `full-only` | Quick probes start immediately; full experiments need approval. This is the default. |
+| `all` | Every wrapped run needs approval. |
+| `none` | Runs start immediately, but are still fully recorded. |
+
+A gated command files a proposal containing its intent and captured inputs, then waits for a
+decision. Approval launches it automatically while the command is waiting. If the wait expires, the
+proposal stays pending and can be launched later:
+
+```sh
+ut lab run --proposal R12
+```
+
+Launch recomputes the code and parameter hashes. If they differ from the approved proposal, Lab
+refuses to run it and asks for a new proposal. A rejection can carry a human explanation which the
+agent receives in its brief.
+
+## The Lab hub
+
+Open Lab with `⇧⌘L` on macOS or the Lab destination on Android.
+
+- **Inbox** contains pending access requests and run proposals, newest first. Each proposal opens an
+  evidence dossier before the approve/reject controls.
+- **Research** groups experiment sets by project and opens every run's reported results, parameters,
+  exact code snapshot and diff, declared-data integrity, environment, log, artifacts, and event
+  record. Agent-authored Markdown, tables, and code blocks render as rich, safe content.
+- **Compare** selects two runs from a set and shows their recorded envelopes and parameter delta.
+- **Guidance** publishes durable human instructions everywhere, to one machine, to one project, or
+  to one experiment set. A set ledger shows both its direct instruction and inherited guidance.
+- **Curation** hides individual claims, archives and restores runs or sets, changes approval policy,
+  and revokes keys without deleting the underlying record.
+
+Lab attention is not confined to the hub. Pending access and experiment decisions appear in
+**Command Center** beside agent sessions, and system notifications deep-link to the exact dossier.
+This works on macOS and Android.
+
+## Shared clusters and offline records
+
+On an NFS-backed cluster such as a fleet of `babel-*` nodes, every node can see the same Lab store.
+Argus uses the broker-reported store identity—and a cluster-prefix fallback—to show one experiment,
+key, proposal, or instruction rather than one replica per node. Actions still route to an online
+owner.
+
+The Mac broker also mirrors remote Lab records. When a source machine goes offline, its mirrored
+sets remain readable and are marked as offline; actions that require the source are disabled. The
+record is append-only and the mirror never silently shrinks.
+
+## What the record can and cannot promise
+
+Lab promises a complete record of work that passed through `ut lab run`. It cannot stop an agent
+from bypassing the wrapper, and data provenance covers only files declared with `--data-files`.
+The store is owned by the same operating-system user as the agent, so append-only is a protocol
+guarantee at the CLI and UI surfaces rather than a hostile-process security boundary.
+
+The practical contract is simple: a research result only counts when it has a Lab run ID.
+
+## Human-side CLI
+
+Most human work is easier in the hub, but the CLI has equivalents:
+
+```sh
+ut lab keys
+ut lab approve <key-prefix> --project my-project --policy full-only
+ut lab deny <key-prefix> --note "use the shared eval split"
+ut lab proposals
+ut lab grant <set> <run>
+ut lab reject <set> <run> --note "increase the sample size first"
+ut lab policy <set> all
+ut lab archive <set> [run]
+```
+
+Run `ut lab help` for the complete agent and human command reference.
+
+## Read next
+
+<Cards>
+  <Card title="Command Center" href="/docs/command-center" description="How Lab decisions join the one queue for everything that needs your attention." />
+  <Card title="Git panel" href="/docs/git" description="Review working trees, commits, branches, and pull requests across remote hosts." />
+  <Card title="Activity Journal" href="/docs/journal" description="The separate local record of your own attention and actions across the fleet." />
+</Cards>

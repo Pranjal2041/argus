@@ -8,7 +8,8 @@ your own machines and is reachable only over your private tailnet.
 
 ## Tailnet-only reach
 
-All traffic — terminals, files, ports — rides your **Tailscale tailnet** (WireGuard). Brokers
+All traffic—terminals, files, ports, Lab records, and cross-device journal delivery—rides your
+**Tailscale tailnet** (WireGuard). Brokers
 listen on the tailnet (or loopback) and are reachable only by devices that belong to your
 tailnet. Nothing is exposed to the public internet.
 
@@ -39,8 +40,14 @@ started on.
 - The full git history has been scanned to confirm no real keys, tokens, or passwords were ever
   committed.
 
+The [Activity Journal](/docs/journal) is local but intentionally records terminal messages as typed.
+It does not attempt unreliable password detection. Turn journal capture off before entering secrets
+into a recorded terminal. [Argus Lab](/docs/lab) also captures experiment commands, environment
+metadata, parameter files, diffs, logs, and declared file hashes; use it only for material you are
+comfortable storing on that host and in the Mac's offline mirror.
+
 <Callout type="warn">
-Mutating broker actions (rename / kill / write / delete) are reachable by anything on your
+Mutating broker actions (rename / kill / write / delete / Lab decisions) are reachable by anything on your
 tailnet. Keep your tailnet ACLs tight; an optional `tag:utmux-broker` ACL can gate exactly which
 devices may reach brokers.
 </Callout>

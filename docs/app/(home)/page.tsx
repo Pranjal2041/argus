@@ -6,7 +6,7 @@ import {
   Workflow, Terminal, FileCode2, ListTodo, Cable, History, Palette,
   Check, ArrowRight, Cpu, Laptop, Smartphone, Monitor,
   Radar, LineChart, Notebook, StickyNote, RefreshCw, Coffee,
-  ShieldCheck, Sparkles, TerminalSquare, GitBranch, BookOpen,
+  ShieldCheck, Sparkles, TerminalSquare, GitBranch, BookOpen, FlaskConical,
 } from 'lucide-react';
 
 function Github({ size = 17 }: { size?: number }) {
@@ -31,6 +31,7 @@ function EyeMark() {
 
 const ccCards = [
   { name: 'caption-model', host: 'gpu-node-07', cls: 's-needs', pill: 'pill-needs', label: 'Needs you', line: <>Run failed — <b>CUDA OOM</b> at step 4,210. Waiting on a smaller batch.</> },
+  { name: 'Lab / R12', host: 'vlm-gating · gpu-node-12', cls: 's-lab', pill: 'pill-lab', label: 'Approval', line: <>Full experiment is gated — inspect the exact code, params, and intent.</> },
   { name: 'rl-finetune', host: 'gpu-node-12', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Generating rollouts <b>6/8</b> · 9.7 tok/s, GPUs healthy.</> },
   { name: 'recsys-train', host: 'gpu-node-12', cls: 's-milestone', pill: 'pill-mile', label: 'Milestone', line: <>Eval harness + model server <b>up</b>.</> },
   { name: 'web-agent', host: 'this mac', cls: 's-working', pill: 'pill-working', label: 'Working', line: <>Probe executing — 2/7 trials, no action needed.</> },
@@ -55,7 +56,8 @@ const tiles = [
   { icon: Palette, t: 'Themes', d: 'Recolor the whole app — chrome, terminals, and editor — with editor-grade schemes.' },
   { icon: RefreshCw, t: 'Cross-device sync', d: 'Workflows, todos, and notes follow you from Mac to phone, with your Mac as the sync host.' },
   { icon: Coffee, t: 'Awake while locked', d: 'Keep the Mac reachable behind a lock screen, so tmux, the broker, and your jobs keep running.' },
-  { icon: BookOpen, t: 'Activity journal', d: 'A local, append-only record of every moment you engaged — what you saw, what you said, what came of it. Yours alone, on your disk.' },
+  { icon: BookOpen, t: 'Activity journal', d: 'A local, append-only record of what you saw, said, and did across Mac and phone, with a first-class in-app ledger.' },
+  { icon: Sparkles, t: 'Argus Wrapped', d: 'A living story and dashboard of your fleet, rhythm, delegation, interventions, experiments, and shipped work — derived from the journal.' },
 ];
 
 export default function HomePage() {
@@ -93,7 +95,7 @@ export default function HomePage() {
         <p className="al-hero-sub">
           Reach every <code>claude</code> and <code>codex</code> session across your Mac, clusters,
           Windows boxes, and phone — and know which ones <b style={{ color: 'var(--ink)' }}>need you</b>.
-          One native app, no central server.
+          Gate research, review changes, and keep the record. One native app, no central server.
         </p>
         <div className="al-hero-cta">
           <Link href="/docs" className="al-btn al-btn-primary">Read the docs <ArrowRight size={17} /></Link>
@@ -110,7 +112,7 @@ export default function HomePage() {
           <div className="al-cc-bar">
             <span className="al-traffic"><i style={{ background: '#e0655c' }} /><i style={{ background: '#e0a36b' }} /><i style={{ background: '#5fd07a' }} /></span>
             <span className="al-cc-title">Command Center</span>
-            <span className="al-cc-glance"><b>1</b> needs you · 6 quiet</span>
+            <span className="al-cc-glance"><b>2</b> need you · 5 quiet</span>
           </div>
           <div className="al-cc-body">
             <div className="al-cc-sec">Across every machine</div>
@@ -142,7 +144,8 @@ export default function HomePage() {
             A few on your laptop, a dozen on a cluster behind SLURM, one on a Windows box, maybe one
             on your phone. Argus collapses the whole sprawl into a single pane of glass — and reads
             each agent&apos;s screen passively to tell you, in plain English, which ones are
-            <em> working</em>, <em>stuck</em>, or <em>waiting on you</em>.
+            <em> working</em>, <em>stuck</em>, or <em>waiting on you</em> — while Lab brings the
+            experiment decisions that require your judgment into the same attention surface.
           </p>
         </div>
       </section>
@@ -184,8 +187,38 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 2. Terminals + agent state + renders */}
+        {/* 2. Lab — the research protocol */}
         <div className="al-feat rev al-reveal">
+          <div className="al-feat-copy">
+            <span className="al-eyebrow">Argus Lab</span>
+            <h3>Experiments with a record you can trust.</h3>
+            <p>Agents wrap research in <span className="al-mono">ut lab run</span>. Argus captures the exact code, parameters, data fingerprints, environment, log, artifacts, and exit status — then gates expensive work on your approval.</p>
+            <ul>
+              <li><Check size={16} /> Approve the captured proposal, not an agent&apos;s recollection of it.</li>
+              <li><Check size={16} /> Compare runs and inspect the recorded code, parameters, data integrity, environment, artifacts, and rich results.</li>
+              <li><Check size={16} /> Publish human guidance by network, machine, project, or isolated experiment set.</li>
+              <li><Check size={16} /> The full approval and research hub is native on macOS and Android.</li>
+            </ul>
+          </div>
+          <div className="al-feat-art">
+            <div className="al-art-bar"><FlaskConical size={13} /> Lab · approval dossier · R12</div>
+            <div className="al-art-body al-lab-art">
+              <div className="al-lab-kicker">Full experiment · waiting for you</div>
+              <div className="al-lab-title">Does the frozen teacher improve routed accuracy?</div>
+              <div className="al-lab-facts">
+                <span><small>Code</small><b>bc34f7b + 18 KB diff</b></span>
+                <span><small>Parameters</small><b>conf/train.yaml</b></span>
+                <span><small>Data</small><b>eval.jsonl · fingerprinted</b></span>
+                <span><small>Machine</small><b>gpu-node-12</b></span>
+              </div>
+              <div className="al-lab-bind"><ShieldCheck size={15} /> Approval binds this exact code and parameter state.</div>
+              <div className="al-lab-actions"><span>Reject with note</span><b>Approve experiment</b></div>
+            </div>
+          </div>
+        </div>
+
+        {/* 3. Terminals + agent state + renders */}
+        <div className="al-feat al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Live terminals</span>
             <h3>Every session live — and it tells you when it&apos;s working.</h3>
@@ -209,8 +242,8 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 3. Weights & Biases */}
-        <div className="al-feat al-reveal">
+        {/* 4. Weights & Biases */}
+        <div className="al-feat rev al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Weights &amp; Biases</span>
             <h3>Your runs, in the same window.</h3>
@@ -245,14 +278,15 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 4. Dashboards & notebooks */}
-        <div className="al-feat rev al-reveal">
+        {/* 5. Dashboards & notebooks */}
+        <div className="al-feat al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Dashboards &amp; JupyterLab</span>
             <h3>Remote web apps and notebooks, in app.</h3>
-            <p>An in-app browser for any web UI on a host — TensorBoard, a dev server, a dashboard — forwarded over the tailnet. Plus Jupyter notebooks whose kernel runs on the remote machine, so the work happens on the host&apos;s GPU.</p>
+            <p>An in-app browser that probes each host and catalogs the ports that really answer HTTP — TensorBoard, dev servers, internal tools — plus Jupyter notebooks whose kernel runs on the remote machine.</p>
             <ul>
-              <li><Check size={16} /> View a remote port without leaving Argus or wiring up a tunnel.</li>
+              <li><Check size={16} /> Discover a remote web service without guessing its port or wiring a tunnel.</li>
+              <li><Check size={16} /> Persistent tabs, find, zoom, and 5–60 second auto-refresh for live dashboards.</li>
               <li><Check size={16} /> Run notebook cells against a kernel on the host, not your laptop.</li>
             </ul>
           </div>
@@ -271,15 +305,16 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 5. Files / Monaco */}
-        <div className="al-feat al-reveal">
+        {/* 6. Files / Monaco */}
+        <div className="al-feat rev al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Files</span>
             <h3>Edit any host&apos;s files in VS Code&apos;s editor.</h3>
-            <p>A cross-host file explorer with Monaco built in — per-file tabs, <span className="al-mono">⌘P</span> quick-open, live Markdown preview, and image / PDF / media preview, themed to match the app.</p>
+            <p>A cross-host file explorer with Monaco built in — per-file tabs, quick-open, live Markdown, and image / PDF / media preview, themed to match the app.</p>
             <ul>
-              <li><Check size={16} /> Syntax highlighting and editor themes that match the window.</li>
-              <li><Check size={16} /> Upload, download, and reveal a session&apos;s working directory.</li>
+              <li><Check size={16} /> <span className="al-mono">⇧⌘G</span> jumps to absolute, relative, <span className="al-mono">~</span>, or <span className="al-mono">$VAR</span> paths with live completion.</li>
+              <li><Check size={16} /> Search file contents with regex and open the exact matching line.</li>
+              <li><Check size={16} /> Git status colors the tree before you even open the review pane.</li>
             </ul>
           </div>
           <div className="al-feat-art">
@@ -294,16 +329,16 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 5b. Git panel */}
-        <div className="al-feat rev al-reveal">
+        {/* 7. Git panel */}
+        <div className="al-feat al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Git panel</span>
             <h3>See what your agents actually changed.</h3>
-            <p>One keystroke turns any session into a GitKraken-style git viewer for <i>that repo, on that machine</i> — working-tree diffs, a commit graph with your uncommitted work riding the top, and per-line blame. Read-only by design; lazygit is one click away for write ops.</p>
+            <p>One keystroke opens the working tree, commit graph, blame, branches, and pull requests for <i>that repo, on that machine</i>. Local review stays read-only; explicit PR actions and lazygit are there when you choose to mutate.</p>
             <ul>
               <li><Check size={16} /> GitHub-grade side-by-side diffs, straight from the broker — nothing installed per host.</li>
-              <li><Check size={16} /> Hover a commit to trace its lineage; <span className="al-mono">⌘</span>-click two to compare.</li>
-              <li><Check size={16} /> <b style={{ color: 'var(--ink)' }}>Agent insights</b>: shift-click a commit range and a model writes what was done and what deserves your eye — on demand, cached forever.</li>
+              <li><Check size={16} /> Review checks, conversations, and diffs; approve, comment, request changes, merge, or open on GitHub.</li>
+              <li><Check size={16} /> <b style={{ color: 'var(--ink)' }}>Agent insights</b> and free-form questions work on a commit, range, branch, or PR — on demand, cached forever.</li>
             </ul>
           </div>
           <div className="al-feat-art">
@@ -320,15 +355,44 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 6. Work from your phone */}
+        {/* 8. Journal → Wrapped */}
+        <div className="al-feat rev al-reveal">
+          <div className="al-feat-copy">
+            <span className="al-eyebrow">Activity Journal → Argus Wrapped</span>
+            <h3>Your fleet leaves a memory, not just scrollback.</h3>
+            <p>The local Activity Journal records the moments your attention touched the fleet across Mac and phone. Wrapped turns that raw evidence into a living story and dashboard — without inventing the missing parts.</p>
+            <ul>
+              <li><Check size={16} /> An in-app ledger for what you saw, said, reviewed, changed, and launched.</li>
+              <li><Check size={16} /> Rhythm, fleet state, delegation, interventions, experiments, projects, and shipped work.</li>
+              <li><Check size={16} /> Statistics stay local; the optional persona sees only a compact numeric digest.</li>
+            </ul>
+          </div>
+          <div className="al-feat-art al-wrapped-art">
+            <div className="al-art-bar"><Sparkles size={13} /> Argus Wrapped · all recorded time</div>
+            <div className="al-art-body">
+              <div className="al-wrapped-kicker">The view from the bridge</div>
+              <div className="al-wrapped-title">You supervised a fleet,<br />not a tab bar.</div>
+              <div className="al-wrapped-stats">
+                <span><b>18</b><small>agents</small></span>
+                <span><b>6.4×</b><small>delegation</small></span>
+                <span><b>27</b><small>milestones</small></span>
+              </div>
+              <div className="al-wrapped-meter"><i style={{ width: '74%' }} /><span>74% of fleet time was heads-down work</span></div>
+            </div>
+          </div>
+        </div>
+
+        {/* 9. Work from your phone */}
         <div className="al-feat al-reveal">
           <div className="al-feat-copy">
             <span className="al-eyebrow">Android</span>
             <h3>Run it all from your pocket.</h3>
-            <p>The whole command center, live terminals, and files — on your phone, over the same tailnet. Jump into a stuck run from anywhere, with a key bar for esc, tab, <span className="al-mono">^C</span>, and <span className="al-mono">^L</span>.</p>
+            <p>The Command Center, live terminals, Files, ports, and full Lab hub — on your phone, over the same tailnet. Jump into a stuck session or decide a gated experiment from anywhere.</p>
             <ul>
               <li><Check size={16} /> The same peer-to-peer reach — no servers, just your tailnet.</li>
-              <li><Check size={16} /> Workflows, todos, and notes synced from your Mac.</li>
+              <li><Check size={16} /> Lab approvals, evidence, comparison, guidance, curation, and deep-linked notifications.</li>
+              <li><Check size={16} /> Workflows, todos, notes, and sent journal messages synced with your Mac.</li>
+              <li><Check size={16} /> Dead cluster nodes age out automatically instead of filling the machine list.</li>
               <li><Check size={16} /> Foreground forwarding keeps tunnels alive in your pocket.</li>
             </ul>
           </div>
@@ -338,8 +402,8 @@ export default function HomePage() {
                 <div className="al-phone-hd"><EyeMark /> <b>Argus</b> <span className="al-phone-badge"><i />1 needs you</span></div>
                 <div className="al-phone-body">
                   <div className="al-pcard s-needs">
-                    <div className="al-pcard-top"><span className="al-card-dot" /><b>caption-model</b><span className="pill pill-needs">Needs you</span></div>
-                    <div className="al-pcard-line">CUDA OOM — waiting on a smaller batch.</div>
+                    <div className="al-pcard-top"><span className="al-card-dot" /><b>Lab · R12</b><span className="pill pill-needs">Approval</span></div>
+                    <div className="al-pcard-line">Full experiment gated · open exact evidence.</div>
                   </div>
                   <div className="al-pcard">
                     <div className="al-pcard-top"><span className="al-card-dot" style={{ background: 'var(--blue)' }} /><b>rl-finetune</b><span className="pill pill-working">Working</span></div>

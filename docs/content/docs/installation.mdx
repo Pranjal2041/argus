@@ -65,8 +65,13 @@ bash dev-install.sh   # builds the debug APK and installs to the connected devic
 ```
 
 The phone joins the tailnet itself via an embedded `tsnet` core — paste a Tailscale auth key in
-the app; no system Tailscale client or manual hostnames required. The Android client includes
-the file explorer, port forwarding, and a built-in PDF viewer.
+the app; no system Tailscale client or manual hostnames required. The Android client includes the
+Command Center, live terminals, Files with a built-in PDF viewer, port forwarding, and full
+[Argus Lab](/docs/lab): approvals, research records, artifacts, comparison, guidance, archive and
+policy controls, and deep-linked notifications.
+
+Discovery is self-cleaning. A broker seen during an earlier scan is pruned after it stays absent,
+so terminated cluster nodes do not accumulate forever in the phone's machine list.
 
 </Tab>
 
