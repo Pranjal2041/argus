@@ -49,10 +49,11 @@
   --radius: 7px;
   --mast-height: 58px;
   --context-width: clamp(270px, 24vw, 330px);
-  --sans: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  --display: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
-  --condensed: "SF Compact Text", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
-  --mono: "MesloLGS NF", "SFMono-Regular", ui-monospace, Menlo, monospace;
+  /* Follow SwiftUI's native typography instead of giving Lab its own faces. */
+  --sans: -apple-system, BlinkMacSystemFont, system-ui, "Helvetica Neue", sans-serif;
+  --display: var(--sans);
+  --condensed: var(--sans);
+  --mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Monaco, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -70,7 +71,7 @@ body {
   font-family: var(--sans);
   font-size: 1rem;
   line-height: 1.45;
-  -webkit-font-smoothing: antialiased;
+  -webkit-font-smoothing: auto;
 }
 
 button, input, select, textarea { font: inherit; }
