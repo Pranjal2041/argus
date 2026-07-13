@@ -103,11 +103,19 @@ Open Lab with `⇧⌘L` on macOS or the Lab destination on Android.
 - **Research** groups experiment sets by project and opens every run's reported results, parameters,
   exact code snapshot and diff, declared-data integrity, environment, log, artifacts, and event
   record. Agent-authored Markdown, tables, and code blocks render as rich, safe content.
+- **Access** in the macOS dashboard is the equivalent of `ut lab keys`: it lists active, pending, denied, and
+  revoked credentials without exposing full secrets. Pending requests open their decision dossier;
+  active keys can be revoked, and assigned sets open directly from the registry.
 - **Compare** selects two runs from a set and shows their recorded envelopes and parameter delta.
 - **Guidance** publishes durable human instructions everywhere, to one machine, to one project, or
   to one experiment set. A set ledger shows both its direct instruction and inherited guidance.
 - **Curation** hides individual claims, archives and restores runs or sets, changes approval policy,
   and revokes keys without deleting the underlying record.
+
+The set page keeps the complete human control surface visible: archive or restore the set, change
+its approval policy, revoke access, and install the standard Lab instruction into that project's
+`AGENTS.md` / `CLAUDE.md` files (the same idempotent operation as `ut lab init`). Access-request
+approval also accepts the initial policy and the optional human decision note supported by the CLI.
 
 Lab attention is not confined to the hub. Pending access and experiment decisions appear in
 **Command Center** beside agent sessions, and system notifications deep-link to the exact dossier.

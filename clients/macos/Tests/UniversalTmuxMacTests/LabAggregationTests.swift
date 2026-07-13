@@ -33,12 +33,14 @@ final class LabAggregationTests: XCTestCase {
         let result = LabModel.aggregate(snapshots, mirrored: [], mirrorHTTPBase: "")
 
         XCTAssertEqual(result.sets.count, 1)
+        XCTAssertEqual(result.accessKeys.count, 2, "the access registry includes pending and active keys once per store")
         XCTAssertEqual(result.pendingKeys.count, 1)
         XCTAssertEqual(result.pendingRuns.count, 1)
         XCTAssertEqual(result.hubNotes.count, 2, "machine-scoped guidance still needs one group per node")
         XCTAssertEqual(result.sets.first?.machineID, n5.id, "the set keeps its actual home machine")
         XCTAssertEqual(result.sets.first?.storeID, "shared:babel")
         XCTAssertEqual(result.sets.first.flatMap { result.activeKeyBySet[$0.id] }, "active-key")
+        XCTAssertEqual(Set(result.accessKeys.map { $0.key.status }), Set(["pending", "active"]))
 
         let model = LabModel()
         model.pendingKeys = result.pendingKeys
@@ -96,6 +98,30 @@ final class LabAggregationTests: XCTestCase {
         ], mirrored: [], mirrorHTTPBase: "")
 
         XCTAssertEqual(result.sets.map { $0.brief.set.id }, ["s-updated", "s-stale"])
+    }
+
+    func testSharedStorePrefersRevokedKeyOverStaleActiveReplica() {
+        let n5 = machine("babel-n5-24")
+        let u5 = machine("babel-u5-24")
+        let brief = labBrief(set: "s-93k08z", machine: "babel-n5-24")
+        let active = LabKeyInfo(key: "same-key", set: "s-93k08z", project: "vlm_gating",
+                                machine: "babel-n5-24", cwd: "/shared/vlm_gating",
+                                session: nil, status: "active", created: "2026-07-11T15:00:00Z",
+                                decided: "2026-07-11T15:01:00Z")
+        let revoked = LabKeyInfo(key: "same-key", set: "s-93k08z", project: "vlm_gating",
+                                 machine: "babel-n5-24", cwd: "/shared/vlm_gating",
+                                 session: nil, status: "revoked", created: "2026-07-11T15:00:00Z",
+                                 decided: "2026-07-12T15:01:00Z")
+
+        let result = LabModel.aggregate([
+            LabModel.MachineSnapshot(machine: n5, briefs: [brief], keys: [active], proposals: [],
+                                     notes: LabModel.NotesResp(store: "shared", notes: [])),
+            LabModel.MachineSnapshot(machine: u5, briefs: [brief], keys: [revoked], proposals: [],
+                                     notes: LabModel.NotesResp(store: "shared", notes: [])),
+        ], mirrored: [], mirrorHTTPBase: "")
+
+        XCTAssertEqual(result.accessKeys.map { $0.key.status }, ["revoked"])
+        XCTAssertTrue(result.activeKeyBySet.isEmpty)
     }
 
     private func machine(_ name: String) -> Machine {

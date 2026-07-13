@@ -680,10 +680,21 @@ func main() {
 			return
 		}
 		q := r.URL.Query()
+		policy := q.Get("policy")
+		if q.Get("approve") == "1" && policy != "" && !labsvc.ValidPolicy(policy) {
+			http.Error(w, "policy must be all, full-only, or none", http.StatusBadRequest)
+			return
+		}
 		k, err := st.Decide(q.Get("key"), q.Get("approve") == "1", q.Get("project"), q.Get("note"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if k.Status == "active" && policy != "" {
+			if err := st.SetPolicy(k.Set, policy); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(k)
@@ -925,6 +936,27 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+	})
+	// Dashboard equivalent of `ut lab init`. The set resolves the project cwd;
+	// callers cannot provide an arbitrary filesystem path.
+	mux.HandleFunc("/lab/init", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		results, err := st.InstallSetInstructions(r.URL.Query().Get("set"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": results})
 	})
 	// The permanent mirror this machine keeps of other machines' lab stores.
 	mux.HandleFunc("/lab/mirror", func(w http.ResponseWriter, r *http.Request) {

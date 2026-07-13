@@ -1,7 +1,7 @@
 "use strict";
 
 const Lab = {
-  model: { sets: [], pendingKeys: [], pendingRuns: [], hubNotes: [] },
+  model: { sets: [], keys: [], pendingKeys: [], pendingRuns: [], hubNotes: [] },
   area: "inbox",
   selection: null,
   details: Object.create(null),
@@ -20,6 +20,7 @@ const Lab = {
   drawerOpen: false,
   researchQuery: "",
   researchFilter: "active",
+  accessFilter: "all",
   runFilter: "all",
   runTab: "summary",
   compareMode: false,
@@ -280,6 +281,7 @@ function statusWord(raw) {
 function normalizeModel(input) {
   const model = input || {};
   model.sets = Array.isArray(model.sets) ? model.sets : [];
+  model.keys = Array.isArray(model.keys) ? model.keys : [];
   model.pendingKeys = Array.isArray(model.pendingKeys) ? model.pendingKeys : [];
   model.pendingRuns = Array.isArray(model.pendingRuns) ? model.pendingRuns : [];
   model.hubNotes = Array.isArray(model.hubNotes) ? model.hubNotes : [];
@@ -453,6 +455,7 @@ function ensureSelection() {
     }
     return;
   }
+  if (Lab.area === "access") { Lab.selection = null; return; }
   if (Lab.area === "guidance") Lab.selection = null;
 }
 
@@ -473,7 +476,7 @@ function render() {
 function renderMasthead() {
   const count = pendingItems().length;
   const tabs = [
-    ["inbox", "Inbox"], ["research", "Research"], ["guidance", "Guidance"],
+    ["inbox", "Inbox"], ["research", "Research"], ["access", "Access"], ["guidance", "Guidance"],
   ].map(([key, label]) => `<button class="nav-item ${Lab.area === key ? "active" : ""}" type="button" data-nav="${key}">
       ${label}${key === "inbox" && count ? `<span class="nav-badge">${count}</span>` : ""}
     </button>`).join("");
@@ -496,6 +499,7 @@ function renderMasthead() {
 
 function renderContext() {
   if (Lab.area === "inbox") return renderInboxContext();
+  if (Lab.area === "access") return renderAccessContext();
   if (Lab.area === "guidance") return renderGuidanceContext();
   return renderResearchContext();
 }
@@ -522,6 +526,63 @@ function renderInboxContext() {
     <div class="context-help">Newest request first. J/K moves through the queue; the evidence follows your selection.</div>
     ${rows(proposals, "Experiment approvals")}${rows(keys, "Access requests")}
     ${items.length ? "" : `<div class="context-empty">Nothing needs a decision. Running and recently finished work remains in Research.</div>`}`;
+}
+
+function keyStatusInfo(status) {
+  const key = String(status || "unknown").toLowerCase();
+  if (key === "active") return { label: "Active", tone: "verified" };
+  if (key === "pending") return { label: "Pending", tone: "decision" };
+  if (key === "denied") return { label: "Denied", tone: "danger" };
+  if (key === "revoked") return { label: "Revoked", tone: "danger" };
+  return { label: key || "Unknown", tone: "quiet" };
+}
+
+function filteredAccessKeys() {
+  let keys = [...Lab.model.keys];
+  if (Lab.accessFilter === "active") keys = keys.filter(key => key.status === "active");
+  if (Lab.accessFilter === "pending") keys = keys.filter(key => key.status === "pending");
+  if (Lab.accessFilter === "closed") keys = keys.filter(key => ["denied", "revoked"].includes(key.status));
+  return keys.sort((a,b) => String(b.created || "").localeCompare(String(a.created || "")) || String(b.id).localeCompare(String(a.id)));
+}
+
+function renderAccessContext() {
+  const keys = Lab.model.keys;
+  const count = status => keys.filter(key => key.status === status).length;
+  return `<div class="context-heading"><span class="context-title">Access registry</span><span class="context-count">${keys.length} keys</span></div>
+    <div class="context-help">Every Lab credential, including closed access. Full secrets are never displayed.</div>
+    <div class="access-filter-list">
+      ${[["all","All keys",keys.length],["active","Active",count("active")],["pending","Pending",count("pending")],["closed","Closed",count("denied") + count("revoked")]].map(([key,label,total]) => `<button class="scope-row ${Lab.accessFilter === key ? "active" : ""}" type="button" data-access-filter="${key}"><span class="queue-row-top"><span class="scope-kind">${esc(label)}</span><span class="set-state">${total}</span></span></button>`).join("")}
+    </div>`;
+}
+
+function renderAccessMain() {
+  const all = Lab.model.keys;
+  const keys = filteredAccessKeys();
+  const active = all.filter(key => key.status === "active").length;
+  const pending = all.filter(key => key.status === "pending").length;
+  const closed = all.filter(key => ["denied", "revoked"].includes(key.status)).length;
+  return `<div class="main-content wide"><div class="eyebrow">Human access control</div><h1 class="display-title">Access registry</h1>
+    <p class="lede">The dashboard counterpart to <span class="mono">ut lab keys</span>. Review pending requests, open the owning set, or revoke an active credential without reaching for the CLI.</p>
+    <div class="access-metrics" aria-label="Key status summary">
+      ${[["verified",active,"Active"],["decision",pending,"Pending"],["quiet",closed,"Closed"],["accent",all.length,"Total"]].map(([tone,total,label]) => `<div class="access-metric tone-${tone}"><span>${total}</span><small>${label}</small></div>`).join("")}
+    </div>
+    <div class="section-head"><h2>${Lab.accessFilter === "all" ? "All credentials" : `${Lab.accessFilter} credentials`}</h2><span class="section-kicker">newest first</span></div>
+    ${keys.length ? `<div class="key-ledger" role="table" aria-label="Lab access keys">
+      <div class="key-row key-head" role="row"><span>Status</span><span>Key / set</span><span>Project / folder</span><span>Machine</span><span>Created</span><span>Actions</span></div>
+      ${keys.map(key => {
+        const status = keyStatusInfo(key.status);
+        const open = key.card ? `<button class="button link small" type="button" data-action="open-key-set" data-card="${esc(key.card)}">Open set</button>` : "";
+        const review = key.status === "pending" && key.pendingID ? `<button class="button primary small" type="button" data-action="review-key" data-id="${esc(key.pendingID)}">Review</button>` : "";
+        const revoke = key.status === "active" ? `<button class="button danger small" type="button" data-action="revoke-key" data-id="${esc(key.id)}">Revoke</button>` : "";
+        return `<div class="key-row" role="row">
+          <span><span class="key-status tone-${status.tone}"><i></i>${esc(status.label)}</span></span>
+          <span class="key-identity"><strong>${esc(key.prefix || "—")}</strong><small>${esc(key.setID || "no set assigned")}</small></span>
+          <span class="key-project"><strong>${esc(key.project || "Unnamed project")}</strong><small title="${esc(key.cwd || "")}">${esc(displayPath(key.cwd || ""))}</small>${key.note ? `<small class="key-note">${esc(key.note)}</small>` : ""}</span>
+          <span>${esc(key.machineName || "—")}</span><span class="mono quiet">${esc(ago(key.created))}</span>
+          <span class="key-actions">${review}${open}${revoke}</span>
+        </div>`;
+      }).join("")}</div>` : emptyState("No credentials in this view", "Choose another access filter or wait for a Lab login request.")}
+  </div>`;
 }
 
 function searchMatchesSet(card, query) {
@@ -630,6 +691,7 @@ function renderGuidanceContext() {
 
 function renderMain() {
   if (Lab.area === "inbox") return renderInboxMain();
+  if (Lab.area === "access") return renderAccessMain();
   if (Lab.area === "guidance") return renderGuidanceMain();
   return renderResearchMain();
 }
@@ -665,6 +727,8 @@ function renderInboxClear() {
 
 function renderAccessDossier(key) {
   const projectDraft = draft(`key-project:${key.id}`, key.project || "");
+  const policyDraft = draft(`key-policy:${key.id}`, "full-only");
+  const noteDraft = draft(`key-note:${key.id}`, "");
   return `<div class="main-content has-dock">
     <div class="eyebrow">Access request · ${esc(ago(key.created))}</div>
     <h1 class="display-title">An agent wants a research set.</h1>
@@ -677,10 +741,16 @@ function renderAccessDossier(key) {
         <div class="fact-label">Session</div><div class="fact-value">${esc(key.session || "not reported")}</div>
         <div class="fact-label">Requested</div><div class="fact-value">${esc(ago(key.created))} ago</div>
         <div class="fact-label">Project label</div><div class="fact-value"><input class="text-input" style="width:min(360px,100%)" data-draft="key-project:${esc(key.id)}" value="${esc(projectDraft)}" aria-label="Project label"></div>
+        <div class="fact-label">Approval policy</div><div class="fact-value"><select class="select-input" style="width:min(360px,100%)" data-draft="key-policy:${esc(key.id)}" aria-label="Initial approval policy">
+          <option value="all" ${policyDraft === "all" ? "selected" : ""}>Every run needs approval</option>
+          <option value="full-only" ${policyDraft === "full-only" ? "selected" : ""}>Only full runs need approval</option>
+          <option value="none" ${policyDraft === "none" ? "selected" : ""}>Runs start without approval</option>
+        </select></div>
+        <div class="fact-label">Decision note</div><div class="fact-value"><input class="text-input" style="width:min(560px,100%)" data-draft="key-note:${esc(key.id)}" value="${esc(noteDraft)}" placeholder="Optional context for approval or denial" aria-label="Decision note"></div>
       </div>
       ${key.session ? `<div style="margin-top:20px"><button class="button" type="button" data-action="terminal" data-machine="${esc(key.machineID)}" data-session="${esc(key.session)}">${icon("terminal")}Open agent terminal</button></div>` : ""}
     </div></section>
-    ${decisionDock("key", { id: key.id, project: projectDraft })}
+    ${decisionDock("key", { id: key.id, project: projectDraft, policy: policyDraft, note: noteDraft })}
   </div>`;
 }
 
@@ -815,19 +885,20 @@ function renderSetPage() {
     <div class="page-head"><div class="page-head-main">
       <div class="eyebrow">Experiment set · ${esc(card.setID)}</div><h1 class="display-title">${esc(card.project)}</h1>
       <div class="meta-line"><span>${esc(card.machineName)}</span><span class="meta-divider">/</span><span class="selectable">${esc(card.cwd)}</span><span class="meta-divider">/</span><span>${card.keyActive ? "key active" : "access closed"}</span>${card.archived ? `<span class="tag">archived set</span>` : ""}</div>
-    </div><div class="page-actions">${card.offline ? "" : `<button class="button" type="button" data-action="files" data-card="${esc(card.id)}" data-cwd="${esc(card.cwd)}">${icon("folder")}Files</button>`}</div></div>
+    </div><div class="page-actions">${card.offline ? "" : `<button class="button" type="button" data-action="files" data-card="${esc(card.id)}" data-cwd="${esc(card.cwd)}">${icon("folder")}Files</button>
+      <button class="button ${card.archived ? "primary" : ""}" type="button" data-action="archive" data-card="${esc(card.id)}" data-on="${card.archived ? "0" : "1"}">${icon("archive")}${card.archived ? "Restore set" : "Archive set"}</button>`}</div></div>
     ${card.offline ? offlineBanner(card) : ""}
     <div class="set-summary-grid"><div>${renderSetGuidance(card, guidance)}</div>
-      ${card.offline ? "" : `<details class="access-panel" ${Lab.accessOpen ? "open" : ""}><summary>Access &amp; policy</summary><div class="access-controls">
+      ${card.offline ? "" : `<section class="access-panel" aria-label="Set controls"><div class="access-head"><div><div class="fact-label">Set controls</div><div class="access-state ${card.keyActive ? "active" : "closed"}"><i></i>${card.keyActive ? "Key active" : "Access closed"}</div></div></div><div class="access-controls">
         <label class="fact-label" for="policy-select">Approval policy</label>
         <select id="policy-select" class="select-input" data-action="policy" data-card="${esc(card.id)}">
           <option value="all" ${card.policy === "all" ? "selected" : ""}>Every run needs approval</option>
           <option value="full-only" ${card.policy === "full-only" ? "selected" : ""}>Only full runs need approval</option>
           <option value="none" ${card.policy === "none" ? "selected" : ""}>Runs start without approval</option>
         </select>
-        <button class="button small" type="button" data-action="archive" data-card="${esc(card.id)}" data-on="${card.archived ? "0" : "1"}">${icon("archive")}${card.archived ? "Unarchive set" : "Archive set"}</button>
-        ${card.keyActive ? `<button class="button danger small" type="button" data-action="revoke" data-card="${esc(card.id)}">Revoke agent access</button>` : ""}
-      </div></details>`}
+        <div class="control-actions"><button class="button small" type="button" data-action="init" data-card="${esc(card.id)}" title="Equivalent to ut lab init in this set's project folder">Install Lab instructions</button>
+        ${card.keyActive ? `<button class="button danger small" type="button" data-action="revoke" data-card="${esc(card.id)}">Revoke agent access</button>` : ""}</div>
+      </div></section>`}
     </div>
     ${renderSignalStrip(card.runs)}
     <div class="research-toolbar">
@@ -1319,6 +1390,8 @@ document.addEventListener("click", event => {
   if (home) { Lab.area = "research"; Lab.selection = null; resetMainScroll(); render(); return; }
   const filter = event.target.closest("[data-research-filter]");
   if (filter) { Lab.researchFilter = filter.dataset.researchFilter; render(); return; }
+  const accessFilter = event.target.closest("[data-access-filter]");
+  if (accessFilter) { Lab.accessFilter = accessFilter.dataset.accessFilter; render(); return; }
   const runFilter = event.target.closest("[data-run-filter]");
   if (runFilter) { Lab.runFilter = runFilter.dataset.runFilter; render(); return; }
   const tab = event.target.closest("[data-run-tab]");
@@ -1332,6 +1405,8 @@ document.addEventListener("click", event => {
   if (kind === "font-down") { setManualScale(Lab.manualScale - .1); return; }
   if (kind === "font-up") { setManualScale(Lab.manualScale + .1); return; }
   if (kind === "font-reset") { setManualScale(1); return; }
+  if (kind === "review-key") { selectPending("key", action.dataset.id); return; }
+  if (kind === "open-key-set") { selectSet(action.dataset.card); return; }
   if (kind === "open-set-guidance") { Lab.area = "guidance"; Lab.selection = null; Lab.guidanceScopeKey = `set:${action.dataset.card}`; Lab.drawerOpen = false; resetMainScroll(); render(); return; }
   if (kind === "refresh") { post({ type: "refresh" }); toast("Refreshing Lab…"); return; }
   if (kind === "terminal") { post({ type: "openTerminal", machineID: action.dataset.machine, session: action.dataset.session }); return; }
@@ -1355,7 +1430,7 @@ document.addEventListener("click", event => {
   }
   if (kind === "decide-key") {
     const id = action.dataset.id;
-    startAction("decideKey", { id, approve: action.dataset.approve === "1", project: draft(`key-project:${id}`) }, action.dataset.approve === "1" ? "Access approved" : "Access denied", `key-project:${id}`); return;
+    startAction("decideKey", { id, approve: action.dataset.approve === "1", project: draft(`key-project:${id}`), policy: draft(`key-policy:${id}`, "full-only"), note: draft(`key-note:${id}`) }, action.dataset.approve === "1" ? "Access approved" : "Access denied", `key-note:${id}`); return;
   }
   if (kind === "decide-run") {
     const card = action.dataset.card, runID = action.dataset.run;
@@ -1371,6 +1446,8 @@ document.addEventListener("click", event => {
   }
   if (kind === "archive") { startAction("archive", { card: action.dataset.card, run: action.dataset.run || "", on: action.dataset.on === "1" }, action.dataset.on === "1" ? "Moved to archive" : "Restored from archive"); return; }
   if (kind === "revoke") { if (confirm("Revoke this agent's access? Every experiment record remains.")) startAction("revoke", { card: action.dataset.card }, "Agent access revoked"); return; }
+  if (kind === "revoke-key") { if (confirm("Revoke this key permanently? Its experiment records will remain.")) startAction("revokeKey", { id: action.dataset.id }, "Agent access revoked"); return; }
+  if (kind === "init") { if (confirm("Install the Argus Lab instruction in this project's AGENTS.md / CLAUDE.md files?")) startAction("init", { card: action.dataset.card }, "Lab instructions installed"); return; }
   if (kind === "hide-result") { startAction("hide", { card: action.dataset.card, run: action.dataset.run, target: action.dataset.target }, "Agent claim hidden from briefs"); return; }
   if (kind === "run-note") {
     const key = `run-note:${action.dataset.card}/${action.dataset.run}`;
@@ -1499,7 +1576,7 @@ window.UTLab = {
       if (queryView === "notes" || queryView === "guidance") Lab.area = "guidance";
       else if (queryView === "home" || queryView === "research") Lab.area = "research";
       else if (pendingItems().length) { Lab.area = "inbox"; Lab.selection = null; }
-      else if (saved && ["inbox", "research", "guidance"].includes(saved.area)) { Lab.area = saved.area; Lab.selection = saved.selection || null; }
+      else if (saved && ["inbox", "research", "access", "guidance"].includes(saved.area)) { Lab.area = saved.area; Lab.selection = saved.selection || null; }
       else Lab.area = "research";
     }
     if (key !== Lab.dataKey) {

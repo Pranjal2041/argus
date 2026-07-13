@@ -975,40 +975,23 @@ func labArchive(st *labsvc.Store, args []string, on bool) int {
 	return 0
 }
 
-const labInstruction = "This project uses Argus Lab. Run `ut lab brief` at the start of work and whenever unsure. Run every experiment through `ut lab run` and append results with `ut lab note` (see `ut lab help`).\n"
-
 // labInit writes the one line agents need into the project instruction files.
 // It appends to CLAUDE.md and AGENTS.md when they exist, creates AGENTS.md
 // when neither does, and never duplicates the line.
-func labInit(st *labsvc.Store) int {
+func labInit(_ *labsvc.Store) int {
 	cwd, _ := os.Getwd()
-	targets := []string{}
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
-		if _, err := os.Stat(filepath.Join(cwd, name)); err == nil {
-			targets = append(targets, name)
-		}
+	results, err := labsvc.InstallInstructions(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ut lab: %v\n", err)
+		return 1
 	}
-	if len(targets) == 0 {
-		targets = []string{"AGENTS.md"}
-	}
-	for _, name := range targets {
-		path := filepath.Join(cwd, name)
-		b, _ := os.ReadFile(path)
-		if strings.Contains(string(b), "ut lab brief") {
+	for _, result := range results {
+		name := filepath.Base(result.Path)
+		if result.Changed {
+			fmt.Printf("added the lab instruction to %s\n", name)
+		} else {
 			fmt.Printf("%s already mentions ut lab, leaving it alone\n", name)
-			continue
 		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ut lab: %v\n", err)
-			return 1
-		}
-		if len(b) > 0 && !strings.HasSuffix(string(b), "\n") {
-			f.WriteString("\n")
-		}
-		f.WriteString("\n" + labInstruction)
-		f.Close()
-		fmt.Printf("added the lab instruction to %s\n", name)
 	}
 	return 0
 }
