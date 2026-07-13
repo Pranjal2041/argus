@@ -220,6 +220,32 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             if let v = r.proposal.cwd { d["cwd"] = v }
             return d
         }
+        let access: [[String: Any]] = lab.accessKeys.map { item in
+            let setID = item.key.set ?? ""
+            let cardID = lab.sets.first(where: {
+                $0.storeID == item.storeID && $0.brief.set.id == setID
+            })?.id ?? ""
+            var d: [String: Any] = [
+                "id": item.id,
+                "prefix": String(item.key.key.prefix(8)),
+                "setID": setID,
+                "card": cardID,
+                "storeID": item.storeID,
+                "machineID": item.machineID,
+                "machineName": item.machineName,
+                "project": item.key.project,
+                "cwd": item.key.cwd,
+                "session": item.key.session ?? "",
+                "status": item.key.status,
+                "created": item.key.created,
+            ]
+            if let pending = lab.pendingKeys.first(where: {
+                $0.storeID == item.storeID && $0.key.key == item.key.key
+            }) { d["pendingID"] = pending.id }
+            if let decided = item.key.decided { d["decided"] = decided }
+            if let note = item.key.note { d["note"] = note }
+            return d
+        }
         let hub: [[String: Any]] = lab.hubNotes.map { g in
             ["machineID": g.machineID, "machineName": g.machineName,
              "storeID": g.storeID,
@@ -230,7 +256,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                  return d
              }]
         }
-        let model: [String: Any] = ["sets": sets, "pendingKeys": keys, "pendingRuns": pruns, "hubNotes": hub]
+        let model: [String: Any] = ["sets": sets, "keys": access, "pendingKeys": keys,
+                                    "pendingRuns": pruns, "hubNotes": hub]
         if let d = try? JSONSerialization.data(withJSONObject: model), let s = String(data: d, encoding: .utf8) {
             eval("window.UTLab.setData(\(s))")
         }
@@ -348,7 +375,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             if let k = lab.pendingKeys.first(where: { $0.id == str("id") }) {
                 let approve = d["approve"] as? Bool ?? false
                 performAction(id: actionID, success: approve ? "Access approved" : "Access denied") {
-                    await lab.decideKeyNow(k, approve: approve, project: str("project"))
+                    await lab.decideKeyNow(k, approve: approve, project: str("project"),
+                                           policy: str("policy"), note: str("note"))
                 }
             } else { reportAction(actionID, ok: false, message: "That access request is no longer pending.") }
         case "decideRun":
@@ -435,6 +463,18 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                     await lab.revokeKeyNow(c)
                 }
             } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
+        case "revokeKey":
+            if let key = lab.accessKeys.first(where: { $0.id == str("id") }) {
+                performAction(id: actionID, success: "Agent access revoked") {
+                    await lab.revokeKeyNow(key)
+                }
+            } else { reportAction(actionID, ok: false, message: "That key is no longer available.") }
+        case "init":
+            if let c = card() {
+                performAction(id: actionID, success: "Lab instructions installed") {
+                    await lab.installInstructionsNow(c)
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "openTerminal":
             state.selection = SessionRef(machineID: str("machineID"), session: str("session"))
             state.showLab = false
@@ -495,6 +535,7 @@ struct LabCenterView: View {
             }
             // push AFTER the published values settle (onReceive fires on willSet)
             .onReceive(lab.$sets) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
+            .onReceive(lab.$accessKeys) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$pendingKeys) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$pendingRuns) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$hubNotes) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }

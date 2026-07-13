@@ -27,6 +27,8 @@ struct LabKeyInfo: Codable, Hashable {
     var session: String?
     let status: String
     let created: String
+    var decided: String? = nil
+    var note: String? = nil
 }
 
 struct LabEventInfo: Codable, Hashable, Identifiable {
@@ -174,6 +176,17 @@ final class LabModel: ObservableObject {
         let proposal: LabProposal
         var id: String { machineID + "/" + proposal.id }
     }
+    /// One key in the human access registry. Unlike PendingKey this includes
+    /// active, denied, and revoked credentials so the dashboard matches
+    /// `ut lab keys` instead of showing only decisions waiting in Inbox.
+    struct AccessKey: Identifiable {
+        let storeID: String
+        let machineID: String
+        let machineName: String
+        let httpBase: String
+        let key: LabKeyInfo
+        var id: String { storeID + "/key/" + key.key }
+    }
     /// One online machine's scope-level notes for the hub's Notes view.
     struct HubNotesGroup: Identifiable {
         let machineID: String
@@ -198,6 +211,7 @@ final class LabModel: ObservableObject {
 
     struct AggregatedState {
         var sets: [SetCard]
+        var accessKeys: [AccessKey]
         var pendingKeys: [PendingKey]
         var pendingRuns: [PendingRun]
         var hubNotes: [HubNotesGroup]
@@ -221,6 +235,7 @@ final class LabModel: ObservableObject {
     }
 
     @Published var sets: [SetCard] = []
+    @Published var accessKeys: [AccessKey] = []
     @Published var pendingKeys: [PendingKey] = []
     @Published var pendingRuns: [PendingRun] = []
     @Published var hubNotes: [HubNotesGroup] = []
@@ -312,6 +327,7 @@ final class LabModel: ObservableObject {
                                            mirrorHTTPBase: machines.first(where: { $0.isLocal })?.httpBase ?? "")
             guard gen == generation else { return }
             sets = aggregate.sets
+            accessKeys = aggregate.accessKeys
             pendingKeys = aggregate.pendingKeys
             pendingRuns = aggregate.pendingRuns
             hubNotes = aggregate.hubNotes
@@ -336,6 +352,7 @@ final class LabModel: ObservableObject {
             storeKey(for: snapshot.machine, reported: snapshot.notes?.store)
         }
         var cardsByRecord: [String: SetCard] = [:]
+        var accessByRecord: [String: AccessKey] = [:]
         var pendingByRecord: [String: PendingKey] = [:]
         var proposalsByRecord: [String: PendingRun] = [:]
         var activeByRecord: [String: LabKeyInfo] = [:]
@@ -360,7 +377,12 @@ final class LabModel: ObservableObject {
                 }
                 for key in peer.keys {
                     if let current = keys[key.key] {
-                        if keyStateRank(key.status) > keyStateRank(current.status) { keys[key.key] = key }
+                        let candidateRank = keyStateRank(key.status)
+                        let currentRank = keyStateRank(current.status)
+                        if candidateRank > currentRank
+                            || (candidateRank == currentRank && (key.decided ?? "") > (current.decided ?? "")) {
+                            keys[key.key] = key
+                        }
                     } else {
                         keys[key.key] = key
                     }
@@ -387,13 +409,18 @@ final class LabModel: ObservableObject {
             }
             for key in keys.values {
                 let route = peers.first(where: { machine($0.machine, matches: key.machine) }) ?? fallback
+                let keyRecord = storeID + "/key/" + key.key
+                accessByRecord[keyRecord] = AccessKey(storeID: storeID,
+                                                       machineID: route.machine.id,
+                                                       machineName: route.machine.name,
+                                                       httpBase: route.machine.httpBase,
+                                                       key: key)
                 if key.status == "pending" {
-                    let record = storeID + "/key/" + key.key
-                    pendingByRecord[record] = PendingKey(storeID: storeID,
-                                                         machineID: route.machine.id,
-                                                         machineName: route.machine.name,
-                                                         httpBase: route.machine.httpBase,
-                                                         key: key)
+                    pendingByRecord[keyRecord] = PendingKey(storeID: storeID,
+                                                            machineID: route.machine.id,
+                                                            machineName: route.machine.name,
+                                                            httpBase: route.machine.httpBase,
+                                                            key: key)
                 } else if key.status == "active", let set = key.set {
                     activeByRecord[storeID + "/set/" + set] = key
                 }
@@ -446,6 +473,7 @@ final class LabModel: ObservableObject {
         }
         return AggregatedState(
             sets: cards,
+            accessKeys: accessByRecord.values.sorted { ($0.key.created, $0.id) > ($1.key.created, $1.id) },
             pendingKeys: pendingByRecord.values.sorted { ($0.key.created, $0.id) > ($1.key.created, $1.id) },
             pendingRuns: proposalsByRecord.values.sorted { ($0.proposal.created, $0.id) > ($1.proposal.created, $1.id) },
             hubNotes: notes.sorted { ($0.machineName.lowercased(), $0.machineID) < ($1.machineName.lowercased(), $1.machineID) },
@@ -486,7 +514,12 @@ final class LabModel: ObservableObject {
     }
 
     private static func keyStateRank(_ status: String) -> Int {
-        status == "pending" ? 0 : 1
+        switch status {
+        case "pending": return 0
+        case "active", "denied": return 1
+        case "revoked": return 2
+        default: return 0
+        }
     }
 
     private static func prefer(_ candidate: LabBrief, over current: LabBrief) -> Bool {
@@ -531,11 +564,17 @@ final class LabModel: ObservableObject {
 
     // MARK: decisions and curation (the human channel)
 
-    func decideKeyNow(_ k: PendingKey, approve: Bool, project: String) async -> Bool {
+    func decideKeyNow(_ k: PendingKey, approve: Bool, project: String,
+                      policy: String, note: String) async -> Bool {
         var q = [URLQueryItem(name: "key", value: String(k.key.key.prefix(8))),
                  URLQueryItem(name: "approve", value: approve ? "1" : "0")]
         let p = project.trimmingCharacters(in: .whitespacesAndNewlines)
         if approve, !p.isEmpty, p != k.key.project { q.append(URLQueryItem(name: "project", value: p)) }
+        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !n.isEmpty { q.append(URLQueryItem(name: "note", value: n)) }
+        if approve, ["all", "full-only", "none"].contains(policy) {
+            q.append(URLQueryItem(name: "policy", value: policy))
+        }
         return await postNow(k.httpBase + "/lab/decide", q)
     }
 
@@ -628,6 +667,19 @@ final class LabModel: ObservableObject {
         guard let key = activeKeyBySet[card.id] else { return false }
         return await postNow(card.httpBase + "/lab/revoke",
                              [URLQueryItem(name: "key", value: String(key.prefix(8)))])
+    }
+
+    func revokeKeyNow(_ item: AccessKey) async -> Bool {
+        guard item.key.status == "active" else { return false }
+        return await postNow(item.httpBase + "/lab/revoke",
+                             [URLQueryItem(name: "key", value: String(item.key.key.prefix(8)))])
+    }
+
+    /// Dashboard equivalent of `ut lab init`, routed through the owning set so
+    /// the broker—not web content—chooses the project folder.
+    func installInstructionsNow(_ card: SetCard) async -> Bool {
+        await postNow(card.httpBase + "/lab/init",
+                      [URLQueryItem(name: "set", value: card.brief.set.id)])
     }
 
     // MARK: reads for the run page

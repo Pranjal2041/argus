@@ -92,6 +92,12 @@
   ].join("\n");
 
   const model = {
+    keys: [
+      { id: "store:local/key/active-retina", prefix: "a19f4d20", setID: "s-41ejpm", card: localCard, storeID: "store:local", machineID: "local", machineName: "Mara's MacBook Pro", project: "retina-calibration", cwd: projectRoot, session: "retina-lab", status: "active", created: iso(7100) },
+      { id: "store:local/key/pending-spectral", prefix: "99b2ac71", setID: "", card: "", pendingID: "local/key-99b2", storeID: "store:local", machineID: "local", machineName: "Mara's MacBook Pro", project: "spectral-transfer", cwd: "/Users/mara/Developer/spectral-transfer", session: "spectral-agent", status: "pending", created: iso(52) },
+      { id: "store:local/key/revoked-legacy", prefix: "de17ac8d", setID: "s-old001", card: "local/s-old001", storeID: "store:local", machineID: "local", machineName: "Mara's MacBook Pro", project: "legacy-encoder", cwd: "/Users/mara/Archive/legacy-encoder", status: "revoked", created: iso(44000), decided: iso(18000), note: "Replacement encoder reached parity." },
+      { id: "store:babel/key/denied-pause", prefix: "8a43e118", setID: "", card: "", storeID: "store:babel", machineID: "babel-q9-24", machineName: "babel-q9-24", project: "pause-prediction", cwd: "/data/user_data/mara/smart-caching", status: "denied", created: iso(900), decided: iso(870), note: "Use the existing shared set." },
+    ],
     pendingKeys: [
       {
         id: "local/key-99b2",
@@ -303,6 +309,7 @@
     inbox: ["inbox", { type: "proposal", id: "local/s-41ejpm/R4" }],
     access: ["inbox", { type: "key", id: "local/key-99b2" }],
     research: ["research", null],
+    keys: ["access", null],
     project: ["research", { type: "set", card: localCard }],
     run: ["research", { type: "run", card: localCard, run: "R3" }],
     pending: ["research", { type: "run", card: localCard, run: "R4" }],
