@@ -2,6 +2,47 @@ import AppKit
 import SwiftUI
 import WebKit
 
+enum DashboardNavigationFailureDisposition: Equatable {
+    case superseded
+    case contentHandled
+    case retryable
+    case report
+}
+
+/// WKWebView reports both real navigation failures and control-flow events through
+/// the same delegate callback. Keep that distinction explicit so a successfully
+/// opened native document is never mistaken for an unavailable dashboard.
+enum DashboardNavigationFailurePolicy {
+    static func disposition(for error: Error) -> DashboardNavigationFailureDisposition {
+        let error = error as NSError
+
+        if error.domain == NSURLErrorDomain, error.code == NSURLErrorCancelled {
+            return .superseded
+        }
+
+        // A top-level audio/video resource is handed to WebKit's native media viewer.
+        // WebKit still calls didFail with its legacy "plug-in will handle load" value
+        // (WebKitErrorDomain/204), even though playback has successfully started.
+        if error.domain == "WebKitErrorDomain", error.code == 204 {
+            return .contentHandled
+        }
+
+        guard error.domain == NSURLErrorDomain else { return .report }
+        switch error.code {
+        case NSURLErrorTimedOut,
+             NSURLErrorCannotFindHost,
+             NSURLErrorCannotConnectToHost,
+             NSURLErrorNetworkConnectionLost,
+             NSURLErrorDNSLookupFailed,
+             NSURLErrorResourceUnavailable,
+             NSURLErrorNotConnectedToInternet:
+            return .retryable
+        default:
+            return .report
+        }
+    }
+}
+
 // MARK: - WKWebView host (one per tab; NO native bridge — sandboxed web content)
 
 struct WebTabView: NSViewRepresentable {
@@ -55,7 +96,16 @@ struct WebTabView: NSViewRepresentable {
         var lastLoaded: URL?
         var retries = 0
         private let maxRetries = 3
+        private var pendingRetry: DispatchWorkItem?
         init(tab: DashboardTab) { self.tab = tab }
+
+        @discardableResult
+        private func cancelPendingRetry() -> Bool {
+            let hadPendingRetry = pendingRetry != nil
+            pendingRetry?.cancel()
+            pendingRetry = nil
+            return hadPendingRetry
+        }
 
         private func sync(_ wv: WKWebView) {
             tab.canGoBack = wv.canGoBack
@@ -65,12 +115,16 @@ struct WebTabView: NSViewRepresentable {
             if let t = wv.title, !t.isEmpty { tab.title = t }
         }
         func webView(_ wv: WKWebView, didStartProvisionalNavigation n: WKNavigation!) {
+            // If the user navigated while a retry was waiting, the old URL must not
+            // unexpectedly replace the new page when that delayed block fires.
+            if cancelPendingRetry() { retries = 0 }
             tab.isLoading = true; tab.status = nil
             if tab.readinessJS != nil { tab.contentReady = false }
             sync(wv)
         }
         func webView(_ wv: WKWebView, didCommit n: WKNavigation!) { sync(wv) }
         func webView(_ wv: WKWebView, didFinish n: WKNavigation!) {
+            cancelPendingRetry()
             tab.isLoading = false; retries = 0; sync(wv)
             // The page loaded, but its SPA may still be painting. If a readiness check is
             // set (notebooks), poll it so the pane keeps a spinner until real content appears
@@ -98,12 +152,37 @@ struct WebTabView: NSViewRepresentable {
         // before surfacing the error.
         private func handleFailure(_ wv: WKWebView, _ e: Error) {
             tab.isLoading = false
-            if (e as NSError).code == NSURLErrorCancelled { sync(wv); return }  // superseded navigation
-            if retries < maxRetries, let u = lastLoaded ?? tab.url {
+            switch DashboardNavigationFailurePolicy.disposition(for: e) {
+            case .superseded:
+                sync(wv)
+                return
+            case .contentHandled:
+                // Native media/document playback is already live in this WKWebView.
+                // Treat the handoff like didFinish instead of reloading it from zero.
+                cancelPendingRetry()
+                retries = 0
+                tab.status = nil
+                tab.contentReady = true
+                sync(wv)
+                tab.isLoading = false
+                return
+            case .retryable where retries < maxRetries:
+                guard let u = lastLoaded ?? tab.url else {
+                    tab.status = e.localizedDescription
+                    sync(wv)
+                    return
+                }
+                cancelPendingRetry()
                 retries += 1
                 tab.status = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak wv] in wv?.load(URLRequest(url: u)) }
-            } else {
+                let retry = DispatchWorkItem { [weak self, weak wv] in
+                    self?.pendingRetry = nil
+                    wv?.load(URLRequest(url: u))
+                }
+                pendingRetry = retry
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: retry)
+            case .retryable, .report:
+                cancelPendingRetry()
                 tab.status = e.localizedDescription
             }
             sync(wv)
