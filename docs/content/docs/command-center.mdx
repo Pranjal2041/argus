@@ -27,6 +27,10 @@ where should your attention go *first*?
   over the tailnet. Change a status on either and it propagates both ways.
 - **Notifications.** When a session flips to needing you, Argus raises a notification and a Dock
   badge, so you do not have to keep watching — your attention is pulled to it only when it is earned.
+- **Lab decisions share the same attention surface.** A pending experiment-set access request or a
+  gated run appears in the top band with a flask mark and a fixed Lab label. Selecting it opens the
+  exact evidence dossier in [Argus Lab](/docs/lab), rather than pretending the gate is a terminal
+  status.
 
 <Callout type="info">
 It reads each agent's screen **passively** — nothing is ever typed into your agents to find out
@@ -45,7 +49,7 @@ a fast model (`claude -p`, Haiku) for a compact `{label, summary}` judged agains
 that agent to do. The result is published to the owning broker so any client — your phone included —
 can read it. There is no central service: the Mac generates, the brokers relay, the phone displays.
 
-The status is a read of the **current** screen every time, so it follows reality. If an agent that
+The inferred session status is a read of the **current** screen every time, so it follows reality. If an agent that
 was "working" hits an API error and stops, the card flips to **stuck**; when you hand it new
 instructions, it flips back to **working**. An agent minding launched work — a training run,
 a sweep, a monitoring loop it set up — counts as **working** even while its own prompt sits idle,
@@ -53,15 +57,17 @@ so long jobs don't read as "idle". A status you set by hand is delivered to the 
 correction it keeps in context, so it sticks until the screen genuinely changes — without being
 permanently forced.
 
-<Callout type="warn">
-The Command Center is a macOS feature today (the phone reads its results). It costs a small amount
-per refresh, since it runs a model over each changed session; unchanged screens are skipped, and
-hidden / agent sessions are never summarized.
+<Callout type="info">
+The Mac generates model-written session summaries and publishes them to the brokers; Android renders
+the same cards and can change manual status. Lab approval cards are deterministic protocol state,
+not model inference, and both macOS and Android render and notify for them. Model-written refreshes
+cost a small amount; unchanged screens are skipped, and hidden / agent sessions are never summarized.
 </Callout>
 
 ## Read next
 
 <Cards>
+  <Card title="Argus Lab" href="/docs/lab" description="Inspect and decide the experiment gates that appear in Needs you." />
   <Card title="Themes" href="/docs/themes" description="Recolor the whole app — chrome, terminals, and editor — to match how you like to work." />
   <Card title="Session history" href="/docs/history" description="A durable record of every session that has run, so you can find where one was." />
 </Cards>

@@ -1,75 +1,100 @@
 ---
-title: Git panel
-description: A GitKraken-style, read-only git viewer for any session's repo, on any machine — plus lazygit one click away for write operations.
+title: Git & pull-request review
+description: Review working trees, commits, branches, blame, and pull requests for any session's repo, with on-demand agent insights and explicit write actions.
 ---
 
-Agents change code on machines you are not looking at. The Git panel answers "what did this agent
-actually change?" without leaving the app: select a session, press `⇧⌘G`, and the pane becomes a
-rich git viewer for **that session's folder, on that session's machine** — a babel node, your Mac,
-the Windows box. Toggle again and the terminal is exactly as you left it.
+Agents change code on machines you are not looking at. The Git panel answers “what did this agent
+actually change?” without leaving the app: select a session, press `⇧⌘G`, and the pane becomes a
+rich Git viewer for **that session's folder, on that session's machine**—a cluster node, your Mac,
+or a Windows box. Toggle again and the terminal is exactly as you left it.
 
-There is nothing to install on any host. The broker answers thin, read-only `/git/*` queries using
-the `git` binary every machine already has, and the app renders them in a bundled viewer. No server
-runs between clicks, no RAM is held per repo.
+There is nothing to install for local Git review. The broker answers thin, read-only `/git/*`
+queries using the `git` binary every machine already has, and the app renders them in a bundled
+viewer. Pull-request review uses `gh` on the repository's host when it is installed and
+authenticated. No server runs between clicks, and no RAM is held per repo.
 
-## The three views
+## The four views
 
-- **Changes** — the branch, ahead/behind and stash chips, and every staged / unstaged / untracked
-  file with status badges and per-file `+/−` counts. It opens straight onto the full working-tree
-  diff — GitHub-style side-by-side (or inline), syntax-highlighted, with word-level change
-  highlights, per-file collapse, and a filter box.
+- **Changes** — the branch, ahead/behind and stash chips, and every staged, unstaged, or untracked
+  file with status badges and per-file `+/−` counts. It opens onto the full working-tree diff:
+  GitHub-style side-by-side or inline, syntax-highlighted, with word-level changes, per-file
+  collapse, a filter box, and optional line wrapping.
 - **History** — the commit graph. Uncommitted work rides the top as a dashed **WIP row**; lanes are
-  smooth curves with merge rings; each row shows ref pills (branch / remote / tag), a color-hashed
-  author avatar, hash, and age. Click a commit for its full diff with a file jump-list; **hover** a
-  commit to trace its lineage (everything unrelated dims); **⌘-click** a second commit to diff the
-  two directly. An **all branches** toggle draws the whole repo's topology in one graph.
-- **Blame** — per-line author, commit, and age with a GitLens-style age heatmap; hover for the
-  commit summary, double-click a line to jump to that commit in History.
+  smooth curves with merge rings; each row shows ref pills, author, hash, and age. Click a commit
+  for its full diff, hover to trace its lineage, **⌘-click** another commit to compare the two, or
+  turn on **all branches** for the repository's full topology.
+- **Blame** — per-line author, commit, and age with a GitLens-style heatmap. Hover for the commit
+  summary and double-click a line to jump to that commit in History. Long lines can wrap.
+- **Pull Requests** — list Open, Merged, Closed, or All PRs, then open a dossier with description,
+  checks, reviews, commits, and the combined diff. Explicit controls can approve, request changes,
+  comment, merge, or open the PR on GitHub. If `gh` is missing, signed out, or the repository has
+  no GitHub remote, the tab explains the unavailable capability without affecting local review.
 
-## Agent insights
+## Agent insights and questions
 
-Agents produce noisy history — many small commits, churny edits, verbose messages. **Shift-click**
-a second commit in History to select the whole contiguous range: the panel shows the combined diff
-plus an **✦ Agent insights** bar with three levels — **Brief**, **Medium**, **Detailed**. Click one
-and a local `claude` run (Sonnet) reads the range — each commit's individual diff *and* the net
-effect — and writes what a reviewer would actually want: an upfront account of **what was done**,
-then **worth your attention** (risks, leftovers, dead ends, hollow tests), every point anchored to
-a file or function.
+Agents produce noisy history—many small commits, churny edits, and verbose messages. The
+**✦ Agent insights** bar works on four selection shapes:
 
-Cost discipline is built in: nothing generates until you click a level, and results are cached
-forever keyed by the commit hashes — commits are immutable, so a cache hit can never go stale and
-repeat questions are free. The per-run cost is always shown in the footer.
+- a single commit;
+- a contiguous range selected with **Shift-click**;
+- a whole loaded branch selected from its ref pill;
+- a pull request, using its commits and combined diff.
 
-## Write operations: lazygit
+Choose **Brief**, **Medium**, or **Detailed** and a local `claude` run (Sonnet) reads each step
+diff plus the net effect. The result leads with **what was done**, then **worth your attention**:
+risks, leftovers, dead ends, hollow tests, and other agent tells, anchored to files or functions.
+All levels use the same evidence-backed structure at different depths.
 
-The viewer is deliberately **read-only** — reviewing an agent's work shouldn't risk mutating it.
-When you do want to stage, commit, rebase, or resolve conflicts, the panel's **lazygit** button
-swaps the same pane to [lazygit](https://github.com/jesseduffield/lazygit), the full-featured
-terminal git client, running in that folder on that machine (with mouse support). The broker
-installs its single ~6&nbsp;MB binary once per host automatically — on a cluster with a shared home,
-one download covers every node.
+The ask box accepts a free-form question for the same selection: “where is this retry bounded?”,
+“does the migration preserve old rows?”, or whatever the diff actually calls for. Questions and
+answers stay attached to that selection as a compact review conversation.
+
+Cost discipline is built in: nothing generates until you click, and results are cached forever by
+the immutable commit selection or PR diff plus the requested depth or question. Repeat reviews are
+free and instant. The per-run cost—or cache hit—is always shown in the footer.
+
+## Explicit write operations
+
+Browsing local Git data is deliberately **read-only**—opening Changes, History, Blame, a diff, or
+an insight cannot mutate the repository. Write operations sit behind controls whose names state the
+action:
+
+- Pull-request approve, request-changes, comment, and merge call `gh` only after you choose them.
+- The **lazygit** button swaps the same pane to
+  [lazygit](https://github.com/jesseduffield/lazygit), running in that folder on that machine, for
+  staging, commits, rebases, and conflict resolution.
+
+The broker installs lazygit's single ~6&nbsp;MB binary once per host when first requested. On a
+cluster with a shared home, one download covers every node.
 
 ## How it works
 
-The broker exposes read-only endpoints that shell out to `git` (always with
-`--no-optional-locks`, so the viewer can never take an index lock):
+The broker shells out to `git` with `--no-optional-locks` for read paths, so browsing cannot
+take an index lock:
 
 | endpoint | purpose |
 |---|---|
 | `GET /git/summary` | branch, upstream, ahead/behind, stashes, changed files (porcelain v2) |
-| `GET /git/log` | commit log with parents + decorations; `all=1` walks every ref, topo-ordered |
-| `GET /git/diff` | unified diff — working tree, staged, vs HEAD, one commit, or a commit range |
+| `GET /git/log` | commit log with parents and decorations; `all=1` walks every ref |
+| `GET /git/diff` | working tree, staged, one commit, two commits, or a range |
 | `GET /git/blame` | per-line attribution (`blame --porcelain`) |
 | `GET /git/show` | a file's content at any revision |
-| `POST /gitui` | ensure lazygit + run it in a hidden session for the folder |
+| `GET /git/prs` | pull-request list with an explicit state filter |
+| `GET /git/pr` | one PR's metadata, checks, reviews, and commits |
+| `GET /git/pr/diff` | one PR's combined diff |
+| `POST /git/pr/{review,comment,merge}` | explicit `gh`-backed PR actions |
+| `POST /gitui` | ensure lazygit and run it in a hidden session for the folder |
 
-The client renders diffs with **diff2html** and the same **highlight.js** the app already bundles,
-entirely offline. One viewer instance lives per session and is kept alive across pane switches, so
-flipping to a terminal and back doesn't re-render.
+The client renders diffs with **diff2html** and bundled **highlight.js**, entirely offline. One
+viewer instance lives per session and remains alive across pane switches. If you manually pin the
+session's folder, Git honors that folder instead of snapping back to a stale working directory.
+Very large working trees are capped by file count before rendering so a runaway diff cannot freeze
+the web view.
 
 <Callout type="info">
-Works on every platform the broker runs on — Linux clusters, macOS, and Windows (`git.exe`) — with
-zero per-host setup. Only lazygit is fetched, once, and only when you first use the button.
+Local review works anywhere the broker runs—Linux clusters, macOS, and Windows (`git.exe`)—with
+zero per-host setup. PR features additionally require an authenticated `gh` on that host; lazygit
+is fetched once and only when first used.
 </Callout>
 
 ## Opening it

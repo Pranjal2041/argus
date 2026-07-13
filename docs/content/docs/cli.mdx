@@ -50,6 +50,24 @@ A session started by `ut spawn` is an **agent session**: hidden from the app by 
 **auto-reaped** once it has sat idle past its leash (`--idle`, a few hours by default), so a swarm of
 short-lived helpers does not pile up.
 
+## The Lab research protocol
+
+`ut lab` is a second command family implemented by the same CLI. It does not create or attach a
+terminal session; it reads and writes the append-only [Argus Lab](/docs/lab) store:
+
+| command | what it does |
+|---|---|
+| `ut lab login` | request an approved key for one isolated experiment set |
+| `ut lab brief` | read applicable human guidance, run summaries, and pending decisions |
+| `ut lab run … -- <command>` | capture provenance, apply the set's approval policy, and execute |
+| `ut lab note --run R3 <text>` | append an attributable result or observation |
+| `ut lab show R3` | inspect one run's full record |
+| `ut lab diff R3` | compare the recorded base commit, parameters, and declared data with today |
+| `ut lab init` | add the durable Lab reminder to `CLAUDE.md` or `AGENTS.md` |
+
+The human approval, policy, curation, archive, and key commands are documented in the
+[Lab guide](/docs/lab). Run `ut lab help` for the complete terminal reference.
+
 ## Environment
 
 | variable | default | meaning |

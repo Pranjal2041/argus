@@ -19,7 +19,9 @@
 coding-agent session across all your machines at once — your Mac, SLURM/HPC clusters,
 Windows boxes, your phone — over [Tailscale](https://tailscale.com), peer-to-peer, with
 **no central server**. Beyond terminals it's a cross-host **file explorer + editor** and a
-**port-forward hub**: one calm pane of glass over a sprawl of agents and compute.
+**port-forward hub**. Argus Lab adds a recorded, human-approved experiment protocol, and the
+Activity Journal turns your supervision into a durable ledger and Wrapped recap: one calm pane of
+glass over a sprawl of agents and compute.
 
 > Named for **Argus Panoptes**, the hundred-eyed giant who watched over everything.
 > *(Formerly `universal_tmux`; the `ut` CLI and per-host broker keep that name internally —
@@ -45,7 +47,13 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 - **Command Center** — one card per agent, across every machine, with a plain-English line on
   what each is doing and which ones **need you**. A small model reads each session's screen
   (passively — nothing is ever typed into your agents) and labels it *working*, *needs you*,
-  *stuck*, or *idle*; you can override a card by hand, and it syncs to your phone.
+  *stuck*, or *idle*; you can override a card by hand, and it syncs to your phone. Pending Lab
+  access and experiment decisions share the same attention band and deep-link to their evidence.
+- **Argus Lab** — a recorded research protocol for agent-run experiments. `ut lab run`
+  mechanically captures code state, parameters, environment, declared-data fingerprints, logs,
+  artifacts, and exit status; approval policies bind the exact proposal before expensive work
+  starts. The macOS and Android hubs provide approvals, comparison, scoped human guidance,
+  curation, archive/policy/key controls, shared-cluster deduplication, and offline mirrors.
 - **Workflows, Todo Maps & Notes** — three planning surfaces that **sync across your devices** (via
   your Mac's broker, no central server): saved **workflows** that spin up an agent in the right
   machine + folder with one click; per-session **todo** checklists that outlive the session; and a
@@ -56,13 +64,22 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   (read passively from the screen, so it works with nothing attached). On macOS, an opt-in toggle
   keeps the Mac awake and reachable while the screen is locked.
 - **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
-  per-file tabs, `⌘P` quick-open, live Markdown preview, syntax highlighting, image / PDF / media
-  preview, upload & download, and *reveal-from-session* to jump to a session's working directory.
+  per-file tabs, `⌘P` quick-open, `⇧⌘G` Go to Folder, content search, Git-aware tree coloring,
+  live Markdown preview, syntax highlighting, image / PDF / media preview, upload & download, and
+  *reveal-from-session* to jump to a session's working directory.
+- **Git & pull-request review** — inspect working trees, commit graphs, blame, branches, and GitHub
+  PR dossiers on the host that owns the repo. Ask free-form questions or generate cached agent
+  insights over one commit, a range, a whole branch, or a PR; use explicit `gh` actions or jump
+  to lazygit when review becomes mutation.
 - **Ports** — a port-forward hub: bind a local port and tunnel it over the tailnet to any
   remote broker, no `ssh -L` juggling.
-- **Dashboards & notebooks** — an in-app browser for remote web UIs (training dashboards,
-  TensorBoard), and Jupyter notebooks whose **kernel runs on the host** while you edit from your Mac.
+- **Dashboards & notebooks** — an in-app browser that discovers real HTTP services on remote
+  listeners, persists tabs, supports find/zoom and per-tab auto-refresh, plus Jupyter notebooks
+  whose **kernel runs on the host** while you edit from your Mac.
 - **Weights & Biases** — when an agent prints a W&B run URL, open the run in-app, already logged in.
+- **Activity Journal & Wrapped** — a local, append-only record of what you saw, said, and did across
+  Mac and phone, with an in-app ledger. Wrapped reduces that event stream into a visual story and
+  dashboard of your rhythm, fleet, delegation, interventions, experiments, and shipped work.
 - **History & themes** — a durable record of every session that has run (name, node, folders) that
   survives a machine going offline; click a row to open the session, or re-create a finished one in
   its last folder. Plus themes that recolor the whole app: chrome, terminals, and editor.
@@ -150,8 +167,9 @@ A zero-install **xterm.js** client lives in [`web/`](web/) — point it at a bro
 
 ## Documentation
 
-Full docs — install per platform, architecture, the `ut` CLI, Files & Ports guides, and the
-security model — live at **[pranjal2041.github.io/argus](https://pranjal2041.github.io/argus/)**
+Full docs—including Argus Lab, Git and PR review, the Activity Journal and Wrapped, installation,
+architecture, the `ut` CLI, and the security model—live at
+**[pranjal2041.github.io/argus](https://pranjal2041.github.io/argus/)**
 (built with [Fumadocs](https://fumadocs.dev), source in [`docs/`](docs/)).
 
 ## Repository layout
@@ -162,7 +180,8 @@ security model — live at **[pranjal2041.github.io/argus](https://pranjal2041.g
 | `cmd/ut/`             | the `ut` CLI launcher |
 | `internal/tmux/`      | tmux control-mode `SessionProvider` (the modular seam) |
 | `internal/broker/`    | per-client WebSocket server + frame codec |
-| `internal/fsvc/`      | the `/fs/*` file service (browse / read / write / upload) |
+| `internal/fsvc/`      | the `/fs/*` file service (browse / search / read / write / upload) |
+| `internal/labsvc/`    | append-only Lab records, approvals, snapshots, mirrors, and guidance |
 | `internal/forward/`   | the port-forward agent |
 | `internal/conpty/`    | Windows ConPTY `SessionProvider` |
 | `clients/macos/`      | native macOS app (AppKit + SwiftTerm + CodeMirror) |
@@ -179,6 +198,8 @@ security model — live at **[pranjal2041.github.io/argus](https://pranjal2041.g
 - The broker only ever serves a host it was started on; discovery requires the
   `GET /whoami` identity handshake, so an unrelated service on `:8722` is never mistaken for
   one. Auth keys and other secrets are never committed (see [`.gitignore`](.gitignore)).
+- The local Activity Journal records terminal messages as typed; disable it before entering secrets
+  into a recorded pane. Lab intentionally stores experiment commands, diffs, configs, and logs.
 
 ## License
 

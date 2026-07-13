@@ -1,0 +1,66 @@
+---
+title: Argus Wrapped
+description: A living story and dashboard of how you worked with your agent fleet, computed from your local Activity Journal.
+---
+
+Argus Wrapped turns the [Activity Journal](/docs/journal) into a visual recap of your time with the
+fleet. It is closer to a living operations review than a usage counter: when you worked, how much
+you delegated, which agents and machines carried the load, what shipped, where you intervened, and
+how the fleet spent its time.
+
+Open the standalone window with `⇧⌘E` or choose **Argus Wrapped** from the command palette.
+
+## Two ways to read it
+
+- **Story deck** walks through the period as a sequence of full-window cards with keyboard, click,
+  and arrow navigation.
+- **Overview** places the same evidence in a compact dashboard for scanning and comparison.
+
+Wrapped adapts to the history that exists. Open it after a day and it describes that day; open it
+after months and it spans the whole recorded period. Empty or inapplicable cards are omitted instead
+of padded with invented content.
+
+## What it derives
+
+Every number comes from journal events:
+
+- active days, time-of-day rhythm, day/hour heatmap, streak, and activity pulse;
+- agents, machines, session births and retirements, and the fleet's working/waiting/stuck/idle mix;
+- messages you actually sent, phone participation, watch time, and manual corrections;
+- delegation ratio—estimated agent working time versus your active intervention time;
+- projects, experiments, W&amp;B runs, Git reviews and questions, workflows, todos, and file saves;
+- milestones reported by the fleet, leaderboards, superlatives, and earned badges.
+
+Message counts are deliberately de-noised. Empty keypresses, app slash commands, cumulative typing
+prefixes, and exact duplicates are excluded so “messages you sent” means messages rather than raw
+input events.
+
+## Persona finale
+
+The final card names the working style suggested by the real statistics. Argus sends a compact
+numeric digest—not the raw journal or terminal screens—to a local `claude` CLI using Haiku. The
+result is cached for that journal window. If the CLI is unavailable or the call fails, Wrapped uses
+an immediate rule-based fallback, so the recap itself never depends on a model.
+
+## Privacy and performance
+
+The dashboard computation is a pure local reduction over
+`~/Library/Application Support/Argus/journal/*.jsonl`. It runs off the main thread, and the deck
+is a bundled offline web view. Only the optional persona digest leaves that local computation
+through your configured Claude CLI; the raw event stream remains on disk.
+
+Wrapped is currently a macOS feature because the canonical journal is assembled on the Mac. Phone
+messages still contribute: Android forwards its sent utterances to the Mac journal through the
+append-only sync inbox.
+
+<Callout type="info">
+Wrapped can only describe the period recorded by the Activity Journal. Turning journal capture off
+also pauses the evidence available to future recaps.
+</Callout>
+
+## Read next
+
+<Cards>
+  <Card title="Activity Journal" href="/docs/journal" description="What the underlying event stream records, including messages sent from Android." />
+  <Card title="Command Center" href="/docs/command-center" description="The status transitions and interventions that become part of the recap." />
+</Cards>

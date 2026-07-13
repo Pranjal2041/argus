@@ -1,6 +1,6 @@
 # Argus Lab (`ut lab`) — design
 
-This document describes the research layer of Argus. The design was agreed on 2026-07-08 and nothing here is built yet. DESIGN.md covers the base system that this layer sits on.
+This document describes the research layer of Argus. The design was agreed on 2026-07-08; the core protocol, broker routes, macOS hub, and Android hub are now built. The status section at the end distinguishes shipped behavior from remaining limits. DESIGN.md covers the base system that this layer sits on.
 
 ## Purpose and premise
 
@@ -60,7 +60,7 @@ The wrapper stores the parameter files exactly as given, records the environment
 
 The run id prints the moment the run starts. The agent uses that id afterward to append partial results, updated tables, artifacts, and notes, for as long as the experiment lives. The log tail stored in the record is a preview for debugging. The results are what the agent appends plus the artifacts.
 
-`ut lab diff R12` shows everything that differs between the recorded world of run 12 and the present, covering the code, the parameters, the environment, and the declared data file hashes. This is the command for the moment, weeks later, when a result no longer makes sense.
+`ut lab diff R12` compares the recorded base commit, parameter files, and declared data hashes with the present, and calls out when the run carried an uncommitted snapshot. The recorded environment remains available through `ut lab show` and the hub. This is the command for the moment, weeks later, when a result no longer makes sense.
 
 ## Proposals and approvals
 

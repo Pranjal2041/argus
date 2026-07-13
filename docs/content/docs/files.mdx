@@ -16,6 +16,14 @@ preview, and transfer files on any of your machines, the same way you reach thei
 - **Per-file tabs** — keep several files open at once and switch between them; a dot marks unsaved
   edits, and closing one asks before discarding.
 - **Quick-open** — press `⌘P` to fuzzy-find any file under the current root and jump to it.
+- **Go to Folder** — press `⇧⌘G` and paste or type an absolute path, `~`, `$VAR`, or a
+  path relative to the current folder. Completion is live; a directory becomes the tree root and a
+  file opens at its parent.
+- **Content search** — press `⇧⌘F` to search text across the open folder, optionally as a regular
+  expression. Results are grouped by file with the matching line highlighted; selecting one opens
+  it at the exact line.
+- **Git-aware tree** — modified files are amber, new or untracked files green, and deleted files
+  red; parent folders carry a change dot so working-tree activity is visible before opening Git.
 - **Markdown preview** — for `.md` files, toggle Editor / Split / Preview; the rendered view updates
   live as you type and matches your app theme.
 - **Preview anything** — images, PDF, audio, and video, with independent zoom.
@@ -29,14 +37,19 @@ terminal and the port hub. The broker exposes a small `/fs/*` API:
 | endpoint | purpose |
 |---|---|
 | `GET /fs/home` | the host's home directory |
-| `GET /fs/list` | list a directory (entries carry full absolute paths) |
+| `GET /fs/list` | resolve and list a directory (entries carry full absolute paths) |
 | `GET /fs/find` | recursively list files under a root, for `⌘P` quick-open |
+| `GET /fs/grep` | bounded content search, using ripgrep when available and a Go walker otherwise |
 | `GET /fs/read` | stream a file (`Range` + content-type via `http.ServeContent`) |
 | `GET /fs/stat` | resolve a terminal-clicked path on the right host |
 | `POST /fs/write` | write a file atomically (temp + rename) |
 | `POST /fs/mkdir` | create a directory |
 | `POST /fs/rename` | rename / move |
 | `POST /fs/delete` | delete |
+
+Path resolution is shared by `/fs/list` and `/fs/stat`, so completion and Enter agree on
+relative paths, `~`, `..`, and environment variables even when the broker was launched from a
+different working directory.
 
 The editor is Monaco running in a `WKWebView` on macOS, themed from your active app palette so it
 matches the rest of the window. Files open editable — there is no separate "edit mode" — and `⌘S`
@@ -47,6 +60,11 @@ Android client renders PDFs with the platform `PdfRenderer`.
 <Callout type="info">
 Quick-open's `/fs/find` skips heavy directories (`.git`, `node_modules`, caches, build output) and is
 capped in size and time, so it stays fast even on large repos or a remote cluster home.
+</Callout>
+
+<Callout type="info">
+Content search follows the same bounded-walk discipline. On hosts with `rg` it uses ripgrep; the
+broker has a compatible fallback for machines where ripgrep is not installed.
 </Callout>
 
 <Callout type="info">
