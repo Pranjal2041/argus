@@ -31,7 +31,7 @@ const Lab = {
   showHiddenNotes: false,
   accessOpen: false,
   drafts: Object.create(null),
-  scroll: { main: 0, context: 0, blocks: Object.create(null) },
+  scroll: { main: 0, context: 0, blocks: Object.create(null), resetMain: false },
   action: null,
   renderPending: false,
   syncAt: null,
@@ -328,6 +328,17 @@ function cardForProposal(proposal) {
 
 function detailKey(cardID, run) { return `${cardID}/${run}`; }
 function detailFor(cardID, run) { return Lab.details[detailKey(cardID, run)]; }
+function sameJSONValue(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length
+      && a.every((value, index) => sameJSONValue(value, b[index]));
+  }
+  const aKeys = Object.keys(a), bKeys = Object.keys(b);
+  return aKeys.length === bKeys.length && aKeys.every(key => Object.prototype.hasOwnProperty.call(b, key)
+    && sameJSONValue(a[key], b[key]));
+}
 function runSummaryFingerprint(run) {
   return JSON.stringify([run.status || "", run.started || "", run.latest || "", run.latestAt || "", run.exitCode, run.archived === true]);
 }
@@ -377,7 +388,7 @@ function draft(key, fallback = "") {
 function captureViewState() {
   const main = $("#main");
   const context = $("#context");
-  if (main) Lab.scroll.main = main.scrollTop;
+  if (main && !Lab.scroll.resetMain) Lab.scroll.main = main.scrollTop;
   if (context) Lab.scroll.context = context.scrollTop;
   document.querySelectorAll("[data-scroll-key]").forEach(node => {
     Lab.scroll.blocks[node.dataset.scrollKey] = { top: node.scrollTop, left: node.scrollLeft };
@@ -418,15 +429,16 @@ function restoreFocusState(state) {
 function restoreViewState() {
   const main = $("#main");
   const context = $("#context");
-  if (main) main.scrollTop = Lab.scroll.main || 0;
+  if (main) main.scrollTop = Lab.scroll.resetMain ? 0 : Lab.scroll.main || 0;
   if (context) context.scrollTop = Lab.scroll.context || 0;
   document.querySelectorAll("[data-scroll-key]").forEach(node => {
     const pos = Lab.scroll.blocks[node.dataset.scrollKey];
     if (pos) { node.scrollTop = pos.top; node.scrollLeft = pos.left; }
   });
+  Lab.scroll.resetMain = false;
 }
 
-function resetMainScroll() { Lab.scroll.main = 0; }
+function resetMainScroll() { Lab.scroll.main = 0; Lab.scroll.resetMain = true; }
 
 function savedLocation() {
   try { return JSON.parse(localStorage.getItem("argus.lab.location.v2") || "null"); }
@@ -470,7 +482,11 @@ function render() {
   document.body.classList.toggle("context-open", Lab.drawerOpen);
   document.body.classList.toggle("action-busy", Boolean(Lab.action));
   persistLocation();
-  requestAnimationFrame(() => { restoreViewState(); restoreFocusState(focus); });
+  // Replacing innerHTML resets every nested code/artifact scroller to zero.
+  // Restore in the same task so a live broker refresh can never paint that
+  // transient top position (or race with a user's next wheel gesture).
+  restoreViewState();
+  restoreFocusState(focus);
 }
 
 function renderMasthead() {
@@ -1589,7 +1605,12 @@ window.UTLab = {
     else { $("#masthead").innerHTML = renderMasthead(); }
   },
   setRunDetail(card, run, detail) {
-    Lab.details[detailKey(card, run)] = detail || {};
+    const key = detailKey(card, run);
+    const next = detail || {};
+    // Running and approval records are polled regularly. Do not tear down the
+    // reading surface when the broker returned the exact detail already shown.
+    if (Object.prototype.hasOwnProperty.call(Lab.details, key) && sameJSONValue(Lab.details[key], next)) return;
+    Lab.details[key] = next;
     if (Lab.selection && Lab.selection.card === card && (Lab.selection.run === run || Lab.selection.a === run || Lab.selection.b === run)) render();
     if (Lab.area === "inbox") render();
   },
