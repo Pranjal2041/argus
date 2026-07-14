@@ -197,6 +197,7 @@ export default function HomePage() {
               <li><Check size={16} /> Approve the captured proposal, not an agent&apos;s recollection of it.</li>
               <li><Check size={16} /> Compare runs and inspect the recorded code, parameters, data integrity, environment, artifacts, and rich results.</li>
               <li><Check size={16} /> Publish human guidance by network, machine, project, or isolated experiment set.</li>
+              <li><Check size={16} /> Turn on Unattended Mode to pre-authorize Lab gates while you are away, with every decision audited.</li>
               <li><Check size={16} /> The full approval and research hub is native on macOS and Android.</li>
             </ul>
           </div>
@@ -390,7 +391,7 @@ export default function HomePage() {
             <p>The Command Center, live terminals, Files, ports, and full Lab hub — on your phone, over the same tailnet. Jump into a stuck session or decide a gated experiment from anywhere.</p>
             <ul>
               <li><Check size={16} /> The same peer-to-peer reach — no servers, just your tailnet.</li>
-              <li><Check size={16} /> Lab approvals, evidence, comparison, guidance, curation, and deep-linked notifications.</li>
+              <li><Check size={16} /> Lab approvals, evidence, comparison, guidance, curation, Unattended Mode, and deep-linked notifications.</li>
               <li><Check size={16} /> Workflows, todos, notes, and sent journal messages synced with your Mac.</li>
               <li><Check size={16} /> Dead cluster nodes age out automatically instead of filling the machine list.</li>
               <li><Check size={16} /> Foreground forwarding keeps tunnels alive in your pocket.</li>

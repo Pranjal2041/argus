@@ -247,6 +247,31 @@ func main() {
 			_, _ = w.Write([]byte("{}"))
 		}
 	})
+	// /automation/unattended is the one durable cross-device switch for work
+	// that may proceed without the user present. The first capability is narrow:
+	// automatically approve Lab access requests and recorded run proposals.
+	mux.HandleFunc("/automation/unattended", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		state := broker.UnattendedMode()
+		switch r.Method {
+		case http.MethodGet:
+		case http.MethodPost:
+			raw := strings.ToLower(r.URL.Query().Get("enabled"))
+			if raw != "1" && raw != "0" && raw != "true" && raw != "false" {
+				http.Error(w, "enabled must be true or false", http.StatusBadRequest)
+				return
+			}
+			state = broker.SetUnattendedMode(raw == "1" || raw == "true")
+			if state.Enabled {
+				go labUnattendedSweep() // resolve anything already waiting immediately
+			}
+		default:
+			http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(state)
+	})
 	// /recent — a session's recent rendered scrollback as plain text, for the
 	// macOS command center's status updater (claude -p reads it). ?session=NAME
 	// &lines=N (default 400). Forks capture-pane per call, so clients must poll
@@ -995,6 +1020,11 @@ func main() {
 	// copy of every peer's lab store, so records outlive cluster jobs.
 	if labMirrorEnabled() {
 		go labMirrorLoop(ctx)
+	}
+	// Automation is a Mac-hub responsibility, but it is independent of whether
+	// the optional offline mirror was disabled with UT_LAB_MIRROR=0.
+	if runtime.GOOS == "darwin" {
+		go labUnattendedLoop(ctx)
 	}
 
 	srv := &http.Server{Handler: mux}

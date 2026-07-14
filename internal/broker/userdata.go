@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // User-global data (Workflows, Todo Maps) is synced through ONE designated host (the
@@ -71,6 +72,58 @@ func SetUserData(key string, body []byte) []byte {
 	}
 	_ = os.WriteFile(p, body, 0o644)
 	return body
+}
+
+// UnattendedModeState is the broker-owned automation switch shared by every
+// Argus client. The Mac broker is the sync host, so the mode keeps operating
+// when the Lab pane (or the entire native app) is closed.
+type UnattendedModeState struct {
+	Enabled   bool  `json:"enabled"`
+	UpdatedAt int64 `json:"updatedAt"`
+}
+
+const unattendedModeKey = "unattended-mode"
+
+func decodeUnattendedMode(body []byte) UnattendedModeState {
+	var envelope struct {
+		UpdatedAt int64           `json:"updatedAt"`
+		Data      json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return UnattendedModeState{}
+	}
+	state := UnattendedModeState{UpdatedAt: envelope.UpdatedAt}
+	var data struct {
+		Enabled bool `json:"enabled"`
+	}
+	if json.Unmarshal(envelope.Data, &data) == nil {
+		state.Enabled = data.Enabled
+		return state
+	}
+	// Accept the early scalar shape too, so a development build cannot strand
+	// an enabled switch when upgrading to the named-data form.
+	_ = json.Unmarshal(envelope.Data, &state.Enabled)
+	return state
+}
+
+// UnattendedMode returns the durable switch; absent or malformed state is off.
+func UnattendedMode() UnattendedModeState {
+	return decodeUnattendedMode(UserData(unattendedModeKey))
+}
+
+// SetUnattendedMode updates the shared switch using the same last-write-wins
+// envelope as the other cross-device user data.
+func SetUnattendedMode(enabled bool) UnattendedModeState {
+	updatedAt := time.Now().UnixMilli()
+	body, _ := json.Marshal(struct {
+		UpdatedAt int64 `json:"updatedAt"`
+		Data      struct {
+			Enabled bool `json:"enabled"`
+		} `json:"data"`
+	}{UpdatedAt: updatedAt, Data: struct {
+		Enabled bool `json:"enabled"`
+	}{Enabled: enabled}})
+	return decodeUnattendedMode(SetUserData(unattendedModeKey, body))
 }
 
 // ---- journal inbox --------------------------------------------------------

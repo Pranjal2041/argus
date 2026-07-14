@@ -699,6 +699,27 @@ struct CommandCenterView: View {
                     .font(cf(11)).foregroundStyle(Theme.textTertiary)
                     .help("Cumulative claude -p spend (status updates) since first run")
             }
+            Button { lab.setUnattendedMode(!lab.unattendedMode) } label: {
+                HStack(spacing: 5) {
+                    if lab.unattendedModeUpdating {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: lab.unattendedMode ? "moon.fill" : "moon")
+                    }
+                    Text(lab.unattendedMode ? "UNATTENDED" : "AUTO LAB")
+                }
+                .font(cf(10, .semibold))
+                .foregroundStyle(lab.unattendedMode ? Theme.waiting : Theme.textTertiary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(lab.unattendedMode ? Theme.waiting.opacity(0.12) : Theme.surface))
+                .overlay(Capsule().stroke(lab.unattendedMode ? Theme.waiting.opacity(0.7) : Theme.border, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(lab.unattendedModeUpdating)
+            .help(lab.unattendedModeError ?? (lab.unattendedMode
+                ? "Unattended Mode is on. Lab requests are auto-approved; click to turn it off."
+                : "Turn on Unattended Mode to auto-approve Lab requests while you are away."))
         }
     }
 

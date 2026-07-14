@@ -126,6 +126,16 @@ a { color: var(--link); }
   font: 700 .66rem/1 var(--mono);
 }
 .mast-spacer { flex: 1; min-width: 12px; }
+.unattended-control {
+  height: 29px; margin-right: 10px; padding: 0 9px; flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--canvas-deep); color: var(--text-quiet);
+  cursor: pointer; font: 700 .58rem/1 var(--condensed); letter-spacing: .1em;
+}
+.unattended-control:hover { color: var(--text); border-color: var(--control-hover-border); background: var(--surface); }
+.unattended-control.active { color: var(--decision); border-color: color-mix(in srgb, var(--decision) 58%, var(--line)); background: var(--decision-soft); }
+.unattended-control:disabled { opacity: .62; cursor: default; }
+.unattended-control .icon { width: 14px; height: 14px; }
 .type-controls {
   display: inline-flex; align-items: center; flex: 0 0 auto; margin-right: 10px;
   border: 1px solid var(--line); border-radius: 5px; background: var(--canvas-deep); overflow: hidden;
@@ -602,6 +612,8 @@ body.ultra-compact .lab-name { display: none; }
 body.ultra-compact .nav-item { padding-inline: 6px; letter-spacing: 0; }
 body.ultra-compact .nav-badge { margin-left: 3px; }
 body.ultra-compact .masthead .icon-button { display: none; }
+body.ultra-compact .unattended-control { width: 29px; margin-right: 6px; padding: 0; justify-content: center; }
+body.ultra-compact .unattended-control span { display: none; }
 body.ultra-compact .type-controls .type-readout { display: none; }
 body.ultra-compact .main-content { padding-top: 24px; }
 body.ultra-compact .display-title { font-size: 1.75rem; }
@@ -647,6 +659,8 @@ body.ultra-compact .evidence-spine { grid-template-columns: repeat(2,minmax(0,1f
   .nav-item { padding-inline: 6px; letter-spacing: 0; }
   .nav-badge { margin-left: 3px; }
   .masthead .icon-button { display: none; }
+  .unattended-control { width: 29px; margin-right: 6px; padding: 0; justify-content: center; }
+  .unattended-control span { display: none; }
   .type-controls .type-readout { display: none; }
   .main-content { padding-top: 24px; }
   .display-title { font-size: 1.75rem; }

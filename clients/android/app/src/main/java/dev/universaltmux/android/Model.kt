@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -195,6 +196,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var labLoaded by mutableStateOf(false)
         private set
     var labError by mutableStateOf<String?>(null)
+        private set
+    var unattendedMode by mutableStateOf(prefs.getBoolean("ut.unattendedMode", false))
+        private set
+    var unattendedModeUpdating by mutableStateOf(false)
+        private set
+    var unattendedModeError by mutableStateOf<String?>(null)
         private set
     var requestedScreen by mutableStateOf<Int?>(null)
         private set
@@ -409,6 +416,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val mirrorBroker = current.firstOrNull { it.isMac }
                 val mirrored = if (mirrorBroker == null) emptyList() else
                     withContext(Dispatchers.IO) { LabNet.mirror(mirrorBroker) }
+                val remoteUnattended = if (mirrorBroker == null) null else
+                    withContext(Dispatchers.IO) { LabNet.unattendedMode(mirrorBroker) }
                 val answered = snapshots.any {
                     it.notes != null || it.briefs.isNotEmpty() || it.keys.isNotEmpty() || it.proposals.isNotEmpty()
                 }
@@ -418,6 +427,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val aggregate = LabAggregator.aggregate(snapshots, mirrored, mirrorBroker)
                 if (generation != labGeneration) return@launch
+                if (!unattendedModeUpdating && remoteUnattended != null) {
+                    unattendedMode = remoteUnattended
+                    unattendedModeError = null
+                    prefs.edit().putBoolean("ut.unattendedMode", remoteUnattended).apply()
+                }
                 val previousSummaries = labSets.flatMap { card ->
                     card.brief.runs.map { run -> labDetailKey(card, run.id) to labSummaryFingerprint(run) }
                 }.toMap()
@@ -510,6 +524,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumeScreenRequest() { requestedScreen = null }
     fun clearLabError() { labError = null }
+
+    fun changeUnattendedMode(enabled: Boolean) {
+        if (unattendedModeUpdating) return
+        val host = syncHost()
+        if (host == null) {
+            unattendedModeError = "The Mac broker is not available."
+            return
+        }
+        val previous = unattendedMode
+        unattendedMode = enabled
+        unattendedModeUpdating = true
+        unattendedModeError = null
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { LabNet.setUnattendedMode(host, enabled) }
+            unattendedModeUpdating = false
+            if (ok) {
+                prefs.edit().putBoolean("ut.unattendedMode", enabled).apply()
+                delay(750)
+                refreshLab()
+            } else {
+                unattendedMode = previous
+                unattendedModeError = "The Mac broker could not change Unattended Mode."
+            }
+        }
+    }
 
     fun labDetailKey(card: LabSetCard, run: String) = "${card.id}/$run"
 

@@ -10,6 +10,15 @@ import java.net.URLEncoder
 
 /** Synchronous Lab HTTP client. AppViewModel calls it only from Dispatchers.IO. */
 object LabNet {
+    fun unattendedMode(broker: Broker): Boolean? {
+        val response = getObject("${broker.httpBase}/automation/unattended") ?: return null
+        return response.optBoolean("enabled")
+    }
+
+    fun setUnattendedMode(broker: Broker, enabled: Boolean): Boolean = post(
+        broker, "/automation/unattended", listOf("enabled" to enabled.toString()),
+    )
+
     fun snapshot(broker: Broker): LabBrokerSnapshot {
         val notesResponse = getObject("${broker.httpBase}/lab/notes")
         val notes = notesResponse?.optJSONArray("notes")?.objects()?.map(::parseHubNote)

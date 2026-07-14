@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.EditNote
@@ -179,6 +180,11 @@ fun App(vm: AppViewModel) {
                                 }
                                 IconButton(onClick = { renderText = ActiveTerm.rt?.renderableText() }) {
                                     Icon(Icons.Filled.AutoAwesome, "Render", tint = cText)
+                                }
+                            }
+                            if (vm.unattendedMode) {
+                                IconButton(onClick = { vm.changeUnattendedMode(false) }, enabled = !vm.unattendedModeUpdating) {
+                                    Icon(Icons.Filled.Bedtime, "Unattended Mode is on", tint = waiting)
                                 }
                             }
                             IconButton(onClick = { screen = if (screen == 3) 0 else 3 }) {
@@ -376,6 +382,23 @@ private fun Sidebar(
             IconButton(onClick = onAbout) { Icon(Icons.Filled.Info, "About", tint = cFaint) }
             IconButton(onClick = onAuthKey) { Icon(Icons.Filled.VpnKey, "Tailnet key", tint = cDim) }
             IconButton(onClick = onAddBroker) { Icon(Icons.Filled.Add, "Add broker", tint = accent) }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Bedtime, null, tint = if (vm.unattendedMode) waiting else cFaint)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Unattended mode", color = cText, fontSize = 14.sp)
+                Text("Auto-approve Lab gates while away", color = cFaint, fontSize = 11.sp)
+                vm.unattendedModeError?.let { Text(it, color = bad, fontSize = 11.sp) }
+            }
+            if (vm.unattendedModeUpdating) {
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = accent)
+            } else {
+                Switch(checked = vm.unattendedMode, onCheckedChange = vm::changeUnattendedMode)
+            }
         }
         Divider(color = cBorder)
         var menuFor by remember { mutableStateOf<Pair<Broker, SessionInfo>?>(null) }

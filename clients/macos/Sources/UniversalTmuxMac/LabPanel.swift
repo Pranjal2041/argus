@@ -256,8 +256,11 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                  return d
              }]
         }
-        let model: [String: Any] = ["sets": sets, "keys": access, "pendingKeys": keys,
-                                    "pendingRuns": pruns, "hubNotes": hub]
+        var model: [String: Any] = ["sets": sets, "keys": access, "pendingKeys": keys,
+                                    "pendingRuns": pruns, "hubNotes": hub,
+                                    "unattendedMode": lab.unattendedMode,
+                                    "unattendedModeUpdating": lab.unattendedModeUpdating]
+        if let error = lab.unattendedModeError { model["unattendedModeError"] = error }
         if let d = try? JSONSerialization.data(withJSONObject: model), let s = String(data: d, encoding: .utf8) {
             eval("window.UTLab.setData(\(s))")
         }
@@ -371,6 +374,9 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         switch type {
         case "refresh":
             lab.refresh(state)
+        case "setUnattendedMode":
+            lab.setUnattendedMode(d["enabled"] as? Bool ?? false)
+            DispatchQueue.main.async { self.pushData() }
         case "decideKey":
             if let k = lab.pendingKeys.first(where: { $0.id == str("id") }) {
                 let approve = d["approve"] as? Bool ?? false
@@ -539,6 +545,9 @@ struct LabCenterView: View {
             .onReceive(lab.$pendingKeys) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$pendingRuns) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
             .onReceive(lab.$hubNotes) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
+            .onReceive(lab.$unattendedMode) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
+            .onReceive(lab.$unattendedModeUpdating) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
+            .onReceive(lab.$unattendedModeError) { _ in DispatchQueue.main.async { LabWebPanel.shared.pushData() } }
     }
 }
 

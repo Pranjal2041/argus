@@ -54,6 +54,8 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   artifacts, and exit status; approval policies bind the exact proposal before expensive work
   starts. The macOS and Android hubs provide approvals, comparison, scoped human guidance,
   curation, archive/policy/key controls, shared-cluster deduplication, and offline mirrors.
+  **Unattended Mode** can temporarily pre-authorize Lab access and run requests while you are away;
+  every automatic approval is labeled in the append-only audit trail.
 - **Workflows, Todo Maps & Notes** — three planning surfaces that **sync across your devices** (via
   your Mac's broker, no central server): saved **workflows** that spin up an agent in the right
   machine + folder with one click; per-session **todo** checklists that outlive the session; and a
@@ -152,7 +154,9 @@ in the app; no system Tailscale client or manual hostnames required.
 
 The native Lab screen includes approvals, research records and artifacts, run comparison,
 scoped guidance, archive/policy/key controls, Babel shared-store deduplication, and Lab items
-in the Command Center. Approval notifications deep-link to the exact evidence dossier.
+in the Command Center. Approval notifications deep-link to the exact evidence dossier. The phone
+can also turn Unattended Mode on or off through the Mac broker, including directly from Command
+Center.
 
 ### 4 · Windows
 
