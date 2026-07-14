@@ -80,6 +80,10 @@ The Mac broker mirrors remote sets and events idempotently by event ID. That mir
 research remains readable when its source node disappears. Lab approval and curation actions still
 route to an online owner; mirrored records are read-only.
 
+The Mac broker also owns the durable [Unattended Mode](/docs/lab#unattended-mode) switch. While it
+is enabled, the broker—not the UI—deduplicates physical stores and resolves pending Lab gates with
+an explicit audit note, so the behavior continues if the native apps are closed.
+
 ## User-data sync: your Mac is the sync host
 
 [Workflows](/docs/workflows), [Todo Maps](/docs/todo-maps), and the [Notes Hub](/docs/notes) are

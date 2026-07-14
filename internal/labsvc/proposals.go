@@ -3,6 +3,8 @@ package labsvc
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -119,10 +121,29 @@ func (s *Store) RunDecision(set, run string) (decided, approved bool, note strin
 
 // DecideRun records the human's decision on a proposal.
 func (s *Store) DecideRun(set, run string, approve bool, note string) error {
-	if _, err := os.Stat(s.RunDir(set, run)); err != nil {
+	runDir := s.RunDir(set, run)
+	if _, err := os.Stat(runDir); err != nil {
 		return err
 	}
-	_, err := s.Append(s.RunDir(set, run), Event{Author: "human", Kind: "decision",
+	events, err := s.Events(runDir, false)
+	if err != nil {
+		return err
+	}
+	proposed := false
+	for _, event := range events {
+		switch event.Kind {
+		case "proposal":
+			proposed = true
+		case "decision":
+			return errors.New("run proposal already has a decision")
+		case "run-start":
+			return errors.New("run has already started")
+		}
+	}
+	if !proposed {
+		return fmt.Errorf("run %s has no proposal", run)
+	}
+	_, err = s.Append(runDir, Event{Author: "human", Kind: "decision",
 		Text: note, Data: map[string]any{"approve": approve}})
 	return err
 }

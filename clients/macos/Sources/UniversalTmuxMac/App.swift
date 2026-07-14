@@ -76,6 +76,11 @@ struct UniversalTmuxApp: App {
                 Button("Theme…") { state.showThemePicker = true }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
+                Toggle("Unattended Mode — Auto-Approve Lab Requests", isOn: Binding(
+                    get: { lab.unattendedMode },
+                    set: { lab.setUnattendedMode($0) }
+                ))
+                .disabled(lab.unattendedModeUpdating)
                 Toggle("Keep This Mac Awake While Locked", isOn: $state.keepAwake)
                 Divider()
                 Button("Refresh Sessions") { state.refreshAll() }
@@ -161,7 +166,7 @@ struct UniversalTmuxApp: App {
 
 
         Settings {
-            SettingsView(terminals: terminals, state: state)
+            SettingsView(terminals: terminals, state: state, lab: lab)
         }
     }
 }
@@ -170,6 +175,7 @@ struct UniversalTmuxApp: App {
 struct SettingsView: View {
     @ObservedObject var terminals: TerminalController
     @ObservedObject var state: AppState
+    @ObservedObject var lab: LabModel
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
 
     var body: some View {
@@ -223,6 +229,25 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Unattended mode", isOn: Binding(
+                    get: { lab.unattendedMode },
+                    set: { lab.setUnattendedMode($0) }
+                ))
+                .disabled(lab.unattendedModeUpdating)
+                if lab.unattendedModeUpdating {
+                    ProgressView().controlSize(.small)
+                }
+                if let error = lab.unattendedModeError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+            } header: {
+                Text("Automation")
+            } footer: {
+                Text("Keeps Lab work moving while you're away by automatically approving access-key requests and recorded run proposals. Every automatic decision is labeled in Lab's audit trail. This does not answer terminal questions yet.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle("Record activity journal", isOn: $state.journalEnabled)
                 Button("Open Journal Folder") {
                     NSWorkspace.shared.open(ActivityJournal.dirURL)
@@ -244,7 +269,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 480)
+        .frame(width: 440, height: 590)
         .tint(Theme.accent)
     }
 }
@@ -738,6 +763,18 @@ struct RootView: View {
                 .transition(.scale.combined(with: .opacity))
             }
             Spacer()
+            if lab.unattendedMode {
+                Button { lab.setUnattendedMode(false) } label: {
+                    Image(systemName: "moon.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.waiting)
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Unattended Mode is on — Lab requests are auto-approved. Click to turn off.")
+                .transition(.scale.combined(with: .opacity))
+            }
             // Only takes a slot in the bar when it's ON — otherwise it lives in ⌘P /
             // the View menu / Settings. When on, it's a glanceable indicator + quick off.
             if state.keepAwake {
@@ -1436,6 +1473,7 @@ private struct CommandPalette: View {
     let machineName: (String) -> String
     @EnvironmentObject var state: AppState
     @EnvironmentObject var terminals: TerminalController
+    @EnvironmentObject var lab: LabModel
     @Environment(\.openWindow) private var openWindow
     @State private var query = ""
     @State private var sel = 0
@@ -1481,6 +1519,9 @@ private struct CommandPalette: View {
             (state.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer",
              state.keepAwake ? "Stop Keeping This Mac Awake" : "Keep This Mac Awake & Reachable While Locked",
              "", { state.keepAwake.toggle() }),
+            (lab.unattendedMode ? "moon.fill" : "moon",
+             lab.unattendedMode ? "Turn Off Unattended Mode" : "Turn On Unattended Mode",
+             "Auto-approve Lab gates", { lab.setUnattendedMode(!lab.unattendedMode) }),
             // Window opens route through state: SwiftUI's openWindow action is
             // not available inside the AppKit palette panel's hosting view.
             ("folder", "Open Files", "", { state.openWindowRequest = "files" }),

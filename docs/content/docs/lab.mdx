@@ -94,6 +94,22 @@ Launch recomputes the code and parameter hashes. If they differ from the approve
 refuses to run it and asks for a new proposal. A rejection can carry a human explanation which the
 agent receives in its brief.
 
+### Unattended Mode
+
+Turn on **Unattended Mode** when you want Lab work to continue while you are away. The Mac broker
+then approves new Lab access-key requests and recorded run proposals automatically, even when the
+Argus app and Lab pane are closed. You can control the same broker-owned switch from Lab, Settings,
+or Command Center on macOS, and from the drawer or Command Center on Android.
+
+This is explicit user pre-authorization, not a weaker run path. Every decision is recorded with the
+note `Auto-approved because Unattended Mode was on.`, and approved proposals still undergo the same
+code and parameter bind-hash check before launch. Turning the mode off stops future automatic
+decisions; approvals already committed remain part of the append-only record. Keep the Mac awake
+and reachable if it needs to approve requests from remote machines.
+
+The current scope is intentionally limited to Lab gates. Unattended Mode does not yet answer
+free-form questions in terminal agents.
+
 ## The Lab hub
 
 Open Lab with `⇧⌘L` on macOS or the Lab destination on Android.
@@ -119,7 +135,8 @@ approval also accepts the initial policy and the optional human decision note su
 
 Lab attention is not confined to the hub. Pending access and experiment decisions appear in
 **Command Center** beside agent sessions, and system notifications deep-link to the exact dossier.
-This works on macOS and Android.
+This works on macOS and Android. Command Center also exposes the Unattended Mode switch and shows
+its active state, so the automation is visible from the surface you monitor.
 
 ## Shared clusters and offline records
 

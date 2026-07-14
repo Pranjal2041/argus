@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.outlined.Circle
@@ -125,8 +126,32 @@ fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
                 Spacer(Modifier.width(10.dp))
                 Text(
                     if (needsCount == 0) "all ${tiles.size} quiet" else "$needsCount need you · ${tiles.size - sessionNeeds} other",
-                    color = if (needsCount == 0) ccFaint else cWaiting, fontSize = 12.sp,
+                    color = if (needsCount == 0) ccFaint else cWaiting, fontSize = 12.sp, maxLines = 1,
+                    modifier = Modifier.weight(1f),
                 )
+                val modeShape = RoundedCornerShape(50)
+                Row(
+                    Modifier
+                        .background(if (vm.unattendedMode) cWaiting.copy(alpha = 0.14f) else ccPanel, modeShape)
+                        .border(1.dp, if (vm.unattendedMode) cWaiting.copy(alpha = 0.7f) else ccFaint.copy(alpha = 0.45f), modeShape)
+                        .clickable(enabled = !vm.unattendedModeUpdating) {
+                            vm.changeUnattendedMode(!vm.unattendedMode)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.Bedtime, "Toggle Unattended Mode",
+                        tint = if (vm.unattendedMode) cWaiting else ccFaint,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        if (vm.unattendedModeUpdating) "…" else if (vm.unattendedMode) "UNATTENDED" else "AUTO LAB",
+                        color = if (vm.unattendedMode) cWaiting else ccFaint,
+                        fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
         }
         if (tiles.isEmpty() && labItems.isEmpty()) {

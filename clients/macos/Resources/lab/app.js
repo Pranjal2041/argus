@@ -1,7 +1,7 @@
 "use strict";
 
 const Lab = {
-  model: { sets: [], keys: [], pendingKeys: [], pendingRuns: [], hubNotes: [] },
+  model: { sets: [], keys: [], pendingKeys: [], pendingRuns: [], hubNotes: [], unattendedMode: false },
   area: "inbox",
   selection: null,
   details: Object.create(null),
@@ -59,6 +59,7 @@ function icon(name) {
     compare: '<path d="M8 4 4 8l4 4M4 8h13M16 20l4-4-4-4M20 16H7"/>',
     note: '<path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/>',
     chevron: '<path d="m9 18 6-6-6-6"/>',
+    moon: '<path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>',
   };
   return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || ""}</svg>`;
 }
@@ -491,6 +492,8 @@ function render() {
 
 function renderMasthead() {
   const count = pendingItems().length;
+  const unattended = Boolean(Lab.model.unattendedMode);
+  const unattendedBusy = Boolean(Lab.model.unattendedModeUpdating);
   const tabs = [
     ["inbox", "Inbox"], ["research", "Research"], ["access", "Access"], ["guidance", "Guidance"],
   ].map(([key, label]) => `<button class="nav-item ${Lab.area === key ? "active" : ""}" type="button" data-nav="${key}">
@@ -504,6 +507,11 @@ function renderMasthead() {
     </div>
     <nav class="primary-nav" aria-label="Lab destinations">${tabs}</nav>
     <span class="mast-spacer"></span>
+    <button class="unattended-control ${unattended ? "active" : ""}" type="button" data-action="unattended"
+      aria-pressed="${unattended}" ${unattendedBusy ? "disabled" : ""}
+      title="${esc(Lab.model.unattendedModeError || (unattended ? "Unattended Mode is on: Lab access and run proposals are approved automatically." : "Turn on Unattended Mode to auto-approve Lab gates while you are away."))}">
+      ${icon("moon")}<span>${unattendedBusy ? "UPDATING" : "UNATTENDED"}</span>
+    </button>
     <div class="type-controls" role="group" aria-label="Lab text size">
       <button type="button" data-action="font-down" aria-label="Decrease Lab text size" title="Decrease text size (⌘−)">A−</button>
       <button class="type-readout" type="button" data-action="font-reset" aria-label="Reset Lab text size" title="Reset adaptive text size">${Math.round(Lab.uiScale * 100)}%</button>
@@ -1421,6 +1429,12 @@ document.addEventListener("click", event => {
   if (kind === "font-down") { setManualScale(Lab.manualScale - .1); return; }
   if (kind === "font-up") { setManualScale(Lab.manualScale + .1); return; }
   if (kind === "font-reset") { setManualScale(1); return; }
+  if (kind === "unattended") {
+    const enabled = !Boolean(Lab.model.unattendedMode);
+    post({ type: "setUnattendedMode", enabled });
+    toast(enabled ? "Turning on Unattended Mode…" : "Turning off Unattended Mode…");
+    return;
+  }
   if (kind === "review-key") { selectPending("key", action.dataset.id); return; }
   if (kind === "open-key-set") { selectSet(action.dataset.card); return; }
   if (kind === "open-set-guidance") { Lab.area = "guidance"; Lab.selection = null; Lab.guidanceScopeKey = `set:${action.dataset.card}`; Lab.drawerOpen = false; resetMainScroll(); render(); return; }

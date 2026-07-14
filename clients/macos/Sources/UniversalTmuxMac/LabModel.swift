@@ -242,6 +242,9 @@ final class LabModel: ObservableObject {
     @Published var activeKeyBySet: [String: String] = [:]
     @Published var refreshing = false
     @Published var loadedOnce = false
+    @Published private(set) var unattendedMode = false
+    @Published private(set) var unattendedModeUpdating = false
+    @Published private(set) var unattendedModeError: String?
 
     /// Newest first, matching the Lab decision queue. Everything in this list
     /// is blocked on a human action and therefore belongs in Command Center's
@@ -305,6 +308,8 @@ final class LabModel: ObservableObject {
         let gen = generation
         refreshing = true
         Task {
+            async let unattendedRequest = Self.fetchUnattendedMode(
+                machines.first(where: { $0.isLocal }))
             var snapshots: [MachineSnapshot] = []
             await withTaskGroup(of: MachineSnapshot.self) { group in
                 for m in machines {
@@ -323,6 +328,7 @@ final class LabModel: ObservableObject {
             if let local = machines.first(where: { $0.isLocal }) {
                 mirrored = await Self.fetchMirror(local)
             }
+            let unattended = await unattendedRequest
             let aggregate = Self.aggregate(snapshots, mirrored: mirrored,
                                            mirrorHTTPBase: machines.first(where: { $0.isLocal })?.httpBase ?? "")
             guard gen == generation else { return }
@@ -334,6 +340,10 @@ final class LabModel: ObservableObject {
             activeKeyBySet = aggregate.activeKeyBySet
             refreshing = false
             loadedOnce = true
+            if !unattendedModeUpdating, let unattended {
+                unattendedMode = unattended.enabled
+                unattendedModeError = nil
+            }
             AttentionNotifier.shared.updateLabAttention(total: attentionItems.count)
             notifyNewPendings()
         }
@@ -564,6 +574,36 @@ final class LabModel: ObservableObject {
 
     // MARK: decisions and curation (the human channel)
 
+    /// Toggle the broker-owned automation switch. The optimistic value keeps
+    /// every surface in sync immediately; a failed POST rolls it back rather
+    /// than pretending unattended approvals are active.
+    func setUnattendedMode(_ enabled: Bool) {
+        guard !unattendedModeUpdating else { return }
+        guard let state = boundState,
+              let local = state.machines.first(where: { $0.isLocal }) else {
+            unattendedModeError = "This Mac's broker is not available."
+            return
+        }
+        let previous = unattendedMode
+        unattendedMode = enabled
+        unattendedModeUpdating = true
+        unattendedModeError = nil
+        Task {
+            let ok = await postNow(local.httpBase + "/automation/unattended",
+                                   [URLQueryItem(name: "enabled", value: enabled ? "true" : "false")])
+            unattendedModeUpdating = false
+            if ok {
+                // The broker starts an immediate sweep. Refresh shortly after
+                // so auto-resolved Inbox rows disappear without waiting 20s.
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                refresh(state)
+            } else {
+                unattendedMode = previous
+                unattendedModeError = "This Mac's broker could not change Unattended Mode."
+            }
+        }
+    }
+
     func decideKeyNow(_ k: PendingKey, approve: Bool, project: String,
                       policy: String, note: String) async -> Bool {
         var q = [URLQueryItem(name: "key", value: String(k.key.key.prefix(8))),
@@ -753,6 +793,10 @@ final class LabModel: ObservableObject {
     private struct MirrorResp: Decodable { var mirror: [LabMirrored]? }
     private struct EventsResp: Decodable { var events: [LabEventItem]? }
     private struct FilesResp: Decodable { var files: [LabRunFileInfo]? }
+    private struct UnattendedModeResp: Decodable {
+        let enabled: Bool
+        var updatedAt: Int64?
+    }
 
     private static func fetchBriefs(_ m: Machine) async -> [LabBrief] {
         guard let resp = await get(m.httpBase + "/lab/sets", as: SetsResp.self), let metas = resp.sets else { return [] }
@@ -772,6 +816,10 @@ final class LabModel: ObservableObject {
     }
     private static func fetchMirror(_ m: Machine) async -> [LabMirrored] {
         (await get(m.httpBase + "/lab/mirror", as: MirrorResp.self))?.mirror ?? []
+    }
+    private static func fetchUnattendedMode(_ m: Machine?) async -> UnattendedModeResp? {
+        guard let m else { return nil }
+        return await get(m.httpBase + "/automation/unattended", as: UnattendedModeResp.self)
     }
     /// nil when the machine's broker is unreachable (pre-lab or offline), so
     /// the Notes view can distinguish "no notes" from "no answer".
