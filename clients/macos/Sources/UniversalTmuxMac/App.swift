@@ -649,9 +649,12 @@ struct RootView: View {
                     over: NSApp.keyWindow ?? NSApp.mainWindow,
                     onDismiss: { if state.showPalette { state.showPalette = false } }
                 ) {
-                    CommandPalette(machineName: machineName)
-                        .environmentObject(state)
-                        .environmentObject(terminals)
+                    // This view is hosted in a detached AppKit panel, so it does not
+                    // inherit RootView's environment. Pass every dependency explicitly:
+                    // adding a new one now becomes a compile-time requirement instead of
+                    // an EnvironmentObject runtime trap when the palette first renders.
+                    CommandPalette(machineName: machineName, state: state,
+                                   terminals: terminals, lab: lab)
                 }
             } else {
                 PaletteWindow.shared.hide()
@@ -1469,12 +1472,11 @@ struct StatusDot: View {
 
 /// Fuzzy cross-node session switcher + action launcher. Type to filter, ↑/↓ to
 /// move, ↩ to run the highlighted item, Esc to dismiss.
-private struct CommandPalette: View {
+struct CommandPalette: View {
     let machineName: (String) -> String
-    @EnvironmentObject var state: AppState
-    @EnvironmentObject var terminals: TerminalController
-    @EnvironmentObject var lab: LabModel
-    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var state: AppState
+    @ObservedObject var terminals: TerminalController
+    @ObservedObject var lab: LabModel
     @State private var query = ""
     @State private var sel = 0
     @FocusState private var focused: Bool
