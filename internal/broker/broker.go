@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -421,6 +420,9 @@ func (m *Manager) SendText(name, text string, enter bool) error {
 // adds it to the cache so it shows up immediately. idleSec is its idle-reap
 // leash in seconds (0 = never).
 func (m *Manager) Spawn(name, dir, cmd string, idleSec int) error {
+	if m.reservesStableIDs() && isStableSessionID(name) {
+		return fmt.Errorf("session name %q is reserved for a stable session handle", name)
+	}
 	if err := m.prov.Spawn(name, dir, cmd, idleSec); err != nil {
 		return err
 	}
@@ -614,8 +616,18 @@ func (m *Manager) sessionRefreshLoop(interval time.Duration) {
 	}
 }
 
-// Ensure pre-creates/attaches a session hub (used to warm a default session).
+// Ensure explicitly creates a missing session, then attaches a hub (used to warm
+// a default session). Provider.Dial is attach-only: keeping creation here preserves
+// the startup behavior without letting a WebSocket attach typo create a session.
 func (m *Manager) Ensure(name string) error {
+	if m.reservesStableIDs() && isStableSessionID(name) {
+		return fmt.Errorf("session name %q is reserved for a stable session handle", name)
+	}
+	if !m.prov.Has(name) {
+		if err := m.prov.Create(name, ""); err != nil && !m.prov.Has(name) {
+			return err
+		}
+	}
 	_, err := m.hub(name)
 	return err
 }
@@ -634,6 +646,12 @@ func (m *Manager) hub(name string) (*sessionHub, error) {
 			return h, nil
 		}
 	}
+	// Defense in depth: attaching is never creation. Every caller currently checks
+	// existence (or Ensure explicitly creates), but keep the invariant at the one
+	// function that actually dials the backend too.
+	if !m.prov.Has(name) {
+		return nil, fmt.Errorf("no such session: %q", name)
+	}
 	tm, err := m.prov.Dial(m.ctx, name)
 	if err != nil {
 		return nil, err
@@ -643,24 +661,46 @@ func (m *Manager) hub(name string) (*sessionHub, error) {
 	return h, nil
 }
 
-// resolveTarget maps a connection target to a session NAME. A target starting
-// with "$" is a stable tmux session id; we ask the provider for the session's
-// current name (which follows renames). Plain names pass through unchanged, as
-// do ids the provider can't resolve (a dead id then fails the Has() guard, so
-// it can't resurrect anything). Backends without id support (ConPTY) simply
-// don't implement SessionForID, so their clients keep using names.
-func (m *Manager) resolveTarget(target string) string {
-	if !strings.HasPrefix(target, "$") {
-		return target
+// isStableSessionID recognizes tmux's reserved stable-handle namespace. Limit it
+// to $ followed by digits so an ordinary session name such as "$scratch" remains
+// legal.
+func isStableSessionID(target string) bool {
+	if len(target) < 2 || target[0] != '$' {
+		return false
 	}
-	if r, ok := m.prov.(interface {
-		SessionForID(string) (string, bool)
-	}); ok {
-		if cur, ok := r.SessionForID(target); ok {
-			return cur
+	for i := 1; i < len(target); i++ {
+		if target[i] < '0' || target[i] > '9' {
+			return false
 		}
 	}
-	return target
+	return true
+}
+
+type sessionIDResolver interface {
+	SessionForID(string) (string, bool)
+}
+
+func (m *Manager) reservesStableIDs() bool {
+	_, ok := m.prov.(sessionIDResolver)
+	return ok
+}
+
+// resolveTarget maps a connection target to a session NAME. A $N target is a
+// stable tmux session id; the provider resolves it to the current name (which
+// follows renames). If a tmux provider cannot resolve the id, resolution FAILS:
+// tmux's target parser also treats $N as an id when asked for an "exact name",
+// so passing a dead/transiently-unresolved id through can make a later attach
+// create a literal "$N" duplicate. Backends without stable ids (ConPTY) retain
+// normal name behavior, including a user-created name that happens to look like $N.
+func (m *Manager) resolveTarget(target string) (string, bool) {
+	if !isStableSessionID(target) {
+		return target, true
+	}
+	if r, ok := m.prov.(sessionIDResolver); ok {
+		cur, ok := r.SessionForID(target)
+		return cur, ok
+	}
+	return target, true
 }
 
 // Serve attaches a client to an EXISTING session. It never creates one: a
@@ -675,7 +715,11 @@ func (m *Manager) resolveTarget(target string) string {
 // We resolve the id back to the session's CURRENT name here, then run the
 // existing name-keyed machinery (so id- and name-connections share one hub).
 func (m *Manager) Serve(ctx context.Context, c *websocket.Conn, name string) error {
-	name = m.resolveTarget(name)
+	resolved, ok := m.resolveTarget(name)
+	if !ok {
+		return fmt.Errorf("no such session handle: %q", name)
+	}
+	name = resolved
 	if !m.prov.Has(name) {
 		return fmt.Errorf("no such session: %q", name)
 	}
@@ -688,6 +732,9 @@ func (m *Manager) Serve(ctx context.Context, c *websocket.Conn, name string) err
 
 // Create makes a new detached session (optionally rooted at startDir).
 func (m *Manager) Create(name, startDir string) error {
+	if m.reservesStableIDs() && isStableSessionID(name) {
+		return fmt.Errorf("session name %q is reserved for a stable session handle", name)
+	}
 	err := m.prov.Create(name, startDir)
 	if err == nil {
 		// Optimistically add to the cache so a client's refresh-after-create sees the
@@ -733,6 +780,9 @@ func (m *Manager) Kill(name string) error {
 // tmux rename-session, so connected WebSocket clients keep streaming without a
 // reconnect — the rename is seamless and the session is never interrupted.
 func (m *Manager) Rename(from, to string) error {
+	if m.reservesStableIDs() && isStableSessionID(to) {
+		return fmt.Errorf("session name %q is reserved for a stable session handle", to)
+	}
 	if err := m.prov.Rename(from, to); err != nil {
 		return err
 	}

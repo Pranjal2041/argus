@@ -34,24 +34,31 @@ func TestResolveTargetFollowsRename(t *testing.T) {
 		t.Fatalf("expected a $N id for alpha, got %q", id)
 	}
 
-	if got := m.resolveTarget(id); got != "alpha" {
-		t.Fatalf("resolveTarget(%q) = %q, want alpha", id, got)
+	if got, ok := m.resolveTarget(id); !ok || got != "alpha" {
+		t.Fatalf("resolveTarget(%q) = (%q, %v), want (alpha, true)", id, got, ok)
 	}
 
 	// Rename, then resolve the SAME id again — it must follow to the new name.
 	if err := prov.Rename("alpha", "beta"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if got := m.resolveTarget(id); got != "beta" {
-		t.Fatalf("after rename resolveTarget(%q) = %q, want beta", id, got)
+	if got, ok := m.resolveTarget(id); !ok || got != "beta" {
+		t.Fatalf("after rename resolveTarget(%q) = (%q, %v), want (beta, true)", id, got, ok)
 	}
 
 	// A plain name passes through unchanged.
-	if got := m.resolveTarget("beta"); got != "beta" {
-		t.Fatalf("name passthrough = %q, want beta", got)
+	if got, ok := m.resolveTarget("beta"); !ok || got != "beta" {
+		t.Fatalf("name passthrough = (%q, %v), want (beta, true)", got, ok)
 	}
-	// A dead id is left as-is so the downstream Has() guard rejects it.
-	if got := m.resolveTarget("$99999"); got != "$99999" {
-		t.Fatalf("dead id passthrough = %q, want $99999", got)
+	// A dead id must fail closed. Passing it through is unsafe because tmux's
+	// supposedly-exact name target still interprets $N as an id.
+	if got, ok := m.resolveTarget("$99999"); ok || got != "" {
+		t.Fatalf("dead id resolution = (%q, %v), want (empty, false)", got, ok)
+	}
+
+	// The stable-id namespace is reserved on tmux backends, so no explicit API
+	// call can create the same phantom form either.
+	if err := m.Create(id, ""); err == nil {
+		t.Fatalf("Create(%q) succeeded; stable handle names must be rejected", id)
 	}
 }
