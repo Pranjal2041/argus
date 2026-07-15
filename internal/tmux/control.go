@@ -43,7 +43,7 @@ type Provider struct{ socket string }
 // NewProvider returns a tmux-backed provider for the given server socket.
 func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
-func (p *Provider) List() []SessionInfo                  { return ListSessions(p.socket) }
+func (p *Provider) List() []SessionInfo { return ListSessions(p.socket) }
 
 // Capture returns a session's recent scrollback as plain rendered text (no
 // escapes) — `capture-pane -p -S -<lines>`. Feeds the macOS command center's
@@ -101,26 +101,32 @@ func dropDimAndAnsi(b []byte) string {
 	}
 	return string(out)
 }
-func (p *Provider) Create(name, dir string) error       { return CreateSession(p.socket, name, dir) }
+func (p *Provider) Create(name, dir string) error { return CreateSession(p.socket, name, dir) }
 func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
 	return SpawnSession(p.socket, name, dir, cmd, idleSec)
 }
-func (p *Provider) ReapAgents() []string                { return ReapIdleAgentSessions(p.socket) }
-func (p *Provider) Kill(name string) error              { return KillSession(p.socket, name) }
-func (p *Provider) Rename(from, to string) error        { return RenameSession(p.socket, from, to) }
-func (p *Provider) Has(name string) bool                { return HasSession(p.socket, name) }
-func (p *Provider) SetHistoryLimit(lines int)           { SetHistoryLimit(p.socket, lines) }
+func (p *Provider) ReapAgents() []string         { return ReapIdleAgentSessions(p.socket) }
+func (p *Provider) Kill(name string) error       { return KillSession(p.socket, name) }
+func (p *Provider) Rename(from, to string) error { return RenameSession(p.socket, from, to) }
+func (p *Provider) Has(name string) bool         { return HasSession(p.socket, name) }
+func (p *Provider) SetHistoryLimit(lines int)    { SetHistoryLimit(p.socket, lines) }
 
 // SessionForID resolves a stable tmux session id ($N) to that session's CURRENT
 // name (which follows renames). The broker uses this so a client reconnecting
 // by id always reaches the right session no matter how it was renamed. Returns
 // ok=false if the id no longer exists or maps to an internal session.
 func (p *Provider) SessionForID(id string) (string, bool) {
-	out, err := exec.Command("tmux", tmuxArgs(p.socket, "display-message", "-t", id, "-p", "#{session_name}")...).Output()
+	out, err := exec.Command("tmux", tmuxArgs(p.socket, "display-message", "-t", id, "-p", "#{session_id}\t#{session_name}")...).Output()
 	if err != nil {
 		return "", false
 	}
-	name := strings.TrimSpace(string(out))
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)
+	// tmux may interpret a dead $N as a literal session NAME "$N". Verify the
+	// resolved object's own id so that ambiguity can never resurrect a dead handle.
+	if len(parts) != 2 || parts[0] != id {
+		return "", false
+	}
+	name := parts[1]
 	if name == "" || isInternalSession(name) {
 		return "", false
 	}
@@ -374,20 +380,28 @@ type Client struct {
 	lastH   int
 }
 
-// Dial starts a control-mode client attached to (creating if absent) the named
-// session. We OWN this session — see DESIGN.md.
+// Dial starts a control-mode client attached to an EXISTING named session.
+// Creation belongs exclusively to Create/Spawn/Manager.Ensure. Keeping Dial
+// attach-only is a safety boundary: a stale stable id or reconnect typo can
+// disconnect, but can never manufacture a duplicate session.
 func Dial(ctx context.Context, socket, session string) (*Client, error) {
+	id, ok := sessionIDForName(socket, session)
+	if !ok {
+		return nil, fmt.Errorf("no such session: %q", session)
+	}
 	// -CC: control mode with echo disabled (the programmatic form iTerm2 uses).
 	// -L SOCKET: a dedicated tmux server, isolating our sessions from any other.
-	// new-session -A -s NAME: attach if it exists, else create it.
-	cmd := exec.CommandContext(ctx, "tmux", tmuxArgs(socket, "-CC", "new-session", "-A", "-s", session)...)
+	// Attach by the already-resolved stable id, avoiding tmux's name-prefix and
+	// $N name/id ambiguity. attach-session cannot create if the session disappears
+	// in the small gap after the lookup.
+	cmd := exec.CommandContext(ctx, "tmux", tmuxArgs(socket, "-CC", "attach-session", "-t", id)...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("start tmux under pty: %w", err)
 	}
 	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 30, Cols: 100})
 
-	c := &Client{cmd: cmd, ptmx: ptmx, socket: socket, session: session, primary: discoverPane(socket, session), outCh: make(chan Output, 1024)}
+	c := &Client{cmd: cmd, ptmx: ptmx, socket: socket, session: session, primary: discoverPane(socket, id), outCh: make(chan Output, 1024)}
 	go c.readLoop(ptmx)
 	return c, nil
 }
@@ -525,13 +539,31 @@ func KillSession(socket, name string) error {
 	return nil
 }
 
-// HasSession reports whether an exact-named session exists on the server.
-// `=name` forces an exact match so "will" can't match "will-rename".
-func HasSession(socket, name string) bool {
+// sessionIDForName performs a genuinely exact name lookup. `tmux has-session
+// -t =NAME` is not exact when NAME looks like "$N": tmux still interprets it as
+// a session id, which is the ambiguity that allowed literal-$N duplicates.
+func sessionIDForName(socket, name string) (string, bool) {
 	if isInternalSession(name) {
-		return false // infra sessions are not attachable by clients
+		return "", false // infra sessions are not attachable by clients
 	}
-	return exec.Command("tmux", tmuxArgs(socket, "has-session", "-t", "="+name)...).Run() == nil
+	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F", "#{session_name}\t#{session_id}")...).Output()
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 && parts[0] == name {
+			return parts[1], true
+		}
+	}
+	return "", false
+}
+
+// HasSession reports whether a session with this exact NAME exists. It does not
+// treat a stable session id as a name.
+func HasSession(socket, name string) bool {
+	_, ok := sessionIDForName(socket, name)
+	return ok
 }
 
 // RenameSession renames a session in place.
@@ -659,11 +691,11 @@ func (c *Client) Snapshot() []byte {
 	// snapshot repeatedly (e.g. a redraw on every settled resize) without ever
 	// duplicating history — the snapshot is an idempotent "here is the truth now".
 	if alt {
-		args = []string{"capture-pane", "-p", "-e", "-t", c.primary}                  // visible screen only
-		prefix = esc + "[?1049h" + esc + "[2J" + esc + "[3J" + esc + "[H"              // enter alt, clear, clear scrollback, home
+		args = []string{"capture-pane", "-p", "-e", "-t", c.primary}      // visible screen only
+		prefix = esc + "[?1049h" + esc + "[2J" + esc + "[3J" + esc + "[H" // enter alt, clear, clear scrollback, home
 	} else {
-		args = []string{"capture-pane", "-p", "-e", "-S", "-10000", "-t", c.primary}  // + scrollback
-		prefix = esc + "[?1049l" + esc + "[2J" + esc + "[3J" + esc + "[H"              // ensure main, clear, clear scrollback, home
+		args = []string{"capture-pane", "-p", "-e", "-S", "-10000", "-t", c.primary} // + scrollback
+		prefix = esc + "[?1049l" + esc + "[2J" + esc + "[3J" + esc + "[H"            // ensure main, clear, clear scrollback, home
 	}
 	out, err := exec.Command("tmux", tmuxArgs(c.socket, args...)...).Output()
 	if err != nil || len(out) == 0 {
