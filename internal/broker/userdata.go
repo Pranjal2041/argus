@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,23 +11,12 @@ import (
 
 // User-global data (Workflows, Todo Maps) is synced through ONE designated host (the
 // user's Mac) so the macOS app and the phone share it without a central server. The
-// broker just stores an opaque blob per key and serves it; the clients keep a local copy
-// and sync with last-write-wins. The blob carries its own `updatedAt` (unix millis);
-// SetUserData keeps the newer of incoming vs stored so a stale client can't clobber a
-// newer save.
+// broker stores one envelope per key and serves it; the clients keep a local copy and
+// sync with last-write-wins. Destructive replacements must additionally declare intent,
+// so a freshly-created or corrupt client cannot turn a populated store into an empty one.
 var userDataMu sync.Mutex
 
-func userDataPath(key string) string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
-	host, _ := os.Hostname()
-	if host == "" {
-		host = "local"
-	}
-	dir := filepath.Join(home, ".universal-tmux")
-	_ = os.MkdirAll(dir, 0o755)
+func safeUserDataKey(key string) string {
 	safe := make([]rune, 0, len(key))
 	for _, r := range key {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
@@ -36,7 +26,14 @@ func userDataPath(key string) string {
 	if len(safe) == 0 {
 		safe = []rune("data")
 	}
-	return filepath.Join(dir, "userdata-"+string(safe)+"-"+host+".json")
+	return string(safe)
+}
+
+// User-global data belongs to the sync host, not to its current DHCP/mDNS hostname.
+// The former hostname suffix split one Mac's data into multiple stores when its name
+// changed. New stores use one stable path; readUserDataLocked migrates the old files.
+func userDataPath(key string) string {
+	return filepath.Join(brokerStateDir(), "userdata-"+safeUserDataKey(key)+".json")
 }
 
 func userDataUpdatedAt(b []byte) int64 {
@@ -47,15 +44,117 @@ func userDataUpdatedAt(b []byte) int64 {
 	return m.UpdatedAt
 }
 
+type userDataEnvelope struct {
+	UpdatedAt        int64           `json:"updatedAt"`
+	Data             json.RawMessage `json:"data"`
+	AllowDestructive bool            `json:"allowDestructive,omitempty"`
+}
+
+func decodeUserDataEnvelope(body []byte) (userDataEnvelope, bool) {
+	var env userDataEnvelope
+	if json.Unmarshal(body, &env) != nil || env.UpdatedAt <= 0 || len(env.Data) == 0 || !json.Valid(env.Data) {
+		return userDataEnvelope{}, false
+	}
+	return env, true
+}
+
+func identifiedRecordCountJSON(v any) int {
+	switch x := v.(type) {
+	case []any:
+		n := 0
+		for _, item := range x {
+			n += identifiedRecordCountJSON(item)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		if id, ok := x["id"].(string); ok && id != "" {
+			n++
+		}
+		for _, item := range x {
+			n += identifiedRecordCountJSON(item)
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
+func identifiedRecordCount(body []byte) int {
+	env, ok := decodeUserDataEnvelope(body)
+	if !ok {
+		return 0
+	}
+	var data any
+	if json.Unmarshal(env.Data, &data) != nil {
+		return 0
+	}
+	return identifiedRecordCountJSON(data)
+}
+
+func destructiveReplacement(existing, incoming []byte) bool {
+	before := identifiedRecordCount(existing)
+	after := identifiedRecordCount(incoming)
+	return before > 0 && after < before
+}
+
+func preservedAtNewerTimestamp(existing []byte, incomingTS int64) []byte {
+	env, ok := decodeUserDataEnvelope(existing)
+	if !ok {
+		return existing
+	}
+	winnerTS := time.Now().UnixMilli()
+	if winnerTS <= incomingTS {
+		winnerTS = incomingTS + 1
+	}
+	if winnerTS <= env.UpdatedAt {
+		winnerTS = env.UpdatedAt + 1
+	}
+	body, err := json.Marshal(userDataEnvelope{UpdatedAt: winnerTS, Data: env.Data})
+	if err != nil {
+		return existing
+	}
+	return body
+}
+
+func readUserDataLocked(key string) []byte {
+	p := userDataPath(key)
+	if body, err := os.ReadFile(p); err == nil {
+		return body
+	}
+
+	// One-time migration from userdata-<key>-<hostname>.json. Pick the newest
+	// valid envelope, breaking timestamp ties in favor of the more complete copy.
+	legacy, _ := filepath.Glob(filepath.Join(brokerStateDir(), "userdata-"+safeUserDataKey(key)+"-*.json"))
+	var winner []byte
+	for _, candidate := range legacy {
+		body, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		if _, ok := decodeUserDataEnvelope(body); !ok {
+			continue
+		}
+		if len(winner) == 0 || userDataUpdatedAt(body) > userDataUpdatedAt(winner) ||
+			(userDataUpdatedAt(body) == userDataUpdatedAt(winner) && identifiedRecordCount(body) > identifiedRecordCount(winner)) {
+			winner = body
+		}
+	}
+	if len(winner) > 0 {
+		_ = writeFileAtomic(p, winner, 0o600)
+	}
+	return winner
+}
+
 // UserData returns the stored blob for a key (nil if none stored yet).
 func UserData(key string) []byte {
 	userDataMu.Lock()
 	defer userDataMu.Unlock()
-	b, err := os.ReadFile(userDataPath(key))
-	if err != nil {
-		return nil
+	body := readUserDataLocked(key)
+	if len(body) > 0 {
+		_ = backupUserDataBlobAt(key, body, time.Now())
 	}
-	return b
+	return body
 }
 
 // SetUserData stores body for a key unless what's already there is newer (by updatedAt).
@@ -65,12 +164,32 @@ func SetUserData(key string, body []byte) []byte {
 	userDataMu.Lock()
 	defer userDataMu.Unlock()
 	p := userDataPath(key)
-	if existing, err := os.ReadFile(p); err == nil {
-		if userDataUpdatedAt(existing) > userDataUpdatedAt(body) {
+	existing := readUserDataLocked(key)
+	incoming, valid := decodeUserDataEnvelope(body)
+	if !valid {
+		return existing
+	}
+	if len(existing) > 0 {
+		_ = backupUserDataBlobAt(key, existing, time.Now())
+		if userDataUpdatedAt(existing) > incoming.UpdatedAt {
 			return existing
 		}
+		if destructiveReplacement(existing, body) && !incoming.AllowDestructive {
+			log.Printf("blocked unmarked destructive userdata replacement key=%s records=%d->%d",
+				safeUserDataKey(key), identifiedRecordCount(existing), identifiedRecordCount(body))
+			winner := preservedAtNewerTimestamp(existing, incoming.UpdatedAt)
+			if err := writeFileAtomic(p, winner, 0o600); err != nil {
+				return existing
+			}
+			return winner
+		}
 	}
-	_ = os.WriteFile(p, body, 0o644)
+	if err := writeFileAtomic(p, body, 0o600); err != nil {
+		return existing
+	}
+	if len(existing) == 0 {
+		_ = backupUserDataBlobAt(key, body, time.Now())
+	}
 	return body
 }
 
