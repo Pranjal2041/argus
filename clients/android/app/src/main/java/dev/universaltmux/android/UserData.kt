@@ -55,6 +55,12 @@ data class Note(
 
 /** JSON for the /userdata sync envelopes — kept byte-compatible with the Mac's Codable. */
 object UserDataJson {
+    private fun envelope(updatedAt: Long, data: JSONArray, allowDestructive: Boolean): String {
+        val out = JSONObject().put("updatedAt", updatedAt).put("data", data)
+        if (allowDestructive) out.put("allowDestructive", true)
+        return out.toString()
+    }
+
     fun parseWorkflows(envelope: String?): Pair<Long, List<Workflow>>? {
         if (envelope == null) return null
         return try {
@@ -70,13 +76,13 @@ object UserDataJson {
         } catch (_: Exception) { null }
     }
 
-    fun workflowsEnvelope(updatedAt: Long, list: List<Workflow>): String {
+    fun workflowsEnvelope(updatedAt: Long, list: List<Workflow>, allowDestructive: Boolean = false): String {
         val arr = JSONArray()
         list.forEach { w ->
             arr.put(JSONObject().put("id", w.id).put("name", w.name).put("machine", w.machine)
                 .put("folder", w.folder).put("commands", w.commands).put("notes", w.notes).put("colorHex", w.colorHex))
         }
-        return JSONObject().put("updatedAt", updatedAt).put("data", arr).toString()
+        return envelope(updatedAt, arr, allowDestructive)
     }
 
     fun parseTodos(envelope: String?): Pair<Long, List<TodoBoard>>? {
@@ -102,7 +108,7 @@ object UserDataJson {
         } catch (_: Exception) { null }
     }
 
-    fun todosEnvelope(updatedAt: Long, list: List<TodoBoard>): String {
+    fun todosEnvelope(updatedAt: Long, list: List<TodoBoard>, allowDestructive: Boolean = false): String {
         val arr = JSONArray()
         list.forEach { board ->
             val items = JSONArray()
@@ -114,7 +120,7 @@ object UserDataJson {
             arr.put(JSONObject().put("id", board.id).put("machine", board.machine).put("session", board.session)
                 .put("isMisc", board.isMisc).put("items", items))
         }
-        return JSONObject().put("updatedAt", updatedAt).put("data", arr).toString()
+        return envelope(updatedAt, arr, allowDestructive)
     }
 
     fun parseNotes(envelope: String?): Pair<Long, List<Note>>? {
@@ -133,10 +139,10 @@ object UserDataJson {
         } catch (_: Exception) { null }
     }
 
-    fun notesEnvelope(updatedAt: Long, list: List<Note>): String {
+    fun notesEnvelope(updatedAt: Long, list: List<Note>, allowDestructive: Boolean = false): String {
         val arr = JSONArray()
         list.forEach { n -> arr.put(JSONObject().put("id", n.id).put("text", n.text).put("done", n.done)
             .put("createdAt", n.createdAt).put("editedAt", n.editedAt)) }
-        return JSONObject().put("updatedAt", updatedAt).put("data", arr).toString()
+        return envelope(updatedAt, arr, allowDestructive)
     }
 }

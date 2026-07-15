@@ -8,7 +8,7 @@ final class CommandPaletteHostingTests: XCTestCase {
     func testDetachedPaletteCanRenderWithExplicitDependencies() {
         let palette = CommandPalette(
             machineName: { $0 },
-            state: AppState(),
+            state: AppState(isolatedForTesting: true),
             terminals: TerminalController(),
             lab: LabModel()
         )
@@ -22,5 +22,18 @@ final class CommandPaletteHostingTests: XCTestCase {
 
         XCTAssertGreaterThan(host.fittingSize.width, 0)
         XCTAssertGreaterThan(host.fittingSize.height, 0)
+    }
+
+    func testAppStateInitializationCannotMutateProductionTodosUnderXCTest() {
+        XCTAssertTrue(AppState.isRunningTests, "XCTest process detection must fail closed")
+        let defaults = UserDefaults.standard
+        let beforeData = defaults.data(forKey: "ut.todoBoards.v1")
+        let beforeTimestamp = defaults.object(forKey: "ut.todoBoards.updatedAt") as? NSNumber
+
+        _ = AppState() // automatic XCTest detection must isolate even without the flag
+
+        XCTAssertEqual(defaults.data(forKey: "ut.todoBoards.v1"), beforeData)
+        XCTAssertEqual(defaults.object(forKey: "ut.todoBoards.updatedAt") as? NSNumber,
+                       beforeTimestamp)
     }
 }

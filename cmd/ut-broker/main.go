@@ -73,6 +73,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if err := broker.BackupDurableState(); err != nil {
+		log.Printf("warn: initial durable-state backup: %v", err)
+	}
+	go broker.RunDailyBackupLoop(ctx)
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
 	fwdMgr := forward.NewManager()                                 // port-hub agent (used when this broker is the local agent)

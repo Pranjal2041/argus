@@ -142,6 +142,16 @@ struct TodoBoard: Identifiable, Codable, Hashable {
 struct SyncEnvelope<T: Codable>: Codable {
     var updatedAt: Int64
     var data: T
+    /// Required only when a user intentionally removes records. The broker rejects a
+    /// shrinking snapshot without this bit, preventing initialization/decoding failures
+    /// from silently replacing populated data.
+    var allowDestructive: Bool? = nil
+
+    init(updatedAt: Int64, data: T, allowDestructive: Bool = false) {
+        self.updatedAt = updatedAt
+        self.data = data
+        self.allowDestructive = allowDestructive ? true : nil
+    }
 }
 
 /// A free-form note in the Notes Hub — multiline text, optionally checkable, not tied to
@@ -175,6 +185,17 @@ struct FolderGroup: Identifiable {
 
 @MainActor
 final class AppState: ObservableObject {
+    /// Tests import the production executable target, so UserDefaults.standard can point
+    /// at the real app domain. Keep every persistence/network side effect disabled under
+    /// XCTest even if a future test forgets to request isolation explicitly.
+    private var persistenceEnabled = true
+    private var pendingDestructiveSync: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "ut.pendingDestructiveSync") ?? [])
+    static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
     @Published var machines: [Machine]
     @Published var sessionsByMachine: [String: [SessionInfo]] = [:]
     @Published var statusByMachine: [String: String] = [:]
@@ -270,10 +291,12 @@ final class AppState: ObservableObject {
     /// Persisted workflow definitions (UserDefaults `ut.workflows.v1`).
     @Published var workflows: [Workflow] = AppState.loadWorkflows() {
         didSet {
+            guard persistenceEnabled else { return }
             AppState.saveWorkflows(workflows)
             if !applyingRemoteWorkflows {       // a local edit → stamp + push to the sync host
                 workflowsUpdatedAt = nowMs()
-                pushUserData("workflows", workflows, workflowsUpdatedAt)
+                pushUserData("workflows", workflows, workflowsUpdatedAt,
+                             allowDestructive: pendingDestructiveSync.contains("workflows"))
             }
         }
     }
@@ -295,7 +318,11 @@ final class AppState: ObservableObject {
         if let i = workflows.firstIndex(where: { $0.id == wf.id }) { workflows[i] = wf }
         else { workflows.append(wf) }
     }
-    func deleteWorkflow(_ wf: Workflow) { workflows.removeAll { $0.id == wf.id } }
+    func deleteWorkflow(_ wf: Workflow) {
+        guard workflows.contains(where: { $0.id == wf.id }) else { return }
+        markDestructiveSync("workflows")
+        workflows.removeAll { $0.id == wf.id }
+    }
 
     /// Online machines whose name matches a workflow's wildcard pattern (`*` → any run of
     /// chars, case-insensitive, full match). The local machine also matches its hostname
@@ -386,10 +413,12 @@ final class AppState: ObservableObject {
     /// history (created/completed timestamps), so nothing is lost for later analysis.
     @Published var todoBoards: [TodoBoard] = AppState.loadTodoBoards() {
         didSet {
+            guard persistenceEnabled else { return }
             AppState.saveTodoBoards(todoBoards)
             if !applyingRemoteTodos {           // a local edit → stamp + push to the sync host
                 todosUpdatedAt = nowMs()
-                pushUserData("todos", todoBoards, todosUpdatedAt)
+                pushUserData("todos", todoBoards, todosUpdatedAt,
+                             allowDestructive: pendingDestructiveSync.contains("todos"))
             }
         }
     }
@@ -438,10 +467,14 @@ final class AppState: ObservableObject {
         return f
     }
     func deleteTodo(_ boardID: UUID, _ itemID: UUID) {
-        guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }) else { return }
+        guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }),
+              todoBoards[bi].items.contains(where: { $0.id == itemID }) else { return }
+        markDestructiveSync("todos")
         todoBoards[bi].items.removeAll { $0.id == itemID }
     }
     func deleteBoard(_ boardID: UUID) {
+        guard todoBoards.contains(where: { $0.id == boardID && !$0.isMisc }) else { return }
+        markDestructiveSync("todos")
         todoBoards.removeAll { $0.id == boardID && !$0.isMisc }   // Misc is permanent
     }
 
@@ -476,6 +509,7 @@ final class AppState: ObservableObject {
         // Save locally + stamp on a local edit; the periodic reconcile pushes it (no POST
         // per keystroke). Adopting a remote copy sets applyingRemoteNotes to skip the stamp.
         didSet {
+            guard persistenceEnabled else { return }
             AppState.saveNotes(notes)
             if !applyingRemoteNotes { notesUpdatedAt = nowMs() }
         }
@@ -511,7 +545,11 @@ final class AppState: ObservableObject {
         guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[i].done.toggle()
     }
-    func deleteNote(_ id: UUID) { notes.removeAll { $0.id == id } }
+    func deleteNote(_ id: UUID) {
+        guard notes.contains(where: { $0.id == id }) else { return }
+        markDestructiveSync("notes")
+        notes.removeAll { $0.id == id }
+    }
 
     // MARK: User-data sync (Workflows + Todo Maps) — this Mac IS the sync host.
 
@@ -526,6 +564,16 @@ final class AppState: ObservableObject {
         set { UserDefaults.standard.set(Int(newValue), forKey: "ut.todoBoards.updatedAt") }
     }
     private func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+    private func markDestructiveSync(_ key: String) {
+        pendingDestructiveSync.insert(key)
+        if persistenceEnabled {
+            UserDefaults.standard.set(Array(pendingDestructiveSync), forKey: "ut.pendingDestructiveSync")
+        }
+    }
+    private func clearDestructiveSync(_ key: String) {
+        guard pendingDestructiveSync.remove(key) != nil, persistenceEnabled else { return }
+        UserDefaults.standard.set(Array(pendingDestructiveSync), forKey: "ut.pendingDestructiveSync")
+    }
     /// The sync host is this Mac's own broker (loopback).
     private var syncHostBase: String? { machines.first { $0.isLocal }?.httpBase }
 
@@ -553,10 +601,13 @@ final class AppState: ObservableObject {
         }.resume()
     }
 
-    private func pushUserData<T: Codable>(_ key: String, _ data: T, _ ts: Int64) {
-        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=\(key)") else { return }
+    private func pushUserData<T: Codable>(_ key: String, _ data: T, _ ts: Int64,
+                                          allowDestructive: Bool = false) {
+        guard persistenceEnabled, let base = syncHostBase,
+              let url = URL(string: "\(base)/userdata?key=\(key)") else { return }
         let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
-        guard let body = try? enc.encode(SyncEnvelope(updatedAt: ts, data: data)) else { return }
+        guard let body = try? enc.encode(SyncEnvelope(updatedAt: ts, data: data,
+                                                      allowDestructive: allowDestructive)) else { return }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 8
         URLSession.shared.dataTask(with: req).resume()
     }
@@ -565,6 +616,7 @@ final class AppState: ObservableObject {
     /// local copy up when it's newer (or to bootstrap pre-existing data). Runs on the poll
     /// timer + at launch.
     func syncUserData() {
+        guard persistenceEnabled else { return }
         syncWorkflows()
         syncTodos()
         syncNotes()
@@ -586,8 +638,12 @@ final class AppState: ObservableObject {
                     self.workflows = remote
                     self.applyingRemoteWorkflows = false
                     self.workflowsUpdatedAt = remoteTs
+                    self.clearDestructiveSync("workflows")
                 } else if localTs > remoteTs {
-                    self.pushUserData("workflows", self.workflows, localTs)
+                    self.pushUserData("workflows", self.workflows, localTs,
+                                      allowDestructive: self.pendingDestructiveSync.contains("workflows"))
+                } else if localTs != 0 {
+                    self.clearDestructiveSync("workflows")
                 }
             }
         }.resume()
@@ -611,8 +667,12 @@ final class AppState: ObservableObject {
                     self.todoBoards = remote
                     self.applyingRemoteTodos = false
                     self.todosUpdatedAt = remoteTs
+                    self.clearDestructiveSync("todos")
                 } else if localTs > remoteTs {
-                    self.pushUserData("todos", self.todoBoards, localTs)
+                    self.pushUserData("todos", self.todoBoards, localTs,
+                                      allowDestructive: self.pendingDestructiveSync.contains("todos"))
+                } else if localTs != 0 {
+                    self.clearDestructiveSync("todos")
                 }
             }
         }.resume()
@@ -634,8 +694,12 @@ final class AppState: ObservableObject {
                     self.notes = remote
                     self.applyingRemoteNotes = false
                     self.notesUpdatedAt = remoteTs
+                    self.clearDestructiveSync("notes")
                 } else if localTs > remoteTs {
-                    self.pushUserData("notes", self.notes, localTs)
+                    self.pushUserData("notes", self.notes, localTs,
+                                      allowDestructive: self.pendingDestructiveSync.contains("notes"))
+                } else if localTs != 0 {
+                    self.clearDestructiveSync("notes")
                 }
             }
         }.resume()
@@ -824,7 +888,9 @@ final class AppState: ObservableObject {
     /// selection — rendered as an ORANGE "done, unseen" dot until you open the pane.
     @Published var unseen: Set<String> = []
 
-    init() {
+    init(isolatedForTesting: Bool = false) {
+        let isolated = isolatedForTesting || Self.isRunningTests
+        persistenceEnabled = !isolated
         // Local (loopback) is fixed; cluster brokers are discovered from the tailnet.
         machines = [
             Machine(id: "local", name: "this mac", isLocal: true,
@@ -832,14 +898,18 @@ final class AppState: ObservableObject {
         ]
         selection = SessionRef(machineID: "local", session: "ut-demo")
         loadHistoryCache()
-        applyKeepAwake()   // honor a persisted "keep awake" across relaunches
-        if !todoBoards.contains(where: { $0.isMisc }) { todoBoards.append(TodoBoard(isMisc: true)) }
-        // Activity journal: resolve machine names / session cwds at event time.
-        ActivityJournal.shared.nameResolver = { [weak self] id in
-            self?.machines.first(where: { $0.id == id })?.name
+        if !isolated {
+            applyKeepAwake()   // honor a persisted "keep awake" across relaunches
+            if !todoBoards.contains(where: { $0.isMisc }) { todoBoards.append(TodoBoard(isMisc: true)) }
         }
-        ActivityJournal.shared.folderResolver = { [weak self] mid, session in
-            self?.sessionsByMachine[mid]?.first(where: { $0.name == session })?.path
+        // Activity journal: resolve machine names / session cwds at event time.
+        if !isolated {
+            ActivityJournal.shared.nameResolver = { [weak self] id in
+                self?.machines.first(where: { $0.id == id })?.name
+            }
+            ActivityJournal.shared.folderResolver = { [weak self] mid, session in
+                self?.sessionsByMachine[mid]?.first(where: { $0.name == session })?.path
+            }
         }
     }
 

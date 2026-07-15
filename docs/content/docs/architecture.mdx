@@ -95,6 +95,19 @@ host**: your **Mac's** broker. Each app keeps a local copy and reconciles with i
 the Mac broker over the tailnet, which it already does for sessions. So a workflow you add on the Mac
 shows up on the phone within seconds, and a note you jot on the phone lands on the Mac just as fast.
 
+The sync store has two recovery layers. User-global keys live at a stable path that does not change
+when macOS changes the machine's network hostname, and any update that removes records must carry
+explicit deletion intent from the UI. A newly initialized or unreadable client therefore cannot
+replace populated data with an empty snapshot.
+
+The broker also makes an immutable recovery point every local calendar day and retains the latest
+seven days under `~/.argus/backups/YYYY-MM-DD/`. It covers all broker-owned JSON state, the complete
+macOS Argus preferences domain (including dashboards, notebooks, W&B links, and settings), and the
+compact Argus Lab control-plane record (keys, manifests, policies, notes, approvals, proposals, and
+result events). Large Lab artifacts and logs are excluded because they are immutable and addressed
+by the Lab store's own retention policy; experiment provenance remains in the backed-up
+event metadata and offline mirror. The Activity Journal already uses append-only files split by day.
+
 <Callout type="info">
 The broker, the file service, and the port-forward agent all ride the **same** per-host broker
 over the tailnet — so adding Files or Ports needs zero extra deployment.

@@ -59,7 +59,8 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 - **Workflows, Todo Maps & Notes** — three planning surfaces that **sync across your devices** (via
   your Mac's broker, no central server): saved **workflows** that spin up an agent in the right
   machine + folder with one click; per-session **todo** checklists that outlive the session; and a
-  **notes** hub of free-form, time-grouped notes.
+  **notes** hub of free-form, time-grouped notes. Destructive syncs require explicit user intent,
+  and Argus keeps seven daily recovery points for synced data, app preferences, and Lab metadata.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session

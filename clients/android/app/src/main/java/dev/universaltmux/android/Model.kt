@@ -176,6 +176,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var workflowsTs = 0L
     private var todosTs = 0L
     private var notesTs = 0L
+    private var workflowsDestructive = prefs.getBoolean("ut.workflows.pendingDestructive", false)
+    private var todosDestructive = prefs.getBoolean("ut.todos.pendingDestructive", false)
+    private var notesDestructive = prefs.getBoolean("ut.notes.pendingDestructive", false)
 
     // --- Argus Lab ----------------------------------------------------------
     // Store-owned records are reduced through LabAggregator before reaching
@@ -811,16 +814,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun saveTodosLocal() {
         prefs.edit().putString("ut.todoBoards.v1", UserDataJson.todosEnvelope(todosTs, todoBoards.toList())).apply()
     }
-    private fun touchWorkflows() {
+    private fun touchWorkflows(destructive: Boolean = false) {
+        if (destructive) {
+            workflowsDestructive = true
+            prefs.edit().putBoolean("ut.workflows.pendingDestructive", true).apply()
+        }
         workflowsTs = now(); saveWorkflowsLocal()
         val h = syncHost() ?: return
-        val body = UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())
+        val body = UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList(), workflowsDestructive)
         viewModelScope.launch { withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", body) } }
     }
-    private fun touchTodos() {
+    private fun touchTodos(destructive: Boolean = false) {
+        if (destructive) {
+            todosDestructive = true
+            prefs.edit().putBoolean("ut.todos.pendingDestructive", true).apply()
+        }
         todosTs = now(); saveTodosLocal()
         val h = syncHost() ?: return
-        val body = UserDataJson.todosEnvelope(todosTs, todoBoards.toList())
+        val body = UserDataJson.todosEnvelope(todosTs, todoBoards.toList(), todosDestructive)
         viewModelScope.launch { withContext(Dispatchers.IO) { Net.postUserData(h, "todos", body) } }
     }
 
@@ -829,7 +840,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (i >= 0) workflows[i] = w else workflows.add(w)
         touchWorkflows()
     }
-    fun deleteWorkflow(w: Workflow) { workflows.removeAll { it.id == w.id }; touchWorkflows() }
+    fun deleteWorkflow(w: Workflow) {
+        if (workflows.removeAll { it.id == w.id }) touchWorkflows(destructive = true)
+    }
 
     fun ensureBoard(machine: String, session: String) {
         val m = machine.trim(); val s = session.trim()
@@ -854,13 +867,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteTodo(boardId: String, itemId: String) {
         val i = todoBoards.indexOfFirst { it.id == boardId }; if (i < 0) return
         val items = todoBoards[i].items.filter { it.id != itemId }.toMutableList()
-        todoBoards[i] = todoBoards[i].copy(items = items); touchTodos()
+        if (items.size == todoBoards[i].items.size) return
+        todoBoards[i] = todoBoards[i].copy(items = items); touchTodos(destructive = true)
     }
-    fun deleteBoard(boardId: String) { todoBoards.removeAll { it.id == boardId && !it.isMisc }; touchTodos() }
+    fun deleteBoard(boardId: String) {
+        if (todoBoards.removeAll { it.id == boardId && !it.isMisc }) touchTodos(destructive = true)
+    }
 
     // -- Notes Hub: bump+save on edit; the reconcile pushes (no POST per keystroke) --
     private fun saveNotesLocal() { prefs.edit().putString("ut.notes.v1", UserDataJson.notesEnvelope(notesTs, notes.toList())).apply() }
-    private fun touchNotes() { notesTs = now(); saveNotesLocal() }
+    private fun touchNotes(destructive: Boolean = false) {
+        if (destructive) {
+            notesDestructive = true
+            prefs.edit().putBoolean("ut.notes.pendingDestructive", true).apply()
+        }
+        notesTs = now(); saveNotesLocal()
+    }
     fun addNote(): String { val n = Note(); notes.add(n); touchNotes(); return n.id }
     fun updateNoteText(id: String, text: String) {
         val i = notes.indexOfFirst { it.id == id }; if (i < 0) return
@@ -870,7 +892,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val i = notes.indexOfFirst { it.id == id }; if (i < 0) return
         notes[i] = notes[i].copy(done = !notes[i].done); touchNotes()
     }
-    fun deleteNote(id: String) { notes.removeAll { it.id == id }; touchNotes() }
+    fun deleteNote(id: String) {
+        if (notes.removeAll { it.id == id }) touchNotes(destructive = true)
+    }
 
     // -- machine pattern matching + running a workflow --
     private fun wildcardRegex(p: String): Regex {
@@ -958,8 +982,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (lw == 0L && workflows.isNotEmpty()) { lw = now(); workflowsTs = lw; saveWorkflowsLocal() }
             if (remoteW != null && rwTs > lw) {
                 workflows.clear(); workflows.addAll(remoteW.second); workflowsTs = rwTs; saveWorkflowsLocal()
+                workflowsDestructive = false; prefs.edit().remove("ut.workflows.pendingDestructive").apply()
             } else if (lw > rwTs) {
-                withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", UserDataJson.workflowsEnvelope(lw, workflows.toList())) }
+                withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", UserDataJson.workflowsEnvelope(lw, workflows.toList(), workflowsDestructive)) }
+            } else if (lw != 0L && workflowsDestructive) {
+                workflowsDestructive = false; prefs.edit().remove("ut.workflows.pendingDestructive").apply()
             }
 
             val rawT = withContext(Dispatchers.IO) { Net.getUserData(h, "todos") }
@@ -971,8 +998,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val boards = remoteT.second.toMutableList()
                 if (boards.none { it.isMisc }) boards.add(TodoBoard(isMisc = true))
                 todoBoards.clear(); todoBoards.addAll(boards); todosTs = rtTs; saveTodosLocal()
+                todosDestructive = false; prefs.edit().remove("ut.todos.pendingDestructive").apply()
             } else if (lt > rtTs) {
-                withContext(Dispatchers.IO) { Net.postUserData(h, "todos", UserDataJson.todosEnvelope(lt, todoBoards.toList())) }
+                withContext(Dispatchers.IO) { Net.postUserData(h, "todos", UserDataJson.todosEnvelope(lt, todoBoards.toList(), todosDestructive)) }
+            } else if (lt != 0L && todosDestructive) {
+                todosDestructive = false; prefs.edit().remove("ut.todos.pendingDestructive").apply()
             }
 
             val rawN = withContext(Dispatchers.IO) { Net.getUserData(h, "notes") }
@@ -981,8 +1011,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (ln == 0L && notes.isNotEmpty()) { ln = now(); notesTs = ln; saveNotesLocal() }
             if (remoteN != null && rnTs > ln) {
                 notes.clear(); notes.addAll(remoteN.second); notesTs = rnTs; saveNotesLocal()
+                notesDestructive = false; prefs.edit().remove("ut.notes.pendingDestructive").apply()
             } else if (ln > rnTs) {
-                withContext(Dispatchers.IO) { Net.postUserData(h, "notes", UserDataJson.notesEnvelope(ln, notes.toList())) }
+                withContext(Dispatchers.IO) { Net.postUserData(h, "notes", UserDataJson.notesEnvelope(ln, notes.toList(), notesDestructive)) }
+            } else if (ln != 0L && notesDestructive) {
+                notesDestructive = false; prefs.edit().remove("ut.notes.pendingDestructive").apply()
             }
         }
     }
