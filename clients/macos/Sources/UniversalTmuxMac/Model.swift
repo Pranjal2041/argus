@@ -230,7 +230,7 @@ final class AppState: ObservableObject {
     @Published var showPalette = false
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
     @Published var showOverview = true          // command-center panel is the home view (⇧⌘A); set false when diving into a session
-    @Published var renderText: String?    // non-nil → the Renders panel is up with this snapshot
+    @Published var renderDocument: RenderDocument? // non-nil → styled/static Render overlay is up
     @Published var searchFocusToken = 0   // bumped to request focusing the filter field
     @Published var isRefreshing = false
     @Published var clock = Date()          // bumped periodically so relative times re-render

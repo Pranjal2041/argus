@@ -1,8 +1,7 @@
 <!doctype html>
-<!-- Argus "Renders": offline markdown + LaTeX + code view of terminal content.
-     Loaded from the app bundle (no network). Driven via window.UTRender.
-     LIGHT theme on purpose: this is a reading surface (a "document"), distinct
-     from the dark terminal it lifts text out of. -->
+<!-- Argus "Renders": a faithful styled terminal document plus an optional
+     Markdown + LaTeX + code interpretation of its plain source. Loaded from the
+     app bundle (no network). Driven via window.UTRender. -->
 <html>
 <head>
 <meta charset="utf-8">
@@ -20,6 +19,41 @@
     max-width: 740px;
     margin: 0 auto;
     word-wrap: break-word;
+  }
+  /* Faithful mode is an editorial terminal folio: it reproduces the exact cell
+     styling and visual rows SwiftTerm drew, but removes the live cursor/input
+     behavior. No Markdown guessing occurs on this surface. */
+  html.terminal-fidelity, html.terminal-fidelity body {
+    background: var(--term-bg, #11131A);
+  }
+  html.terminal-fidelity body {
+    color: var(--term-fg, #E8E9EE);
+    max-width: none;
+    margin: 0;
+    padding: 26px 32px 52px;
+    word-wrap: normal;
+    overflow-wrap: normal;
+    -webkit-font-smoothing: antialiased;
+  }
+  .terminal-page {
+    box-sizing: border-box;
+    width: max-content;
+    min-width: 100%;
+    font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-variant-ligatures: none;
+    line-height: 1.48;
+    letter-spacing: 0;
+  }
+  .terminal-row {
+    min-height: 1.48em;
+    white-space: pre;
+  }
+  .terminal-row a { color: inherit; text-decoration-color: currentColor; }
+  @media print {
+    html.terminal-fidelity, html.terminal-fidelity body {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
   }
   h1, h2, h3, h4 { color: #111418; line-height: 1.3; margin: 1.4em 0 0.55em; font-weight: 650; }
   h1 { font-size: 1.55em; border-bottom: 1px solid #E4E4E0; padding-bottom: .3em; }
@@ -98,7 +132,16 @@
   // markdown/math/JSON pipeline. The cost asymmetry drives the bias: prose
   // accidentally shown monospace is mildly ugly, a table run through markdown
   // is destroyed.
-  function render(md) {
+  function markdownSurface() {
+    const root = document.documentElement;
+    root.classList.remove("terminal-fidelity");
+    root.style.removeProperty("--term-bg");
+    root.style.removeProperty("--term-fg");
+    root.style.removeProperty("color-scheme");
+  }
+
+  function renderMarkdown(md) {
+    markdownSurface();
     const out = document.getElementById("out");
     if (!md || !md.trim()) {
       out.innerHTML = '<div id="empty">Nothing to render</div>';
@@ -121,6 +164,83 @@
 
     out.innerHTML = html;
     out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+  }
+
+  function darkColor(hex) {
+    const match = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+    if (!match) return true;
+    const rgb = match.slice(1).map((x) => parseInt(x, 16) / 255)
+      .map((x) => x <= .04045 ? x / 12.92 : Math.pow((x + .055) / 1.055, 2.4));
+    return .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2] < .42;
+  }
+
+  function safeLink(raw) {
+    if (!raw) return null;
+    try {
+      const url = new URL(raw);
+      return ["http:", "https:", "file:", "mailto:"].includes(url.protocol) ? raw : null;
+    } catch (_) { return null; }
+  }
+
+  function renderTerminal(term) {
+    const out = document.getElementById("out");
+    const root = document.documentElement;
+    root.classList.remove("dark");
+    root.classList.add("terminal-fidelity");
+    root.style.setProperty("--term-bg", (term && term.background) || "#11131A");
+    root.style.setProperty("--term-fg", (term && term.foreground) || "#E8E9EE");
+    root.style.setProperty("color-scheme", darkColor(term && term.background) ? "dark" : "light");
+    if (!term || !term.lines || !term.lines.length) {
+      out.innerHTML = '<div id="empty">Nothing to render</div>';
+      return;
+    }
+
+    const page = document.createElement("div");
+    page.className = "terminal-page";
+    page.style.minWidth = Math.max(1, term.columns || 1) + "ch";
+    if (term.fontFamily) page.style.fontFamily = term.fontFamily;
+
+    for (const line of term.lines) {
+      const row = document.createElement("div");
+      row.className = "terminal-row";
+      row.dataset.wrapped = line.wrapped ? "true" : "false";
+      if (!line.runs || !line.runs.length) {
+        row.textContent = "\u00a0";
+      } else {
+        for (const run of line.runs) {
+          const style = term.styles[run.style] || {};
+          const href = safeLink(run.link);
+          const span = document.createElement(href ? "a" : "span");
+          if (href) {
+            span.href = href;
+            span.rel = "noreferrer";
+          }
+          span.textContent = run.text || "";
+          if (style.foreground) span.style.color = style.foreground;
+          if (style.background && style.background !== term.background) {
+            span.style.backgroundColor = style.background;
+          }
+          if (style.bold) span.style.fontWeight = "700";
+          if (style.italic) span.style.fontStyle = "italic";
+          const decorations = [];
+          if (style.underline) decorations.push("underline");
+          if (style.strikethrough) decorations.push("line-through");
+          if (decorations.length) span.style.textDecorationLine = decorations.join(" ");
+          if (style.underline) span.style.textDecorationStyle = style.underline;
+          if (style.underlineColor) span.style.textDecorationColor = style.underlineColor;
+          row.appendChild(span);
+        }
+      }
+      page.appendChild(row);
+    }
+    out.replaceChildren(page);
+  }
+
+  let activeDocument = null;
+  function presentDocument(doc, presentation) {
+    activeDocument = doc;
+    if (presentation === "typeset") renderMarkdown((doc && doc.source) || "");
+    else renderTerminal(doc && doc.terminal);
   }
 
   // Box-drawing, block elements, and legacy +---+ rules mark a line as
@@ -301,7 +421,12 @@
   });
 
   window.UTRender = {
-    set(md, px) { if (px) this.setZoom(px); render(md); },
+    // Backwards-compatible plain Markdown entry point used by Files preview.
+    set(md, px) { activeDocument = null; if (px) this.setZoom(px); renderMarkdown(md); },
+    setDocument(doc, px, presentation) {
+      if (px) this.setZoom(px);
+      presentDocument(doc, presentation || "terminal");
+    },
     setZoom(px) { document.body.style.fontSize = px + "px"; },
     // Opt-in theming (the editor preview calls this; the Renders panel never does,
     // so it stays light). spec = { dark:bool, bg:'#hex', fg:'#hex' }.

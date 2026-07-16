@@ -101,8 +101,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("g", modifiers: [.control, .command])   // ⇧⌘G belongs to the Git panel (feature panels are ⇧⌘-x); shift+Enter in the find bar also works
             }
             CommandMenu("Terminal") {
-                // ⇧⌘M (markdown/math) — ⇧⌘P belongs to Claude Code inside the terminal.
-                Button("Render Output…") { state.renderText = terminals.renderableText() }
+                // ⇧⌘M (faithful terminal / typeset) — ⇧⌘P belongs to Claude Code inside the terminal.
+                Button("Render Output…") { state.renderDocument = terminals.renderableDocument() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                 Button("W&B Run ⇄ Terminal") { if let sel = state.selection { terminals.toggleWandb(sel) } }
                     .keyboardShortcut("w", modifiers: [.control, .command])
@@ -621,8 +621,8 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea() // fill the entire window; columns space their own top edge
         .overlay {
-            if let md = state.renderText {
-                RenderPanel(text: md).environmentObject(state)
+            if let document = state.renderDocument {
+                RenderPanel(document: document).environmentObject(state)
             }
         }
         .background(WindowAccessor(onFullscreen: { isFullscreen = $0 }))
@@ -658,7 +658,7 @@ struct RootView: View {
                 }
             } else {
                 PaletteWindow.shared.hide()
-                if !state.showFind && state.renderText == nil { terminals.focusTerminal() }
+                if !state.showFind && state.renderDocument == nil { terminals.focusTerminal() }
             }
         }
         .onChange(of: state.openWindowRequest) { id in
@@ -668,7 +668,7 @@ struct RootView: View {
             openWindow(id: id)
             state.openWindowRequest = nil
         }
-        .onChange(of: state.renderText) { v in if v == nil { terminals.focusTerminal() } }
+        .onChange(of: state.renderDocument) { value in if value == nil { terminals.focusTerminal() } }
         .sheet(isPresented: $state.showNew) { newSessionSheet }
         .sheet(isPresented: $state.showHiddenPicker) { HiddenPanelsView().environmentObject(state) }
         .sheet(isPresented: $state.showHistory) { SessionHistoryView().environmentObject(state) }
@@ -1507,7 +1507,7 @@ struct CommandPalette: View {
         let actions: [(String, String, String, () -> Void)] = [
             ("plus", "New Session…", "⌘N", { state.showNew = true }),
             ("magnifyingglass", "Find in Terminal", "⌘F", { state.showFind = true; state.findFocusToken &+= 1 }),
-            ("sparkles", "Render Output (Markdown / LaTeX)", "⇧⌘M", { state.renderText = terminals.renderableText() }),
+            ("sparkles", "Render Output (Terminal / Typeset)", "⇧⌘M", { state.renderDocument = terminals.renderableDocument() }),
             ("pencil", "Rename Current Session…", "⇧⌘R",
              { if let s = state.selection { state.renameText = s.session; state.renameTarget = s } }),
             ("trash", "Kill Current Session…", "⌘⌫", { if let s = state.selection { state.killTarget = s } }),
