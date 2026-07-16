@@ -1012,15 +1012,25 @@ final class TerminalController: ObservableObject {
     }
     func scrollToBottom() { visible?.view.scroll(toPosition: 1.0); atBottom = true }
 
-    /// Text for the Renders panel (⇧⌘P): the user's selection if there is one,
-    /// else the recent output (screen + scrollback tail) with soft-wrapped grid
-    /// rows rejoined into logical lines, then stripped of TUI chrome.
-    func renderableText() -> String? {
+    /// Static document for Render (⇧⌘M). Keep the styled cell grid alongside
+    /// cleaned plain source: the default view can faithfully reproduce ANSI
+    /// colors/emphasis/table geometry, while Typeset can still interpret raw
+    /// Markdown, math, JSON, and code.
+    func renderableDocument() -> RenderDocument? {
         guard let v = visible?.view else { return nil }
         if let sel = v.getSelection(), !sel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return RenderExtract.clean(sel)
+            let styled = v.getStyledSelection()
+                ?? v.getTerminal().getStyledText(maxVisualLines: 400)
+            let source = RenderExtract.clean(RenderExtract.joiningWrappedRows(styled))
+            return RenderDocument(source: source, styled: styled, view: v)
         }
-        return RenderExtract.clean(v.getTerminal().getTextJoiningWraps(maxVisualLines: 400))
+        let terminal = v.getTerminal()
+        let styled = terminal.getStyledText(maxVisualLines: 400)
+        let source = RenderExtract.clean(RenderExtract.joiningWrappedRows(styled))
+        guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !styled.lines.isEmpty else {
+            return nil
+        }
+        return RenderDocument(source: source, styled: styled, view: v)
     }
 
     /// ⌘V: if the clipboard holds an image, bridge it to the visible session's host;

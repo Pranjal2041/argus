@@ -1,16 +1,121 @@
 import AppKit
+import SwiftTerm
 import SwiftUI
 import WebKit
 
-// MARK: - "Renders": render the terminal's markdown/LaTeX/code properly (⇧⌘P)
+// MARK: - "Renders": preserve terminal fidelity and optionally typeset source (⇧⌘M)
 //
-// Agents emit markdown with math and fenced code, which a cell grid can't
-// typeset. Rendering IN PLACE would fight the remote TUI (the pane owns its
-// cells; any redraw/snapshot would wipe local edits), so this is a Quick-Look
-// style overlay instead: one keystroke renders a STATIC SNAPSHOT of the
-// terminal text (selection if any, else recent output) in a webview hosting an
-// offline bundle (marked + KaTeX + highlight.js — Resources/render), Esc
-// dismisses, the live terminal underneath is never touched.
+// A terminal TUI often ALREADY parses the model's Markdown and expresses its
+// semantics through ANSI color, emphasis, spacing, and box-drawn tables. Plain
+// string extraction destroys that information before a Markdown parser ever
+// sees it. Render therefore carries two representations in one static document:
+// the styled SwiftTerm cell snapshot (faithful/default) and cleaned plain source
+// for explicit Markdown/KaTeX typesetting. The live pane is never touched.
+
+struct RenderCellStyle: Codable, Equatable, Hashable {
+    let foreground: String
+    let background: String
+    let bold: Bool
+    let italic: Bool
+    let underline: String?
+    let underlineColor: String?
+    let strikethrough: Bool
+}
+
+struct RenderTerminalRun: Codable, Equatable {
+    let text: String
+    let style: Int
+    let link: String?
+}
+
+struct RenderTerminalLine: Codable, Equatable {
+    let runs: [RenderTerminalRun]
+    let wrapped: Bool
+}
+
+struct RenderTerminalSnapshot: Codable, Equatable {
+    let columns: Int
+    let fontFamily: String
+    let background: String
+    let foreground: String
+    let styles: [RenderCellStyle]
+    let lines: [RenderTerminalLine]
+}
+
+/// Everything the overlay needs, captured synchronously from one terminal frame.
+/// The UUID makes repeated captures of identical text distinct SwiftUI values.
+struct RenderDocument: Codable, Equatable, Identifiable {
+    let id: UUID
+    let source: String
+    let terminal: RenderTerminalSnapshot
+
+    init(source: String, styled: StyledTerminalText, view: TerminalView, id: UUID = UUID()) {
+        self.id = id
+        self.source = source
+
+        var styles: [RenderCellStyle] = []
+        var styleIDs: [RenderCellStyle: Int] = [:]
+        let lines = styled.lines.map { line in
+            let runs = line.runs.map { run -> RenderTerminalRun in
+                let resolved = view.resolvedAttributes(for: run.attribute)
+                let foreground = (resolved[.foregroundColor] as? NSColor) ?? view.nativeForegroundColor
+                let background = (resolved[.backgroundColor] as? NSColor) ?? view.nativeBackgroundColor
+                let underline = Self.underlineName(run.attribute)
+                let resolvedFont = resolved[.font] as? NSFont
+                let style = RenderCellStyle(
+                    foreground: Self.hex(foreground),
+                    background: Self.hex(background),
+                    bold: resolvedFont?.fontDescriptor.symbolicTraits.contains(.bold)
+                        ?? run.attribute.style.contains(.bold),
+                    italic: resolvedFont?.fontDescriptor.symbolicTraits.contains(.italic)
+                        ?? run.attribute.style.contains(.italic),
+                    underline: underline,
+                    underlineColor: underline.flatMap { _ in
+                        (resolved[.underlineColor] as? NSColor).map(Self.hex)
+                    },
+                    strikethrough: run.attribute.style.contains(.crossedOut)
+                )
+                let styleID: Int
+                if let existing = styleIDs[style] {
+                    styleID = existing
+                } else {
+                    styleID = styles.count
+                    styleIDs[style] = styleID
+                    styles.append(style)
+                }
+                return RenderTerminalRun(text: run.text, style: styleID, link: run.link)
+            }
+            return RenderTerminalLine(runs: runs, wrapped: line.isWrapped)
+        }
+        terminal = RenderTerminalSnapshot(
+            columns: styled.columns,
+            fontFamily: view.font.familyName ?? "SF Mono",
+            background: Self.hex(view.nativeBackgroundColor),
+            foreground: Self.hex(view.nativeForegroundColor),
+            styles: styles,
+            lines: lines
+        )
+    }
+
+    private static func underlineName(_ attribute: Attribute) -> String? {
+        guard attribute.style.contains(.underline) || attribute.underlineStyle != .none else { return nil }
+        switch attribute.underlineStyle {
+        case .none, .single: return "solid"
+        case .double: return "double"
+        case .curly: return "wavy"
+        case .dotted: return "dotted"
+        case .dashed: return "dashed"
+        }
+    }
+
+    private static func hex(_ color: NSColor) -> String {
+        let value = color.usingColorSpace(.sRGB) ?? color
+        return String(format: "#%02X%02X%02X",
+                      Int((value.redComponent * 255).rounded()),
+                      Int((value.greenComponent * 255).rounded()),
+                      Int((value.blueComponent * 255).rounded()))
+    }
+}
 
 enum RenderExtract {
     /// Per-line leading gutters that are unambiguously AGENT chrome (claude's
@@ -19,6 +124,27 @@ enum RenderExtract {
     /// already typeset (tables, rules) — the renderer's segmenter preserves
     /// those runs verbatim instead. Stripping them destroyed real tables.
     private static let gutterPrefixes = ["⏺ ", "⎿ "]
+
+    /// Recover logical source from the exact same styled frame used by faithful
+    /// mode. A wrapped visual row continues the prior row; a hard row boundary
+    /// stays a newline. Keeping both views frame-identical avoids races where
+    /// new terminal output arrives between two independent extractions.
+    static func joiningWrappedRows(_ styled: StyledTerminalText) -> String {
+        var logical: [String] = []
+        for line in styled.lines {
+            // TUIs commonly repaint the rest of a row with styled spaces. Those
+            // cells are visually meaningful in Terminal mode, but in Markdown
+            // two trailing spaces mean a forced line break. Strip them only
+            // from the logical-source representation.
+            let sourceText = String(line.text.reversed().drop(while: { $0 == " " || $0 == "\t" }).reversed())
+            if line.isWrapped, !logical.isEmpty {
+                logical[logical.count - 1] += sourceText
+            } else {
+                logical.append(sourceText)
+            }
+        }
+        return logical.joined(separator: "\n")
+    }
 
     /// Strip agent chrome from extracted terminal text, preserving everything
     /// else verbatim (markdown indentation matters — only KNOWN gutters go).
@@ -51,10 +177,14 @@ final class RenderWebProxy: ObservableObject {
     /// one-page PDF via WebKit's native renderer, then ask where to save it.
     func exportPDF(suggestedName: String) {
         guard let wv = webView else { return }
-        wv.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { h, _ in
-            let height = (h as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.height
+        wv.evaluateJavaScript("({ width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth), height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) })") { dimensions, _ in
+            let values = dimensions as? [String: Any]
+            let width = (values?["width"] as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.width
+            let height = (values?["height"] as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.height
             let cfg = WKPDFConfiguration()
-            cfg.rect = CGRect(x: 0, y: 0, width: wv.bounds.width, height: max(height, wv.bounds.height))
+            cfg.rect = CGRect(x: 0, y: 0,
+                              width: max(width, wv.bounds.width),
+                              height: max(height, wv.bounds.height))
             wv.createPDF(configuration: cfg) { result in
                 guard case .success(let data) = result else { NSSound.beep(); return }
                 let panel = NSSavePanel()
@@ -73,9 +203,10 @@ final class RenderWebProxy: ObservableObject {
 /// Esc and ⌘+/−/0 are handled by a local key monitor while the panel is up.
 struct RenderPanel: View {
     @EnvironmentObject var state: AppState
-    let text: String
+    let document: RenderDocument
 
     @AppStorage("ut.renderFontSize") private var fontSize = 16.0
+    @AppStorage("ut.renderPresentation") private var presentation = "terminal"
     @State private var copied = false
     @StateObject private var web = RenderWebProxy()
 
@@ -91,12 +222,21 @@ struct RenderPanel: View {
                 HStack(spacing: 10) {
                     Image(systemName: "sparkles").font(.system(size: 13)).foregroundStyle(Color(hex: "#B58A00"))
                     Text("Render").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(hex: "#1F2328"))
-                    Text("markdown · LaTeX · code").font(.system(size: 11)).foregroundStyle(inkDim)
+                    Text(presentation == "terminal" ? "color · emphasis · layout" : "markdown · LaTeX · code")
+                        .font(.system(size: 11)).foregroundStyle(inkDim)
                     Spacer()
+                    Picker("Presentation", selection: $presentation) {
+                        Text("Terminal").tag("terminal")
+                        Text("Typeset").tag("typeset")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 150)
+                    .help("Terminal preserves the exact styled grid; Typeset interprets the extracted source as Markdown")
                     Button {
                         let pb = NSPasteboard.general
                         pb.clearContents()
-                        pb.setString(text, forType: .string)
+                        pb.setString(document.source, forType: .string)
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
                     } label: {
@@ -129,7 +269,11 @@ struct RenderPanel: View {
                 .padding(.horizontal, 14).frame(height: 40)
                 .background(paper)
                 Rectangle().fill(Color(hex: "#E4E4E0")).frame(height: 1)
-                RenderWebView(markdown: text, fontSize: fontSize, proxy: web)
+                RenderWebView(document: document, fontSize: fontSize,
+                              presentation: presentation, proxy: web)
+                    .background(presentation == "terminal"
+                                ? Color(hex: document.terminal.background)
+                                : paper)
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.black.opacity(0.25), lineWidth: 1))
@@ -151,7 +295,7 @@ struct RenderPanel: View {
     }
 
     private func adjustZoom(_ d: Double) { fontSize = min(28, max(9, fontSize + d)) }
-    private func close() { state.renderText = nil }
+    private func close() { state.renderDocument = nil }
 
     // Esc closes; ⌘+/−/0 zoom the rendered content (standing requirement: every
     // content pane gets keyboard zoom) without reaching the terminal behind.
@@ -176,11 +320,12 @@ struct RenderPanel: View {
     }
 }
 
-/// WKWebView hosting the offline render bundle (Resources/render). The text is
-/// a static snapshot pushed once on load; zoom updates restyle in place.
+/// WKWebView hosting the offline render bundle (Resources/render). The complete
+/// static document is pushed on load; mode and zoom updates restyle in place.
 private struct RenderWebView: NSViewRepresentable {
-    let markdown: String
+    let document: RenderDocument
     let fontSize: Double
+    let presentation: String
     let proxy: RenderWebProxy
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -189,45 +334,60 @@ private struct RenderWebView: NSViewRepresentable {
         let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         proxy.webView = wv
         wv.navigationDelegate = context.coordinator
-        if #available(macOS 12.0, *) { wv.underPageBackgroundColor = NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1) }
+        if #available(macOS 12.0, *) {
+            wv.underPageBackgroundColor = presentation == "terminal"
+                ? NSColor(hex: document.terminal.background)
+                : NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1)
+        }
         wv.setValue(false, forKey: "drawsBackground")   // panel paper shows through while loading
-        context.coordinator.pending = (markdown, fontSize)
+        context.coordinator.pending = (document, fontSize, presentation)
         let dir = Bundle.main.resourceURL!.appendingPathComponent("render")
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
         return wv
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
-        context.coordinator.update(wv, markdown, fontSize)
+        if #available(macOS 12.0, *) {
+            wv.underPageBackgroundColor = presentation == "terminal"
+                ? NSColor(hex: document.terminal.background)
+                : NSColor(red: 0.984, green: 0.984, blue: 0.980, alpha: 1)
+        }
+        context.coordinator.update(wv, document, fontSize, presentation)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
-        var pending: (String, Double)?
+        var pending: (RenderDocument, Double, String)?
         private var ready = false
-        private var shownText: String?
+        private var shownDocument: UUID?
         private var shownSize: Double = 0
+        private var shownPresentation = ""
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
-            if let p = pending { push(webView, p.0, p.1); pending = nil }
+            if let p = pending { push(webView, p.0, p.1, p.2); pending = nil }
         }
-        func update(_ wv: WKWebView, _ text: String, _ size: Double) {
-            guard ready else { pending = (text, size); return }
-            if shownText != text { push(wv, text, size) }
+        func update(_ wv: WKWebView, _ document: RenderDocument, _ size: Double, _ presentation: String) {
+            guard ready else { pending = (document, size, presentation); return }
+            if shownDocument != document.id || shownPresentation != presentation {
+                push(wv, document, size, presentation)
+            }
             else if shownSize != size {
                 shownSize = size
                 wv.evaluateJavaScript("window.UTRender.setZoom(\(Int(size)))")
             }
         }
-        private func push(_ wv: WKWebView, _ text: String, _ size: Double) {
-            shownText = text
+        private func push(_ wv: WKWebView, _ document: RenderDocument, _ size: Double, _ presentation: String) {
+            shownDocument = document.id
             shownSize = size
-            wv.evaluateJavaScript("window.UTRender.set(\(js(text)), \(Int(size)))")
+            shownPresentation = presentation
+            wv.evaluateJavaScript(
+                "window.UTRender.setDocument(\(js(document)), \(Int(size)), \(js(presentation)))"
+            )
         }
-        private func js(_ s: String) -> String {
-            guard let d = try? JSONSerialization.data(withJSONObject: [s]),
-                  let arr = String(data: d, encoding: .utf8) else { return "\"\"" }
-            return String(arr.dropFirst().dropLast())
+        private func js<T: Encodable>(_ value: T) -> String {
+            guard let data = try? JSONEncoder().encode(value),
+                  let encoded = String(data: data, encoding: .utf8) else { return "null" }
+            return encoded
         }
     }
 }

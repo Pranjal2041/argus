@@ -44,10 +44,11 @@ and it is hidden on your phone too. Restore it whenever you want.
 
 ## Render output
 
-Agents often print Markdown, tables, and LaTeX into a terminal, where it reads as raw text. **Render
-Output** (`⇧⌘M`) lifts the current screen into a clean reading view — Markdown, math, and highlighted
-code — rendered entirely offline, so nothing leaves your machine. It is a reading surface laid over
-the terminal, not a replacement for it.
+**Render Output** (`⇧⌘M`) lifts the current screen into a static reading view without touching the
+live session. **Terminal** mode is the default: it preserves the terminal's colors, bold/italic text,
+links, spacing, soft wraps, and already-formatted tables. Switch to **Typeset** when the agent printed
+raw source and you want Argus to interpret it as Markdown, LaTeX math, highlighted code, or JSON.
+Both modes run entirely offline, so nothing leaves your machine.
 
 ## Keeping a Mac reachable while locked
 
