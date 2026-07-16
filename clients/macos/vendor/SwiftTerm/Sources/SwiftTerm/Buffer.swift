@@ -421,7 +421,12 @@ public final class Buffer {
             // Deal with columns increasing (reducing needs to happen after reflow)
             
             if cols < newCols {
-                for i in 0..<lines.maxLength {
+                // `maxLength` is capacity, not content. Reading an unused slot
+                // through CircularBufferLineList's subscript materializes a full
+                // BufferLine. With Argus's 100k-line history allowance this loop
+                // allocated all 100k rows on the first pane resize, even when the
+                // terminal contained only the visible viewport.
+                for i in 0..<lines.count {
                     lines [i].resize (cols: newCols, fillData: CharData.Null)
                 }
 
@@ -503,7 +508,7 @@ public final class Buffer {
             reflow (newCols, newRows)
             // Trim the end of the line off if cols shrunk
             if cols > newCols {
-                for i in 0..<lines.maxLength {
+                for i in 0..<lines.count {
                     lines [i].resize (cols: newCols, fillData: CharData.Null)
                 }
             }
@@ -511,7 +516,7 @@ public final class Buffer {
         
         // DEBUG: Post-condition
         if lines.count > 0 {
-            for i in 0..<lines.maxLength {
+            for i in 0..<lines.count {
                 let line = lines [i]
                 if line.count < newCols {
                     print ("stop here newCols=\(newCols) but the element has: \(line.count)")

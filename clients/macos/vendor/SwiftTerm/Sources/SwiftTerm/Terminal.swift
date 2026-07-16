@@ -5501,7 +5501,16 @@ open class Terminal {
 
     private func snapshotBuffer (_ source: Buffer) -> Buffer
     {
-        let copy = Buffer(cols: source.cols, rows: source.rows, tabStopWidth: tabStopWidth, scrollback: source.scrollback)
+        // This buffer is a short-lived, read-only display snapshot. Give it
+        // capacity for the lines that actually exist, not the terminal's full
+        // history allowance. With a 100k-line scrollback, allocating the optional
+        // slot array at full capacity for every synchronized Codex/Claude frame
+        // cost ~800KB per frame even when only 25 rows existed.
+        let materializedScrollback = source.hasScrollback
+            ? max(0, source.lines.count - source.rows)
+            : nil
+        let copy = Buffer(cols: source.cols, rows: source.rows, tabStopWidth: tabStopWidth,
+                          scrollback: materializedScrollback)
         copy.xDisp = source.xDisp
         copy.yDisp = source.yDisp
         copy.xBase = source.xBase
@@ -5522,7 +5531,6 @@ open class Terminal {
         copy.marginRight = source.marginRight
         copy.savedAttr = source.savedAttr
         copy.savedCharset = source.savedCharset
-        copy.scrollback = source.scrollback
 
         // Only the visible viewport can change during a synchronized frame; the
         // scrollback is static for that duration, so deep-copying it every frame was

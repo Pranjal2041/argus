@@ -1069,8 +1069,9 @@ struct RootView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 } else if terminals.isWandbShown(ref), terminals.currentRun(for: ref) != nil {
-                    // W&B run, in place of the terminal. The terminal PaneConn stays
-                    // alive (cached) in the background, so output + detection continue.
+                    // W&B run, in place of the terminal. Its broker connection and
+                    // W&B detector stay alive; SwiftTerm catches up from one snapshot
+                    // on return instead of repainting an invisible terminal.
                     WandbPaneView(controller: wandb, terminals: terminals, ref: ref)
                 } else {
                     TerminalHostView(controller: terminals, ref: ref, url: state.wsURL(for: ref))
