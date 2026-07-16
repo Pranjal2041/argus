@@ -207,6 +207,7 @@ a { color: var(--link); }
 .status-dot.status-running, .signal-running .signal-mark { background: var(--live); box-shadow: 0 0 0 2px var(--live-soft); }
 .status-dot.status-failed, .status-dot.status-rejected, .signal-failed .signal-mark { border-radius: 2px; background: var(--danger); transform: rotate(45deg); }
 .status-dot.status-finished, .signal-finished .signal-mark { background: var(--verified); }
+.status-dot.status-stopped { border: 1px solid var(--text-secondary); background: transparent; }
 .context-empty { padding: 18px 9px; color: var(--text-quiet); font-family: var(--sans); font-size: .78rem; line-height: 1.5; }
 
 /* Main canvas */
@@ -283,6 +284,8 @@ a { color: var(--link); }
 .status-word.status-needs::before { background: var(--decision); }
 .status-word.status-approved { color: var(--queued); }
 .status-word.status-approved::before { border-radius: 2px; background: var(--queued); }
+.status-word.status-stopped { color: var(--text-secondary); }
+.status-word.status-stopped::before { border: 1px solid currentColor; background: transparent; }
 .signal-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 25px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .signal { min-width: 0; display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 7px; padding: 10px 12px; border-right: 1px solid var(--line-soft); }
 .signal:last-child { border-right: 0; }
@@ -348,6 +351,8 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .spine-node.queued::before { border-color: var(--queued); border-radius: 2px; background: var(--queued); box-shadow: 0 0 0 3px var(--queued-soft); }
 .spine-node.rejected, .spine-node.failed { border-top-color: var(--danger); }
 .spine-node.rejected::before, .spine-node.failed::before { border-color: var(--danger); background: var(--danger); }
+.spine-node.stopped { border-top-color: var(--text-secondary); }
+.spine-node.stopped::before { border-color: var(--text-secondary); background: var(--canvas); }
 .spine-label { color: var(--text-secondary); font: 700 .59rem var(--condensed); letter-spacing: .12em; text-transform: uppercase; }
 .spine-time { margin-top: 5px; color: var(--text-quiet); font: .62rem var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .spine-note { margin-top: 4px; color: var(--text-secondary); font-family: var(--sans); font-size: .68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -419,6 +424,7 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .run-result { margin-top: 29px; padding: 4px 0 5px 21px; border-left: 3px solid var(--verified); }
 .run-result.failed { border-left-color: var(--danger); }
 .run-result.pending { border-left-color: var(--decision); }
+.run-result.stopped { border-left-color: var(--text-secondary); }
 .run-result-label { color: var(--text-quiet); font: 700 .6rem var(--condensed); letter-spacing: .14em; text-transform: uppercase; }
 .run-result-text { max-width: 900px; margin-top: 7px; font-family: var(--display); font-size: clamp(1.18rem, 1.9vw, 1.65rem); font-weight: 530; line-height: 1.4; letter-spacing: -.015em; }
 .run-result-text.long-report { max-width: 1020px; font-family: var(--sans); font-size: .9rem; font-weight: 450; line-height: 1.62; letter-spacing: 0; }
@@ -556,6 +562,30 @@ body.action-busy .decision-dock, body.action-busy .access-panel { opacity: .64; 
 .toast { min-width: 260px; max-width: 390px; border: 1px solid var(--line); border-left: 3px solid var(--verified); border-radius: 5px; background: var(--toast-bg); color: var(--text); padding: 11px 13px; box-shadow: 0 18px 48px var(--shadow); font-size: .74rem; animation: toast-in .18s ease-out both; }
 .toast.error { border-left-color: var(--danger); }
 .drawer-scrim { display: none; }
+
+/* Manual lifecycle correction. Kept visually neutral because "stopped" is
+   neither a successful finding nor an experiment failure. */
+.modal-layer { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 22px; }
+.modal-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--scrim); cursor: default; }
+.stop-dialog {
+  position: relative; width: min(560px, 100%); max-height: calc(100vh - 44px); overflow: auto;
+  border: 1px solid var(--line); border-top: 2px solid var(--text-secondary); border-radius: 8px;
+  background: var(--surface); padding: 24px; box-shadow: 0 28px 90px var(--shadow);
+}
+.dialog-kicker { color: var(--text-quiet); font: 700 .59rem/1 var(--condensed); letter-spacing: .14em; text-transform: uppercase; }
+.stop-dialog h2 { margin: 9px 0 0; color: var(--text); font-family: var(--display); font-size: 1.35rem; font-weight: 650; letter-spacing: -.015em; }
+.stop-dialog > p { margin: 9px 0 0; color: var(--text-secondary); font-size: .78rem; line-height: 1.55; }
+.dialog-boundary { display: grid; gap: 3px; margin-top: 17px; border-left: 3px solid var(--text-secondary); background: var(--surface-soft); padding: 11px 13px; }
+.dialog-boundary strong { color: var(--text); font-size: .76rem; font-weight: 650; }
+.dialog-boundary span { color: var(--text-secondary); font-size: .72rem; line-height: 1.45; }
+.dialog-field { display: grid; gap: 7px; margin-top: 18px; }
+.dialog-field > span { color: var(--text); font: 650 .7rem var(--sans); }
+.dialog-field .text-area { width: 100%; min-height: 104px; }
+.dialog-field small { color: var(--text-quiet); font: .59rem/1.4 var(--mono); }
+.dialog-confirm { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; align-items: start; margin-top: 16px; color: var(--text-secondary); font-size: .74rem; line-height: 1.45; cursor: pointer; }
+.dialog-confirm input { width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--accent); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+body.modal-open .app-shell { filter: saturate(.82); }
 
 @keyframes breathe { 0% { box-shadow: 0 0 0 0 var(--live-soft); } 70%,100% { box-shadow: 0 0 0 8px transparent; } }
 @keyframes shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }

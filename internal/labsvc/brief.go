@@ -7,15 +7,17 @@ import (
 
 // RunSummary is the one-line view of a run used by the brief and the hub.
 type RunSummary struct {
-	ID       string `json:"id"`
-	Group    string `json:"group,omitempty"`
-	Tier     string `json:"tier,omitempty"`
-	Status   string `json:"status"`
-	Started  string `json:"started,omitempty"`
-	Latest   string `json:"latest,omitempty"`
-	LatestAt string `json:"latestAt,omitempty"`
-	ExitCode int    `json:"exitCode"`
-	Archived bool   `json:"archived,omitempty"`
+	ID         string `json:"id"`
+	Group      string `json:"group,omitempty"`
+	Tier       string `json:"tier,omitempty"`
+	Status     string `json:"status"`
+	Started    string `json:"started,omitempty"`
+	StoppedAt  string `json:"stoppedAt,omitempty"`
+	StopReason string `json:"stopReason,omitempty"`
+	Latest     string `json:"latest,omitempty"`
+	LatestAt   string `json:"latestAt,omitempty"`
+	ExitCode   int    `json:"exitCode"`
+	Archived   bool   `json:"archived,omitempty"`
 }
 
 // BriefData is everything `ut lab brief` prints and everything the hub needs
@@ -74,7 +76,8 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 		return RunSummary{}, nil, err
 	}
 	sum := RunSummary{ID: run, Status: "recorded", ExitCode: -1}
-	var proposed, decided, approved, started, ended bool
+	var proposed, decided, approved, started bool
+	terminal := ""
 	for _, e := range evs {
 		switch e.Kind {
 		case "proposal":
@@ -92,6 +95,10 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 			}
 		case "run-start":
 			started = true
+			terminal = ""
+			sum.ExitCode = -1
+			sum.StoppedAt = ""
+			sum.StopReason = ""
 			sum.Started = e.Time
 			if v, ok := e.Data["tier"].(string); ok {
 				sum.Tier = v
@@ -100,10 +107,17 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 				sum.Group = v
 			}
 		case "run-end":
-			ended = true
+			terminal = "run-end"
+			sum.StoppedAt = ""
+			sum.StopReason = ""
 			if v, ok := e.Data["exit"].(float64); ok {
 				sum.ExitCode = int(v)
 			}
+		case "run-stop":
+			terminal = "run-stop"
+			sum.ExitCode = -1
+			sum.StoppedAt = e.Time
+			sum.StopReason = e.Text
 		case "result", "note":
 			if e.Text != "" {
 				sum.Latest = e.Text
@@ -116,10 +130,12 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 		}
 	}
 	switch {
-	case ended && sum.ExitCode == 0:
+	case terminal == "run-end" && sum.ExitCode == 0:
 		sum.Status = "done"
-	case ended:
+	case terminal == "run-end":
 		sum.Status = fmt.Sprintf("failed (exit %d)", sum.ExitCode)
+	case terminal == "run-stop":
+		sum.Status = "stopped"
 	case started:
 		sum.Status = "running"
 		if t, err := time.Parse(time.RFC3339, sum.Started); err == nil {

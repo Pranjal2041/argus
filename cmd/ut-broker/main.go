@@ -844,6 +844,26 @@ func main() {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+	// Human lifecycle correction for an orphaned run. This records that the
+	// operator already verified the process is stopped; it never sends a signal.
+	mux.HandleFunc("/lab/mark-stopped", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := labsvc.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		q := r.URL.Query()
+		if err := st.MarkRunStopped(q.Get("set"), q.Get("run"), q.Get("reason")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 	// Scope-level notes (global, this machine, each project) for the hub's
 	// Notes view. Hidden ones are included and flagged: the human sees what
 	// they hid, agents never do.

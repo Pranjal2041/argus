@@ -154,7 +154,7 @@ The phone joins the tailnet itself via an embedded `tsnet` core — paste a Tail
 in the app; no system Tailscale client or manual hostnames required.
 
 The native Lab screen includes approvals, research records and artifacts, run comparison,
-scoped guidance, archive/policy/key controls, Babel shared-store deduplication, and Lab items
+scoped guidance, guarded lifecycle correction, archive/policy/key controls, Babel shared-store deduplication, and Lab items
 in the Command Center. Approval notifications deep-link to the exact evidence dossier. The phone
 can also turn Unattended Mode on or off through the Mac broker, including directly from Command
 Center.

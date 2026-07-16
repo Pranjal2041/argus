@@ -4,7 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode/utf8"
 )
+
+// MaxStopReasonRunes keeps the human lifecycle note useful in compact Lab
+// surfaces while still leaving ample room for an honest explanation.
+const MaxStopReasonRunes = 1000
 
 // Hide appends a human "hide" event next to the target event, which removes
 // the target from agent-facing reads and default hub views. Nothing is ever
@@ -168,5 +174,53 @@ func (s *Store) SetArchived(set, run string, archived bool) error {
 	}
 	_, err := s.Append(dir, Event{Author: "human", Kind: "archive",
 		Data: map[string]any{"archived": archived}})
+	return err
+}
+
+// MarkRunStopped records that a human has verified an orphaned run is no
+// longer executing. It deliberately does not signal a process and does not
+// fabricate a machine-authored run-end: the required reason makes the manual
+// lifecycle correction explicit and auditable. A later real run-end remains
+// authoritative when it arrives.
+func (s *Store) MarkRunStopped(set, run, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Errorf("a reason is required")
+	}
+	if utf8.RuneCountInString(reason) > MaxStopReasonRunes {
+		return fmt.Errorf("reason is too long (maximum %d characters)", MaxStopReasonRunes)
+	}
+	if run == "" {
+		return fmt.Errorf("a run is required")
+	}
+	dir := s.RunDir(set, run)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return fmt.Errorf("no such run")
+	}
+	events, err := s.Events(dir, false)
+	if err != nil {
+		return err
+	}
+	started := false
+	terminal := ""
+	for _, event := range events {
+		switch event.Kind {
+		case "run-start":
+			started = true
+			terminal = ""
+		case "run-end", "run-stop":
+			terminal = event.Kind
+		}
+	}
+	if !started {
+		return fmt.Errorf("run has no recorded start")
+	}
+	switch terminal {
+	case "run-end":
+		return fmt.Errorf("run has already ended")
+	case "run-stop":
+		return fmt.Errorf("run is already marked stopped")
+	}
+	_, err = s.Append(dir, Event{Author: "human", Kind: "run-stop", Text: reason})
 	return err
 }

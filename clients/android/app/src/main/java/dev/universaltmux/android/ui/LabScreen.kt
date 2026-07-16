@@ -482,6 +482,7 @@ private fun LabRunRow(run: LabRunSummary, onClick: () -> Unit) {
             Text(run.id, color = labText, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
             run.tier?.let { Spacer(Modifier.width(7.dp)); LabTag(it.uppercase(), labFaint) }
             run.group?.let { Spacer(Modifier.width(5.dp)); LabTag(it, labFaint) }
+            if (run.archived) { Spacer(Modifier.width(5.dp)); LabTag("ARCHIVED", labFaint) }
             Spacer(Modifier.weight(1f)); Text(label.uppercase(), color = color, fontSize = 10.sp)
         }
         run.latest?.takeIf(String::isNotEmpty)?.let {
@@ -500,6 +501,9 @@ private fun LabRunPage(vm: AppViewModel, cardID: String, runID: String, onOpenTe
     val detail = vm.labDetails[key]
     var note by remember(key) { mutableStateOf("") }
     var artifact by remember(key) { mutableStateOf("") }
+    var showStopDialog by remember(key) { mutableStateOf(false) }
+    var stopReason by remember(key) { mutableStateOf("") }
+    var stopConfirmed by remember(key) { mutableStateOf(false) }
     LaunchedEffect(key) { vm.loadLabDetail(card, runID) }
     val pending = vm.labPendingRuns.firstOrNull { it.storeID == card.storeID && it.proposal.set == card.brief.set.id && it.proposal.run == runID }
     Column(Modifier.fillMaxSize()) {
@@ -510,8 +514,18 @@ private fun LabRunPage(vm: AppViewModel, cardID: String, runID: String, onOpenTe
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(runID, color = labText, fontSize = 26.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     Spacer(Modifier.width(9.dp)); LabTag(label.uppercase(), color)
+                    if (run.archived) { Spacer(Modifier.width(7.dp)); LabTag("ARCHIVED", labFaint) }
                 }
                 LabMetaLine(card, run.tier, run.group)
+                if (labRunPhase(run) == "stopped") {
+                    LabLedgerCard(accent = labFaint) {
+                        LabSectionLabel("WHY THIS RECORD WAS CLOSED", detail = "manual lifecycle correction")
+                        Text(
+                            run.stopReason ?: "The run was manually marked stopped after its underlying process was verified absent.",
+                            color = labText, fontSize = 13.sp,
+                        )
+                    }
+                }
                 run.latest?.let {
                     LabMarkdown(it, labText, labFaint, labPanel, Modifier.fillMaxWidth().padding(top = 12.dp))
                 }
@@ -575,12 +589,71 @@ private fun LabRunPage(vm: AppViewModel, cardID: String, runID: String, onOpenTe
                 }
             }
             if (!card.offline) item {
-                TextButton(onClick = { vm.setLabArchived(card, runID, !run.archived) }) {
-                    Icon(Icons.Filled.Archive, null); Spacer(Modifier.width(6.dp)); Text(if (run.archived) "Restore run" else "Archive run")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (labRunPhase(run) == "running") {
+                        TextButton(onClick = {
+                            stopReason = ""
+                            stopConfirmed = false
+                            showStopDialog = true
+                        }) { Text("Mark stopped") }
+                    }
+                    TextButton(onClick = { vm.setLabArchived(card, runID, !run.archived) }) {
+                        Icon(Icons.Filled.Archive, null); Spacer(Modifier.width(6.dp)); Text(if (run.archived) "Restore run" else "Archive run")
+                    }
                 }
             }
             item { Spacer(Modifier.height(20.dp)) }
         }
+    }
+    if (showStopDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!vm.labActionBusy) showStopDialog = false },
+            title = { Text("Mark $runID stopped") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Use this only when the process or remote job has already stopped but its Lab wrapper never recorded an ending.",
+                        color = labDim,
+                    )
+                    Surface(color = labPanel, shape = RoundedCornerShape(7.dp)) {
+                        Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("This changes the Lab record only.", color = labText, fontWeight = FontWeight.SemiBold)
+                            Text("Argus will not send a signal or report success or failure.", color = labDim, fontSize = 12.sp)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = stopReason,
+                        onValueChange = { stopReason = it.take(1000) },
+                        label = { Text("Reason for the missing automatic ending") },
+                        minLines = 3,
+                        enabled = !vm.labActionBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().clickable(enabled = !vm.labActionBusy) { stopConfirmed = !stopConfirmed },
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Checkbox(stopConfirmed, { stopConfirmed = it }, enabled = !vm.labActionBusy)
+                        Text(
+                            "I confirmed that the underlying process or job is no longer running.",
+                            color = labText, fontSize = 13.sp, modifier = Modifier.padding(top = 11.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.markLabRunStopped(card, runID, stopReason)
+                        showStopDialog = false
+                    },
+                    enabled = stopReason.isNotBlank() && stopConfirmed && !vm.labActionBusy,
+                ) { Text("Mark stopped") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStopDialog = false }, enabled = !vm.labActionBusy) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -1108,16 +1181,14 @@ private fun LabResolved(onBack: () -> Unit) {
 
 @Composable
 private fun runStatus(run: LabRunSummary): Pair<String, Color> {
-    val s = run.status.lowercase()
-    return when {
-        run.archived -> "archived" to labFaint
-        "awaiting approval" in s || s.startsWith("proposed") -> "needs" to labWaiting
-        s.startsWith("approved") -> "approved" to labAccent
-        s.startsWith("running") -> "running" to labRunning
-        s.startsWith("failed") -> "failed" to labDanger
-        s.startsWith("denied") -> "rejected" to labDanger
-        s.startsWith("done") -> "finished" to labSuccess
-        else -> "recorded" to labFaint
+    return when (val phase = labRunPhase(run)) {
+        "needs" -> phase to labWaiting
+        "approved" -> phase to labAccent
+        "running" -> phase to labRunning
+        "failed", "rejected" -> phase to labDanger
+        "stopped" -> phase to labDim
+        "finished" -> phase to labSuccess
+        else -> phase to labFaint
     }
 }
 

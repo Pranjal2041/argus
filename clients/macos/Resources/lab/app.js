@@ -33,6 +33,7 @@ const Lab = {
   drafts: Object.create(null),
   scroll: { main: 0, context: 0, blocks: Object.create(null), resetMain: false },
   action: null,
+  stopDialog: null,
   renderPending: false,
   syncAt: null,
   dataKey: "",
@@ -56,6 +57,7 @@ function icon(name) {
     external: '<path d="M14 4h6v6M20 4l-9 9M18 13v7H4V6h7"/>',
     copy: '<rect x="8" y="8" width="11" height="11" rx="1"/><path d="M16 8V4H4v12h4"/>',
     archive: '<path d="M4 8h16v12H4zM3 4h18v4H3zM9 12h6"/>',
+    stop: '<rect x="7" y="7" width="10" height="10" rx="1"/>',
     compare: '<path d="M8 4 4 8l4 4M4 8h13M16 20l4-4-4-4M20 16H7"/>',
     note: '<path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/>',
     chevron: '<path d="m9 18 6-6-6-6"/>',
@@ -268,6 +270,7 @@ function statusInfo(raw) {
   if (s.startsWith("running")) return { key: "running", label: s.replace(/^running\s*/i, "Running ").trim(), tone: "live" };
   if (s === "done") return { key: "finished", label: "Finished", tone: "verified" };
   if (s.startsWith("failed")) return { key: "failed", label: s.replace(/^failed/i, "Failed"), tone: "danger" };
+  if (s === "stopped") return { key: "stopped", label: "Stopped", tone: "quiet" };
   if (s === "denied") return { key: "rejected", label: "Rejected", tone: "danger" };
   if (s.startsWith("proposed")) return { key: "needs", label: "Needs approval", tone: "decision" };
   if (s.startsWith("approved")) return { key: "approved", label: "Approved · awaiting launch", tone: "decision" };
@@ -300,7 +303,9 @@ function pendingItems() {
   return [...runs, ...keys].sort((a, b) => String(b.item.created || "").localeCompare(String(a.item.created || "")) || String(b.id).localeCompare(String(a.id)));
 }
 
-function runActivityAt(run, card) { return run.latestAt || run.started || card && card.created || ""; }
+function runActivityAt(run, card) {
+  return [run.latestAt, run.stoppedAt, run.started, card && card.created].filter(Boolean).sort().pop() || "";
+}
 function cardActivityAt(card) {
   return (card.runs || []).reduce((latest, run) => {
     const activity = runActivityAt(run, card);
@@ -341,7 +346,7 @@ function sameJSONValue(a, b) {
     && sameJSONValue(a[key], b[key]));
 }
 function runSummaryFingerprint(run) {
-  return JSON.stringify([run.status || "", run.started || "", run.latest || "", run.latestAt || "", run.exitCode, run.archived === true]);
+  return JSON.stringify([run.status || "", run.started || "", run.stoppedAt || "", run.stopReason || "", run.latest || "", run.latestAt || "", run.exitCode, run.archived === true]);
 }
 function invalidateChangedRunDetails(nextModel) {
   const previous = new Map();
@@ -362,7 +367,9 @@ function foldDetail(detail) {
   const events = detail && Array.isArray(detail.events) ? detail.events : [];
   const proposal = events.find(event => event.kind === "proposal");
   const start = events.find(event => event.kind === "run-start");
-  const end = [...events].reverse().find(event => event.kind === "run-end");
+  const terminal = [...events].reverse().find(event => event.kind === "run-end" || event.kind === "run-stop");
+  const end = terminal && terminal.kind === "run-end" ? terminal : null;
+  const stop = terminal && terminal.kind === "run-stop" ? terminal : null;
   const decision = [...events].reverse().find(event => event.kind === "decision");
   const env = (start && start.data) || (proposal && proposal.data) || {};
   const hidden = new Set(events.filter(event => event.kind === "hide" && event.data && event.data.target).map(event => event.data.target));
@@ -372,6 +379,8 @@ function foldDetail(detail) {
     proposal,
     start,
     end,
+    stop,
+    terminal,
     decision,
     env,
     hidden,
@@ -480,7 +489,10 @@ function render() {
   $("#masthead").innerHTML = renderMasthead();
   $("#context").innerHTML = renderContext();
   $("#main").innerHTML = renderMain();
+  $("#modal-root").innerHTML = renderStopDialog();
+  $(".app-shell").inert = Boolean(Lab.stopDialog);
   document.body.classList.toggle("context-open", Lab.drawerOpen);
+  document.body.classList.toggle("modal-open", Boolean(Lab.stopDialog));
   document.body.classList.toggle("action-busy", Boolean(Lab.action));
   persistLocation();
   // Replacing innerHTML resets every nested code/artifact scroller to zero.
@@ -488,6 +500,48 @@ function render() {
   // transient top position (or race with a user's next wheel gesture).
   restoreViewState();
   restoreFocusState(focus);
+}
+
+function renderStopDialog() {
+  if (!Lab.stopDialog) return "";
+  const card = cardByID(Lab.stopDialog.card);
+  const run = card && card.runs.find(item => item.id === Lab.stopDialog.run);
+  if (!card || !run || card.offline || statusInfo(run.status).key !== "running") {
+    Lab.stopDialog = null;
+    return "";
+  }
+  const key = `stop-reason:${card.id}/${run.id}`;
+  const reason = draft(key, "");
+  const confirmed = Lab.stopDialog.confirmed === true;
+  const busy = Boolean(Lab.action && Lab.action.type === "markStopped");
+  return `<div class="modal-layer">
+    <button class="modal-scrim" type="button" tabindex="-1" data-action="cancel-stop" aria-label="Cancel marking the run stopped" ${busy ? "disabled" : ""}></button>
+    <section class="stop-dialog" role="dialog" aria-modal="true" aria-labelledby="stop-dialog-title" aria-describedby="stop-dialog-copy">
+      <div class="dialog-kicker">Lifecycle correction · ${esc(card.setID)}</div>
+      <h2 id="stop-dialog-title">Mark ${esc(run.id)} stopped</h2>
+      <p id="stop-dialog-copy">Use this only when the experiment process or remote job has already stopped but its Lab wrapper never recorded an ending.</p>
+      <div class="dialog-boundary"><strong>This changes the Lab record only.</strong><span>Argus will not send a signal, kill a process, or report the run as successful or failed.</span></div>
+      <label class="dialog-field" for="stop-reason"><span>Reason for the missing automatic ending</span>
+        <textarea id="stop-reason" class="text-area" data-draft="${esc(key)}" maxlength="1000" rows="4" placeholder="For example: wrapper disappeared during a node reset; the remote scheduler shows no surviving job." ${busy ? "disabled" : ""}>${esc(reason)}</textarea>
+        <small><span data-stop-count>${reason.length}</span> / 1000 characters · stored in the append-only event record</small>
+      </label>
+      <label class="dialog-confirm"><input id="stop-confirm" type="checkbox" data-stop-confirm ${confirmed ? "checked" : ""} ${busy ? "disabled" : ""}><span>I confirmed that the underlying process or job is no longer running.</span></label>
+      <div class="dialog-actions">
+        <button class="button" type="button" data-action="cancel-stop" ${busy ? "disabled" : ""}>Cancel</button>
+        <button class="button primary" type="button" data-action="confirm-stop" ${!reason.trim() || !confirmed || busy ? "disabled" : ""}>${icon("stop")}${busy ? "Recording…" : "Mark stopped"}</button>
+      </div>
+    </section>
+  </div>`;
+}
+
+function syncStopDialogControls() {
+  if (!Lab.stopDialog) return;
+  const key = `stop-reason:${Lab.stopDialog.card}/${Lab.stopDialog.run}`;
+  const reason = draft(key, "");
+  const button = document.querySelector('[data-action="confirm-stop"]');
+  const count = document.querySelector("[data-stop-count]");
+  if (button) button.disabled = !reason.trim() || Lab.stopDialog.confirmed !== true || Boolean(Lab.action);
+  if (count) count.textContent = String(reason.length);
 }
 
 function renderMasthead() {
@@ -622,7 +676,7 @@ function setSignals(card) {
     const status = statusInfo(run.status);
     if (!present.has(status.key)) present.set(status.key, status);
   }
-  const ordered = ["needs", "approved", "running", "failed", "rejected", "finished", "recorded"]
+  const ordered = ["needs", "approved", "running", "failed", "rejected", "stopped", "finished", "recorded"]
     .map(key => present.get(key)).filter(Boolean);
   if (!ordered.length) return `<span class="status-cluster empty" aria-label="No runs recorded"><span class="status-dot status-recorded" title="No runs recorded"></span></span>`;
   const label = ordered.map(status => status.label).join(", ");
@@ -633,7 +687,7 @@ function researchCards() {
   let cards = Lab.model.sets.filter(card => searchMatchesSet(card, Lab.researchQuery));
   if (Lab.researchFilter !== "archived") cards = cards.filter(card => !card.archived);
   if (Lab.researchFilter === "archived") cards = cards.filter(card => card.archived || card.runs.some(run => run.archived));
-  if (Lab.researchFilter === "active") cards = cards.filter(card => card.runs.some(run => ["running", "needs", "approved"].includes(statusInfo(run.status).key)) || card.runs.length === 0);
+  if (Lab.researchFilter === "active") cards = cards.filter(card => card.runs.some(run => !run.archived && ["running", "needs", "approved"].includes(statusInfo(run.status).key)) || card.runs.length === 0);
   if (Lab.researchFilter === "failed") cards = cards.filter(card => card.runs.some(run => statusInfo(run.status).key === "failed"));
   if (Lab.researchFilter === "finished") cards = cards.filter(card => card.runs.some(run => statusInfo(run.status).key === "finished"));
   return cards;
@@ -926,7 +980,7 @@ function renderSetPage() {
     </div>
     ${renderSignalStrip(card.runs)}
     <div class="research-toolbar">
-      <div class="segmented">${[["all","All"],["active","Active"],["failed","Failed"],["finished","Finished"],["archived","Archive"]].map(([key,label]) => `<button class="segment ${Lab.runFilter === key ? "active" : ""}" type="button" data-run-filter="${key}">${label}</button>`).join("")}</div>
+      <div class="segmented">${[["all","All"],["active","Active"],["failed","Failed"],["stopped","Stopped"],["finished","Finished"],["archived","Archive"]].map(([key,label]) => `<button class="segment ${Lab.runFilter === key ? "active" : ""}" type="button" data-run-filter="${key}">${label}</button>`).join("")}</div>
       <span style="flex:1"></span>
       <button class="button small ${Lab.compareMode ? "primary" : ""}" type="button" data-action="compare-mode">${icon("compare")}${Lab.compareMode ? "Cancel compare" : "Compare runs"}</button>
       ${Lab.compareMode && Lab.comparePicks.length === 2 ? `<button class="button primary small" type="button" data-action="compare-go">Compare ${esc(Lab.comparePicks[0])} / ${esc(Lab.comparePicks[1])}</button>` : ""}
@@ -941,6 +995,7 @@ function filteredRuns(card) {
   if (Lab.runFilter === "archived") runs = runs.filter(({run}) => run.archived);
   if (Lab.runFilter === "active") runs = runs.filter(({run}) => ["running","needs","approved"].includes(statusInfo(run.status).key));
   if (Lab.runFilter === "failed") runs = runs.filter(({run}) => statusInfo(run.status).key === "failed");
+  if (Lab.runFilter === "stopped") runs = runs.filter(({run}) => statusInfo(run.status).key === "stopped");
   if (Lab.runFilter === "finished") runs = runs.filter(({run}) => statusInfo(run.status).key === "finished");
   return runs.sort((a,b) => runActivityAt(b.run, b.card).localeCompare(runActivityAt(a.run, a.card))
     || runNumber(b.run.id) - runNumber(a.run.id));
@@ -971,13 +1026,15 @@ function renderRunRecord() {
   const pending = folded.pending || st.key === "needs";
   const latest = [...folded.results].reverse().find(event => event.kind === "result" && event.text && !folded.hidden.has(event.id));
   const update = [...folded.results].reverse().find(event => event.kind === "note" && event.text && !folded.hidden.has(event.id));
-  const hero = st.key === "failed" ? `The run exited without a successful result${run.exitCode >= 0 ? ` (code ${run.exitCode})` : ""}.`
+  const stopReason = folded.stop && folded.stop.text || run.stopReason || "The run was manually marked stopped after its underlying process was verified absent.";
+  const hero = st.key === "stopped" ? stopReason
+    : st.key === "failed" ? `The run exited without a successful result${run.exitCode >= 0 ? ` (code ${run.exitCode})` : ""}.`
     : latest ? latest.text : st.key === "running" && update ? update.text
     : run.latest ? run.latest
     : st.key === "running" ? "The experiment is running; no finding has been reported yet."
     : st.key === "needs" ? (folded.proposal && folded.proposal.text) || "This experiment is waiting for approval."
     : "No result has been reported.";
-  const resultLabel = st.key === "failed" ? "Failure" : pending ? "Proposed intent"
+  const resultLabel = st.key === "stopped" ? "Why this record was closed" : st.key === "failed" ? "Failure" : pending ? "Proposed intent"
     : st.key === "running" && !latest ? "Latest update" : "Latest finding";
   const message = draft(`decision:${card.id}/${run.id}`, "");
   return `<div class="main-content wide ${pending ? "has-dock" : ""}">
@@ -987,7 +1044,7 @@ function renderRunRecord() {
     </div><div class="page-actions">${runActions(card, run, folded)}</div></div>
     ${card.offline ? offlineBanner(card) : ""}
     ${evidenceSpine(folded, run, card)}
-    <section class="run-result ${st.key === "failed" ? "failed" : pending ? "pending" : ""}"><div class="run-result-label">${resultLabel}</div><div class="run-result-text selectable ${normalizedReportText(hero).length > 480 ? "long-report" : ""}">${renderReportText(hero)}</div></section>
+    <section class="run-result ${st.key === "failed" ? "failed" : st.key === "stopped" ? "stopped" : pending ? "pending" : ""}"><div class="run-result-label">${resultLabel}</div><div class="run-result-text selectable ${normalizedReportText(hero).length > 480 ? "long-report" : ""}">${renderReportText(hero)}</div></section>
     ${folded.env.argv && folded.env.argv.length ? `<div class="command-line selectable">${esc(folded.env.argv.join(" "))}</div>` : ""}
     ${detail ? `<nav class="tab-bar" aria-label="Run evidence">${runTabs(folded).map(([key,label]) => `<button class="tab ${Lab.runTab === key ? "active" : ""}" type="button" data-run-tab="${key}">${label}</button>`).join("")}</nav><div class="tab-panel">${renderRunTab(card, run, folded)}</div>` : `<div class="skeleton"></div><div class="skeleton"></div>`}
     ${pending && !card.offline ? decisionDock("run", { card: card.id, run: run.id, message }) : ""}
@@ -1010,6 +1067,7 @@ function runActions(card, run, folded) {
   if (!card.offline && folded.env.cwd) out.push(`<button class="button small" type="button" data-action="files" data-card="${esc(card.id)}" data-cwd="${esc(folded.env.cwd)}">${icon("folder")}Files</button>`);
   if (!card.offline && folded.end && folded.end.data && folded.end.data.wandb && folded.end.data.wandb.length) out.push(`<button class="button small" type="button" data-action="wandb" data-card="${esc(card.id)}" data-session="${esc(folded.env.tmuxSession || "")}" data-run-ref="${esc(folded.end.data.wandb[0])}">${icon("external")}W&amp;B</button>`);
   if (card.runs.length > 1) out.push(`<button class="button small" type="button" data-action="compare-from" data-card="${esc(card.id)}" data-run="${esc(run.id)}">${icon("compare")}Compare</button>`);
+  if (!card.offline && statusInfo(run.status).key === "running") out.push(`<button class="button small" type="button" data-action="open-stop" data-card="${esc(card.id)}" data-run="${esc(run.id)}">${icon("stop")}Mark stopped</button>`);
   if (!card.offline) out.push(`<button class="button small" type="button" data-action="archive" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-on="${run.archived ? "0" : "1"}">${icon("archive")}${run.archived ? "Unarchive" : "Archive"}</button>`);
   return out.join("");
 }
@@ -1019,11 +1077,12 @@ function evidenceSpine(folded, run, card) {
   const decision = folded.decision;
   const started = folded.start;
   const ended = folded.end;
+  const stopped = folded.stop || (!folded.terminal && run.stoppedAt ? { time: run.stoppedAt, text: run.stopReason || "" } : null);
   const approved = decision && decision.data && decision.data.approve === true;
   const rejected = decision && decision.data && decision.data.approve === false;
   const phase = statusInfo(run.status).key;
   const failed = (ended && ended.data && Number(ended.data.exit) !== 0) || phase === "failed";
-  const startedEvidence = started || (run.started && ["running", "finished", "failed"].includes(phase) ? { time: run.started, data: {} } : null);
+  const startedEvidence = started || (run.started && ["running", "finished", "failed", "stopped"].includes(phase) ? { time: run.started, data: {} } : null);
   const tier = folded.env.tier || run.tier || "";
   const policy = card.policy || "full-only";
   const decisionRequired = policy === "all" || (policy === "full-only" && tier === "full");
@@ -1037,7 +1096,9 @@ function evidenceSpine(folded, run, card) {
     ${node("Proposed", proposed, proposed ? "complete" : "", proposed && proposed.text)}
     ${node("Decision", decision, decisionState, decisionNote)}
     ${node("Started", startedEvidence, startedEvidence ? "complete" : approved ? "queued" : "", started ? card.machineName : startedEvidence ? "summary record" : "")}
-    ${node("Ended", ended, failed ? "failed" : ended ? "complete" : phase === "finished" ? "complete" : startedEvidence ? "current" : "", ended ? `exit ${ended.data && ended.data.exit != null ? ended.data.exit : run.exitCode}` : phase === "finished" ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : failed ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : startedEvidence ? "in progress" : "")}
+    ${stopped
+      ? node("Stopped", stopped, "stopped", stopped.text || run.stopReason || "manually closed")
+      : node("Ended", ended, failed ? "failed" : ended ? "complete" : phase === "finished" ? "complete" : startedEvidence ? "current" : "", ended ? `exit ${ended.data && ended.data.exit != null ? ended.data.exit : run.exitCode}` : phase === "finished" ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : failed ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : startedEvidence ? "in progress" : "")}
   </div>`;
 }
 
@@ -1145,7 +1206,7 @@ function renderProvenance(folded, card, run) {
 }
 
 function eventLabel(kind) {
-  return ({ proposal: "Proposed", decision: "Decision", "run-start": "Started", "run-end": "Ended", result: "Result", note: "Agent note", hnote: "Human note", "data-drift": "Data drift", archive: "Archive" })[kind] || kind;
+  return ({ proposal: "Proposed", decision: "Decision", "run-start": "Started", "run-end": "Ended", "run-stop": "Marked stopped", result: "Result", note: "Agent note", hnote: "Human note", "data-drift": "Data drift", archive: "Archive" })[kind] || kind;
 }
 
 function eventSummary(event) {
@@ -1474,6 +1535,39 @@ document.addEventListener("click", event => {
     if (other) { Lab.selection = { type: "compare", card: card.id, a: action.dataset.run, b: other.id }; resetMainScroll(); render(); }
     return;
   }
+  if (kind === "open-stop") {
+    if (Lab.action) return;
+    const card = cardByID(action.dataset.card);
+    const run = card && card.runs.find(item => item.id === action.dataset.run);
+    if (!card || card.offline || !run || statusInfo(run.status).key !== "running") {
+      toast("This run is no longer available to mark stopped.", true);
+      return;
+    }
+    const key = `stop-reason:${card.id}/${run.id}`;
+    delete Lab.drafts[key];
+    Lab.stopDialog = { card: card.id, run: run.id, confirmed: false };
+    render();
+    setTimeout(() => { const field = $("#stop-reason"); if (field) field.focus(); }, 0);
+    return;
+  }
+  if (kind === "cancel-stop") {
+    if (!Lab.stopDialog || Lab.action) return;
+    delete Lab.drafts[`stop-reason:${Lab.stopDialog.card}/${Lab.stopDialog.run}`];
+    Lab.stopDialog = null;
+    render();
+    return;
+  }
+  if (kind === "confirm-stop") {
+    if (!Lab.stopDialog || Lab.action) return;
+    const key = `stop-reason:${Lab.stopDialog.card}/${Lab.stopDialog.run}`;
+    const reason = draft(key, "").trim();
+    if (!reason || Lab.stopDialog.confirmed !== true) {
+      toast("Confirm the process is stopped and record a reason.", true);
+      return;
+    }
+    startAction("markStopped", { card: Lab.stopDialog.card, run: Lab.stopDialog.run, reason }, "Run marked stopped", key);
+    return;
+  }
   if (kind === "archive") { startAction("archive", { card: action.dataset.card, run: action.dataset.run || "", on: action.dataset.on === "1" }, action.dataset.on === "1" ? "Moved to archive" : "Restored from archive"); return; }
   if (kind === "revoke") { if (confirm("Revoke this agent's access? Every experiment record remains.")) startAction("revoke", { card: action.dataset.card }, "Agent access revoked"); return; }
   if (kind === "revoke-key") { if (confirm("Revoke this key permanently? Its experiment records will remain.")) startAction("revokeKey", { id: action.dataset.id }, "Agent access revoked"); return; }
@@ -1509,11 +1603,17 @@ $("#drawer-scrim").addEventListener("click", () => { Lab.drawerOpen = false; ren
 document.addEventListener("input", event => {
   const input = event.target;
   if (input.dataset && input.dataset.draft) Lab.drafts[input.dataset.draft] = input.value;
+  if (input.id === "stop-reason") syncStopDialogControls();
   if (input.id === "research-search") { Lab.researchQuery = input.value; Lab.scroll.context = 0; render(); const next = $("#research-search"); if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); } }
 });
 
 document.addEventListener("change", event => {
   const input = event.target;
+  if (input.dataset && Object.prototype.hasOwnProperty.call(input.dataset, "stopConfirm")) {
+    if (Lab.stopDialog) Lab.stopDialog.confirmed = input.checked;
+    syncStopDialogControls();
+    return;
+  }
   if (input.dataset && input.dataset.comparePick) {
     event.stopPropagation();
     const id = input.dataset.comparePick;
@@ -1537,12 +1637,25 @@ document.addEventListener("toggle", event => {
 
 document.addEventListener("keydown", event => {
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement && document.activeElement.tagName);
+  if (Lab.stopDialog && event.key === "Tab") {
+    const controls = [...document.querySelectorAll("#modal-root .stop-dialog button:not(:disabled), #modal-root .stop-dialog textarea:not(:disabled), #modal-root .stop-dialog input:not(:disabled)")];
+    if (controls.length) {
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { last.focus(); event.preventDefault(); return; }
+      if (!event.shiftKey && document.activeElement === last) { first.focus(); event.preventDefault(); return; }
+    }
+  }
   if (event.metaKey || event.ctrlKey) {
     if (event.key === "+" || event.key === "=") { setManualScale(Lab.manualScale + .1); event.preventDefault(); return; }
     if (event.key === "-") { setManualScale(Lab.manualScale - .1); event.preventDefault(); return; }
     if (event.key === "0") { setManualScale(1); event.preventDefault(); return; }
   }
   if (event.key === "Escape") {
+    if (Lab.stopDialog && !Lab.action) {
+      delete Lab.drafts[`stop-reason:${Lab.stopDialog.card}/${Lab.stopDialog.run}`];
+      Lab.stopDialog = null;
+      render(); event.preventDefault(); return;
+    }
     if (Lab.drawerOpen) { Lab.drawerOpen = false; render(); event.preventDefault(); return; }
     if (Lab.compareMode) { Lab.compareMode = false; Lab.comparePicks = []; render(); event.preventDefault(); return; }
   }
@@ -1634,6 +1747,7 @@ window.UTLab = {
     Lab.action = null;
     if (ok) {
       if (action.draftKey) delete Lab.drafts[action.draftKey];
+      if (action.type === "markStopped") Lab.stopDialog = null;
       toast(message || action.successMessage || "Done");
     } else toast(message || "The action failed", true);
     render();

@@ -100,6 +100,22 @@ final class LabAggregationTests: XCTestCase {
         XCTAssertEqual(result.sets.map { $0.brief.set.id }, ["s-updated", "s-stale"])
     }
 
+    func testManualStopIsNewerActivityThanAnEarlierResult() {
+        let alpha = machine("alpha")
+        let stale = labBrief(set: "s-stale", machine: "alpha",
+                             created: "2026-07-15T10:00:00Z", latestAt: "2026-07-15T12:00:00Z")
+        let stopped = labBrief(set: "s-stopped", machine: "alpha",
+                               created: "2026-07-14T10:00:00Z", latestAt: "2026-07-14T12:00:00Z",
+                               status: "stopped", stoppedAt: "2026-07-15T13:00:00Z")
+
+        let result = LabModel.aggregate([
+            LabModel.MachineSnapshot(machine: alpha, briefs: [stale, stopped], keys: [], proposals: [],
+                                     notes: LabModel.NotesResp(store: "alpha-store", notes: [])),
+        ], mirrored: [], mirrorHTTPBase: "")
+
+        XCTAssertEqual(result.sets.map { $0.brief.set.id }, ["s-stopped", "s-stale"])
+    }
+
     func testSharedStorePrefersRevokedKeyOverStaleActiveReplica() {
         let n5 = machine("babel-n5-24")
         let u5 = machine("babel-u5-24")
@@ -130,13 +146,14 @@ final class LabAggregationTests: XCTestCase {
     }
 
     private func labBrief(set: String, machine: String,
-                          created: String = "2026-07-11T15:00:00Z", latestAt: String? = nil) -> LabBrief {
+                          created: String = "2026-07-11T15:00:00Z", latestAt: String? = nil,
+                          status: String = "running", stoppedAt: String? = nil) -> LabBrief {
         LabBrief(
             set: LabSetMeta(id: set, project: "vlm_gating", machine: machine,
                             cwd: "/shared/vlm_gating", created: created),
             policy: "full-only", notes: [], setEvents: [],
-            runs: [LabRunSummary(id: "R2", group: "ablation", tier: "full", status: "running",
-                                 started: "2026-07-11T16:00:00Z", latest: "healthy",
+            runs: [LabRunSummary(id: "R2", group: "ablation", tier: "full", status: status,
+                                 started: "2026-07-11T16:00:00Z", stoppedAt: stoppedAt, latest: "healthy",
                                  latestAt: latestAt, exitCode: -1, archived: false)],
             archived: false
         )

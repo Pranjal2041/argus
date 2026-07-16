@@ -99,6 +99,8 @@ struct LabRunSummary: Codable, Hashable, Identifiable {
     var tier: String?
     let status: String
     var started: String?
+    var stoppedAt: String? = nil
+    var stopReason: String? = nil
     var latest: String?
     var latestAt: String? = nil
     let exitCode: Int
@@ -468,7 +470,9 @@ final class LabModel: ObservableObject {
         }
 
         func activity(_ card: SetCard) -> String {
-            card.brief.runs?.map { $0.latestAt ?? $0.started ?? card.brief.set.created }.max()
+            card.brief.runs?.map {
+                [$0.latestAt, $0.stoppedAt, $0.started].compactMap { $0 }.max() ?? card.brief.set.created
+            }.max()
                 ?? card.brief.set.created
         }
         let cards = cardsByRecord.values.sorted {
@@ -695,6 +699,15 @@ final class LabModel: ObservableObject {
                  URLQueryItem(name: "on", value: on ? "1" : "0")]
         if !run.isEmpty { q.append(URLQueryItem(name: "run", value: run)) }
         return await postNow(card.httpBase + "/lab/archive", q)
+    }
+
+    /// Records a manual lifecycle correction for a process the human already
+    /// verified is stopped. The broker does not signal or otherwise manage it.
+    func markRunStoppedNow(_ card: SetCard, run: String, reason: String) async -> Bool {
+        await postNow(card.httpBase + "/lab/mark-stopped",
+                      [URLQueryItem(name: "set", value: card.brief.set.id),
+                       URLQueryItem(name: "run", value: run),
+                       URLQueryItem(name: "reason", value: reason.trimmingCharacters(in: .whitespacesAndNewlines))])
     }
 
     func setPolicyNow(_ card: SetCard, policy: String) async -> Bool {
