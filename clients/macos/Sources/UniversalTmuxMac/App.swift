@@ -627,6 +627,7 @@ struct RootView: View {
         }
         .background(WindowAccessor(onFullscreen: { isFullscreen = $0 }))
         .onAppear {
+            MainThreadStallMonitor.shared.start()
             AttentionNotifier.shared.attach(state)
             lab.bind(state)   // app-wide: approval notifications fire with the pane closed
             AttentionNotifier.shared.requestAuthorizationIfNeeded()

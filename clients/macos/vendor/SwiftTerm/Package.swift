@@ -11,6 +11,8 @@
 //   upstream loop materialized 100k blank rows on a normal pane resize in Argus.
 // - StyledText exposes bounded, attributed terminal snapshots so print/render
 //   surfaces do not have to discard ANSI styling and reconstruct it heuristically.
+// - macOS display scheduling skips hidden views and exposes a redraw FPS cap;
+//   terminal parsing/history remain lossless while cached panes avoid wasted paint.
 import PackageDescription
 
 let package = Package(

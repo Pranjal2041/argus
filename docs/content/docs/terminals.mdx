@@ -28,12 +28,13 @@ version of this, see the [Command Center](/docs/command-center).
 
 Reconnects are visibility-aware. The pane you are reading uses an eager first-frame watchdog and
 retry schedule; background panes back off more calmly so one unhealthy host cannot churn the whole
-sidebar. On macOS, the eight most-recent panes stay warm, but an off-screen pane stops terminal
-repaints and compacts its local history to the broker's recent 10k-line snapshot window; tmux still
-retains the full 100k lines. Revealing it nudges the connection and applies one authoritative
-snapshot before live rendering resumes. On Windows, ConPTY snapshots preserve DEC private modes
-such as bracketed paste, so reconnecting after older output leaves the ring does not silently change
-terminal input behavior.
+sidebar. On macOS, the eight most-recent panes stay warm and protocol-current. Off-screen panes keep
+parsing output into their existing 100k-line local history, but skip invisible paints; one shared,
+bounded main-thread scheduler keeps a burst from several agents from starving clicks or panel
+switches. Revealing a pane therefore does not shrink its history or replace it with a reconnect
+snapshot. On Windows, a genuinely new connection can initially recover only the recent output held
+by the bounded ConPTY ring, but that snapshot preserves DEC private modes such as bracketed paste;
+once connected, subsequent output and panel switches retain the full local history normally.
 
 ## Hidden panels
 
@@ -71,7 +72,13 @@ streams from the tmux server (or ConPTY on Windows) directly.
 
 ## Connection and UI diagnostics
 
-The repository includes two opt-in flight recorders for problems that are otherwise hard to catch:
+Argus automatically watches its own main-thread heartbeat. If the app stops servicing the main queue
+for two seconds, it captures a five-second process sample under
+`~/Library/Logs/Argus/Hangs/` while the blocking stack still exists; it keeps the newest 14 samples.
+This is specifically for beachballs that end in Force Quit and therefore never produce a crash
+report.
+
+The repository also includes two opt-in flight recorders for broader problems:
 
 - `tools/reconnectwatch.sh` is the repository's cluster diagnostic: it discovers the current
   `ut-babel` / `ut-orchard` peers and probes them with the companion `wsprobe`, requiring real

@@ -172,6 +172,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// https://gist.github.com/lukaskubanek/9a61ac71dc0db8bb04db2028f2635779
     /// https://developer.apple.com/forums/thread/663256?answerId=646653022#646653022
     public var disableFullRedrawOnAnyChanges = false
+
+    /// Caps coalesced terminal redraws. Parsing remains lossless and immediate;
+    /// only presentation is throttled. Monitoring terminals do not benefit from
+    /// consuming a CPU core at 60 redraws/sec, especially on macOS versions that
+    /// ask a layer-backed view to repaint its full surface for small changes.
+    public var maximumFramesPerSecond = 60
     var fontSet: FontSet
 
     /// The font to use to render the terminal

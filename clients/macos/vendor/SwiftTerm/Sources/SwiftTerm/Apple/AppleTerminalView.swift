@@ -1702,16 +1702,31 @@ extension TerminalView {
     // It is also cheap, so should be called when new data has been posted or received.
     func queuePendingDisplay ()
     {
+        #if os(macOS)
+        // A hidden cached terminal still needs its model updated so scrollback is
+        // complete when it returns, but drawing an invisible view is pure work.
+        guard !isHidden, window != nil else { return }
+        let boundedFPS = max(1, min(120, maximumFramesPerSecond))
+        let fpsDelay = 1_000_000_000 / boundedFPS
+        #else
+        let fpsDelay = 16_670_000
+        #endif
         // throttle
         if !pendingDisplay {
-            let fps60 = 16670000
-            // let fps30 = 16670000*2
-            let fpsDelay = fps60
             pendingDisplay = true
             DispatchQueue.main.asyncAfter(
                 deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay)),
                 execute: updateDisplay)
         }
+    }
+
+    /// Coalesces one complete redraw after a view becomes visible again. Hidden
+    /// terminal feeds deliberately skip presentation work; this also refreshes
+    /// cursor/accessibility state instead of relying on an AppKit paint alone.
+    public func requestDisplayRefresh ()
+    {
+        terminal.updateFullScreen()
+        queuePendingDisplay()
     }
 
 #if canImport(MetalKit)
