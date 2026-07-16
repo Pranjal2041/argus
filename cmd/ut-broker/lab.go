@@ -60,6 +60,8 @@ func cmdLab(args []string) int {
 		return labArchive(st, rest, true)
 	case "unarchive":
 		return labArchive(st, rest, false)
+	case "mark-stopped":
+		return labMarkStopped(st, rest)
 	case "note":
 		return labNote(st, rest, "agent")
 	case "hnote":
@@ -975,6 +977,22 @@ func labArchive(st *labsvc.Store, args []string, on bool) int {
 	return 0
 }
 
+// labMarkStopped closes an orphaned lifecycle record without pretending this
+// CLI sent a signal to the underlying job. The operator must have verified
+// that separately and must record why the automatic run-end is missing.
+func labMarkStopped(st *labsvc.Store, args []string) int {
+	reason := oneFlag(&args, "--reason")
+	if len(args) != 2 || strings.TrimSpace(reason) == "" {
+		fmt.Fprintln(os.Stderr, "usage: ut lab mark-stopped <set> <run> --reason <why the automatic run-end is missing>")
+		return 2
+	}
+	if err := st.MarkRunStopped(args[0], args[1], reason); err != nil {
+		fmt.Fprintf(os.Stderr, "ut lab: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 // labInit writes the one line agents need into the project instruction files.
 // It appends to CLAUDE.md and AGENTS.md when they exist, creates AGENTS.md
 // when neither does, and never duplicates the line.
@@ -1061,6 +1079,9 @@ HUMAN SIDE (agents never need these)
   ut lab hide <set> <event-id>   hide an event from agents, delete nothing
   ut lab archive <set> [run]     tuck a set or run out of the normal view
                                  (reversible: unarchive; agents unaffected)
+  ut lab mark-stopped <set> <run> --reason "wrapper disappeared"
+                                 mark an already-stopped orphaned run; this
+                                 records lifecycle only and sends no signal
   ut lab hnote [--scope global|project|machine] <text>   leave a note
   ut lab init                    add the one-line lab instruction to
                                  CLAUDE.md / AGENTS.md in this folder

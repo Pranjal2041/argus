@@ -61,6 +61,8 @@ data class LabRunSummary(
     val tier: String? = null,
     val status: String,
     val started: String? = null,
+    val stoppedAt: String? = null,
+    val stopReason: String? = null,
     val latest: String? = null,
     val latestAt: String? = null,
     val exitCode: Int = -1,
@@ -205,7 +207,22 @@ data class LabRunDetail(
 }
 
 internal fun labRunActivityAt(run: LabRunSummary, fallback: String = ""): String =
-    run.latestAt ?: run.started ?: fallback
+    listOfNotNull(run.latestAt, run.stoppedAt, run.started, fallback.takeIf(String::isNotEmpty)).maxOrNull().orEmpty()
+
+/** Lifecycle phase is independent from the archive view flag. */
+internal fun labRunPhase(run: LabRunSummary): String {
+    val status = run.status.lowercase()
+    return when {
+        "awaiting approval" in status || status.startsWith("proposed") -> "needs"
+        status.startsWith("approved") -> "approved"
+        status.startsWith("running") -> "running"
+        status.startsWith("failed") -> "failed"
+        status.startsWith("stopped") -> "stopped"
+        status.startsWith("denied") -> "rejected"
+        status.startsWith("done") -> "finished"
+        else -> "recorded"
+    }
+}
 
 internal fun labCardActivityAt(card: LabSetCard): String =
     card.brief.runs.maxOfOrNull { labRunActivityAt(it, card.brief.set.created) } ?: card.brief.set.created

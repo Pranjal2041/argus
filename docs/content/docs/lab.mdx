@@ -126,12 +126,37 @@ Open Lab with `⇧⌘L` on macOS or the Lab destination on Android.
 - **Guidance** publishes durable human instructions everywhere, to one machine, to one project, or
   to one experiment set. A set ledger shows both its direct instruction and inherited guidance.
 - **Curation** hides individual claims, archives and restores runs or sets, changes approval policy,
-  and revokes keys without deleting the underlying record.
+  and revokes keys without deleting the underlying record. A running record whose real process is
+  already gone can be marked stopped with an audited reason.
 
 The set page keeps the complete human control surface visible: archive or restore the set, change
 its approval policy, revoke access, and install the standard Lab instruction into that project's
 `AGENTS.md` / `CLAUDE.md` files (the same idempotent operation as `ut lab init`). Access-request
 approval also accepts the initial policy and the optional human decision note supported by the CLI.
+
+### Stopping an orphaned run record
+
+Normally `ut lab run` writes a mechanical ending with the process exit code. If the wrapper itself
+disappears—for example during a node reset—but you later verify that no process or scheduler job is
+still running, the run would otherwise remain “Running” forever. Open that run and choose **Mark
+stopped**. Both macOS and Android require:
+
+1. a reason explaining why the automatic ending is missing; and
+2. confirmation that you independently checked the underlying process or job.
+
+This writes a human-authored `run-stop` event and gives the run the neutral **Stopped** phase. It
+does not send a signal and does not invent an exit code, so Stopped is neither Finished nor Failed.
+If the original wrapper later reports a genuine `run-end`, that mechanical outcome supersedes the
+manual correction. The CLI equivalent is:
+
+```sh
+ut lab mark-stopped <set> <run> --reason "wrapper vanished; scheduler confirms no surviving job"
+```
+
+Archive is separate. Archiving only removes a set or run from normal views, is reversible, and does
+not change lifecycle state or affect a process. Consequently, archiving a Running record does not
+make it Stopped; use **Mark stopped** first when the process is truly gone, then archive it if you no
+longer want it in the normal ledger.
 
 Lab attention is not confined to the hub. Pending access and experiment decisions appear in
 **Command Center** beside agent sessions, and system notifications deep-link to the exact dossier.
@@ -170,6 +195,7 @@ ut lab proposals
 ut lab grant <set> <run>
 ut lab reject <set> <run> --note "increase the sample size first"
 ut lab policy <set> all
+ut lab mark-stopped <set> <run> --reason "why the wrapper did not record an ending"
 ut lab archive <set> [run]
 ```
 

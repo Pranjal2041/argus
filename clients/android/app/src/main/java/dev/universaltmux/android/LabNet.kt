@@ -85,6 +85,11 @@ object LabNet {
         listOf("set" to card.brief.set.id, "run" to run, "on" to if (on) "1" else "0"),
     )
 
+    fun markStopped(card: LabSetCard, run: String, reason: String): Boolean = post(
+        card.broker, "/lab/mark-stopped",
+        listOf("set" to card.brief.set.id, "run" to run, "reason" to reason.trim()),
+    )
+
     fun policy(card: LabSetCard, policy: String): Boolean = post(
         card.broker, "/lab/policy", listOf("set" to card.brief.set.id, "policy" to policy),
     )
@@ -196,6 +201,7 @@ object LabNet {
                 LabRunSummary(
                     id = run.optString("id"), group = run.stringOrNull("group"), tier = run.stringOrNull("tier"),
                     status = run.optString("status"), started = run.stringOrNull("started"),
+                    stoppedAt = run.stringOrNull("stoppedAt"), stopReason = run.stringOrNull("stopReason"),
                     latest = run.stringOrNull("latest"), latestAt = run.stringOrNull("latestAt"),
                     exitCode = run.optInt("exitCode", -1),
                     archived = run.optBoolean("archived", false),

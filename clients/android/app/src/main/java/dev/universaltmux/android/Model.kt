@@ -556,7 +556,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun labDetailKey(card: LabSetCard, run: String) = "${card.id}/$run"
 
     private fun labSummaryFingerprint(run: LabRunSummary) = listOf(
-        run.status, run.started.orEmpty(), run.latest.orEmpty(), run.latestAt.orEmpty(),
+        run.status, run.started.orEmpty(), run.stoppedAt.orEmpty(), run.stopReason.orEmpty(),
+        run.latest.orEmpty(), run.latestAt.orEmpty(),
         run.exitCode.toString(), run.archived.toString(),
     ).joinToString("\u0000")
 
@@ -635,6 +636,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLabArchived(card: LabSetCard, run: String = "", on: Boolean) =
         labAction { withContext(Dispatchers.IO) { LabNet.archive(card, run, on) } }
+
+    fun markLabRunStopped(card: LabSetCard, run: String, reason: String) =
+        labAction { withContext(Dispatchers.IO) { LabNet.markStopped(card, run, reason) } }
 
     fun revokeLabKey(card: LabSetCard) {
         val key = labActiveKeyBySet[card.id] ?: return

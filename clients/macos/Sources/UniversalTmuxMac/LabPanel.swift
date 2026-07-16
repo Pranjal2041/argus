@@ -195,6 +195,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 if let v = r.latest { rd["latest"] = v }
                 if let v = r.latestAt { rd["latestAt"] = v }
                 if let v = r.started { rd["started"] = v }
+                if let v = r.stoppedAt { rd["stoppedAt"] = v }
+                if let v = r.stopReason { rd["stopReason"] = v }
                 return rd
             }
             return d
@@ -461,6 +463,17 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 performAction(id: actionID, success: on ? "Moved to archive" : "Restored from archive",
                               detail: (c.id, run)) {
                     await lab.setArchivedNow(c, run: run, on: on)
+                }
+            } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
+        case "markStopped":
+            if let c = card() {
+                let run = str("run"), reason = str("reason").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !run.isEmpty, !reason.isEmpty else {
+                    reportAction(actionID, ok: false, message: "A reason is required.")
+                    return
+                }
+                performAction(id: actionID, success: "Run marked stopped", detail: (c.id, run)) {
+                    await lab.markRunStoppedNow(c, run: run, reason: reason)
                 }
             } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "revoke":
