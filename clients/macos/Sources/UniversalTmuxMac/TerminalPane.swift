@@ -3,18 +3,115 @@ import SwiftTerm
 import SwiftUI
 
 /// One live terminal: a SwiftTerm view + its broker connection + delegate.
-/// Kept alive for the lifetime of the app session so switching away and back
-/// preserves scrollback and the connection (no reconnect, no reload).
+/// The controller keeps a bounded set warm so recent pane switches preserve
+/// scrollback without letting every pane ever opened remain resident forever.
 private struct PasteHome: Decodable { let home: String; let sep: String }
+
+/// Tracks DEC private-mode changes in the raw stream, independently of SwiftTerm.
+/// Hidden panes skip expensive terminal parsing; replaying this compact state before
+/// their authoritative snapshot preserves input semantics such as bracketed paste.
+final class DECPrivateModeTracker {
+    private let lock = NSLock()
+    private var state = 0 // 0 ground, 1 ESC, 2 CSI, 3 CSI ? params
+    private var number = 0
+    private var hasNumber = false
+    private var params: [Int] = []
+    private var modes: [Int: Bool] = [:]
+
+    // Snapshot() explicitly restores the main/alternate buffer, while synchronized
+    // output is a transient frame boundary. Replaying either here can freeze or clear
+    // the snapshot we are about to apply.
+    private static let snapshotOwnedModes: Set<Int> = [47, 1047, 1048, 1049, 2026]
+
+    func feed(_ bytes: [UInt8]) {
+        lock.lock()
+        defer { lock.unlock() }
+        for byte in bytes {
+            switch state {
+            case 0:
+                if byte == 0x1b { state = 1 }
+            case 1:
+                if byte == UInt8(ascii: "[") {
+                    state = 2
+                } else if byte == UInt8(ascii: "c") { // RIS resets terminal modes
+                    // DEC autowrap and cursor visibility default on; the private
+                    // modes relevant here otherwise reset off.
+                    for key in Array(modes.keys) { modes[key] = key == 7 || key == 25 }
+                    state = 0
+                } else {
+                    state = byte == 0x1b ? 1 : 0
+                }
+            case 2:
+                if byte == UInt8(ascii: "?") {
+                    state = 3
+                    number = 0
+                    hasNumber = false
+                    params.removeAll(keepingCapacity: true)
+                } else {
+                    state = byte == 0x1b ? 1 : 0
+                }
+            default:
+                switch byte {
+                case UInt8(ascii: "0")...UInt8(ascii: "9"):
+                    number = number * 10 + Int(byte - UInt8(ascii: "0"))
+                    hasNumber = true
+                case UInt8(ascii: ";"):
+                    appendNumber()
+                case UInt8(ascii: "h"), UInt8(ascii: "l"):
+                    appendNumber()
+                    let enabled = byte == UInt8(ascii: "h")
+                    for param in params { modes[param] = enabled }
+                    state = 0
+                default:
+                    state = byte == 0x1b ? 1 : 0
+                }
+            }
+        }
+    }
+
+    func restorationBytes() -> [UInt8] {
+        lock.lock()
+        defer { lock.unlock() }
+        let known = modes.keys.filter { !Self.snapshotOwnedModes.contains($0) }.sorted()
+        let enabled = known.filter { modes[$0] == true }
+        let disabled = known.filter { modes[$0] == false }
+        var result: [UInt8] = []
+        if !enabled.isEmpty {
+            result.append(contentsOf: Array("\u{1b}[?\(enabled.map(String.init).joined(separator: ";"))h".utf8))
+        }
+        if !disabled.isEmpty {
+            result.append(contentsOf: Array("\u{1b}[?\(disabled.map(String.init).joined(separator: ";"))l".utf8))
+        }
+        return result
+    }
+
+    private func appendNumber() {
+        if hasNumber { params.append(number) }
+        number = 0
+        hasNumber = false
+    }
+}
 
 
 final class PaneConn: NSObject, TerminalViewDelegate {
+    private static let foregroundScrollback = 100_000
+    private static let warmScrollback = 10_000
+
     let view: TerminalView
     private let client: BrokerClient
     private let httpBase: String   // broker http(s) base, for uploading pasted images
     private(set) var connURL: URL  // the session URL this conn (re)connects to; changes on rename or resume (new tmux id)
     private var lastPane = ""
     private var wheelMonitor: Any?  // mouse-reporting panes: wheel → remote (see init)
+
+    // A hidden agent TUI can repaint many times a second. Parsing those bytes in
+    // SwiftTerm still runs on the AppKit main thread even though the view is not
+    // visible. Skip hidden rendering and ask the broker for one authoritative,
+    // idempotent snapshot when the pane returns.
+    private let visibilityLock = NSLock()
+    private var rendersLiveOutput = true
+    private var missedOutputWhileHidden = false
+    private let modeTracker = DECPrivateModeTracker()
 
     /// Forwarded live connection state (for the header status chip).
     var onState: ((ConnState) -> Void)?
@@ -39,6 +136,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     private var wandbBuf: [UInt8] = []
     private var wandbTail = ""
     private var wandbScan: DispatchWorkItem?
+    private let wandbQueue = DispatchQueue(label: "dev.universaltmux.wandb-scan", qos: .utility)
 
     /// (Re)apply the active theme to this pane's terminal. Called at creation and again
     /// whenever the user switches themes — recolors in place, no reconnect, scrollback kept.
@@ -69,15 +167,23 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // mouse-driven TUI where clicking panels/commits matters more than copy,
         // so its pane opts in via mouseReporting=true.
         view.allowMouseReporting = mouseReporting
-        view.getTerminal().changeScrollback(100_000) // large client-side scrollback (default is 500)
+        // Keep the full history allowance while the user is working in this pane.
+        // Hidden warm panes are compacted to the broker's 10k reconnect window in
+        // setVisible(), so the cache cannot retain 100k rows per pane indefinitely.
+        view.getTerminal().changeScrollback(Self.foregroundScrollback)
         // Seamless theme: terminal background == window background. Applied here and
         // re-applied live on theme switch (see applyTheme + TerminalController).
         applyTheme()
         client.onOutput = { [weak self] bytes in
+            guard let self else { return }
+            self.modeTracker.feed(bytes)
+            self.ingestForWandb(bytes)
+            guard self.shouldRenderLiveOutput() else { return }
             DispatchQueue.main.async {
-                guard let self else { return }
+                // It may have been hidden after this frame left URLSession's
+                // callback queue but before its main-thread render turn.
+                guard self.shouldRenderLiveOutput() else { return }
                 self.view.feed(byteArray: bytes[...])
-                self.ingestForWandb(bytes)
             }
         }
         // The pane's AUTHORITATIVE size (connect + every remote resize): pin the
@@ -131,10 +237,37 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         }
     }
 
-    /// Hidden panes reconnect lazily; the visible one stays eager (see BrokerClient).
-    func setRelaxed(_ r: Bool) {
-        client.relaxed = r
-        if !r { client.nudge() }   // just revealed: if not live, dial immediately
+    /// Change whether terminal bytes are rendered. W&B discovery continues on a
+    /// utility queue while hidden, but SwiftTerm is caught up once on reveal rather
+    /// than repainting an invisible view continuously.
+    func setVisible(_ visible: Bool) {
+        visibilityLock.lock()
+        let visibilityChanged = visible != rendersLiveOutput
+        let becameVisible = visible && !rendersLiveOutput
+        let needsSnapshot = becameVisible && missedOutputWhileHidden
+        rendersLiveOutput = visible
+        if visible { missedOutputWhileHidden = false }
+        visibilityLock.unlock()
+
+        if visibilityChanged {
+            view.getTerminal().changeScrollback(visible ? Self.foregroundScrollback : Self.warmScrollback)
+        }
+        client.relaxed = !visible
+        guard becameVisible else { return }
+        let modes = modeTracker.restorationBytes()
+        if !modes.isEmpty { view.feed(byteArray: modes[...]) }
+        client.nudge() // if the socket went stale while hidden, dial immediately
+        if needsSnapshot {
+            client.send(op: Op.requestSnapshot, pane: lastPane, payload: [])
+        }
+    }
+
+    private func shouldRenderLiveOutput() -> Bool {
+        visibilityLock.lock()
+        let visible = rendersLiveOutput
+        if !visible { missedOutputWhileHidden = true }
+        visibilityLock.unlock()
+        return visible
     }
 
     func disconnect() {
@@ -145,15 +278,22 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     // MARK: W&B run detection (off the raw output stream)
 
     private func ingestForWandb(_ bytes: [UInt8]) {
-        wandbBuf.append(contentsOf: bytes)
-        // A big reconnect snapshot can arrive faster than the debounce — scan-and-flush
-        // eagerly so it's neither lost to a cap nor held unbounded; the tail bridges any
-        // URL straddling the flush boundary.
-        if wandbBuf.count >= 512 * 1024 { wandbScan?.cancel(); scanWandb(); return }
-        wandbScan?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.scanWandb() }
-        wandbScan = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        wandbQueue.async { [weak self] in
+            guard let self else { return }
+            self.wandbBuf.append(contentsOf: bytes)
+            // A big reconnect snapshot can arrive faster than the debounce —
+            // scan-and-flush eagerly so it is neither lost to a cap nor held
+            // unbounded; the tail bridges a URL split across flushes.
+            if self.wandbBuf.count >= 512 * 1024 {
+                self.wandbScan?.cancel()
+                self.scanWandb()
+                return
+            }
+            self.wandbScan?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.scanWandb() }
+            self.wandbScan = work
+            self.wandbQueue.asyncAfter(deadline: .now() + 0.4, execute: work)
+        }
     }
 
     private func scanWandb() {
@@ -164,7 +304,9 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         let runs = WandbDetector.runs(in: text)
         // mergeWandb (the receiver) unions + dedups by id and persists only on a real
         // change, so re-emitting an already-known run each window is cheap/idempotent.
-        if !runs.isEmpty { onWandbRuns?(runs) }
+        if !runs.isEmpty {
+            DispatchQueue.main.async { [weak self] in self?.onWandbRuns?(runs) }
+        }
     }
 
     /// Repoint this live connection at the renamed session's URL. The open socket
@@ -509,10 +651,22 @@ final class PaneConn: NSObject, TerminalViewDelegate {
 /// view re-frames (pin or fill) and re-asks when the pane area changes.
 final class TermContainerView: NSView {
     var onResize: (() -> Void)?
+    var onDetached: (() -> Void)?
     override var isFlipped: Bool { true }
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
         onResize?()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        guard superview == nil else { return }
+        // SwiftUI can move this representable between branches. Defer one
+        // runloop so a move does not look like a real detach.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.superview == nil else { return }
+            self.onDetached?()
+        }
     }
 }
 
@@ -527,6 +681,8 @@ final class TerminalController: ObservableObject {
     }()
     private var conns: [String: PaneConn] = [:]
     private var lastShownID: String?
+    private var warmPaneOrder: [String] = []
+    private static let maxWarmPaneCount = 8
 
     // MARK: W&B runs — detected per session, shown in-place instead of the terminal
     /// Runs each session advertised (first-seen order; `.last` = latest), keyed by ref.id.
@@ -752,9 +908,31 @@ final class TerminalController: ObservableObject {
 
     private var visible: PaneConn? { lastShownID.flatMap { conns[$0] } }
 
+    private func touchWarmPane(_ id: String) {
+        warmPaneOrder.removeAll { $0 == id }
+        warmPaneOrder.append(id)
+    }
+
+    private func evictColdPanes(keeping id: String) {
+        while conns.count > Self.maxWarmPaneCount {
+            guard let victim = warmPaneOrder.first(where: { $0 != id }) else { return }
+            drop(victim)
+        }
+    }
+
+    private func hideAllPanes() {
+        for (id, c) in conns {
+            if id == lastShownID { c.utter.finalize() }
+            c.view.isHidden = true
+            c.setVisible(false)
+        }
+        lastShownID = nil
+    }
+
     private var keyMonitor: Any?
     init() {
         loadWandb()   // restore the growing W&B run list (pruning entries >7 days old)
+        container.onDetached = { [weak self] in self?.hideAllPanes() }
         // Live re-theme: when the user picks a theme, recolor every cached pane IN PLACE
         // (no reconnect, scrollback kept) plus the container background.
         NotificationCenter.default.addObserver(forName: .utThemeChanged, object: nil, queue: .main) { [weak self] _ in
@@ -762,14 +940,13 @@ final class TerminalController: ObservableObject {
             self.container.layer?.backgroundColor = Theme.nsAppBackground.cgColor
             self.conns.values.forEach { $0.applyTheme() }
         }
-        // Container resize → every pane re-frames (pinned grid or fill) and
-        // re-asks for its natural size from the new bounds.
+        // Container resize → only the visible pane re-frames and re-asks for its
+        // natural size. Hidden panes are laid out when revealed; resizing all of
+        // their scrollback buffers here made a window drag multiply by cache size.
         container.onResize = { [weak self] in
-            guard let self else { return }
-            for c in self.conns.values {
-                c.applyLayout()
-                c.containerDidResize()
-            }
+            guard let c = self?.visible else { return }
+            c.applyLayout()
+            c.containerDidResize()
         }
         // SwiftTerm's keyDown isn't `open`, so we can't subclass it. A local key
         // monitor (runs before the view sees the key) lets us add: Shift+Enter →
@@ -883,6 +1060,7 @@ final class TerminalController: ObservableObject {
         guard oldID != newID, let c = conns[oldID] else { return }
         conns.removeValue(forKey: oldID)
         conns[newID] = c
+        if let i = warmPaneOrder.firstIndex(of: oldID) { warmPaneOrder[i] = newID }
         c.rename(to: url)
         if let st = connState[oldID] { connState.removeValue(forKey: oldID); connState[newID] = st }
         if lastShownID == oldID { lastShownID = newID }
@@ -892,10 +1070,13 @@ final class TerminalController: ObservableObject {
     /// recreate the session after a kill/rename (the broker evicts on /control).
     func drop(_ id: String) {
         if let c = conns[id] {
+            c.utter.finalize()
+            c.setVisible(false) // queued output must not render after eviction
             c.disconnect()
             c.view.removeFromSuperview()
             conns.removeValue(forKey: id)
         }
+        warmPaneOrder.removeAll { $0 == id }
         connState.removeValue(forKey: id)
         if lastShownID == id { lastShownID = nil }
     }
@@ -941,8 +1122,7 @@ final class TerminalController: ObservableObject {
 
     func show(ref: SessionRef?, url: URL?) {
         guard let ref, let url else {
-            for (_, c) in conns { c.view.isHidden = true }
-            lastShownID = nil
+            hideAllPanes()
             return
         }
         let conn: PaneConn
@@ -973,14 +1153,14 @@ final class TerminalController: ObservableObject {
             conn.applyLayout()
             conns[ref.id] = conn
         }
+        touchWarmPane(ref.id)
+        evictColdPanes(keeping: ref.id)
         conn.utter.ref = ref
         for (id, c) in conns {
             // Switching away ends any in-flight utterance on the pane being hidden.
             if id != ref.id, !c.view.isHidden { c.utter.finalize() }
             c.view.isHidden = (id != ref.id)
-            // Background panes back off calmly; the shown one is eager (and gets
-            // an immediate dial if its socket went stale while hidden).
-            c.setRelaxed(id != ref.id)
+            c.setVisible(id == ref.id)
         }
 
         // Only do the expensive work (refocus, geometry push) on an ACTUAL

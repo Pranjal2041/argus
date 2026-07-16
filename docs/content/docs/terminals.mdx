@@ -28,9 +28,12 @@ version of this, see the [Command Center](/docs/command-center).
 
 Reconnects are visibility-aware. The pane you are reading uses an eager first-frame watchdog and
 retry schedule; background panes back off more calmly so one unhealthy host cannot churn the whole
-sidebar. Revealing a pane nudges it immediately. On Windows, ConPTY snapshots preserve DEC private
-modes such as bracketed paste, so reconnecting after older output leaves the ring does not silently
-change terminal input behavior.
+sidebar. On macOS, the eight most-recent panes stay warm, but an off-screen pane stops terminal
+repaints and compacts its local history to the broker's recent 10k-line snapshot window; tmux still
+retains the full 100k lines. Revealing it nudges the connection and applies one authoritative
+snapshot before live rendering resumes. On Windows, ConPTY snapshots preserve DEC private modes
+such as bracketed paste, so reconnecting after older output leaves the ring does not silently change
+terminal input behavior.
 
 ## Hidden panels
 
