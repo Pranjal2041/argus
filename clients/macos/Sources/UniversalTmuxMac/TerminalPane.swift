@@ -7,95 +7,190 @@ import SwiftUI
 /// scrollback without letting every pane ever opened remain resident forever.
 private struct PasteHome: Decodable { let home: String; let sep: String }
 
-/// Tracks DEC private-mode changes in the raw stream, independently of SwiftTerm.
-/// Hidden panes skip expensive terminal parsing; replaying this compact state before
-/// their authoritative snapshot preserves input semantics such as bracketed paste.
-final class DECPrivateModeTracker {
+/// Ordered terminal events waiting to be applied to SwiftTerm.
+///
+/// A reconnect snapshot can span several 256 KiB WebSocket frames. Feeding one
+/// whole frame synchronously on AppKit's thread is enough to beachball panel
+/// switching. This pump preserves protocol order while exposing output in small,
+/// parser-safe slices.
+final class TerminalStreamPump {
+    private enum Event {
+        case output([UInt8])
+        case size(Int, Int)
+    }
+
     private let lock = NSLock()
-    private var state = 0 // 0 ground, 1 ESC, 2 CSI, 3 CSI ? params
-    private var number = 0
-    private var hasNumber = false
-    private var params: [Int] = []
-    private var modes: [Int: Bool] = [:]
+    private var events: [Event] = []
+    private var head = 0
+    private var outputOffset = 0
+    private var stopped = false
+    private var visible = true
+    private let applyOutput: (ArraySlice<UInt8>) -> Void
+    private let applySize: (Int, Int) -> Void
 
-    // Snapshot() explicitly restores the main/alternate buffer, while synchronized
-    // output is a transient frame boundary. Replaying either here can freeze or clear
-    // the snapshot we are about to apply.
-    private static let snapshotOwnedModes: Set<Int> = [47, 1047, 1048, 1049, 2026]
+    init(applyOutput: @escaping (ArraySlice<UInt8>) -> Void,
+         applySize: @escaping (Int, Int) -> Void) {
+        self.applyOutput = applyOutput
+        self.applySize = applySize
+    }
 
-    func feed(_ bytes: [UInt8]) {
+    func enqueueOutput(_ bytes: [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        lock.lock()
+        guard !stopped else { lock.unlock(); return }
+        events.append(.output(bytes))
+        lock.unlock()
+        TerminalDrainCoordinator.shared.wake(self)
+    }
+
+    func enqueueSize(cols: Int, rows: Int) {
+        lock.lock()
+        guard !stopped else { lock.unlock(); return }
+        events.append(.size(cols, rows))
+        lock.unlock()
+        TerminalDrainCoordinator.shared.wake(self)
+    }
+
+    func setVisible(_ value: Bool) {
+        lock.lock()
+        visible = value
+        lock.unlock()
+        if value { TerminalDrainCoordinator.shared.wake(self) }
+    }
+
+    var isVisible: Bool {
         lock.lock()
         defer { lock.unlock() }
-        for byte in bytes {
-            switch state {
-            case 0:
-                if byte == 0x1b { state = 1 }
-            case 1:
-                if byte == UInt8(ascii: "[") {
-                    state = 2
-                } else if byte == UInt8(ascii: "c") { // RIS resets terminal modes
-                    // DEC autowrap and cursor visibility default on; the private
-                    // modes relevant here otherwise reset off.
-                    for key in Array(modes.keys) { modes[key] = key == 7 || key == 25 }
-                    state = 0
-                } else {
-                    state = byte == 0x1b ? 1 : 0
-                }
-            case 2:
-                if byte == UInt8(ascii: "?") {
-                    state = 3
-                    number = 0
-                    hasNumber = false
-                    params.removeAll(keepingCapacity: true)
-                } else {
-                    state = byte == 0x1b ? 1 : 0
-                }
-            default:
-                switch byte {
-                case UInt8(ascii: "0")...UInt8(ascii: "9"):
-                    number = number * 10 + Int(byte - UInt8(ascii: "0"))
-                    hasNumber = true
-                case UInt8(ascii: ";"):
-                    appendNumber()
-                case UInt8(ascii: "h"), UInt8(ascii: "l"):
-                    appendNumber()
-                    let enabled = byte == UInt8(ascii: "h")
-                    for param in params { modes[param] = enabled }
-                    state = 0
-                default:
-                    state = byte == 0x1b ? 1 : 0
-                }
+        return visible
+    }
+
+    var hasPendingEvents: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !stopped && head < events.count
+    }
+
+    /// Applies at most one event/slice. Called only by the main-thread coordinator.
+    /// Returns whether more work remains.
+    @discardableResult
+    func consumeOne(maxOutputBytes: Int) -> Bool {
+        precondition(Thread.isMainThread)
+        var output: ArraySlice<UInt8>?
+        var size: (Int, Int)?
+
+        lock.lock()
+        guard !stopped, head < events.count else {
+            lock.unlock()
+            return false
+        }
+        switch events[head] {
+        case .output(let bytes):
+            let end = min(bytes.count, outputOffset + maxOutputBytes)
+            output = bytes[outputOffset..<end]
+            outputOffset = end
+            if outputOffset == bytes.count {
+                head += 1
+                outputOffset = 0
             }
+        case .size(let cols, let rows):
+            size = (cols, rows)
+            head += 1
         }
+        compactIfNeeded()
+        let remains = head < events.count
+        lock.unlock()
+
+        if let output { applyOutput(output) }
+        if let size { applySize(size.0, size.1) }
+        return remains
     }
 
-    func restorationBytes() -> [UInt8] {
+    func stop() {
         lock.lock()
-        defer { lock.unlock() }
-        let known = modes.keys.filter { !Self.snapshotOwnedModes.contains($0) }.sorted()
-        let enabled = known.filter { modes[$0] == true }
-        let disabled = known.filter { modes[$0] == false }
-        var result: [UInt8] = []
-        if !enabled.isEmpty {
-            result.append(contentsOf: Array("\u{1b}[?\(enabled.map(String.init).joined(separator: ";"))h".utf8))
-        }
-        if !disabled.isEmpty {
-            result.append(contentsOf: Array("\u{1b}[?\(disabled.map(String.init).joined(separator: ";"))l".utf8))
-        }
-        return result
+        stopped = true
+        events.removeAll(keepingCapacity: false)
+        head = 0
+        outputOffset = 0
+        lock.unlock()
     }
 
-    private func appendNumber() {
-        if hasNumber { params.append(number) }
-        number = 0
-        hasNumber = false
+    private func compactIfNeeded() {
+        guard head > 0 else { return }
+        if head == events.count {
+            // Release the payload of the final (often very large) snapshot frame
+            // immediately. Keeping Array capacity is cheap; retaining its consumed
+            // byte arrays until 64 later events arrive is not.
+            events.removeAll(keepingCapacity: true)
+            head = 0
+            return
+        }
+        // Compact once consumed entries are at least half the queue. This is
+        // amortized linear work and bounds retained WebSocket-frame storage.
+        guard head * 2 >= events.count else { return }
+        events.removeFirst(head)
+        head = 0
+    }
+}
+
+/// A single main-thread work budget shared by every cached terminal. Previously,
+/// each pane posted unbounded feed closures to the main queue, so several active
+/// agents—or one deep snapshot—could starve AppKit of clicks and window events.
+private final class TerminalDrainCoordinator {
+    static let shared = TerminalDrainCoordinator()
+    private static let sliceBytes = 8 * 1024
+    private static let turnBudgetNanoseconds: UInt64 = 6_000_000
+
+    private var active: [TerminalStreamPump] = []
+    private var activeIDs: Set<ObjectIdentifier> = []
+    private var scheduled = false
+
+    func wake(_ pump: TerminalStreamPump) {
+        DispatchQueue.main.async { [weak self, weak pump] in
+            guard let self, let pump, pump.hasPendingEvents else { return }
+            let id = ObjectIdentifier(pump)
+            if self.activeIDs.insert(id).inserted { self.active.append(pump) }
+            self.scheduleIfNeeded()
+        }
+    }
+
+    private func scheduleIfNeeded() {
+        guard !scheduled, !active.isEmpty else { return }
+        scheduled = true
+        // Returning to the run loop between bounded turns is what makes this a
+        // responsiveness guarantee rather than merely smaller back-to-back work.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1)) { [weak self] in
+            self?.drainTurn()
+        }
+    }
+
+    private func drainTurn() {
+        precondition(Thread.isMainThread)
+        scheduled = false
+        let started = DispatchTime.now().uptimeNanoseconds
+        var slices = 0
+
+        while !active.isEmpty {
+            // Give the visible pane the first slice of each turn, then rotate all
+            // panes fairly so hidden histories keep up without starving the UI.
+            let index = slices == 0 ? (active.firstIndex(where: { $0.isVisible }) ?? 0) : 0
+            let pump = active.remove(at: index)
+            let pending = pump.consumeOne(maxOutputBytes: Self.sliceBytes)
+            if pending {
+                active.append(pump)
+            } else {
+                activeIDs.remove(ObjectIdentifier(pump))
+            }
+            slices += 1
+            if DispatchTime.now().uptimeNanoseconds - started >= Self.turnBudgetNanoseconds { break }
+        }
+
+        scheduleIfNeeded()
     }
 }
 
 
 final class PaneConn: NSObject, TerminalViewDelegate {
     private static let foregroundScrollback = 100_000
-    private static let warmScrollback = 10_000
 
     let view: TerminalView
     private let client: BrokerClient
@@ -104,14 +199,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     private var lastPane = ""
     private var wheelMonitor: Any?  // mouse-reporting panes: wheel → remote (see init)
 
-    // A hidden agent TUI can repaint many times a second. Parsing those bytes in
-    // SwiftTerm still runs on the AppKit main thread even though the view is not
-    // visible. Skip hidden rendering and ask the broker for one authoritative,
-    // idempotent snapshot when the pane returns.
-    private let visibilityLock = NSLock()
-    private var rendersLiveOutput = true
-    private var missedOutputWhileHidden = false
-    private let modeTracker = DECPrivateModeTracker()
+    private var streamPump: TerminalStreamPump!
 
     /// Forwarded live connection state (for the header status chip).
     var onState: ((ConnState) -> Void)?
@@ -157,6 +245,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         httpBase = PaneConn.httpBase(from: url)
         connURL = url
         super.init()
+        streamPump = TerminalStreamPump(
+            applyOutput: { [weak self] bytes in self?.view.feed(byteArray: bytes) },
+            applySize: { [weak self] cols, rows in self?.setPin(cols: cols, rows: rows) }
+        )
         view.terminalDelegate = self
         // Keep text selectable. With mouse reporting ON (SwiftTerm's default),
         // feedPrepare() clears the selection on EVERY feed, so a periodically
@@ -167,31 +259,25 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // mouse-driven TUI where clicking panels/commits matters more than copy,
         // so its pane opts in via mouseReporting=true.
         view.allowMouseReporting = mouseReporting
-        // Keep the full history allowance while the user is working in this pane.
-        // Hidden warm panes are compacted to the broker's 10k reconnect window in
-        // setVisible(), so the cache cannot retain 100k rows per pane indefinitely.
+        // This is a history limit, not a cache tier. Shrinking it on every hide
+        // permanently discarded scrollback and synchronously copied/deallocated
+        // thousands of rows during panel switching.
         view.getTerminal().changeScrollback(Self.foregroundScrollback)
+        view.maximumFramesPerSecond = 30
         // Seamless theme: terminal background == window background. Applied here and
         // re-applied live on theme switch (see applyTheme + TerminalController).
         applyTheme()
         client.onOutput = { [weak self] bytes in
             guard let self else { return }
-            self.modeTracker.feed(bytes)
             self.ingestForWandb(bytes)
-            guard self.shouldRenderLiveOutput() else { return }
-            DispatchQueue.main.async {
-                // It may have been hidden after this frame left URLSession's
-                // callback queue but before its main-thread render turn.
-                guard self.shouldRenderLiveOutput() else { return }
-                self.view.feed(byteArray: bytes[...])
-            }
+            self.streamPump.enqueueOutput(bytes)
         }
         // The pane's AUTHORITATIVE size (connect + every remote resize): pin the
         // grid to exactly this and ask for a clean repaint. Arrives in stream
         // order relative to output, so the re-pin lands precisely between bytes
         // formatted for the old width and bytes formatted for the new.
         client.onPaneSize = { [weak self] cols, rows in
-            DispatchQueue.main.async { self?.setPin(cols: cols, rows: rows) }
+            self?.streamPump.enqueueSize(cols: cols, rows: rows)
         }
         client.onStatus = { [weak self] st in DispatchQueue.main.async { self?.onState?(st) } }
         // On every (re)connect, push the current geometry so the remote pane
@@ -237,40 +323,20 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         }
     }
 
-    /// Change whether terminal bytes are rendered. W&B discovery continues on a
-    /// utility queue while hidden, but SwiftTerm is caught up once on reveal rather
-    /// than repainting an invisible view continuously.
+    /// Hidden panes remain protocol-current through the cooperative stream pump.
+    /// That preserves their complete local scrollback and avoids a destructive
+    /// broker snapshot when they return; only reconnect timing is relaxed.
     func setVisible(_ visible: Bool) {
-        visibilityLock.lock()
-        let visibilityChanged = visible != rendersLiveOutput
-        let becameVisible = visible && !rendersLiveOutput
-        let needsSnapshot = becameVisible && missedOutputWhileHidden
-        rendersLiveOutput = visible
-        if visible { missedOutputWhileHidden = false }
-        visibilityLock.unlock()
-
-        if visibilityChanged {
-            view.getTerminal().changeScrollback(visible ? Self.foregroundScrollback : Self.warmScrollback)
-        }
+        streamPump.setVisible(visible)
         client.relaxed = !visible
-        guard becameVisible else { return }
-        let modes = modeTracker.restorationBytes()
-        if !modes.isEmpty { view.feed(byteArray: modes[...]) }
-        client.nudge() // if the socket went stale while hidden, dial immediately
-        if needsSnapshot {
-            client.send(op: Op.requestSnapshot, pane: lastPane, payload: [])
+        if visible {
+            view.requestDisplayRefresh()
+            client.nudge() // if the socket went stale while hidden, dial immediately
         }
-    }
-
-    private func shouldRenderLiveOutput() -> Bool {
-        visibilityLock.lock()
-        let visible = rendersLiveOutput
-        if !visible { missedOutputWhileHidden = true }
-        visibilityLock.unlock()
-        return visible
     }
 
     func disconnect() {
+        streamPump.stop()
         client.stop()
         if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
     }
