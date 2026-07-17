@@ -9,9 +9,12 @@ enum CapsLockAttentionPrefs {
     static let enabledKey = "ut.attention.capsLock.enabled"
     static let durationKey = "ut.attention.capsLock.duration"
     static let reminderMinutesKey = "ut.attention.capsLock.reminderMinutes"
+    static let completionEnabledKey = "ut.attention.capsLock.completionEnabled"
+    static let completionDurationKey = "ut.attention.capsLock.completionDuration"
 
     static let defaultDuration = 10.0
     static let defaultReminderMinutes = 5.0
+    static let defaultCompletionDuration = 2.0
 
     static var enabled: Bool {
         UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? false
@@ -26,6 +29,16 @@ enum CapsLockAttentionPrefs {
         let minutes = UserDefaults.standard.object(forKey: reminderMinutesKey) as? Double
             ?? defaultReminderMinutes
         return min(30, max(1, minutes)) * 60
+    }
+
+    static var completionEnabled: Bool {
+        UserDefaults.standard.object(forKey: completionEnabledKey) as? Bool ?? false
+    }
+
+    static var completionDuration: TimeInterval {
+        let stored = UserDefaults.standard.object(forKey: completionDurationKey) as? Double
+            ?? defaultCompletionDuration
+        return min(10, max(1, stored))
     }
 }
 
@@ -58,6 +71,32 @@ struct AttentionBlinkState {
         }
         return .none
     }
+}
+
+/// Hardware bursts share one LED, so a higher-value signal must not be cut short
+/// by a lower-value one. A new Needs You alert always wins; completion is lowest.
+enum CapsLockPulseKind: Int, Equatable {
+    case completion = 0
+    case test = 1
+    case needsYou = 2
+}
+
+func shouldStartCapsLockPulse(_ requested: CapsLockPulseKind,
+                              while active: CapsLockPulseKind?) -> Bool {
+    guard let active else { return true }
+    return requested.rawValue >= active.rawValue
+}
+
+/// The completion light mirrors the user-facing fleet, not housekeeping work.
+/// Keeping this policy pure makes the exact Working -> Idle boundary testable.
+func isVisibleWorkingToIdleTransition(previous: String?, current: String,
+                                      isAgentSession: Bool, isHidden: Bool,
+                                      isBacklogged: Bool) -> Bool {
+    previous == "working"
+        && current == "idle"
+        && !isAgentSession
+        && !isHidden
+        && !isBacklogged
 }
 
 /// Direct HID output driver for the Caps Lock LED. It writes the keyboard's LED
@@ -174,8 +213,8 @@ private actor CapsLockLEDHardware {
     }
 }
 
-/// Schedules immediate and repeating Caps Lock LED bursts for the exact set of
-/// items currently occupying Command Center's "Needs You" section.
+/// Schedules Caps Lock LED bursts for Needs You and Working -> Idle events.
+/// Needs You repeats; completion is a separate, one-shot signal.
 @MainActor
 final class CapsLockAttentionController: ObservableObject {
     static let shared = CapsLockAttentionController()
@@ -186,6 +225,8 @@ final class CapsLockAttentionController: ObservableObject {
     private var state = AttentionBlinkState()
     private var blinkTask: Task<Void, Never>?
     private var reminderTimer: Timer?
+    private var activePulse: CapsLockPulseKind?
+    private var pulseGeneration: UInt64 = 0
 
     private init() {}
 
@@ -194,9 +235,8 @@ final class CapsLockAttentionController: ObservableObject {
         apply(state.update(ids: needsYouIDs, enabled: CapsLockAttentionPrefs.enabled))
     }
 
-    /// Called by Settings for both toggle and timing changes. Enabling while
-    /// attention is already pending produces an immediate burst.
-    func configurationDidChange() {
+    /// Enabling Needs You while attention is pending produces an immediate burst.
+    func needsYouConfigurationDidChange() {
         guard !AppState.isRunningTests else { return }
         let action = state.update(ids: state.ids, enabled: CapsLockAttentionPrefs.enabled)
         apply(action)
@@ -205,10 +245,28 @@ final class CapsLockAttentionController: ObservableObject {
         }
     }
 
+    /// The completion signal is independent: disabling it only cancels an
+    /// in-progress completion pulse, never a Needs You alert.
+    func completionConfigurationDidChange() {
+        guard !AppState.isRunningTests else { return }
+        if !CapsLockAttentionPrefs.completionEnabled {
+            stopPulse(if: .completion)
+        }
+    }
+
+    /// Called once for each refresh batch containing at least one visible panel
+    /// that moved directly from Working to Idle. There are no reminders.
+    func workingBecameIdle(ids: Set<String>) {
+        guard !AppState.isRunningTests,
+              CapsLockAttentionPrefs.completionEnabled,
+              !ids.isEmpty else { return }
+        startBlink(duration: CapsLockAttentionPrefs.completionDuration, kind: .completion)
+    }
+
     /// A short hardware check that works even while the feature is disabled.
     func testBlink() {
         guard !AppState.isRunningTests else { return }
-        startBlink(duration: min(2, CapsLockAttentionPrefs.duration))
+        startBlink(duration: 2, kind: .test)
     }
 
     private func apply(_ action: AttentionBlinkAction) {
@@ -216,23 +274,51 @@ final class CapsLockAttentionController: ObservableObject {
         case .none:
             break
         case .pulse:
-            startBlink(duration: CapsLockAttentionPrefs.duration)
+            startBlink(duration: CapsLockAttentionPrefs.duration, kind: .needsYou)
             scheduleReminder()
         case .stop:
             reminderTimer?.invalidate()
             reminderTimer = nil
-            blinkTask?.cancel()
-            blinkTask = nil
-            Task { await hardware.stop() }
+            stopPulse(if: .needsYou)
         }
     }
 
-    private func startBlink(duration: TimeInterval) {
-        blinkTask?.cancel()
+    private func startBlink(duration: TimeInterval, kind: CapsLockPulseKind) {
+        guard shouldStartCapsLockPulse(kind, while: activePulse) else { return }
+
+        pulseGeneration &+= 1
+        let token = pulseGeneration
+        let previous = blinkTask
+        previous?.cancel()
+        activePulse = kind
         blinkTask = Task { [weak self, hardware] in
+            // Serialize access to the one physical LED. The cancelled burst
+            // restores the real Caps Lock state before its replacement begins.
+            await previous?.value
+            guard !Task.isCancelled else { return }
             let count = await hardware.blink(duration: duration)
             guard !Task.isCancelled else { return }
-            await MainActor.run { self?.lastTargetCount = count }
+            guard let self, self.pulseGeneration == token else { return }
+            self.lastTargetCount = count
+            self.activePulse = nil
+            self.blinkTask = nil
+        }
+    }
+
+    private func stopPulse(if kind: CapsLockPulseKind) {
+        guard activePulse == kind else { return }
+
+        pulseGeneration &+= 1
+        let token = pulseGeneration
+        let previous = blinkTask
+        previous?.cancel()
+        activePulse = nil
+        blinkTask = Task { [weak self, hardware] in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await hardware.stop()
+            guard let self, self.pulseGeneration == token else { return }
+            self.blinkTask = nil
         }
     }
 
@@ -244,7 +330,7 @@ final class CapsLockAttentionController: ObservableObject {
                           repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.state.enabled, !self.state.ids.isEmpty else { return }
-                self.startBlink(duration: CapsLockAttentionPrefs.duration)
+                self.startBlink(duration: CapsLockAttentionPrefs.duration, kind: .needsYou)
             }
         }
         reminderTimer = timer

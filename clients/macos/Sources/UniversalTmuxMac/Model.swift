@@ -1107,6 +1107,7 @@ final class AppState: ObservableObject {
                 if err == nil { self.syncHidden(machine: m, sessions: list) }
                 if err == nil {
                     var entered: [(ref: SessionRef, machine: String)] = []
+                    var becameIdle: Set<String> = []
                     for s in list {
                         let ref = SessionRef(machineID: m.id, session: s.name)
                         let prev = self.prevState[ref.id]
@@ -1123,6 +1124,15 @@ final class AppState: ObservableObject {
                         if s.state == "waiting" && (prev ?? "idle") != "waiting" {
                             entered.append((ref: ref, machine: m.name))
                         }
+                        if isVisibleWorkingToIdleTransition(
+                            previous: prev,
+                            current: s.state,
+                            isAgentSession: s.agent,
+                            isHidden: s.hidden || self.hiddenSessions.contains(ref.id),
+                            isBacklogged: self.backlog.contains(ref.id)
+                        ) {
+                            becameIdle.insert(ref.id)
+                        }
                         // Re-arm: once a session leaves "waiting", a future prompt should
                         // surface again, so drop any prior acknowledgement.
                         if s.state != "waiting" { self.acknowledged.remove(ref.id) }
@@ -1138,6 +1148,7 @@ final class AppState: ObservableObject {
                     // Badge from waitingCount (excludes acknowledged) so the optimistic clear
                     // on view/steer is NOT reverted by this very poll.
                     AttentionNotifier.shared.update(enteredWaiting: entered, totalWaiting: self.waitingCount)
+                    AttentionNotifier.shared.workingBecameIdle(ids: becameIdle)
                 }
                 group?.leave()
             }

@@ -38,4 +38,39 @@ final class CapsLockAttentionTests: XCTestCase {
         XCTAssertEqual(state.update(ids: ["agent-a"], enabled: true), .pulse)
         XCTAssertEqual(state.update(ids: ["agent-a"], enabled: false), .stop)
     }
+
+    func testCompletionCannotInterruptNeedsYou() {
+        XCTAssertFalse(shouldStartCapsLockPulse(.completion, while: .needsYou))
+        XCTAssertTrue(shouldStartCapsLockPulse(.needsYou, while: .completion))
+    }
+
+    func testVisibleWorkingToIdleIsACompletion() {
+        XCTAssertTrue(isVisibleWorkingToIdleTransition(
+            previous: "working", current: "idle",
+            isAgentSession: false, isHidden: false, isBacklogged: false))
+    }
+
+    func testCompletionRequiresTheExactWorkingToIdleEdge() {
+        XCTAssertFalse(isVisibleWorkingToIdleTransition(
+            previous: nil, current: "idle",
+            isAgentSession: false, isHidden: false, isBacklogged: false))
+        XCTAssertFalse(isVisibleWorkingToIdleTransition(
+            previous: "working", current: "waiting",
+            isAgentSession: false, isHidden: false, isBacklogged: false))
+        XCTAssertFalse(isVisibleWorkingToIdleTransition(
+            previous: "idle", current: "idle",
+            isAgentSession: false, isHidden: false, isBacklogged: false))
+    }
+
+    func testNonUserFacingSessionsStaySilentOnCompletion() {
+        XCTAssertFalse(isVisibleWorkingToIdleTransition(
+            previous: "working", current: "idle",
+            isAgentSession: true, isHidden: false, isBacklogged: false))
+        XCTAssertFalse(isVisibleWorkingToIdleTransition(
+            previous: "working", current: "idle",
+            isAgentSession: false, isHidden: true, isBacklogged: false))
+        XCTAssertFalse(isVisibleWorkingToIdleTransition(
+            previous: "working", current: "idle",
+            isAgentSession: false, isHidden: false, isBacklogged: true))
+    }
 }

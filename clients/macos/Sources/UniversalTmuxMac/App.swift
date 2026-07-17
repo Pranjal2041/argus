@@ -183,6 +183,8 @@ struct SettingsView: View {
     @AppStorage(CapsLockAttentionPrefs.enabledKey) private var capsLockBlinkEnabled = false
     @AppStorage(CapsLockAttentionPrefs.durationKey) private var capsLockBlinkDuration = CapsLockAttentionPrefs.defaultDuration
     @AppStorage(CapsLockAttentionPrefs.reminderMinutesKey) private var capsLockReminderMinutes = CapsLockAttentionPrefs.defaultReminderMinutes
+    @AppStorage(CapsLockAttentionPrefs.completionEnabledKey) private var capsLockCompletionEnabled = false
+    @AppStorage(CapsLockAttentionPrefs.completionDurationKey) private var capsLockCompletionDuration = CapsLockAttentionPrefs.defaultCompletionDuration
 
     var body: some View {
         Form {
@@ -253,6 +255,16 @@ struct SettingsView: View {
                         Text("Every 30 minutes").tag(30.0)
                     }
                 }
+                Toggle("Blink when Working becomes Idle", isOn: $capsLockCompletionEnabled)
+                if capsLockCompletionEnabled {
+                    HStack {
+                        Text("Completion duration")
+                        Slider(value: $capsLockCompletionDuration, in: 1...10, step: 1)
+                        Text("\(Int(capsLockCompletionDuration))s")
+                            .monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                }
                 HStack {
                     Button("Test Light") { capsLockAttention.testBlink() }
                     Spacer()
@@ -267,7 +279,7 @@ struct SettingsView: View {
             } header: {
                 Text("Attention")
             } footer: {
-                Text("Flashes compatible built-in and external keyboard LEDs when a terminal agent or Lab approval enters Command Center's Needs You section, then repeats while attention remains. Argus writes only the light and restores the current Caps Lock state; it never changes how your keyboard types.")
+                Text("Needs You flashes when a terminal agent or Lab approval requires attention, then repeats while it remains pending. The separate completion signal flashes once when a visible panel moves directly from Working to Idle; hidden, backlogged, and internal agent sessions stay quiet. Argus writes only the light and restores the current Caps Lock state; it never changes how your keyboard types.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -312,15 +324,17 @@ struct SettingsView: View {
             }
         }
         .onChange(of: capsLockBlinkEnabled) { enabled in
-            capsLockAttention.configurationDidChange()
+            capsLockAttention.needsYouConfigurationDidChange()
             if enabled {
                 commandCenter.bind(state)
                 commandCenter.start()
                 commandCenter.refreshAttention()
             }
         }
-        .onChange(of: capsLockBlinkDuration) { _ in capsLockAttention.configurationDidChange() }
-        .onChange(of: capsLockReminderMinutes) { _ in capsLockAttention.configurationDidChange() }
+        .onChange(of: capsLockBlinkDuration) { _ in capsLockAttention.needsYouConfigurationDidChange() }
+        .onChange(of: capsLockReminderMinutes) { _ in capsLockAttention.needsYouConfigurationDidChange() }
+        .onChange(of: capsLockCompletionEnabled) { _ in capsLockAttention.completionConfigurationDidChange() }
+        .onChange(of: capsLockCompletionDuration) { _ in capsLockAttention.completionConfigurationDidChange() }
         .formStyle(.grouped)
         .frame(width: 460, height: 700)
         .tint(Theme.accent)
