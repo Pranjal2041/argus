@@ -12,7 +12,7 @@
 #   TS_AUTHKEY    (required) reusable Tailscale auth key  [admin -> Settings -> Keys]
 #   UT_BROKER     broker binary           (default: ~/.universal-tmux/ut-broker)
 #   UT_TSNET_DIR  node-local tsnet state  (default: /tmp/ut-tsnet-$USER)
-#   UT_SESSION    session to warm         (default: main)
+#   UT_SESSION    existing fallback session to warm (default: main; never created)
 #
 # Notes: state is kept node-local (not NFS) so each node is its own tailnet
 # identity and they never clash. With an ephemeral key, nodes auto-remove from

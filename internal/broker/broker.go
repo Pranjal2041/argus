@@ -616,17 +616,15 @@ func (m *Manager) sessionRefreshLoop(interval time.Duration) {
 	}
 }
 
-// Ensure explicitly creates a missing session, then attaches a hub (used to warm
-// a default session). Provider.Dial is attach-only: keeping creation here preserves
-// the startup behavior without letting a WebSocket attach typo create a session.
-func (m *Manager) Ensure(name string) error {
+// WarmExisting attaches a hub only when the session already exists. A missing
+// fallback session is normal: broker/app startup must never resurrect a session
+// the user deliberately killed. Sessions are created only by explicit commands.
+func (m *Manager) WarmExisting(name string) error {
 	if m.reservesStableIDs() && isStableSessionID(name) {
 		return fmt.Errorf("session name %q is reserved for a stable session handle", name)
 	}
 	if !m.prov.Has(name) {
-		if err := m.prov.Create(name, ""); err != nil && !m.prov.Has(name) {
-			return err
-		}
+		return nil
 	}
 	_, err := m.hub(name)
 	return err
@@ -647,8 +645,8 @@ func (m *Manager) hub(name string) (*sessionHub, error) {
 		}
 	}
 	// Defense in depth: attaching is never creation. Every caller currently checks
-	// existence (or Ensure explicitly creates), but keep the invariant at the one
-	// function that actually dials the backend too.
+	// existence, but keep the invariant at the one function that actually dials the
+	// backend too.
 	if !m.prov.Has(name) {
 		return nil, fmt.Errorf("no such session: %q", name)
 	}
