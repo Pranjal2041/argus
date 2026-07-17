@@ -417,8 +417,8 @@ func (m *Manager) SendText(name, text string, enter bool) error {
 }
 
 // Spawn creates an agent session that runs cmd directly (no keystroke race) and
-// adds it to the cache so it shows up immediately. idleSec is its idle-reap
-// leash in seconds (0 = never).
+// adds it to the cache so it shows up immediately. idleSec is its early idle
+// cleanup time in seconds (0 retains a finished shell until the 7-day maximum).
 func (m *Manager) Spawn(name, dir, cmd string, idleSec int) error {
 	if m.reservesStableIDs() && isStableSessionID(name) {
 		return fmt.Errorf("session name %q is reserved for a stable session handle", name)

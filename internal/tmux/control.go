@@ -426,13 +426,15 @@ func CreateSession(socket, name, startDir string) error {
 }
 
 // tmux user-options that mark a session as agent-created (via `ut spawn`) and
-// record its idle leash. @ut_agent hides it from the app UI (shown only behind a
-// toggle) and makes it eligible for the idle reaper; @ut_reap_idle is the
-// per-session idle budget in seconds (0 = never reap).
+// record its cleanup timing. @ut_agent hides it from the app UI (shown only
+// behind a toggle); @ut_reap_idle is the per-session idle budget in seconds
+// (0 skips early idle cleanup); @ut_done_at records when the command finished
+// so every finished agent session can be retained for at most seven days.
 const (
 	optAgent    = "@ut_agent"
 	optReapIdle = "@ut_reap_idle"
 	optDone     = "@ut_done" // set by the wrapper the instant cmd returns — the deterministic "job finished" signal
+	optDoneAt   = "@ut_done_at"
 )
 
 // SpawnSession creates a detached session that RUNS cmd directly as its process
@@ -443,7 +445,8 @@ const (
 // `sh -c`, so arbitrary content is safe (no shell re-quoting by us).
 //
 // It is tagged as an agent session (hidden from the UI, idle-reaped) with the
-// given idle leash in seconds (0 = never reap). Because that trailing
+// given idle cleanup time in seconds (0 skips the shorter idle cleanup, while
+// the seven-day post-completion maximum still applies). Because that trailing
 // interactive shell loads the user's full rc (e.g. p10k + gitstatus → ~3
 // processes per shell), dozens of finished spawns would otherwise pile up; the
 // reaper clears the idle ones.
@@ -457,7 +460,8 @@ func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
 	// reaper's deterministic "the job finished" signal — far more robust than
 	// guessing from the foreground command name (on macOS `/bin/sh` is bash, so a
 	// still-running `sh -c` wrapper looks like an interactive bash).
-	wrapper := cmd + "\ntmux set-option " + optDone + " 1 2>/dev/null\nexec \"${SHELL:-sh}\" -i"
+	wrapper := cmd + "\ntmux set-option " + optDoneAt + " \"$(date +%s)\" 2>/dev/null\n" +
+		"tmux set-option " + optDone + " 1 2>/dev/null\nexec \"${SHELL:-sh}\" -i"
 	args = append(args, "sh", "-c", wrapper)
 	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
@@ -480,28 +484,30 @@ var reapableShells = map[string]bool{
 }
 
 // ReapIdleAgentSessions kills agent (@ut_agent) sessions whose command has
-// finished (@ut_done) and which have since sat idle longer than their
-// @ut_reap_idle leash, returning the reaped names. Deterministic and
+// finished (@ut_done) and which have either sat idle longer than their
+// @ut_reap_idle setting or passed the seven-day post-completion maximum. It
+// returns the reaped names. Deterministic and
 // conservative — a session is removed ONLY when ALL hold:
 //   - it is tagged agent (@ut_agent==1),
 //   - its job has finished (@ut_done==1) — a still-running job, even a silent
 //     one, never sets this, so live work is never touched,
-//   - its leash is non-zero and its idle time exceeds it,
+//   - its idle setting or the hard maximum has expired,
 //   - its foreground is an interactive shell (guards the rare case of a new job
 //     started by hand in the post-job shell).
 //
 // Called periodically by the broker.
 func ReapIdleAgentSessions(socket string) []string {
 	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		fmt.Sprintf("#{session_name}\t#{%s}\t#{%s}\t#{%s}\t#{session_activity}", optAgent, optDone, optReapIdle))...).Output()
+		fmt.Sprintf("#{session_name}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{session_activity}",
+			optAgent, optDone, optReapIdle, optDoneAt))...).Output()
 	if err != nil {
 		return nil
 	}
 	now := time.Now().Unix()
 	var reaped []string
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		f := strings.SplitN(line, "\t", 5)
-		if len(f) < 5 || f[1] != "1" || f[2] != "1" { // not agent, or job not finished
+		f := strings.SplitN(line, "\t", 6)
+		if len(f) < 6 || f[1] != "1" || f[2] != "1" { // not agent, or job not finished
 			continue
 		}
 		name := f[0]
@@ -511,14 +517,18 @@ func ReapIdleAgentSessions(socket string) []string {
 				leash = n
 			}
 		}
-		if leash <= 0 { // 0 = never reap
+		doneAt, _ := strconv.ParseInt(f[4], 10, 64)
+		act, _ := strconv.ParseInt(f[5], 10, 64)
+		if doneAt <= 0 {
+			// Sessions created before @ut_done_at was introduced still carry a
+			// reliable @ut_done marker. Their last tmux activity is the safest
+			// available approximation of completion time.
+			doneAt = act
+		}
+		if !session.AgentSessionExpired(now, act, doneAt, leash) {
 			continue
 		}
-		act, _ := strconv.ParseInt(f[4], 10, 64)
-		if now-act <= int64(leash) { // still within its idle budget
-			continue
-		}
-		// Finished + idle past the leash — reap unless a NEW job is now running.
+		// Finished + expired — reap unless a NEW job is now running.
 		fg, e := exec.Command("tmux", tmuxArgs(socket, "display-message", "-p", "-t", name, "#{pane_current_command}")...).Output()
 		if e != nil || !reapableShells[strings.TrimSpace(string(fg))] {
 			continue

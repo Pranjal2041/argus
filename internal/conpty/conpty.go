@@ -44,7 +44,9 @@ type winSession struct {
 	once  sync.Once
 
 	agent    bool // created by the mesh (ut spawn): hidden from the UI, idle-reaped
-	reapIdle int  // idle seconds before the reaper removes it (0 = never)
+	reapIdle int  // idle seconds before early cleanup (0 = retain until the seven-day maximum)
+	doneFile string
+	doneAt   int64
 
 	mu      sync.Mutex
 	ring    []byte
@@ -264,6 +266,12 @@ func (p *Provider) remove(name string) {
 	delete(p.sessions, name)
 	p.mu.Unlock()
 	if s != nil {
+		s.mu.Lock()
+		doneFile := s.doneFile
+		s.mu.Unlock()
+		if doneFile != "" {
+			_ = os.Remove(doneFile)
+		}
 		s.closeReal() // ends readLoop → closes outCh
 	}
 }
@@ -297,35 +305,69 @@ func (p *Provider) Dial(_ context.Context, name string) (session.Session, error)
 // Spawn creates a session, then writes the command into its shell. (A future
 // pass can start the ConPTY with the command directly, like the tmux backend.)
 // It is tagged as an agent session (hidden from the UI, idle-reaped after
-// idleSec seconds of no activity; 0 = never).
+// idleSec seconds of no activity; 0 retains the finished shell until the
+// seven-day maximum). A private completion file lets the reaper distinguish a
+// silent live command from a finished command waiting at its prompt.
 func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
+	done, err := os.CreateTemp("", "ut-agent-done-*")
+	if err != nil {
+		return fmt.Errorf("prepare completion marker: %w", err)
+	}
+	doneFile := done.Name()
+	_ = done.Close()
+	_ = os.Remove(doneFile)
+
 	if err := p.Create(name, dir); err != nil {
+		_ = os.Remove(doneFile)
 		return err
 	}
 	p.mu.Lock()
 	if s := p.sessions[name]; s != nil {
 		s.mu.Lock()
+		oldDoneFile := s.doneFile
 		s.agent = true
 		s.reapIdle = idleSec
+		s.doneFile = doneFile
+		s.doneAt = 0
 		s.mu.Unlock()
+		if oldDoneFile != "" {
+			_ = os.Remove(oldDoneFile)
+		}
 	}
 	p.mu.Unlock()
 	time.Sleep(400 * time.Millisecond) // let the shell come up before typing
-	return p.SendText(name, cmd, true)
+	return p.SendText(name, commandWithDoneFile(p.shell, cmd, doneFile), true)
 }
 
-// ReapAgents removes agent sessions idle (no output/input) past their leash,
-// unless a turn is actively running (the OSC-title spinner says "working"). On
-// ConPTY there is no pane_current_command, so idleness is activity-based; the
-// "working" guard keeps a live agent turn from being killed. Returns reaped
-// names. Called periodically by the broker.
+func commandWithDoneFile(shell, cmd, path string) string {
+	lowerShell := strings.ToLower(shell)
+	if strings.Contains(lowerShell, "powershell") || strings.Contains(lowerShell, "pwsh") {
+		return cmd + "; Set-Content -LiteralPath '" + strings.ReplaceAll(path, "'", "''") + "' -Value done"
+	}
+	if strings.Contains(lowerShell, "cmd") {
+		return cmd + " & (echo done>\"" + path + "\")"
+	}
+	return cmd + "; printf done > '" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
+}
+
+// ReapAgents removes finished agent sessions after their requested idle time or
+// the seven-day maximum. The completion file is written by the shell only after
+// the spawned command returns; a silent live command therefore remains safe.
+// The visible "working" guard also protects a new agent turn started in the
+// retained shell. Returns reaped names. Called periodically by the broker.
 func (p *Provider) ReapAgents() []string {
 	now := time.Now().Unix()
 	var stale []string
 	p.mu.Lock()
 	for name, s := range p.sessions {
 		s.mu.Lock()
-		idle := s.agent && s.reapIdle > 0 && now-s.lastOut > int64(s.reapIdle) && detectState(s.ring) != "working"
+		if s.doneAt <= 0 && s.doneFile != "" {
+			if info, err := os.Stat(s.doneFile); err == nil {
+				s.doneAt = info.ModTime().Unix()
+			}
+		}
+		expired := s.agent && session.AgentSessionExpired(now, s.lastOut, s.doneAt, s.reapIdle)
+		idle := expired && detectState(s.ring) != "working"
 		s.mu.Unlock()
 		if idle {
 			stale = append(stale, name)
