@@ -20,6 +20,8 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     private var asked = false
     private var waitingCount = 0
     private var labAttentionCount = 0
+    private var commandCenterNeeds: Set<String> = []
+    private var labAttentionIDs: Set<String> = []
     private override init() { super.init() }
 
     func attach(_ s: AppState) {
@@ -53,9 +55,26 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// Lab and terminal attention share one durable badge/count. A Lab refresh
     /// supplies the complete current count, so resolved approvals disappear
     /// without relying on notification delivery state.
-    func updateLabAttention(total: Int) {
-        labAttentionCount = total
+    func updateLabAttention(ids: Set<String>) {
+        labAttentionIDs = ids
+        labAttentionCount = ids.count
         updateBadge()
+        updateCapsLockAttention()
+    }
+
+    /// The status model + broker-dot fallback supply the exact terminal cards in
+    /// Command Center's top band. Keep this separate from banner notifications:
+    /// banners follow raw waiting transitions, while the LED mirrors the UI the
+    /// user explicitly asked to monitor.
+    func updateCommandCenterAttention(ids: Set<String>) {
+        commandCenterNeeds = ids
+        updateCapsLockAttention()
+    }
+
+    private func updateCapsLockAttention() {
+        let terminal = Set(commandCenterNeeds.map { "session/" + $0 })
+        let lab = Set(labAttentionIDs.map { "lab/" + $0 })
+        CapsLockAttentionController.shared.update(needsYouIDs: terminal.union(lab))
     }
 
     private func updateBadge() {

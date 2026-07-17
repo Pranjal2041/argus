@@ -387,7 +387,28 @@ final class CommandCenterModel: ObservableObject {
         ClaudeStatusProvider.writeDefaults { UserDefaults.standard.set(d, forKey: key) }
     }
 
-    func bind(_ app: AppState) { self.app = app }
+    func bind(_ app: AppState) {
+        self.app = app
+        refreshAttention()
+    }
+
+    /// Publish the exact terminal cards currently displayed in Command Center's
+    /// "Needs You" section. This uses the same ccSection function as the view,
+    /// including its broker-dot fallback before the status model has answered.
+    func refreshAttention() {
+        guard let app else { return }
+        var needs: Set<String> = []
+        for machine in app.machines {
+            for session in (app.sessionsByMachine[machine.id] ?? []) where !session.agent {
+                let ref = SessionRef(machineID: machine.id, session: session.name)
+                guard !app.hiddenSessions.contains(ref.id), !app.backlog.contains(ref.id) else { continue }
+                if ccSection(state: session.state, status: statuses[ref.id]) == 0 {
+                    needs.insert(ref.id)
+                }
+            }
+        }
+        AttentionNotifier.shared.updateCommandCenterAttention(ids: needs)
+    }
 
     func start() {
         ccLog("start() called (timer already? \(timer != nil))")
@@ -437,6 +458,7 @@ final class CommandCenterModel: ObservableObject {
         // grabbed every slot and remote (babel) sessions were perpetually `gated`/starved.
         candidates.sort { (lastOKAt[$0.ref.id] ?? 0) < (lastOKAt[$1.ref.id] ?? 0) }
         for c in candidates { update(ref: c.ref, machine: c.machine, name: c.name, force: c.force) }
+        refreshAttention()
         guard fullSweep else { return }
         // Drop status + continuity for sessions that vanished.
         var pruned = false
@@ -531,6 +553,7 @@ final class CommandCenterModel: ObservableObject {
     /// match it to its own session list. ("Mac publishes, phone reads.")
     private func publish() {
         guard let app else { return }
+        refreshAttention()
         struct Item: Encodable {
             let session: String; let label: String; let summary: String
             let lookAtThis: String?; let updatedAt: Double

@@ -166,7 +166,8 @@ struct UniversalTmuxApp: App {
 
 
         Settings {
-            SettingsView(terminals: terminals, state: state, lab: lab)
+            SettingsView(terminals: terminals, state: state, lab: lab,
+                         commandCenter: commandCenter)
         }
     }
 }
@@ -176,7 +177,12 @@ struct SettingsView: View {
     @ObservedObject var terminals: TerminalController
     @ObservedObject var state: AppState
     @ObservedObject var lab: LabModel
+    @ObservedObject var commandCenter: CommandCenterModel
+    @ObservedObject private var capsLockAttention = CapsLockAttentionController.shared
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    @AppStorage(CapsLockAttentionPrefs.enabledKey) private var capsLockBlinkEnabled = false
+    @AppStorage(CapsLockAttentionPrefs.durationKey) private var capsLockBlinkDuration = CapsLockAttentionPrefs.defaultDuration
+    @AppStorage(CapsLockAttentionPrefs.reminderMinutesKey) private var capsLockReminderMinutes = CapsLockAttentionPrefs.defaultReminderMinutes
 
     var body: some View {
         Form {
@@ -229,6 +235,43 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Blink Caps Lock light for Needs You", isOn: $capsLockBlinkEnabled)
+                if capsLockBlinkEnabled {
+                    HStack {
+                        Text("Blink duration")
+                        Slider(value: $capsLockBlinkDuration, in: 1...60, step: 1)
+                        Text("\(Int(capsLockBlinkDuration))s")
+                            .monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                    Picker("Repeat while pending", selection: $capsLockReminderMinutes) {
+                        Text("Every minute").tag(1.0)
+                        Text("Every 2 minutes").tag(2.0)
+                        Text("Every 5 minutes").tag(5.0)
+                        Text("Every 10 minutes").tag(10.0)
+                        Text("Every 15 minutes").tag(15.0)
+                        Text("Every 30 minutes").tag(30.0)
+                    }
+                }
+                HStack {
+                    Button("Test Light") { capsLockAttention.testBlink() }
+                    Spacer()
+                    if let count = capsLockAttention.lastTargetCount {
+                        Text(count > 0
+                             ? "\(count) compatible light\(count == 1 ? "" : "s")"
+                             : "No compatible light found")
+                            .font(.caption)
+                            .foregroundStyle(count > 0 ? Color.secondary : Color.orange)
+                    }
+                }
+            } header: {
+                Text("Attention")
+            } footer: {
+                Text("Flashes compatible built-in and external keyboard LEDs when a terminal agent or Lab approval enters Command Center's Needs You section, then repeats while attention remains. Argus writes only the light and restores the current Caps Lock state; it never changes how your keyboard types.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle("Unattended mode", isOn: Binding(
                     get: { lab.unattendedMode },
                     set: { lab.setUnattendedMode($0) }
@@ -268,8 +311,18 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+        .onChange(of: capsLockBlinkEnabled) { enabled in
+            capsLockAttention.configurationDidChange()
+            if enabled {
+                commandCenter.bind(state)
+                commandCenter.start()
+                commandCenter.refreshAttention()
+            }
+        }
+        .onChange(of: capsLockBlinkDuration) { _ in capsLockAttention.configurationDidChange() }
+        .onChange(of: capsLockReminderMinutes) { _ in capsLockAttention.configurationDidChange() }
         .formStyle(.grouped)
-        .frame(width: 440, height: 590)
+        .frame(width: 460, height: 700)
         .tint(Theme.accent)
     }
 }
@@ -560,6 +613,7 @@ struct RootView: View {
     @EnvironmentObject var wandb: WandbController
     @EnvironmentObject var gitPanels: GitPanels
     @EnvironmentObject var ledgerHost: LedgerPanelHost
+    @EnvironmentObject var commandCenter: CommandCenterModel
     @EnvironmentObject var lab: LabModel
     @ViewBuilder private var ledgerPane: some View {
         LedgerView(panel: ledgerHost.panel).onAppear { ledgerHost.panel.refresh() }
@@ -629,10 +683,17 @@ struct RootView: View {
         .onAppear {
             MainThreadStallMonitor.shared.start()
             AttentionNotifier.shared.attach(state)
+            commandCenter.bind(state)
+            // Preserve the command center's prior lazy-start behavior unless the
+            // hardware alert needs its status model running in the background.
+            if CapsLockAttentionPrefs.enabled { commandCenter.start() }
             lab.bind(state)   // app-wide: approval notifications fire with the pane closed
             AttentionNotifier.shared.requestAuthorizationIfNeeded()
             state.refreshAll(); state.startAutoRefresh()
         }
+        .onReceive(state.$sessionsByMachine) { _ in commandCenter.refreshAttention() }
+        .onReceive(state.$hiddenSessions) { _ in commandCenter.refreshAttention() }
+        .onReceive(state.$backlog) { _ in commandCenter.refreshAttention() }
         .onChange(of: state.searchFocusToken) { _ in searchFocused = true }
         .onChange(of: state.selection) { _ in notebooks.activeID = nil }   // selecting a terminal leaves the notebook view
         // When an overlay dismisses, the keyboard goes back to the visible

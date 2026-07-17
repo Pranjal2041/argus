@@ -346,7 +346,7 @@ final class LabModel: ObservableObject {
                 unattendedMode = unattended.enabled
                 unattendedModeError = nil
             }
-            AttentionNotifier.shared.updateLabAttention(total: attentionItems.count)
+            AttentionNotifier.shared.updateLabAttention(ids: Set(attentionItems.map(\.id)))
             notifyNewPendings()
         }
     }
