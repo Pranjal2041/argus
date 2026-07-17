@@ -71,6 +71,13 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
         updateCapsLockAttention()
     }
 
+    /// Forward deterministic, user-visible Working -> Idle edges to the separate
+    /// one-shot completion light. This deliberately does not affect badges or
+    /// notification banners: becoming idle is informational, not "Needs You".
+    func workingBecameIdle(ids: Set<String>) {
+        CapsLockAttentionController.shared.workingBecameIdle(ids: ids)
+    }
+
     private func updateCapsLockAttention() {
         let terminal = Set(commandCenterNeeds.map { "session/" + $0 })
         let lab = Set(labAttentionIDs.map { "lab/" + $0 })

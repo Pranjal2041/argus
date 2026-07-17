@@ -46,10 +46,16 @@ default burst lasts 10 seconds and repeats every five minutes while at least one
 Lab approval remains in the Command Center's top section. Both the burst duration and reminder
 interval are configurable, and **Test Light** checks the currently connected keyboard immediately.
 
+The independent **Blink when Working becomes Idle** option gives one shorter pulse (two seconds by
+default) when a visible panel moves directly from Working to Idle. It does not repeat, and it stays
+quiet for hidden panels, backlogged panels, internal `ut spawn` sessions, and Working → Waiting
+transitions. If both signals arrive together, Needs You takes priority. Both alerts are off by
+default and have separate duration controls.
+
 Argus writes the keyboard's dedicated HID LED output; it does not synthesize a Caps Lock keypress
 or toggle capitalization. When a burst ends, is cancelled, or the attention queue clears, the light
-is restored to the current real Caps Lock state. The feature is off by default and works with
-built-in or external keyboards that expose a standard Caps Lock LED element.
+is restored to the current real Caps Lock state. The alerts work with built-in or external
+keyboards that expose a standard Caps Lock LED element.
 
 ## How it works
 

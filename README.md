@@ -49,8 +49,8 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   (passively — nothing is ever typed into your agents) and labels it *working*, *needs you*,
   *stuck*, or *idle*; you can override a card by hand, and it syncs to your phone. Pending Lab
   access and experiment decisions share the same attention band and deep-link to their evidence.
-  On macOS, an optional Caps Lock light alert flashes when something enters **Needs you** and
-  repeats on a configurable interval until the attention queue clears—without changing typing state.
+  On macOS, optional Caps Lock light alerts can repeat while something **needs you**, or give one
+  short pulse when a visible panel moves from **working** to **idle**—without changing typing state.
 - **Argus Lab** — a recorded research protocol for agent-run experiments. `ut lab run`
   mechanically captures code state, parameters, environment, declared-data fingerprints, logs,
   artifacts, and exit status; approval policies bind the exact proposal before expensive work
