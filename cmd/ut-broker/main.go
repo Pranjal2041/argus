@@ -46,7 +46,7 @@ func main() {
 	}
 
 	listen := flag.String("listen", "127.0.0.1:8722", "local host:port (the port is reused on the tailnet when --tsnet-host is set)")
-	session := flag.String("session", "ut-demo", "default session to warm + attach when none is requested")
+	session := flag.String("session", "ut-demo", "fallback session when none is requested; warmed only when it already exists")
 	tmuxSock := flag.String("tmux-socket", "ut", "dedicated tmux server socket (-L); isolates our sessions from any other tmux")
 	webDir := flag.String("web", "", "serve web assets from this dir instead of the embedded copy (dev)")
 	tsHost := flag.String("tsnet-host", "", "join the tailnet under this hostname and listen there instead of locally")
@@ -83,7 +83,7 @@ func main() {
 	jupyterMgr := jupyter.NewManager()                             // ensures a JupyterLab on this host for the notebook feature
 	mgr.SetHistoryLimit(100000)                                    // large scrollback for new sessions
 	if *session != "" {
-		if err := mgr.Ensure(*session); err != nil {
+		if err := mgr.WarmExisting(*session); err != nil {
 			log.Printf("warn: warming session %q: %v", *session, err)
 		}
 	}
@@ -1087,7 +1087,7 @@ func main() {
 			log.Printf("warn: loopback listener %s failed: %v", loopback, e)
 		}
 	}
-	log.Printf("universal_tmux broker → %s  (tmux -L %s, default session %q)", where, *tmuxSock, *session)
+	log.Printf("universal_tmux broker → %s  (tmux -L %s, fallback session %q)", where, *tmuxSock, *session)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
