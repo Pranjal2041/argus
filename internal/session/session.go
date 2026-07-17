@@ -28,20 +28,20 @@ type Info struct {
 	Activity int64  `json:"activity"` // unix seconds of last activity
 	Path     string `json:"path"`     // active pane cwd (folder grouping)
 	State    string `json:"state"`    // attention: working | waiting | idle
-	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn): hidden from the app UI by default, auto-reaped when idle
+	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn): hidden by default and auto-reaped after completion
 	Hidden   bool   `json:"hidden"`   // user-hidden in a client UI; broker-owned so the hide syncs across devices
 	ID       string `json:"id"`       // backend's STABLE session handle (tmux $N): unchanged across rename, so clients connect by it to survive a rename across any reconnect
 }
 
 // Session is one live session the broker streams to/from clients.
 type Session interface {
-	Output() <-chan Output             // raw pane bytes + in-band size events (closed when the session ends)
+	Output() <-chan Output // raw pane bytes + in-band size events (closed when the session ends)
 	SendKeys(pane string, data []byte) error
 	Resize(cols, rows int) error
-	Size() (cols, rows int)            // the pane's CURRENT size (0,0 if unknown)
-	Snapshot() []byte                  // current screen to prime a freshly-connected client
-	Pane() string                      // default pane id for input routing
-	Close()                            // detach this control client (session itself persists)
+	Size() (cols, rows int) // the pane's CURRENT size (0,0 if unknown)
+	Snapshot() []byte       // current screen to prime a freshly-connected client
+	Pane() string           // default pane id for input routing
+	Close()                 // detach this control client (session itself persists)
 }
 
 // ExecRequest runs a command on this host (the mesh's remote-exec primitive).
@@ -74,11 +74,32 @@ type Provider interface {
 	Dial(ctx context.Context, name string) (Session, error) // attach (creating the control client)
 	Exec(req ExecRequest) ExecResult                        // run a command on this host (mesh primitive)
 	SendText(session, text string, enter bool) error        // type text into a session (fire-and-forget)
-	Spawn(name, dir, cmd string, idleSec int) error         // create an agent session RUNNING cmd; reap when idle > idleSec (0 = never)
-	ReapAgents() []string                                   // kill agent sessions idle past their leash (only when idle at a shell); returns reaped names
+	Spawn(name, dir, cmd string, idleSec int) error         // create an agent session RUNNING cmd; idleSec=0 skips early cleanup, not the hard maximum
+	ReapAgents() []string                                   // remove finished agent sessions after idle cleanup or the hard maximum; returns reaped names
 }
 
-// DefaultReapIdleSec is how long an agent (ut spawn) session may sit idle at a
-// shell prompt before the reaper removes it — overridable per spawn with
-// `ut spawn --idle`. 0 means never reap.
-const DefaultReapIdleSec = 6 * 3600
+const (
+	// DefaultReapIdleSec is how long a finished `ut spawn` session may sit at
+	// its shell prompt before the reaper removes it. `--idle` overrides this;
+	// zero disables this shorter idle cleanup.
+	DefaultReapIdleSec = 6 * 3600
+
+	// MaxAgentRetentionSec is the hard limit for retaining a finished agent
+	// session. It applies even when `--idle 0` was requested. A job that has not
+	// finished is never eligible for either cleanup rule.
+	MaxAgentRetentionSec = 7 * 24 * 3600
+)
+
+// AgentSessionExpired reports whether a finished agent session has reached
+// either its requested idle cleanup time or the seven-day hard maximum. The
+// caller remains responsible for proving that the original job finished and
+// that no new foreground work is using the retained shell.
+func AgentSessionExpired(now, lastActivity, finishedAt int64, idleSec int) bool {
+	if finishedAt <= 0 || now < finishedAt {
+		return false
+	}
+	if now-finishedAt >= int64(MaxAgentRetentionSec) {
+		return true
+	}
+	return idleSec > 0 && lastActivity > 0 && now-lastActivity >= int64(idleSec)
+}

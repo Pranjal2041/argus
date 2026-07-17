@@ -315,7 +315,9 @@ func cmdSpawn(args []string) int {
 
 // extractIdleFlag pulls an optional `--idle <dur>` / `--idle=<dur>` out of the
 // spawn args and returns its value in SECONDS. <dur> accepts a Go duration
-// (6h, 30m, 90s), a plain number of seconds (3600), or 0/never/off (never reap).
+// (6h, 30m, 90s), a plain number of seconds (3600), or 0/never/off (skip the
+// shorter idle cleanup). Every finished agent session still has a seven-day
+// maximum retention.
 // idleSet is false when the flag is absent (the broker then applies its 6h
 // default). The flag is consumed; remaining args are returned in order.
 func extractIdleFlag(args []string) (idleSec int, idleSet bool, rest []string, err error) {
@@ -325,7 +327,7 @@ func extractIdleFlag(args []string) (idleSec int, idleSet bool, rest []string, e
 		switch {
 		case a == "--idle":
 			if i+1 >= len(args) {
-				return 0, false, nil, fmt.Errorf("--idle needs a value (e.g. --idle 12h, --idle 0 = never)")
+				return 0, false, nil, fmt.Errorf("--idle needs a value (e.g. --idle 12h, --idle 0 = retain until the 7d maximum)")
 			}
 			val = args[i+1]
 			i++
@@ -356,7 +358,7 @@ func parseIdleDur(s string) (int, error) {
 	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 { // bare seconds
 		return n, nil
 	}
-	return 0, fmt.Errorf("bad --idle value %q (use 6h, 30m, 3600, or 0/never)", s)
+	return 0, fmt.Errorf("bad --idle value %q (use 6h, 30m, 3600, or 0 for the 7d maximum)", s)
 }
 
 // --- send: type into a shell (no capture) -----------------------------------
@@ -475,7 +477,7 @@ USAGE
   ut sh    @<machine>                   list a machine's shells
   ut run   @<machine>:<shell> <cmd...>  run a command INSIDE a shell (state persists)
   ut spawn @<machine>[:name] <cmd...>   start a long job in a session (returns its name)
-       [--idle <dur>]                   idle leash before auto-cleanup (default 6h; 0 = never)
+       [--idle <dur>]                   idle time before cleanup (default 6h; finished sessions: 7d maximum)
   ut tail  @<machine>:<session>         stream a session's live output (Ctrl-C to stop)
   ut send  @<machine>:<shell> <text...> type text into a shell (no output captured)
   ut cp    <src> <dst>                  copy a file; either side may be <machine>:<path>
@@ -505,7 +507,8 @@ NOTES
     (shown there only behind a "Show agent sessions" toggle), and marked [agent] in 'ut ls'.
     They auto-clean when left IDLE at a shell prompt for their idle leash (default 6h) —
     a still-running job is NEVER reaped, only a finished one sitting idle. Use
-    '--idle <dur>' to lengthen/shorten the leash (e.g. --idle 24h) or '--idle 0' to keep
-    it until you 'ut' kill it. Prefer spawn for jobs you'll come back to; it keeps the UI clean.
+    '--idle <dur>' to lengthen/shorten that time (e.g. --idle 24h). '--idle 0'
+    skips the shorter idle cleanup, but a finished session is still removed after at most 7 days.
+    Prefer spawn for jobs you'll come back to; it keeps the UI clean.
   • Run 'ut ls' first to see the exact machine names.
 `

@@ -48,7 +48,9 @@ the target host's broker.
 
 A session started by `ut spawn` is an **agent session**: hidden from the app by default and
 **auto-reaped** once it has sat idle past its leash (`--idle`, a few hours by default), so a swarm of
-short-lived helpers does not pile up.
+short-lived helpers does not pile up. A live command is not removed. After the command finishes,
+the retained terminal is removed after at most seven days even when `--idle 0` disables the shorter
+idle cleanup.
 
 ## The Lab research protocol
 
