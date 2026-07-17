@@ -27,6 +27,7 @@ where should your attention go *first*?
   over the tailnet. Change a status on either and it propagates both ways.
 - **Notifications.** When a session flips to needing you, Argus raises a notification and a Dock
   badge, so you do not have to keep watching — your attention is pulled to it only when it is earned.
+  On macOS, an optional Caps Lock light alert can provide the same signal without sound.
 - **Lab decisions share the same attention surface.** A pending experiment-set access request or a
   gated run appears in the top band with a flask mark and a fixed Lab label. Selecting it opens the
   exact evidence dossier in [Argus Lab](/docs/lab), rather than pretending the gate is a terminal
@@ -37,6 +38,18 @@ It reads each agent's screen **passively** — nothing is ever typed into your a
 what they are doing. Agent sessions started by the mesh (`ut spawn`) and hidden panels are left out
 of the Command Center entirely.
 </Callout>
+
+## Caps Lock light alerts
+
+On macOS, open **Settings → Attention** and enable **Blink Caps Lock light for Needs You**. The
+default burst lasts 10 seconds and repeats every five minutes while at least one terminal agent or
+Lab approval remains in the Command Center's top section. Both the burst duration and reminder
+interval are configurable, and **Test Light** checks the currently connected keyboard immediately.
+
+Argus writes the keyboard's dedicated HID LED output; it does not synthesize a Caps Lock keypress
+or toggle capitalization. When a burst ends, is cancelled, or the attention queue clears, the light
+is restored to the current real Caps Lock state. The feature is off by default and works with
+built-in or external keyboards that expose a standard Caps Lock LED element.
 
 ## How it works
 

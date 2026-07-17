@@ -20,6 +20,10 @@ cp -R Resources/ledger "$APP/Contents/Resources/" 2>/dev/null || true    # activ
 cp -R Resources/wrapped "$APP/Contents/Resources/" 2>/dev/null || true   # Argus Wrapped deck/dashboard
 cp -R Resources/lab "$APP/Contents/Resources/" 2>/dev/null || true       # the Lab experiments hub (â§âL)
 
+# SwiftPM linker-signs the loose executable before these bundle resources exist.
+# Re-sign the finished bundle so its resource seal is valid after installation.
+codesign --force --deep --sign - --timestamp=none "$APP"
+
 echo "Built $(pwd)/$APP"
 
 # Install to /Applications so a normal relaunch (Dock/Spotlight/⌘-Tab) runs THIS build.
