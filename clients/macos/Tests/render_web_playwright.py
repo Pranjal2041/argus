@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -32,6 +33,19 @@ let answer = 42
 ┌──────┬──────┐
 │ left │ right│
 └──────┴──────┘
+"""
+
+TERMINAL_TABLE_SOURCE = """# Challenge audit
+
+ Requirement                   Result
+ ────────────────────────────  ─────────────────────────────────────────────
+ Camera configuration          Pass. Camera settings are unrestricted.
+                               Organizer forum ruling applies.
+ ────────────────────────────  ─────────────────────────────────────────────
+ Controller/action space       Pass. No published restriction.
+ ────────────────────────────  ─────────────────────────────────────────────
+
+Old document (https://github.com/example/vlnverse_emr/blob/main/README.md).
 """
 
 
@@ -62,11 +76,96 @@ def document(source: str, origin: str) -> dict:
     }
 
 
+def terminal_table_document() -> dict:
+    default = 0
+    green = 1
+    rule = 2
+
+    def run(text: str, style: int = default) -> dict:
+        return {"text": text, "style": style, "link": None}
+
+    def line(*runs: dict) -> dict:
+        return {"runs": list(runs), "wrapped": False}
+
+    def style(foreground: str, bold: bool = False) -> dict:
+        return {
+            "foreground": foreground,
+            "background": "#11131A",
+            "bold": bold,
+            "italic": False,
+            "underline": None,
+            "underlineColor": None,
+            "strikethrough": False,
+        }
+
+    return {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "source": TERMINAL_TABLE_SOURCE,
+        "sourceOrigin": "terminal",
+        "terminal": {
+            "columns": 92,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [style("#E8E9EE"), style("#35C46A", True), style("#6E7681")],
+            "lines": [
+                line(run("# Challenge audit")),
+                line(),
+                line(run(" Requirement                   Result")),
+                line(run(" ────────────────────────────  ─────────────────────────────────────────────", rule)),
+                line(run(" Camera configuration          "), run("Pass", green),
+                     run(". Camera settings are unrestricted.")),
+                line(run("                               Organizer forum ruling applies.")),
+                line(run(" ────────────────────────────  ─────────────────────────────────────────────", rule)),
+                line(run(" Controller/action space       "), run("Pass", green),
+                     run(". No published restriction.")),
+                line(run(" ────────────────────────────  ─────────────────────────────────────────────", rule)),
+                line(),
+                line(run("Old document (https://github.com/example/vlnverse_emr/blob/main/README.md).")),
+            ],
+        },
+    }
+
+
 def endpoint_source(endpoint: str, session: str) -> tuple[str, str]:
     query = urllib.parse.urlencode({"session": session})
     with urllib.request.urlopen(f"{endpoint.rstrip('/')}/render-source?{query}", timeout=10) as response:
         payload = json.load(response)
     return payload["source"], payload["origin"]
+
+
+def recent_terminal_document(endpoint: str, session: str) -> dict:
+    query = urllib.parse.urlencode({"session": session, "lines": 600})
+    with urllib.request.urlopen(f"{endpoint.rstrip('/')}/recent?{query}", timeout=10) as response:
+        source = response.read().decode("utf-8")
+    base_style = {
+        "foreground": "#E8E9EE",
+        "background": "#11131A",
+        "bold": False,
+        "italic": False,
+        "underline": None,
+        "underlineColor": None,
+        "strikethrough": False,
+    }
+    return {
+        "id": "00000000-0000-0000-0000-000000000003",
+        "source": source,
+        "sourceOrigin": "terminal",
+        "terminal": {
+            "columns": max((len(line) for line in source.splitlines()), default=1),
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [base_style],
+            "lines": [
+                {
+                    "runs": ([{"text": line, "style": 0, "link": None}] if line else []),
+                    "wrapped": False,
+                }
+                for line in source.splitlines()
+            ],
+        },
+    }
 
 
 def main() -> None:
@@ -76,11 +175,18 @@ def main() -> None:
     parser.add_argument("--output-dir", default="tmp/pdfs")
     args = parser.parse_args()
 
-    source, origin = FIXTURE, "codex-transcript"
+    active_document = document(FIXTURE, "codex-transcript")
     if args.endpoint:
         if not args.session:
             parser.error("--session is required with --endpoint")
-        source, origin = endpoint_source(args.endpoint, args.session)
+        try:
+            source, origin = endpoint_source(args.endpoint, args.session)
+            active_document = document(source, origin)
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            active_document = recent_terminal_document(args.endpoint, args.session)
+    source = active_document["source"]
 
     render_dir = Path(__file__).resolve().parents[1] / "Resources" / "render"
     output_dir = Path(args.output_dir)
@@ -93,11 +199,12 @@ def main() -> None:
         page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
         page.goto((render_dir / "index.html").as_uri())
         page.wait_for_load_state("networkidle")
-        page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'rendered')", [document(source, origin)])
+        page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'rendered')", [active_document])
         report = page.evaluate("window.UTRender.inspect()")
 
         assert report["error"] is None, report["error"]
-        assert report["headings"] >= 1
+        if re.search(r"(?m)^\s*#{1,6}\s+", source):
+            assert report["headings"] >= 1
         if re.search(r"(?m)^\s*\|.+\|\s*$", source):
             assert report["tables"] >= 1
         if "```" in source or "~~~" in source:
@@ -109,16 +216,30 @@ def main() -> None:
         if re.search(r"\[[^\]]+\]\([^)]+\)", source):
             assert report["links"] >= 1
         if any(char in source for char in "┌┐└┘─│"):
-            assert report["verbatimBlocks"] >= 1
+            assert report["verbatimBlocks"] + report["terminalTables"] >= 1
         assert not console_errors, console_errors
 
         page.screenshot(path=str(output_dir / "rendered-output.png"), full_page=True)
         page.pdf(path=str(output_dir / "rendered-output.pdf"), print_background=True,
                  width="1180px", height=f"{max(900, page.evaluate('document.documentElement.scrollHeight'))}px")
 
-        page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'terminal')", [document(source, origin)])
+        page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'rendered')",
+                      [terminal_table_document()])
+        table_report = page.evaluate("window.UTRender.inspect()")
+        assert table_report["error"] is None, table_report["error"]
+        assert table_report["terminalTables"] == 1
+        assert table_report["terminalTableRows"] == 3
+        assert table_report["verbatimBlocks"] == 0
+        assert table_report["inlineMath"] == 0
+        assert table_report["links"] == 1
+        pass_color = page.locator('table.terminal-table [data-terminal-style="1"]').first.evaluate(
+            "element => getComputedStyle(element).color")
+        assert pass_color != "rgb(31, 35, 40)", pass_color
+        page.screenshot(path=str(output_dir / "borderless-table-rendered.png"), full_page=True)
+
+        page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'terminal')", [active_document])
         terminal = page.evaluate("window.UTRender.inspect()")
-        assert terminal["terminalRows"] == 2
+        assert terminal["terminalRows"] == len(active_document["terminal"]["lines"])
         assert terminal["headings"] == 0
         page.screenshot(path=str(output_dir / "terminal-fallback.png"), full_page=True)
         browser.close()

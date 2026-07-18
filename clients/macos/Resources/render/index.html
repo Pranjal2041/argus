@@ -84,6 +84,27 @@
     padding: 10px 14px; overflow-x: auto;
     font: 12px/1.45 "SF Mono", Menlo, monospace; color: #24292F;
   }
+  /* Terminal TUIs often draw Markdown tables without vertical borders: one
+     horizontal run per column, with wrapped cell lines between separators.
+     Those are reconstructed as a real responsive table, rather than turning
+     every separator into its own horizontally scrolling PRE. */
+  table.terminal-table {
+    display: table; width: 100%; table-layout: fixed; overflow: visible;
+    border: 1px solid #DDDDD8; border-radius: 8px; border-collapse: separate;
+    border-spacing: 0; margin: 1em 0;
+  }
+  .terminal-table th, .terminal-table td {
+    border: 0; border-right: 1px solid #E5E5E0; border-bottom: 1px solid #E5E5E0;
+    vertical-align: top; white-space: normal; overflow-wrap: anywhere;
+  }
+  .terminal-table th:last-child, .terminal-table td:last-child { border-right: 0; }
+  .terminal-table tr:last-child td { border-bottom: 0; }
+  .terminal-table .terminal-cell-line + .terminal-cell-line { margin-top: .18em; }
+  .terminal-accent, .terminal-table [data-terminal-style] {
+    border-radius: 2px;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
   .jblock { position: relative; margin: .9em 0; }
   .jblock pre { margin: 0; }
   .jtoggle {
@@ -140,7 +161,7 @@
     root.style.removeProperty("color-scheme");
   }
 
-  function renderMarkdown(md, repairTerminalSource) {
+  function renderMarkdown(md, repairTerminalSource, terminal) {
     markdownSurface();
     const out = document.getElementById("out");
     if (!md || !md.trim()) {
@@ -150,6 +171,13 @@
 
     try {
       window.UTRender.lastError = null;
+      // Before interpreting fallback text as Markdown, remove any terminal-
+      // typeset tables from that text and retain their exact styled cell rows.
+      // Their placeholders are restored as responsive HTML tables after marked.
+      const extracted = repairTerminalSource
+        ? extractTerminalTables(md, terminal)
+        : { text: md, tables: [] };
+      md = extracted.text;
       // A transcript preserves real delimiters. The fallback terminal source
       // may come from a TUI that consumed only the OUTER \[...\] or \(...\)
       // escapes while leaving TeX commands intact; recover those bounded forms
@@ -165,14 +193,16 @@
       });
 
       jsonBlocks = [];
-      const html = segment(text)
+      let html = segment(text)
         .map((s) => s.verbatim
           ? '<pre class="term">' + escapeHtml(s.text) + "</pre>"
           : renderProse(s.text, code))
         .join("\n");
+      html = restoreTerminalTables(html, extracted.tables);
 
       out.innerHTML = html;
       out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+      applyTerminalAccents(out, terminal, extracted.tableLineIndexes);
     } catch (error) {
       // Rich rendering must fail closed without losing the user's output.
       window.UTRender.lastError = String(error && error.message || error);
@@ -184,7 +214,16 @@
   }
 
   function hasTeXSignal(text) {
-    return /\\[A-Za-z]+|[_^]\s*(?:\{|[A-Za-z0-9])/.test(text);
+    const value = (text || "").trim();
+    // Paths and URLs routinely contain underscores; treating those as stripped
+    // inline TeX turns links such as (.../vlnverse_emr/...) into KaTeX italics.
+    if (/(?:https?:\/\/|file:\/\/|www\.)/i.test(value) || /^[A-Za-z]:[\\/]/.test(value)) {
+      return false;
+    }
+    if (/\\[A-Za-z]+/.test(value)) return true;
+    // A sub/superscript is math-shaped only when its base is a single symbol.
+    // This accepts x_i and D_{KL}, but not ordinary snake_case identifiers.
+    return /(?:^|[^A-Za-z0-9_])[A-Za-z0-9][_\^]\s*(?:\{|[A-Za-z0-9])/.test(value);
   }
 
   function recoverTerminalMath(text) {
@@ -296,7 +335,8 @@
     out.dataset.sourceOrigin = (doc && doc.sourceOrigin) || "terminal";
     if (presentation === "terminal") renderTerminal(doc && doc.terminal);
     else renderMarkdown((doc && doc.source) || "",
-      !!doc && (doc.sourceOrigin === "terminal" || doc.sourceOrigin === "selection"));
+      !!doc && (doc.sourceOrigin === "terminal" || doc.sourceOrigin === "selection"),
+      doc && doc.terminal);
   }
 
   // Box-drawing, block elements, and legacy +---+ rules mark a line as
@@ -323,6 +363,309 @@
     }
     push();
     return segs;
+  }
+
+  const HORIZONTAL_GLYPHS = new Set(Array.from("─━═╌╍┄┅┈┉-"));
+
+  function terminalLineText(line) {
+    return ((line && line.runs) || []).map((run) => run.text || "").join("");
+  }
+
+  // Return the column-rule spans for a borderless terminal table. A single
+  // horizontal rule is prose decoration; two or more separated runs encode
+  // actual column geometry (the shape used by Codex's rendered GFM tables).
+  function terminalTableColumns(text) {
+    const chars = Array.from(text || "");
+    const runs = [];
+    for (let i = 0; i < chars.length;) {
+      if (chars[i] === " " || chars[i] === "\t") { i++; continue; }
+      if (!HORIZONTAL_GLYPHS.has(chars[i])) return null;
+      const start = i;
+      while (i < chars.length && HORIZONTAL_GLYPHS.has(chars[i])) i++;
+      if (i - start >= 3) runs.push({ start, end: i });
+    }
+    return runs.length >= 2 ? runs : null;
+  }
+
+  function terminalSourceForLines(lines) {
+    const logical = [];
+    for (const line of lines) {
+      const text = terminalLineText(line).replace(/[ \t]+$/, "");
+      if (line && line.wrapped && logical.length) logical[logical.length - 1] += text;
+      else logical.push(text);
+    }
+    return logical.map((line) => {
+      const body = line.replace(/^ +/, "");
+      if (body.startsWith("⏺ ") || body.startsWith("⎿ ")) return body.slice(2);
+      return line;
+    }).join("\n");
+  }
+
+  // Replace only table blocks that can be matched byte-for-byte against the
+  // fallback source extracted from this same terminal frame. If matching ever
+  // fails, the old plain segmentation remains the safe fallback.
+  function extractTerminalTables(md, term) {
+    const result = { text: md, tables: [], tableLineIndexes: new Set() };
+    if (!term || !Array.isArray(term.lines) || !term.lines.length) return result;
+
+    const matches = [];
+    const fenced = [];
+    md.replace(/^(```|~~~)[\s\S]*?^\1[ \t]*$/gm, (value, _, offset) => {
+      fenced.push({ start: offset, end: offset + value.length });
+      return value;
+    });
+    let cursor = 0;
+    for (let i = 0; i < term.lines.length;) {
+      if (!terminalLineText(term.lines[i]).trim()) { i++; continue; }
+      const start = i;
+      while (i < term.lines.length && terminalLineText(term.lines[i]).trim()) i++;
+      const end = i;
+      const lines = term.lines.slice(start, end);
+      let columns = null;
+      for (const line of lines) {
+        columns = terminalTableColumns(terminalLineText(line));
+        if (columns) break;
+      }
+      if (!columns) continue;
+
+      const source = terminalSourceForLines(lines);
+      let at = md.indexOf(source, cursor);
+      if (at < 0) at = md.indexOf(source);
+      if (at < 0) continue;
+      if (fenced.some((range) => at < range.end && at + source.length > range.start)) continue;
+      const table = renderStyledTerminalTable(lines, columns, term);
+      if (!table) continue;
+
+      const index = result.tables.length;
+      result.tables.push(table);
+      matches.push({ start: at, end: at + source.length, index });
+      for (let line = start; line < end; line++) result.tableLineIndexes.add(line);
+      cursor = at + source.length;
+    }
+
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const match = matches[i];
+      result.text = result.text.slice(0, match.start) +
+        "\n\n⟦UTTERMTABLE" + match.index + "⟧\n\n" + result.text.slice(match.end);
+    }
+    return result;
+  }
+
+  function terminalLineCells(line) {
+    const cells = [];
+    for (const run of ((line && line.runs) || [])) {
+      for (const character of Array.from(run.text || "")) {
+        cells.push({ character, style: run.style || 0, link: run.link || null });
+      }
+    }
+    return cells;
+  }
+
+  function trimTerminalCells(cells) {
+    let start = 0, end = cells.length;
+    while (start < end && /\s/.test(cells[start].character)) start++;
+    while (end > start && /\s/.test(cells[end - 1].character)) end--;
+    return cells.slice(start, end);
+  }
+
+  function sliceTerminalTableLine(line, columns) {
+    const cells = terminalLineCells(line);
+    return columns.map((column, index) => {
+      const end = index + 1 < columns.length ? columns[index + 1].start : cells.length;
+      return trimTerminalCells(cells.slice(column.start, end));
+    });
+  }
+
+  function terminalCellText(cells) {
+    return (cells || []).map((cell) => cell.character).join("");
+  }
+
+  function splitTerminalTableChunk(lines, columns) {
+    const rows = [];
+    let current = [];
+    for (const line of lines) {
+      const sliced = sliceTerminalTableLine(line, columns);
+      const firstColumnStarts = terminalCellText(sliced[0]).trim() !== "";
+      if (current.length && firstColumnStarts) {
+        rows.push(current);
+        current = [];
+      }
+      current.push(sliced);
+    }
+    if (current.length) rows.push(current);
+    return rows;
+  }
+
+  function renderStyledTerminalTable(lines, columns, term) {
+    const chunks = [];
+    let current = [];
+    let sawRule = false;
+    for (const line of lines) {
+      if (terminalTableColumns(terminalLineText(line))) {
+        if (current.length) chunks.push({ lines: current, header: !sawRule });
+        current = [];
+        sawRule = true;
+      } else {
+        current.push(line);
+      }
+    }
+    if (current.length) chunks.push({ lines: current, header: !sawRule });
+    if (!sawRule || !chunks.length) return "";
+
+    const headerRows = [], bodyRows = [];
+    for (const chunk of chunks) {
+      for (const row of splitTerminalTableChunk(chunk.lines, columns)) {
+        (chunk.header ? headerRows : bodyRows).push(row);
+      }
+    }
+    if (!headerRows.length && !bodyRows.length) return "";
+
+    const widths = columns.map((column, index) =>
+      Math.max(1, (index + 1 < columns.length ? columns[index + 1].start : column.end) - column.start));
+    const total = widths.reduce((sum, width) => sum + width, 0);
+    let html = '<table class="terminal-table"><colgroup>' +
+      widths.map((width) => '<col style="width:' + (100 * width / total).toFixed(3) + '%">').join("") +
+      "</colgroup>";
+    if (headerRows.length) {
+      html += "<thead>" + headerRows.map((row) => renderTerminalTableRow(row, term, true)).join("") + "</thead>";
+    }
+    if (bodyRows.length) {
+      html += "<tbody>" + bodyRows.map((row) => renderTerminalTableRow(row, term, false)).join("") + "</tbody>";
+    }
+    return html + "</table>";
+  }
+
+  function renderTerminalTableRow(rowLines, term, header) {
+    const tag = header ? "th" : "td";
+    const columns = rowLines[0] ? rowLines[0].length : 0;
+    let html = "<tr>";
+    for (let column = 0; column < columns; column++) {
+      const visualLines = rowLines.map((line) => line[column]).filter((cells) => cells && cells.length);
+      html += "<" + tag + ">" + (visualLines.length
+        ? visualLines.map((cells) => '<div class="terminal-cell-line">' +
+            renderStyledTerminalCells(cells, term) + "</div>").join("")
+        : "&nbsp;") + "</" + tag + ">";
+    }
+    return html + "</tr>";
+  }
+
+  function renderStyledTerminalCells(cells, term) {
+    const groups = [];
+    for (const cell of cells) {
+      const previous = groups[groups.length - 1];
+      if (previous && previous.style === cell.style && previous.link === cell.link) {
+        previous.text += cell.character;
+      } else {
+        groups.push({ text: cell.character, style: cell.style, link: cell.link });
+      }
+    }
+    return groups.map((group) => {
+      const href = safeLink(group.link);
+      const tag = href ? "a" : "span";
+      const style = terminalStyleCSS(term, group.style);
+      return "<" + tag + ' data-terminal-style="' + group.style + '"' +
+        (href ? ' href="' + escapeAttribute(href) + '" rel="noreferrer"' : "") +
+        (style ? ' style="' + escapeAttribute(style) + '"' : "") + ">" +
+        escapeHtml(group.text) + "</" + tag + ">";
+    }).join("");
+  }
+
+  function terminalStyleCSS(term, styleIndex) {
+    const style = (term && term.styles && term.styles[styleIndex]) || {};
+    const css = [];
+    if (style.foreground && String(style.foreground).toLowerCase() !== String(term.foreground || "").toLowerCase()) {
+      css.push("color:" + readablePaperColor(style.foreground));
+    }
+    if (style.background && String(style.background).toLowerCase() !== String(term.background || "").toLowerCase()) {
+      css.push("background-color:" + style.background, "padding:0 .08em");
+    }
+    if (style.bold) css.push("font-weight:700");
+    if (style.italic) css.push("font-style:italic");
+    const decoration = [];
+    if (style.underline) decoration.push("underline");
+    if (style.strikethrough) decoration.push("line-through");
+    if (decoration.length) css.push("text-decoration-line:" + decoration.join(" "));
+    if (style.underline) css.push("text-decoration-style:" + style.underline);
+    if (style.underlineColor) css.push("text-decoration-color:" + readablePaperColor(style.underlineColor));
+    return css.join(";");
+  }
+
+  function readablePaperColor(hex) {
+    const match = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+    if (!match) return hex;
+    let rgb = match.slice(1).map((value) => parseInt(value, 16));
+    const linear = (value) => {
+      value /= 255;
+      return value <= .04045 ? value / 12.92 : Math.pow((value + .055) / 1.055, 2.4);
+    };
+    const luminance = (values) => .2126 * linear(values[0]) + .7152 * linear(values[1]) + .0722 * linear(values[2]);
+    const paper = .965;
+    let contrast = (paper + .05) / (luminance(rgb) + .05);
+    while (contrast < 4.5 && rgb.some((value) => value > 0)) {
+      rgb = rgb.map((value) => Math.max(0, Math.round(value * .82)));
+      contrast = (paper + .05) / (luminance(rgb) + .05);
+    }
+    return "#" + rgb.map((value) => value.toString(16).padStart(2, "0")).join("");
+  }
+
+  function restoreTerminalTables(html, tables) {
+    if (!tables || !tables.length) return html;
+    return html
+      .replace(/<p>\s*⟦UTTERMTABLE(\d+)⟧\s*<\/p>/g, (_, index) => tables[+index] || "")
+      .replace(/⟦UTTERMTABLE(\d+)⟧/g, (_, index) => tables[+index] || "");
+  }
+
+  // Semantic Markdown stays semantic, but accent-colored terminal runs are
+  // re-applied after parsing. Styling after marked avoids wrapping `##`, `**`,
+  // or link delimiters in spans and accidentally disabling Markdown itself.
+  function applyTerminalAccents(root, term, excludedLineIndexes) {
+    if (!term || !Array.isArray(term.lines) || !Array.isArray(term.styles)) return;
+    const excluded = excludedLineIndexes || new Set();
+    for (let lineIndex = 0; lineIndex < term.lines.length; lineIndex++) {
+      if (excluded.has(lineIndex)) continue;
+      for (const run of (term.lines[lineIndex].runs || [])) {
+        const style = term.styles[run.style] || {};
+        const foregroundDiffers = style.foreground &&
+          String(style.foreground).toLowerCase() !== String(term.foreground || "").toLowerCase();
+        const backgroundDiffers = style.background &&
+          String(style.background).toLowerCase() !== String(term.background || "").toLowerCase();
+        if (!foregroundDiffers && !backgroundDiffers) continue;
+
+        let needle = (run.text || "").trim()
+          .replace(/^(?:⏺|⎿)\s+/, "")
+          .replace(/^(?:#{1,6}|>|[-+*]|\d+\.)\s+/, "")
+          .replace(/^(?:\*\*|__|~~|`)+|(?:\*\*|__|~~|`)+$/g, "")
+          .trim();
+        if (needle.length < 2 || needle.length > 500 || terminalTableColumns(needle)) continue;
+        wrapFirstTerminalAccent(root, needle, term, run.style);
+      }
+    }
+  }
+
+  function wrapFirstTerminalAccent(root, needle, term, styleIndex) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("pre,code,.katex,.terminal-table,[data-terminal-style]")) continue;
+      const at = node.nodeValue.indexOf(needle);
+      if (at < 0) continue;
+      const fragment = document.createDocumentFragment();
+      fragment.appendChild(document.createTextNode(node.nodeValue.slice(0, at)));
+      const span = document.createElement("span");
+      span.className = "terminal-accent";
+      span.dataset.terminalStyle = String(styleIndex);
+      span.style.cssText = terminalStyleCSS(term, styleIndex);
+      span.textContent = needle;
+      fragment.appendChild(span);
+      fragment.appendChild(document.createTextNode(node.nodeValue.slice(at + needle.length)));
+      node.parentNode.replaceChild(fragment, node);
+      return;
+    }
+  }
+
+  function escapeAttribute(value) {
+    return escapeHtml(String(value)).replace(/"/g, "&quot;");
   }
 
   // The markdown/math/JSON pipeline, applied to ONE prose segment:
@@ -509,6 +852,9 @@
         inlineMath: out.querySelectorAll(".katex:not(.katex-display .katex)").length,
         links: out.querySelectorAll("a[href]").length,
         terminalRows: out.querySelectorAll(".terminal-row").length,
+        terminalTables: out.querySelectorAll("table.terminal-table").length,
+        terminalTableRows: out.querySelectorAll("table.terminal-table tr").length,
+        terminalAccents: out.querySelectorAll(".terminal-accent,[data-terminal-style]").length,
         verbatimBlocks: out.querySelectorAll("pre.term").length,
         text: out.innerText,
         error: this.lastError,
