@@ -232,11 +232,13 @@ struct SessionRow: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 6)
-                    Text(relativeShort(session.activity))
-                        .font(cf(10.5, .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.textTertiary)
-                        .fixedSize()
+                    TimelineView(.periodic(from: .now, by: 30)) { _ in
+                        Text(relativeShort(session.activity))
+                            .font(cf(10.5, .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textTertiary)
+                            .fixedSize()
+                    }
                 }
                 Text(folderText)
                     .font(cf(11))

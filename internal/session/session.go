@@ -78,6 +78,17 @@ type Provider interface {
 	ReapAgents() []string                                   // remove finished agent sessions after idle cleanup or the hard maximum; returns reaped names
 }
 
+// TieredStateProvider lets the broker separate cheap session inventory from
+// comparatively expensive screen classification. The tmux implementation has to
+// fork capture-pane once per classified session, so foreground user sessions are
+// classified on the fast cadence while hidden/agent sessions reuse their cached
+// state until the background cadence. Providers that do not implement this
+// optional capability retain the original List() behavior.
+type TieredStateProvider interface {
+	ListInventory() []Info
+	DetectState(name string) string
+}
+
 const (
 	// DefaultReapIdleSec is how long a finished `ut spawn` session may sit at
 	// its shell prompt before the reaper removes it. `--idle` overrides this;

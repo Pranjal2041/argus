@@ -38,3 +38,18 @@ func TestSessionsStampsHidden(t *testing.T) {
 		t.Fatal("Sessions() must not mutate the cache")
 	}
 }
+
+func TestForegroundSessionsExcludesHiddenAndAgents(t *testing.T) {
+	m := &Manager{
+		hidden: map[string]bool{"hidden": true},
+		sessCache: []session.Info{
+			{Name: "visible"},
+			{Name: "hidden"},
+			{Name: "agent", Agent: true},
+		},
+	}
+	out := m.ForegroundSessions()
+	if len(out) != 1 || out[0].Name != "visible" {
+		t.Fatalf("foreground got %#v, want only visible", out)
+	}
+}

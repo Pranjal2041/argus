@@ -43,7 +43,9 @@ type Provider struct{ socket string }
 // NewProvider returns a tmux-backed provider for the given server socket.
 func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
-func (p *Provider) List() []SessionInfo { return ListSessions(p.socket) }
+func (p *Provider) List() []SessionInfo            { return ListSessions(p.socket) }
+func (p *Provider) ListInventory() []SessionInfo   { return ListSessionInventory(p.socket) }
+func (p *Provider) DetectState(name string) string { return DetectState(p.socket, name) }
 
 // Capture returns a session's recent scrollback as plain rendered text (no
 // escapes) — `capture-pane -p -S -<lines>`. Feeds the macOS command center's
@@ -305,9 +307,9 @@ const internalSessionPrefix = "_ut-"
 // session — it is hidden from List and rejected by Has so clients can't attach.
 func isInternalSession(name string) bool { return strings.HasPrefix(name, internalSessionPrefix) }
 
-// ListSessions returns the sessions on the given tmux server (-L socket).
+// ListSessionInventory returns session metadata without capturing every pane.
 // A missing server / no sessions yields an empty list, not an error.
-func ListSessions(socket string) []SessionInfo {
+func ListSessionInventory(socket string) []SessionInfo {
 	// session_id ($N) is the STABLE handle clients connect by (survives rename).
 	// It and @ut_agent are placed AFTER pane_current_path so a tab inside the path
 	// can't shift the fixed trailing fields — both id and the agent flag are
@@ -346,12 +348,25 @@ func ListSessions(socket string) []SessionInfo {
 			Agent: agent, ID: id,
 		})
 	}
-	// Classify each session's state CONCURRENTLY. DetectState forks a capture-pane,
-	// which is slow on a loaded node; doing it serially made a full refresh cost
-	// (N × slow-capture), so the cached state lagged reality by tens of seconds — a
-	// finished agent kept its "working" dot long after its turn ended. Fan out
-	// (bounded) so a refresh costs ~one slow capture, not N. Each goroutine writes a
-	// distinct slice element, so no lock is needed.
+	return sessions
+}
+
+// ListSessions returns a fully-classified snapshot for direct Provider callers.
+// The broker uses ListSessionInventory + DetectState separately so it can avoid
+// scanning hidden and agent panes on every foreground refresh.
+func ListSessions(socket string) []SessionInfo {
+	sessions := ListSessionInventory(socket)
+	classifySessions(socket, sessions)
+	return sessions
+}
+
+// classifySessions classifies each session's state CONCURRENTLY. DetectState
+// forks a capture-pane, which is slow on a loaded node; doing it serially made a full refresh cost
+// (N × slow-capture), so the cached state lagged reality by tens of seconds — a
+// finished agent kept its "working" dot long after its turn ended. Fan out
+// (bounded) so a refresh costs ~one slow capture, not N. Each goroutine writes a
+// distinct slice element, so no lock is needed.
+func classifySessions(socket string, sessions []SessionInfo) {
 	sem := make(chan struct{}, 16)
 	var wg sync.WaitGroup
 	for i := range sessions {
@@ -364,7 +379,6 @@ func ListSessions(socket string) []SessionInfo {
 		}(i)
 	}
 	wg.Wait()
-	return sessions
 }
 
 // Client is a running `tmux -CC` control-mode session.

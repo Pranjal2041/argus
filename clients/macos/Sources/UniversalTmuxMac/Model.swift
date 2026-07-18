@@ -33,6 +33,28 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         case tmuxID = "id"
     }
 
+    init(
+        name: String,
+        windows: Int = 1,
+        attached: Bool = false,
+        activity: Int64 = 0,
+        path: String? = nil,
+        state: String = "idle",
+        agent: Bool = false,
+        hidden: Bool = false,
+        tmuxID: String? = nil
+    ) {
+        self.name = name
+        self.windows = windows
+        self.attached = attached
+        self.activity = activity
+        self.path = path
+        self.state = state
+        self.agent = agent
+        self.hidden = hidden
+        self.tmuxID = tmuxID
+    }
+
     // Custom decoder: Swift's synthesized `Decodable` does NOT apply the
     // `= "idle"` default for a missing key, so an older broker that omits
     // `state` (or `path`) would make the whole `/sessions` decode throw.
@@ -57,6 +79,60 @@ struct SessionInfo: Identifiable, Hashable, Codable {
 }
 
 struct SessionsResponse: Codable { let sessions: [SessionInfo] }
+
+enum SessionRefreshScope: Equatable {
+    case foreground
+    case all
+}
+
+/// Merge a broker response into the local cache without letting the two-second
+/// foreground path churn hidden/agent rows. A full response remains authoritative;
+/// a foreground response replaces only ordinary visible sessions and retains the
+/// last background snapshot until its 30-second refresh.
+func mergeSessionSnapshot(
+    current: [SessionInfo],
+    fetched: [SessionInfo],
+    scope: SessionRefreshScope,
+    machineID: String,
+    locallyHidden: Set<String>
+) -> [SessionInfo] {
+    var byName: [String: SessionInfo] = [:]
+    if scope == .foreground {
+        for info in current {
+            let refID = machineID + "/" + info.name
+            if info.agent || info.hidden || locallyHidden.contains(refID) {
+                byName[info.name] = info
+            }
+        }
+    }
+    for info in fetched { byName[info.name] = info }
+
+    let previous = Dictionary(uniqueKeysWithValues: current.map { ($0.name, $0) })
+    return byName.values.map { fresh in
+        guard let old = previous[fresh.name], sessionMetadataMatchesIgnoringActivity(old, fresh) else {
+            return fresh
+        }
+        var coalesced = fresh
+        // A newly-active pane after a quiet period updates immediately. Continuous
+        // output advances the sidebar timestamp at most every 30 seconds instead of
+        // rebuilding it for every two-second activity tick.
+        if fresh.activity <= old.activity || fresh.activity - old.activity < 30 {
+            coalesced.activity = old.activity
+        }
+        return coalesced
+    }.sorted { $0.name < $1.name }
+}
+
+private func sessionMetadataMatchesIgnoringActivity(_ lhs: SessionInfo, _ rhs: SessionInfo) -> Bool {
+    lhs.name == rhs.name
+        && lhs.windows == rhs.windows
+        && lhs.attached == rhs.attached
+        && lhs.path == rhs.path
+        && lhs.state == rhs.state
+        && lhs.agent == rhs.agent
+        && lhs.hidden == rhs.hidden
+        && lhs.tmuxID == rhs.tmuxID
+}
 
 /// Identifies the selected (machine, session) pair.
 struct SessionRef: Identifiable, Hashable {
@@ -206,7 +282,7 @@ final class AppState: ObservableObject {
             ActivityJournal.shared.selectionChanged(to: selection)
             guard let ref = selection else { return }
             // Visiting a panel clears its orange "done, unseen" flag → back to green.
-            unseen.remove(ref.id)
+            if unseen.contains(ref.id) { unseen.remove(ref.id) }
             // Viewing a waiting session acknowledges it → clears it from the inbox AND
             // the Dock badge immediately (and durably: a plain state-flip used to be
             // reverted by the very next poll, since the broker still reports "waiting").
@@ -233,7 +309,9 @@ final class AppState: ObservableObject {
     @Published var renderDocument: RenderDocument? // non-nil → styled/static Render overlay is up
     @Published var searchFocusToken = 0   // bumped to request focusing the filter field
     @Published var isRefreshing = false
-    @Published var clock = Date()          // bumped periodically so relative times re-render
+    private var lastRTTPublishedAt: [String: Date] = [:]
+    private var sessionRefreshesInFlight: [String: Int] = [:]
+    private var pendingFullSessionRefresh: [String: Machine] = [:]
 
     /// User-pinned working directory per session (`ref.id` → absolute path on the
     /// host). Used as the resolve base for a terminal cmd+click when the broker's
@@ -875,7 +953,7 @@ final class AppState: ObservableObject {
     /// Mark a session acknowledged and push the new waiting total to the Dock badge
     /// immediately (the badge was previously only updated on the periodic poll).
     private func acknowledge(_ ref: SessionRef) {
-        acknowledged.insert(ref.id)
+        if !acknowledged.contains(ref.id) { acknowledged.insert(ref.id) }
         AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount)
     }
 
@@ -921,19 +999,19 @@ final class AppState: ObservableObject {
 
     func focusSearch() { searchFocusToken &+= 1 }
 
-    /// Light periodic poll: re-fetch sessions for known machines and tick the clock so
-    /// activity labels age. Every ~12s it ALSO re-discovers, so a broker that comes
-    /// online after launch (e.g. a Babel job landing on a fresh node) appears on its
-    /// own instead of only on a manual refresh.
+    /// Light periodic poll: re-fetch foreground sessions for known machines. Every
+    /// 30s it takes a full hidden/agent snapshot; every ~12s it ALSO re-discovers,
+    /// so a broker that comes online after launch (e.g. a Babel job landing on a
+    /// fresh node) appears on its own instead of only on a manual refresh.
     func startAutoRefresh() {
         pollTimer?.invalidate()
         var tick = 0
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.clock = Date()
-                for m in self.machines { self.refresh(m) }
                 tick += 1
+                let scope: SessionRefreshScope = tick % 15 == 0 ? .all : .foreground
+                for m in self.machines { self.refresh(m, scope: scope) }
                 if tick % 6 == 0 { self.discoverNewBrokers() }
                 // Pull durable history in the background while machines are reachable, so
                 // it's captured before a node goes offline. ~2s after launch, then ~30s.
@@ -954,7 +1032,7 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 for m in found where !self.machines.contains(where: { $0.id == m.id }) {
                     self.machines.append(m)
-                    self.refresh(m)
+                    self.refresh(m, scope: .all)
                 }
             }
         }
@@ -968,7 +1046,7 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self.machines = found
                 let group = DispatchGroup()
-                for m in found { self.refresh(m, group: group) }
+                for m in found { self.refresh(m, group: group, scope: .all, coalesce: false) }
                 group.notify(queue: .main) { self.isRefreshing = false }
                 // Safety: never leave the spinner stuck if a request hangs past timeout.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 9) { self.isRefreshing = false }
@@ -1088,71 +1166,143 @@ final class AppState: ObservableObject {
         showOverview = false
     }
 
-    func refresh(_ m: Machine, group: DispatchGroup? = nil) {
-        guard let url = URL(string: m.httpBase + "/sessions") else { return }
+    func refresh(
+        _ m: Machine,
+        group: DispatchGroup? = nil,
+        scope: SessionRefreshScope = .foreground,
+        coalesce: Bool = true
+    ) {
+        var components = URLComponents(string: m.httpBase + "/sessions")
+        if scope == .foreground {
+            components?.queryItems = [URLQueryItem(name: "scope", value: "foreground")]
+        }
+        guard let url = components?.url else { return }
+        if coalesce, sessionRefreshesInFlight[m.id, default: 0] > 0 {
+            // Never stack periodic requests behind a slow/offline broker. Preserve a
+            // skipped full refresh and run it as soon as the active request finishes.
+            if scope == .all { pendingFullSessionRefresh[m.id] = m }
+            return
+        }
+        sessionRefreshesInFlight[m.id, default: 0] += 1
         var req = URLRequest(url: url)
         req.timeoutInterval = 8
         let started = Date()
         group?.enter()
-        URLSession.shared.dataTask(with: req) { data, _, err in
-            var list: [SessionInfo] = []
-            if let data, let resp = try? JSONDecoder().decode(SessionsResponse.self, from: data) {
-                list = resp.sessions
-            }
-            let status = err == nil ? "\(list.count) session\(list.count == 1 ? "" : "s")" : "unreachable"
+        URLSession.shared.dataTask(with: req) { data, response, err in
+            let httpOK = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+            let decoded = data.flatMap { try? JSONDecoder().decode(SessionsResponse.self, from: $0) }
+            let reachable = err == nil && httpOK && decoded != nil
+            let status = reachable ? "reachable" : "unreachable"
+            let rtt = Int(Date().timeIntervalSince(started) * 1000)
             DispatchQueue.main.async {
-                self.sessionsByMachine[m.id] = list.sorted { $0.name < $1.name }
-                self.statusByMachine[m.id] = status
-                if err == nil { self.rttByMachine[m.id] = Int(Date().timeIntervalSince(started) * 1000) }
-                if err == nil { self.syncHidden(machine: m, sessions: list) }
-                if err == nil {
-                    var entered: [(ref: SessionRef, machine: String)] = []
-                    var becameIdle: Set<String> = []
-                    for s in list {
-                        let ref = SessionRef(machineID: m.id, session: s.name)
-                        let prev = self.prevState[ref.id]
-                        // Orange "done, unseen": a turn just finished (working → not-working)
-                        // while this wasn't the pane you're looking at. Cleared when working
-                        // resumes (→ blue) or when you select it (see `selection`).
-                        // A working → WAITING transition is "needs attention" (amber inbox +
-                        // notification), not "done unseen" — orange would mask the amber dot.
-                        if s.state == "working" {
-                            self.unseen.remove(ref.id)
-                        } else if prev == "working" && s.state != "waiting" && self.selection != ref {
-                            self.unseen.insert(ref.id)
-                        }
-                        if s.state == "waiting" && (prev ?? "idle") != "waiting" {
-                            entered.append((ref: ref, machine: m.name))
-                        }
-                        if isVisibleWorkingToIdleTransition(
-                            previous: prev,
-                            current: s.state,
-                            isAgentSession: s.agent,
-                            isHidden: s.hidden || self.hiddenSessions.contains(ref.id),
-                            isBacklogged: self.backlog.contains(ref.id)
-                        ) {
-                            becameIdle.insert(ref.id)
-                        }
-                        // Re-arm: once a session leaves "waiting", a future prompt should
-                        // surface again, so drop any prior acknowledgement.
-                        if s.state != "waiting" { self.acknowledged.remove(ref.id) }
-                        self.prevState[ref.id] = s.state
-                    }
-                    // Prune state for sessions that vanished on this machine (killed/renamed)
-                    // so prevState/acknowledged don't grow unbounded or suppress a future banner.
-                    let live = Set(list.map { SessionRef(machineID: m.id, session: $0.name).id })
-                    let onThisMachine: (String) -> Bool = { $0.hasPrefix(m.id + "/") }
-                    self.prevState = self.prevState.filter { !onThisMachine($0.key) || live.contains($0.key) }
-                    self.acknowledged = self.acknowledged.filter { !onThisMachine($0) || live.contains($0) }
-                    self.unseen = self.unseen.filter { !onThisMachine($0) || live.contains($0) }
-                    // Badge from waitingCount (excludes acknowledged) so the optimistic clear
-                    // on view/steer is NOT reverted by this very poll.
-                    AttentionNotifier.shared.update(enteredWaiting: entered, totalWaiting: self.waitingCount)
-                    AttentionNotifier.shared.workingBecameIdle(ids: becameIdle)
+                if self.statusByMachine[m.id] != status {
+                    self.statusByMachine[m.id] = status
                 }
+
+                if reachable {
+                    let now = Date()
+                    let lastRTT = self.lastRTTPublishedAt[m.id] ?? .distantPast
+                    if self.rttByMachine[m.id] == nil || now.timeIntervalSince(lastRTT) >= 30 {
+                        let roundedRTT = max(0, Int((Double(rtt) / 5).rounded()) * 5)
+                        if self.rttByMachine[m.id] != roundedRTT {
+                            self.rttByMachine[m.id] = roundedRTT
+                        }
+                        self.lastRTTPublishedAt[m.id] = now
+                    }
+                }
+
+                if reachable, let fetched = decoded?.sessions {
+                    let current = self.sessionsByMachine[m.id] ?? []
+                    let merged = mergeSessionSnapshot(
+                        current: current,
+                        fetched: fetched,
+                        scope: scope,
+                        machineID: m.id,
+                        locallyHidden: self.hiddenSessions
+                    )
+                    let sessionsChanged = current != merged
+                    if sessionsChanged {
+                        self.sessionsByMachine[m.id] = merged
+                    }
+                    if scope == .all {
+                        self.syncHidden(machine: m, sessions: fetched)
+                    }
+                    if sessionsChanged {
+                        self.applySessionTransitions(
+                            machine: m,
+                            changedSessions: fetched,
+                            liveSessions: merged
+                        )
+                    }
+                }
+                self.finishSessionRefresh(machineID: m.id)
                 group?.leave()
             }
         }.resume()
+    }
+
+    private func finishSessionRefresh(machineID: String) {
+        let remaining = max(0, sessionRefreshesInFlight[machineID, default: 1] - 1)
+        if remaining > 0 {
+            sessionRefreshesInFlight[machineID] = remaining
+            return
+        }
+        sessionRefreshesInFlight.removeValue(forKey: machineID)
+        guard let machine = pendingFullSessionRefresh.removeValue(forKey: machineID),
+              machines.contains(where: { $0.id == machineID }) else { return }
+        refresh(machine, scope: .all)
+    }
+
+    /// Fold one changed broker snapshot into notification state using local copies,
+    /// then publish each set at most once. The previous implementation mutated two
+    /// @Published sets for nearly every session on every poll, even when nothing changed.
+    private func applySessionTransitions(
+        machine m: Machine,
+        changedSessions: [SessionInfo],
+        liveSessions: [SessionInfo]
+    ) {
+        var nextAcknowledged = acknowledged
+        var nextUnseen = unseen
+        var entered: [(ref: SessionRef, machine: String)] = []
+        var becameIdle: Set<String> = []
+
+        for s in changedSessions {
+            let ref = SessionRef(machineID: m.id, session: s.name)
+            let prev = prevState[ref.id]
+            let hidden = s.hidden || hiddenSessions.contains(ref.id)
+            let userFacing = !s.agent && !hidden
+
+            if userFacing && s.state == "working" {
+                nextUnseen.remove(ref.id)
+            } else if userFacing && prev == "working" && s.state != "waiting" && selection != ref {
+                nextUnseen.insert(ref.id)
+            }
+            if userFacing && s.state == "waiting" && (prev ?? "idle") != "waiting" {
+                entered.append((ref: ref, machine: m.name))
+            }
+            if isVisibleWorkingToIdleTransition(
+                previous: prev,
+                current: s.state,
+                isAgentSession: s.agent,
+                isHidden: hidden,
+                isBacklogged: backlog.contains(ref.id)
+            ) {
+                becameIdle.insert(ref.id)
+            }
+            if s.state != "waiting" { nextAcknowledged.remove(ref.id) }
+            prevState[ref.id] = s.state
+        }
+
+        let live = Set(liveSessions.map { SessionRef(machineID: m.id, session: $0.name).id })
+        let onThisMachine: (String) -> Bool = { $0.hasPrefix(m.id + "/") }
+        prevState = prevState.filter { !onThisMachine($0.key) || live.contains($0.key) }
+        nextAcknowledged = nextAcknowledged.filter { !onThisMachine($0) || live.contains($0) }
+        nextUnseen = nextUnseen.filter { !onThisMachine($0) || live.contains($0) }
+
+        if nextAcknowledged != acknowledged { acknowledged = nextAcknowledged }
+        if nextUnseen != unseen { unseen = nextUnseen }
+        AttentionNotifier.shared.update(enteredWaiting: entered, totalWaiting: waitingCount)
+        if !becameIdle.isEmpty { AttentionNotifier.shared.workingBecameIdle(ids: becameIdle) }
     }
 
     // MARK: Session control (POST /control on the owning broker)

@@ -830,13 +830,18 @@ struct RootView: View {
             sidebarHeader
             searchField
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1, pinnedViews: [.sectionHeaders]) {
+                // The sidebar is deliberately non-lazy. A real fleet is tens of rows,
+                // while SwiftUI's pinned LazyVStack repeatedly entered multi-second
+                // anchor-placement passes when broker snapshots and selection changed.
+                // A stable VStack is both cheaper at this scale and cannot enter that
+                // lazy scroll-anchor reconciliation path.
+                VStack(alignment: .leading, spacing: 1) {
                     NeedsAttentionSection(waiting: state.waitingSessions, selection: $state.selection)
                     ForEach(state.machines) { machine in
-                        Section {
-                            machineBody(machine)
-                        } header: {
-                            machineHeader(machine)
+                        let groups = filteredGroups(machine)
+                        VStack(alignment: .leading, spacing: 1) {
+                            machineHeader(machine, sessionCount: groups.reduce(0) { $0 + $1.sessions.count })
+                            machineBody(machine, groups: groups)
                         }
                     }
                 }
@@ -956,7 +961,7 @@ struct RootView: View {
         .padding(.bottom, 8)
     }
 
-    private func machineHeader(_ m: Machine) -> some View {
+    private func machineHeader(_ m: Machine, sessionCount: Int) -> some View {
         let status = state.statusByMachine[m.id]
         let reachable = status != nil && status != "unreachable"
         let dotColor: Color = status == nil ? Theme.textTertiary : (reachable ? Theme.attached : Theme.unreachable)
@@ -974,7 +979,7 @@ struct RootView: View {
             if reachable, let rtt = state.rttByMachine[m.id] {
                 Text("\(rtt)ms").font(cf(10)).monospacedDigit().foregroundStyle(Theme.textTertiary)
             }
-            countBadge(m, reachable: reachable, loading: status == nil)
+            countBadge(sessionCount: sessionCount, reachable: reachable, loading: status == nil)
         }
         .padding(.horizontal, 6)
         .frame(height: 30)
@@ -989,15 +994,14 @@ struct RootView: View {
         }
     }
 
-    private func countBadge(_ m: Machine, reachable: Bool, loading: Bool) -> some View {
-        let count = filteredGroups(m).reduce(0) { $0 + $1.sessions.count }
+    private func countBadge(sessionCount: Int, reachable: Bool, loading: Bool) -> some View {
         return Group {
             if loading {
                 Text("…").foregroundStyle(Theme.textTertiary)
             } else if !reachable {
                 Text("offline").foregroundStyle(Theme.unreachable)
             } else {
-                Text("\(count)")
+                Text("\(sessionCount)")
                     .foregroundStyle(Theme.textSecondary)
                     .monospacedDigit()
                     .padding(.horizontal, 6)
@@ -1008,9 +1012,8 @@ struct RootView: View {
         .font(cf(10.5, .medium))
     }
 
-    @ViewBuilder private func machineBody(_ m: Machine) -> some View {
+    @ViewBuilder private func machineBody(_ m: Machine, groups: [FolderGroup]) -> some View {
         let nbs = notebooks.forMachine(m.id)
-        let groups = filteredGroups(m)
         ForEach(nbs) { nb in notebookRow(nb) }
         if groups.isEmpty {
             if nbs.isEmpty {
@@ -1311,7 +1314,7 @@ struct RootView: View {
                     meta("·")
                     SessionPathField(ref: ref, brokerPath: s.path ?? "",
                                      isLocal: machineIsLocal(ref.machineID), font: cf(11))
-                    meta("·"); meta(relativeShort(s.activity))
+                    meta("·"); activityMeta(s.activity)
                 }
                 if st == .reconnecting || st == .connecting {
                     Text(st == .connecting ? "connecting…" : "reconnecting…")
@@ -1356,6 +1359,12 @@ struct RootView: View {
 
     private func meta(_ s: String) -> some View {
         Text(s).font(cf(11)).foregroundStyle(Theme.textTertiary).lineLimit(1)
+    }
+
+    private func activityMeta(_ activity: Int64) -> some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            meta(relativeShort(activity))
+        }
     }
 
     private func liveColor(_ st: ConnState?) -> Color {
