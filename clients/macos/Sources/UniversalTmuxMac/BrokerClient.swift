@@ -19,6 +19,8 @@ enum ConnState: Equatable {
 /// Auto-reconnects with exponential backoff; fires `onConnect` on every
 /// (re)connect so the owner can re-send the pane geometry.
 final class BrokerClient {
+    private let traceID = String(UUID().uuidString.prefix(8))
+    private let traceRef: String
     private var url: URL
     private var task: URLSessionWebSocketTask?
     private var closed = false
@@ -32,7 +34,11 @@ final class BrokerClient {
     var onStatus: ((ConnState) -> Void)?
     var onConnect: (() -> Void)?      // each (re)connect — used to re-send geometry
 
-    init(url: URL) { self.url = url }
+    init(url: URL, traceRef: String) {
+        self.url = url
+        self.traceRef = traceRef
+        trace("client_created")
+    }
 
     /// Point (re)connections at a new session URL. On a LIVE socket this only
     /// affects future reconnects, so a seamless rename keeps streaming (the broker
@@ -42,12 +48,14 @@ final class BrokerClient {
     /// so it dials the new id immediately instead of waiting out the backoff.
     func updateURL(_ u: URL) {
         guard u != url else { return }
+        let oldTarget = targetDescription
         url = u
+        trace("url_changed", ["oldTarget": oldTarget, "live": live])
         guard !closed, !live else { return }
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         backoff = 0.5
-        start()
+        start(trigger: "url-change")
     }
 
     // ---- thundering-herd control -------------------------------------------
@@ -80,20 +88,32 @@ final class BrokerClient {
     /// panes churning connection state was enough continuous invalidation to
     /// pin SwiftUI layout on macOS 26 (the whole-Mac "hanging" storms). The
     /// visible pane keeps the snappy caps, and unhiding nudges an immediate dial.
-    var relaxed = false
+    var relaxed = false {
+        didSet {
+            if oldValue != relaxed { trace("reconnect_policy_changed", ["relaxed": relaxed]) }
+        }
+    }
     private var backoffCap: Double { relaxed ? 60 : 10 }
     private var watchdogDelay: Double { relaxed ? 45 : 6 }
 
     /// Un-hidden and not live → dial NOW (skip whatever long backoff remains).
-    func nudge() {
-        guard !closed, !live else { return }
+    func nudge(trigger: String = "visible") {
+        guard !closed else {
+            trace("nudge_skipped", ["reason": "closed", "trigger": trigger])
+            return
+        }
+        guard !live else {
+            trace("nudge_skipped", ["reason": "already-live", "trigger": trigger])
+            return
+        }
+        trace("nudge", ["trigger": trigger, "hadTask": task != nil, "epoch": epoch])
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         backoff = 0.5
-        start()
+        start(trigger: "nudge:\(trigger)")
     }
 
-    func start() {
+    func start(trigger: String = "initial") {
         guard !closed else { return }
         // NO GHOSTS: a superseded dial/socket must die here, not linger. start()
         // used to just overwrite `task`; during restart churn (updateURL fires as
@@ -101,6 +121,7 @@ final class BrokerClient {
         // orphaned LIVE sockets — open on the broker, frames ignored client-side,
         // never cancelled — inflating the very per-pair flow pressure that causes
         // the babel blackhole. Cancel first, always.
+        if task != nil { trace("dial_superseded", ["trigger": trigger, "epoch": epoch]) }
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         // Re-entry safety (found by the git-insights review): updateURL — and any
@@ -113,6 +134,7 @@ final class BrokerClient {
         let inFlight = Self.dialing[host] ?? 0
         if inFlight >= Self.maxDialingPerHost {
             Self.paceLock.unlock()
+            trace("pace_wait", ["trigger": trigger, "inFlight": inFlight, "epoch": epoch])
             // Too many conns to this host mid-dial — wait a beat and retry the
             // gate. STALENESS GUARD: only if nothing superseded this attempt
             // (epoch unchanged) and the pane didn't connect meanwhile — a stale
@@ -121,7 +143,7 @@ final class BrokerClient {
             let retryEpoch = epoch
             DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.4...1.2)) { [weak self] in
                 guard let self, !self.closed, self.epoch == retryEpoch, !self.live else { return }
-                self.start()
+                self.start(trigger: "pace-retry")
             }
             return
         }
@@ -141,6 +163,7 @@ final class BrokerClient {
         task = t
         live = false
         t.resume()
+        trace("dial_started", ["trigger": trigger, "epoch": myEpoch, "state": everConnected ? "reconnecting" : "connecting", "relaxed": relaxed])
         onStatus?(everConnected ? .reconnecting : .connecting)
         onConnect?() // queued by URLSession until the socket opens; re-sends geometry
         firstFrameWork?.cancel()
@@ -148,6 +171,7 @@ final class BrokerClient {
             guard let self, !self.closed, myEpoch == self.epoch, !self.live else { return }
             // Opened but silent for 6s — poisoned flow. Cancel; the receive
             // failure path reconnects with jittered backoff.
+            self.trace("first_frame_watchdog", ["epoch": myEpoch, "delay": self.watchdogDelay])
             self.task?.cancel(with: .goingAway, reason: nil)
         }
         firstFrameWork = watchdog
@@ -168,6 +192,7 @@ final class BrokerClient {
     }
 
     func stop() {
+        trace("client_stopped", ["epoch": epoch, "live": live])
         closed = true
         firstFrameWork?.cancel()
         paceRelease()
@@ -179,7 +204,11 @@ final class BrokerClient {
         task?.receive { [weak self] result in
             // A reconnect (or updateURL) bumps `epoch`; a callback from a superseded
             // socket bails so we never run two receive loops at once.
-            guard let self, !self.closed, myEpoch == self.epoch else { return }
+            guard let self, !self.closed else { return }
+            guard myEpoch == self.epoch else {
+                self.trace("stale_receive_ignored", ["callbackEpoch": myEpoch, "epoch": self.epoch])
+                return
+            }
             switch result {
             case .success(let message):
                 if !self.live {
@@ -188,15 +217,17 @@ final class BrokerClient {
                     self.backoff = 0.5
                     self.firstFrameWork?.cancel()
                     self.paceRelease()
+                    self.trace("first_frame", ["epoch": myEpoch])
                     self.onStatus?(.connected)
                 }
                 if case .data(let data) = message { self.handle(data) }
                 self.receiveLoop(myEpoch)
-            case .failure:
+            case .failure(let error):
                 guard !self.closed, myEpoch == self.epoch else { return }
                 self.live = false
                 self.firstFrameWork?.cancel()
                 self.paceRelease()
+                self.trace("receive_failed", ["epoch": myEpoch, "error": error.localizedDescription])
                 self.onStatus?(.reconnecting)
                 self.scheduleReconnect(myEpoch)
             }
@@ -206,10 +237,25 @@ final class BrokerClient {
     private func scheduleReconnect(_ myEpoch: Int) {
         let delay = backoff * Double.random(in: 0.7...1.3)   // jitter: no synchronized waves
         backoff = min(backoff * 2, backoffCap) // 0.5,1,2,4,8,… capped (60s when hidden)
+        trace("reconnect_scheduled", ["epoch": myEpoch, "delay": delay, "nextBackoff": backoff, "relaxed": relaxed])
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.closed, myEpoch == self.epoch else { return }
-            self.start()
+            self.start(trigger: "backoff-retry")
         }
+    }
+
+    private var targetDescription: String {
+        let session = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "session" })?.value ?? ""
+        return "\(url.host ?? "?")\(url.path)#\(session)"
+    }
+
+    private func trace(_ event: String, _ fields: [String: Any] = [:]) {
+        var all = fields
+        all["client"] = traceID
+        all["ref"] = traceRef
+        all["target"] = targetDescription
+        TerminalConnectionTrace.record("broker.\(event)", all)
     }
 
     private func handle(_ data: Data) {

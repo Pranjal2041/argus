@@ -188,18 +188,43 @@ private final class TerminalDrainCoordinator {
     }
 }
 
+enum PaneVisibilityTransition: Equatable {
+    case unchanged
+    case becameVisible
+    case becameHidden
+}
+
+/// Separates a real pane reveal/hide edge from SwiftUI re-applying the current
+/// NSView state. A view update is not a connection lifecycle event.
+struct PaneVisibilityState {
+    private(set) var isVisible: Bool
+
+    init(initiallyVisible: Bool) { isVisible = initiallyVisible }
+
+    mutating func update(_ next: Bool) -> PaneVisibilityTransition {
+        guard next != isVisible else { return .unchanged }
+        isVisible = next
+        return next ? .becameVisible : .becameHidden
+    }
+}
+
 
 final class PaneConn: NSObject, TerminalViewDelegate {
     private static let foregroundScrollback = 100_000
 
     let view: TerminalView
     private let client: BrokerClient
+    private let traceRef: String
     private let httpBase: String   // broker http(s) base, for uploading pasted images
     private(set) var connURL: URL  // the session URL this conn (re)connects to; changes on rename or resume (new tmux id)
     private var lastPane = ""
     private var wheelMonitor: Any?  // mouse-reporting panes: wheel → remote (see init)
 
     private var streamPump: TerminalStreamPump!
+    // PaneConn is created for the currently visible panel. TerminalView and its
+    // pump also start visible, so the first SwiftUI update must be a no-op—not a
+    // reason to cancel the socket that init just started.
+    private var visibility = PaneVisibilityState(initiallyVisible: true)
 
     /// Forwarded live connection state (for the header status chip).
     var onState: ((ConnState) -> Void)?
@@ -239,9 +264,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         view.needsDisplay = true
     }
 
-    init(url: URL, mouseReporting: Bool = false) {
+    init(url: URL, traceRef: String, mouseReporting: Bool = false) {
         view = TerminalView(frame: .zero)
-        client = BrokerClient(url: url)
+        client = BrokerClient(url: url, traceRef: traceRef)
+        self.traceRef = traceRef
         httpBase = PaneConn.httpBase(from: url)
         connURL = url
         super.init()
@@ -327,11 +353,18 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// That preserves their complete local scrollback and avoids a destructive
     /// broker snapshot when they return; only reconnect timing is relaxed.
     func setVisible(_ visible: Bool) {
+        let transition = visibility.update(visible)
+        guard transition != .unchanged else { return }
+        TerminalConnectionTrace.record("pane.visibility_changed", [
+            "ref": traceRef,
+            "visible": visible,
+            "transition": visible ? "revealed" : "hidden",
+        ])
         streamPump.setVisible(visible)
         client.relaxed = !visible
-        if visible {
+        if transition == .becameVisible {
             view.requestDisplayRefresh()
-            client.nudge() // if the socket went stale while hidden, dial immediately
+            client.nudge(trigger: "pane-revealed") // if the socket went stale while hidden, dial immediately
         }
     }
 
@@ -986,7 +1019,10 @@ final class TerminalController: ObservableObject {
         }
     }
 
-    private func hideAllPanes() {
+    private func hideAllPanes(reason: String) {
+        if let lastShownID {
+            TerminalConnectionTrace.record("pane.all_hidden", ["ref": lastShownID, "reason": reason])
+        }
         for (id, c) in conns {
             if id == lastShownID { c.utter.finalize() }
             c.view.isHidden = true
@@ -998,7 +1034,7 @@ final class TerminalController: ObservableObject {
     private var keyMonitor: Any?
     init() {
         loadWandb()   // restore the growing W&B run list (pruning entries >7 days old)
-        container.onDetached = { [weak self] in self?.hideAllPanes() }
+        container.onDetached = { [weak self] in self?.hideAllPanes(reason: "host-detached") }
         // Live re-theme: when the user picks a theme, recolor every cached pane IN PLACE
         // (no reconnect, scrollback kept) plus the container background.
         NotificationCenter.default.addObserver(forName: .utThemeChanged, object: nil, queue: .main) { [weak self] _ in
@@ -1200,8 +1236,20 @@ final class TerminalController: ObservableObject {
 
     func show(ref: SessionRef?, url: URL?) {
         guard let ref, let url else {
-            hideAllPanes()
+            hideAllPanes(reason: ref == nil ? "no-selection" : "missing-url")
             return
+        }
+        let selectionChanged = lastShownID != ref.id
+        let existing = conns[ref.id] != nil
+        let displayedState = connState[ref.id].map { String(describing: $0) } ?? "unset"
+        if selectionChanged || displayedState != "connected" {
+            TerminalConnectionTrace.record("pane.show", [
+                "ref": ref.id,
+                "previousRef": lastShownID ?? "",
+                "selectionChanged": selectionChanged,
+                "cached": existing,
+                "displayedState": displayedState,
+            ])
         }
         let conn: PaneConn
         if let existing = conns[ref.id] {
@@ -1213,7 +1261,7 @@ final class TerminalController: ObservableObject {
             // it was stuck reconnecting on the dead old id, reconnects at once).
             if existing.connURL != url { existing.rename(to: url) }
         } else {
-            conn = PaneConn(url: url, mouseReporting: mouseRefs.contains(ref.id))
+            conn = PaneConn(url: url, traceRef: ref.id, mouseReporting: mouseRefs.contains(ref.id))
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
             conn.onOpenLocalhost = { [weak self] port, path, scheme in self?.openLocalhostHandler?(port, path, scheme) }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }
