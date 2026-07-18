@@ -145,6 +145,10 @@ swift build -c release && bash build-app.sh
 cp -R Argus.app /Applications/ && open /Applications/Argus.app
 ```
 
+`build-app.sh` uses the single stable code-signing identity in your Keychain; set
+`UT_CODESIGN_IDENTITY` when more than one is available. It refuses ad-hoc signing for installed
+builds so macOS privacy grants survive updates.
+
 ### 3 · Android app
 
 ```sh

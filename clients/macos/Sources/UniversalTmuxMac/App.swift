@@ -266,20 +266,37 @@ struct SettingsView: View {
                     }
                 }
                 HStack {
-                    Button("Test Light") { capsLockAttention.testBlink() }
+                    if capsLockAttention.inputAccess == .granted {
+                        Button("Test Light") { capsLockAttention.testBlink() }
+                    } else {
+                        Button(capsLockAttention.inputAccess == .denied
+                               ? "Open Input Monitoring…"
+                               : "Allow Input Monitoring…") {
+                            capsLockAttention.resolveInputAccess()
+                        }
+                    }
                     Spacer()
-                    if let count = capsLockAttention.lastTargetCount {
+                    if capsLockAttention.inputAccess == .denied {
+                        Text("Input Monitoring is off")
+                            .font(.caption).foregroundStyle(Color.orange)
+                    } else if capsLockAttention.inputAccess == .notDetermined {
+                        Text("Required once by macOS")
+                            .font(.caption).foregroundStyle(Color.orange)
+                    } else if let count = capsLockAttention.lastTargetCount {
                         Text(count > 0
-                             ? "\(count) compatible light\(count == 1 ? "" : "s")"
-                             : "No compatible light found")
+                             ? "\(count) Caps Lock light\(count == 1 ? "" : "s") found"
+                             : "No Caps Lock LED found")
                             .font(.caption)
                             .foregroundStyle(count > 0 ? Color.secondary : Color.orange)
+                    } else {
+                        Text("Ready")
+                            .font(.caption).foregroundStyle(Color.secondary)
                     }
                 }
             } header: {
                 Text("Attention")
             } footer: {
-                Text("Needs You flashes when a terminal agent or Lab approval requires attention, then repeats while it remains pending. The separate completion signal flashes once when a visible panel moves directly from Working to Idle; hidden, backlogged, and internal agent sessions stay quiet. Argus writes only the light and restores the current Caps Lock state; it never changes how your keyboard types.")
+                Text("Needs You flashes when a terminal agent or Lab approval requires attention, then repeats while it remains pending. The separate completion signal flashes once when a visible panel moves directly from Working to Idle; hidden, backlogged, and internal agent sessions stay quiet. macOS calls the required hardware permission Input Monitoring, but Argus never registers input callbacks or reads keystrokes—it writes only the light and restores the current Caps Lock state.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -324,17 +341,30 @@ struct SettingsView: View {
             }
         }
         .onChange(of: capsLockBlinkEnabled) { enabled in
-            capsLockAttention.needsYouConfigurationDidChange()
+            if enabled { capsLockAttention.resolveInputAccess() }
+            capsLockAttention.configurationDidChange()
             if enabled {
                 commandCenter.bind(state)
                 commandCenter.start()
                 commandCenter.refreshAttention()
             }
         }
-        .onChange(of: capsLockBlinkDuration) { _ in capsLockAttention.needsYouConfigurationDidChange() }
-        .onChange(of: capsLockReminderMinutes) { _ in capsLockAttention.needsYouConfigurationDidChange() }
-        .onChange(of: capsLockCompletionEnabled) { _ in capsLockAttention.completionConfigurationDidChange() }
-        .onChange(of: capsLockCompletionDuration) { _ in capsLockAttention.completionConfigurationDidChange() }
+        .onChange(of: capsLockBlinkDuration) { _ in capsLockAttention.configurationDidChange() }
+        .onChange(of: capsLockReminderMinutes) { _ in capsLockAttention.configurationDidChange() }
+        .onChange(of: capsLockCompletionEnabled) { enabled in
+            if enabled { capsLockAttention.resolveInputAccess() }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+                capsLockAttention.refreshInputAccess()
+            }
+        .onAppear {
+            capsLockAttention.refreshInputAccess()
+            if (capsLockBlinkEnabled || capsLockCompletionEnabled)
+                    && capsLockAttention.inputAccess == .notDetermined {
+                capsLockAttention.resolveInputAccess()
+            }
+        }
         .formStyle(.grouped)
         .frame(width: 460, height: 700)
         .tint(Theme.accent)

@@ -57,6 +57,11 @@ or toggle capitalization. When a burst ends, is cancelled, or the attention queu
 is restored to the current real Caps Lock state. The alerts work with built-in or external
 keyboards that expose a standard Caps Lock LED element.
 
+The first use may require macOS **Input Monitoring** access because that permission protects direct
+keyboard HID access. Argus does not register input callbacks or read keystrokes; it only writes the
+Caps Lock LED element. Settings distinguishes missing permission from missing hardware and links to
+the correct privacy pane when access was denied.
+
 ## How it works
 
 Each session already has a deterministic **state dot** in the sidebar (running / waiting / idle),
