@@ -96,11 +96,13 @@ private struct NeedsAttentionRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: 70, alignment: .trailing)
-            Text(relativeShort(item.activity))
-                .font(.system(size: 11 * uiScale, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(Theme.textTertiary)
-                .frame(width: 30, alignment: .trailing)
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                Text(relativeShort(item.activity))
+                    .font(.system(size: 11 * uiScale, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textTertiary)
+                    .frame(width: 30, alignment: .trailing)
+            }
         }
         .padding(.leading, 12)
         .padding(.trailing, 8)

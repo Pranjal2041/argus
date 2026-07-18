@@ -174,7 +174,7 @@ func NewProvider(shell string) *Provider {
 
 func (p *Provider) SetHistoryLimit(int) {} // n/a: the ring buffer is fixed-size
 
-func (p *Provider) List() []session.Info {
+func (p *Provider) ListInventory() []session.Info {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]session.Info, 0, len(p.sessions))
@@ -183,10 +183,31 @@ func (p *Provider) List() []session.Info {
 		info := session.Info{
 			Name: s.name, Windows: 1, Attached: false,
 			Activity: s.lastOut, Path: s.dir,
-			State: detectState(s.ring), Agent: s.agent,
+			Agent: s.agent,
 		}
 		s.mu.Unlock()
 		out = append(out, info)
+	}
+	return out
+}
+
+func (p *Provider) DetectState(name string) string {
+	p.mu.Lock()
+	s := p.sessions[name]
+	p.mu.Unlock()
+	if s == nil {
+		return "idle"
+	}
+	s.mu.Lock()
+	state := detectState(s.ring)
+	s.mu.Unlock()
+	return state
+}
+
+func (p *Provider) List() []session.Info {
+	out := p.ListInventory()
+	for i := range out {
+		out[i].State = p.DetectState(out[i].Name)
 	}
 	return out
 }

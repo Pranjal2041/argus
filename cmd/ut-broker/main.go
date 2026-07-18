@@ -115,7 +115,13 @@ func main() {
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.Sessions()})
+		var sessions []sess.Info
+		if r.URL.Query().Get("scope") == "foreground" {
+			sessions = mgr.ForegroundSessions()
+		} else {
+			sessions = mgr.Sessions()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 	})
 	// /ccstatus — command-center status relay. POST: the macOS client publishes its
 	// per-session AI status blob (opaque JSON). GET: any client (the phone) reads the

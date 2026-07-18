@@ -427,7 +427,7 @@ func (m *Manager) Spawn(name, dir, cmd string, idleSec int) error {
 	if err := m.prov.Spawn(name, dir, cmd, idleSec); err != nil {
 		return err
 	}
-	go m.refreshSessions()
+	go m.refreshSessions(false)
 	return nil
 }
 
@@ -544,6 +544,20 @@ func (m *Manager) Sessions() []session.Info {
 	return out
 }
 
+// ForegroundSessions is the fast client snapshot: only ordinary, user-visible
+// sessions. Hidden and agent sessions remain in Sessions() for restore/history and
+// explicit full refreshes, but do not need to cross the UI hot path every two seconds.
+func (m *Manager) ForegroundSessions() []session.Info {
+	all := m.Sessions()
+	out := make([]session.Info, 0, len(all))
+	for _, info := range all {
+		if !info.Agent && !info.Hidden {
+			out = append(out, info)
+		}
+	}
+	return out
+}
+
 // hiddenStatePath is a per-HOST file (not the NFS-shared home key) so brokers on
 // different nodes don't clobber each other's hidden state.
 func hiddenStatePath() string {
@@ -609,9 +623,59 @@ func (m *Manager) HiddenNames() []string {
 }
 
 // refreshSessions recomputes the cache from the provider. May be slow under load;
-// always runs OFF the /sessions request path.
-func (m *Manager) refreshSessions() {
-	list := m.prov.List()
+// always runs OFF the /sessions request path. Providers with tiered state support
+// inventory every session cheaply, but capture/classify hidden and agent panes only
+// on the background pass. Their last classified state is retained between passes.
+func (m *Manager) refreshSessions(includeBackground bool) {
+	var list []session.Info
+	if provider, ok := m.prov.(session.TieredStateProvider); ok {
+		list = provider.ListInventory()
+
+		m.sessMu.Lock()
+		previous := make(map[string]string, len(m.sessCache))
+		for _, info := range m.sessCache {
+			previous[sessionStateKey(info)] = info.State
+		}
+		m.sessMu.Unlock()
+
+		m.hiddenMu.Lock()
+		hidden := make(map[string]bool, len(m.hidden))
+		for name, value := range m.hidden {
+			hidden[name] = value
+		}
+		m.hiddenMu.Unlock()
+
+		indexes := make([]int, 0, len(list))
+		for i := range list {
+			if state := previous[sessionStateKey(list[i])]; state != "" {
+				list[i].State = state
+			} else {
+				list[i].State = "idle"
+			}
+			if includeBackground || (!list[i].Agent && !hidden[list[i].Name]) {
+				indexes = append(indexes, i)
+			}
+		}
+
+		sem := make(chan struct{}, 16)
+		var wg sync.WaitGroup
+		for _, i := range indexes {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				state := provider.DetectState(list[i].Name)
+				if state == "" {
+					state = "idle"
+				}
+				list[i].State = state
+			}(i)
+		}
+		wg.Wait()
+	} else {
+		list = m.prov.List()
+	}
 	if list == nil {
 		list = []session.Info{}
 	}
@@ -621,10 +685,17 @@ func (m *Manager) refreshSessions() {
 	m.recordHistory(list)
 }
 
+func sessionStateKey(info session.Info) string {
+	if info.ID != "" {
+		return info.ID
+	}
+	return info.Name
+}
+
 // sessionRefreshLoop primes the cache, then refreshes it on an interval until ctx
 // is done. Ticks arriving during a slow refresh are coalesced (Ticker drops them).
 func (m *Manager) sessionRefreshLoop(interval time.Duration) {
-	m.refreshSessions()
+	m.refreshSessions(true)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	ticks := 0
@@ -634,9 +705,9 @@ func (m *Manager) sessionRefreshLoop(interval time.Duration) {
 			m.flushHistory() // persist lastSeen on clean shutdown
 			return
 		case <-t.C:
-			m.refreshSessions()
 			ticks++
-			if ticks%30 == 0 { // ~every 60s at the 2s interval: flush lastSeen updates
+			m.refreshSessions(ticks%15 == 0) // 2s foreground; 30s hidden/agent classification
+			if ticks%30 == 0 {               // ~every 60s at the 2s interval: flush lastSeen updates
 				m.flushHistory()
 			}
 		}
@@ -779,7 +850,7 @@ func (m *Manager) Create(name, startDir string) error {
 		}
 		m.sessMu.Unlock()
 	}
-	go m.refreshSessions()
+	go m.refreshSessions(false)
 	return err
 }
 
@@ -796,7 +867,7 @@ func (m *Manager) Kill(name string) error {
 	}
 	m.sessCache = c
 	m.sessMu.Unlock()
-	go m.refreshSessions()
+	go m.refreshSessions(false)
 	return err
 }
 
@@ -826,7 +897,7 @@ func (m *Manager) Rename(from, to string) error {
 	}
 	m.sessCache = c
 	m.sessMu.Unlock()
-	go m.refreshSessions()
+	go m.refreshSessions(false)
 	return nil
 }
 
