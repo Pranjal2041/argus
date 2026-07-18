@@ -67,6 +67,142 @@ final class RenderWebIntegrationTests: XCTestCase {
         XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
     }
 
+    func testRenderedTerminalFallbackKeepsBorderlessStyledTableTogether() async throws {
+        let webView = try await loadRenderer()
+        let source = """
+        # Challenge audit
+
+         Requirement                   Result
+         ────────────────────────────  ─────────────────────────────────────────────
+         Camera configuration          Pass. Camera settings are unrestricted.
+                                       Organizer forum ruling applies.
+         ────────────────────────────  ─────────────────────────────────────────────
+         Controller/action space       Pass. No published restriction.
+         ────────────────────────────  ─────────────────────────────────────────────
+
+        The combined submission finished successfully.
+        """
+        let terminal: [String: Any] = [
+            "columns": 92,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [
+                terminalStyle(foreground: "#E8E9EE"),
+                terminalStyle(foreground: "#35C46A", bold: true),
+                terminalStyle(foreground: "#6E7681"),
+            ],
+            "lines": [
+                terminalLine([terminalRun("# Challenge audit")]),
+                terminalLine([]),
+                terminalLine([terminalRun(" Requirement                   Result")]),
+                terminalLine([terminalRun(" ────────────────────────────  ─────────────────────────────────────────────", style: 2)]),
+                terminalLine([
+                    terminalRun(" Camera configuration          "),
+                    terminalRun("Pass", style: 1),
+                    terminalRun(". Camera settings are unrestricted."),
+                ]),
+                terminalLine([terminalRun("                               Organizer forum ruling applies.")]),
+                terminalLine([terminalRun(" ────────────────────────────  ─────────────────────────────────────────────", style: 2)]),
+                terminalLine([
+                    terminalRun(" Controller/action space       "),
+                    terminalRun("Pass", style: 1),
+                    terminalRun(". No published restriction."),
+                ]),
+                terminalLine([terminalRun(" ────────────────────────────  ─────────────────────────────────────────────", style: 2)]),
+                terminalLine([]),
+                terminalLine([
+                    terminalRun("The combined submission finished "),
+                    terminalRun("successfully", style: 1),
+                    terminalRun("."),
+                ]),
+            ],
+        ]
+        try await setDocument(webView, source: source, origin: "terminal",
+                              presentation: "rendered", terminal: terminal)
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.int("headings"), 1)
+        XCTAssertEqual(report.int("terminalTables"), 1)
+        XCTAssertEqual(report.int("terminalTableRows"), 3)
+        XCTAssertEqual(report.int("verbatimBlocks"), 0)
+        XCTAssertTrue(report.string("text").contains("Camera configuration"))
+        XCTAssertTrue(report.string("text").contains("Organizer forum ruling applies."))
+        XCTAssertTrue(report.string("text").contains("The combined submission finished successfully."))
+
+        let passColor = try await webView.evaluateJavaScript(
+            "getComputedStyle(document.querySelector('table.terminal-table [data-terminal-style=\"1\"]')).color"
+        ) as? String
+        XCTAssertNotNil(passColor)
+        XCTAssertNotEqual(passColor?.lowercased(), "rgb(31, 35, 40)")
+        let proseAccent = try await webView.evaluateJavaScript(
+            "getComputedStyle(document.querySelector('p [data-terminal-style=\"1\"]')).color"
+        ) as? String
+        XCTAssertNotNil(proseAccent)
+        XCTAssertNotEqual(proseAccent?.lowercased(), "rgb(31, 35, 40)")
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+    }
+
+    func testTerminalFallbackDoesNotTurnURLWithUnderscoresIntoMath() async throws {
+        let webView = try await loadRenderer()
+        let source = """
+        Old IROS document (https://github.com/example/vlnverse_emr/blob/main/challenge/README.md).
+        """
+        let terminal: [String: Any] = [
+            "columns": 110,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [terminalStyle(foreground: "#E8E9EE")],
+            "lines": [terminalLine([terminalRun(source)])],
+        ]
+        try await setDocument(webView, source: source, origin: "terminal",
+                              presentation: "rendered", terminal: terminal)
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.int("inlineMath"), 0)
+        XCTAssertEqual(report.int("displayMath"), 0)
+        XCTAssertEqual(report.int("links"), 1)
+        XCTAssertTrue(report.string("text").contains("vlnverse_emr"))
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+    }
+
+    func testTerminalTableRecoveryNeverConsumesFencedCode() async throws {
+        let webView = try await loadRenderer()
+        let source = #"""
+        # Literal layout
+
+        ```text
+        ----------------  ----------------
+        alpha             beta
+        ```
+        """#
+        let terminal: [String: Any] = [
+            "columns": 48,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [terminalStyle(foreground: "#E8E9EE")],
+            "lines": [
+                terminalLine([terminalRun("# Literal layout")]),
+                terminalLine([]),
+                terminalLine([terminalRun("```text")]),
+                terminalLine([terminalRun("----------------  ----------------")]),
+                terminalLine([terminalRun("alpha             beta")]),
+                terminalLine([terminalRun("```")]),
+            ],
+        ]
+        try await setDocument(webView, source: source, origin: "terminal",
+                              presentation: "rendered", terminal: terminal)
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.int("headings"), 1)
+        XCTAssertEqual(report.int("codeBlocks"), 1)
+        XCTAssertEqual(report.int("terminalTables"), 0)
+        XCTAssertTrue(report.string("text").contains("alpha             beta"))
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+    }
+
     func testTerminalPresentationPreservesStyledRowsAsIndependentFallback() async throws {
         let webView = try await loadRenderer()
         try await setDocument(webView, source: "# This must not be parsed",
@@ -98,29 +234,24 @@ final class RenderWebIntegrationTests: XCTestCase {
     }
 
     private func setDocument(_ webView: WKWebView, source: String, origin: String,
-                             presentation: String) async throws {
+                             presentation: String,
+                             terminal customTerminal: [String: Any]? = nil) async throws {
+        let terminal: [String: Any] = customTerminal ?? [
+            "columns": 24,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [terminalStyle(foreground: "#0A78F0", bold: true)],
+            "lines": [
+                terminalLine([terminalRun("ANSI heading")]),
+                terminalLine([terminalRun("└─ exact table")]),
+            ],
+        ]
         let document: [String: Any] = [
             "id": UUID().uuidString,
             "source": source,
             "sourceOrigin": origin,
-            "terminal": [
-                "columns": 24,
-                "fontFamily": "SF Mono",
-                "background": "#11131A",
-                "foreground": "#E8E9EE",
-                "styles": [[
-                    "foreground": "#0A78F0", "background": "#11131A",
-                    "bold": true, "italic": false,
-                    "underline": NSNull(), "underlineColor": NSNull(),
-                    "strikethrough": false,
-                ]],
-                "lines": [
-                    ["runs": [["text": "ANSI heading", "style": 0, "link": NSNull()]],
-                     "wrapped": false],
-                    ["runs": [["text": "└─ exact table", "style": 0, "link": NSNull()]],
-                     "wrapped": false],
-                ],
-            ],
+            "terminal": terminal,
         ]
         let data = try JSONSerialization.data(withJSONObject: document)
         let json = try XCTUnwrap(String(data: data, encoding: .utf8))
@@ -137,6 +268,24 @@ final class RenderWebIntegrationTests: XCTestCase {
         let data = try! JSONSerialization.data(withJSONObject: [value])
         let array = String(data: data, encoding: .utf8)!
         return String(array.dropFirst().dropLast())
+    }
+
+    private func terminalStyle(foreground: String, background: String = "#11131A",
+                               bold: Bool = false) -> [String: Any] {
+        [
+            "foreground": foreground, "background": background,
+            "bold": bold, "italic": false,
+            "underline": NSNull(), "underlineColor": NSNull(),
+            "strikethrough": false,
+        ]
+    }
+
+    private func terminalRun(_ text: String, style: Int = 0) -> [String: Any] {
+        ["text": text, "style": style, "link": NSNull()]
+    }
+
+    private func terminalLine(_ runs: [[String: Any]], wrapped: Bool = false) -> [String: Any] {
+        ["runs": runs, "wrapped": wrapped]
     }
 }
 
