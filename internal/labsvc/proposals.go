@@ -81,6 +81,11 @@ func (s *Store) PendingProposals() ([]Proposal, error) {
 			}
 			p := Proposal{Set: m.ID, Run: r, Project: m.Project, Machine: m.Machine,
 				Intent: prop.Text, Created: prop.Time}
+			// The set machine is only its key-request origin. A proposal may be
+			// filed from any node mounting the store, so prefer its run envelope.
+			if v, ok := prop.Data["machine"].(string); ok && v != "" {
+				p.Machine = v
+			}
 			if v, ok := prop.Data["tier"].(string); ok {
 				p.Tier = v
 			}

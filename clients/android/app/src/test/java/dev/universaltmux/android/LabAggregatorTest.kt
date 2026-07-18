@@ -21,7 +21,7 @@ class LabAggregatorTest {
         )
         val proposal = LabProposal(
             set = "s-93k08z", run = "R3", project = "vlm_gating",
-            machine = "babel-n5-24", intent = "compare router loss", tier = "full",
+            machine = "babel-u5-24", intent = "compare router loss", tier = "full",
             group = "ablation", argv = listOf("python", "train.py"),
             cwd = "/shared/vlm_gating", created = "2026-07-11T17:00:00Z",
         )
@@ -42,7 +42,7 @@ class LabAggregatorTest {
         assertEquals(2, result.notes.size) // machine guidance remains addressable per node
         assertEquals(n5.id, result.sets.single().broker.id)
         assertEquals(n5.id, result.pendingKeys.single().broker.id)
-        assertEquals(n5.id, result.pendingRuns.single().broker.id)
+        assertEquals(u5.id, result.pendingRuns.single().broker.id)
         assertEquals("shared:babel", result.sets.single().storeID)
         assertEquals("active-key", result.activeKeyBySet[result.sets.single().id])
         assertEquals(listOf(LabAttentionKind.PROPOSAL, LabAttentionKind.KEY), result.attention.map { it.kind })

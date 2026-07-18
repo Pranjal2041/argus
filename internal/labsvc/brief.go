@@ -8,6 +8,7 @@ import (
 // RunSummary is the one-line view of a run used by the brief and the hub.
 type RunSummary struct {
 	ID         string `json:"id"`
+	Machine    string `json:"machine,omitempty"` // node that proposed/started this run
 	Group      string `json:"group,omitempty"`
 	Tier       string `json:"tier,omitempty"`
 	Status     string `json:"status"`
@@ -44,7 +45,9 @@ func (s *Store) Brief(set string, agentView bool) (BriefData, error) {
 	for _, dir := range []string{
 		s.NotesDir("global"),
 		s.NotesDir("project", meta.Project),
-		s.NotesDir("machine", meta.Machine),
+		// Machine guidance follows the node assembling/using the brief. The set's
+		// Machine is only its original request host and may be an old Babel node.
+		s.NotesDir("machine", Hostname()),
 	} {
 		evs, _ := s.Events(dir, agentView)
 		b.Notes = append(b.Notes, evs...)
@@ -62,6 +65,9 @@ func (s *Store) Brief(set string, agentView bool) (BriefData, error) {
 	for _, r := range runs {
 		sum, _, err := s.RunSummary(set, r, agentView)
 		if err == nil {
+			if sum.Machine == "" {
+				sum.Machine = meta.Machine // legacy run with no execution envelope
+			}
 			b.Runs = append(b.Runs, sum)
 		}
 	}
@@ -82,6 +88,9 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 		switch e.Kind {
 		case "proposal":
 			proposed = true
+			if v, ok := e.Data["machine"].(string); ok {
+				sum.Machine = v
+			}
 			if v, ok := e.Data["tier"].(string); ok {
 				sum.Tier = v
 			}
@@ -95,6 +104,9 @@ func (s *Store) RunSummary(set, run string, agentView bool) (RunSummary, []Event
 			}
 		case "run-start":
 			started = true
+			if v, ok := e.Data["machine"].(string); ok {
+				sum.Machine = v
+			}
 			terminal = ""
 			sum.ExitCode = -1
 			sum.StoppedAt = ""

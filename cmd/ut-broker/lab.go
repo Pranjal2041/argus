@@ -125,7 +125,8 @@ func labLogin(st *labsvc.Store, args []string) int {
 		fmt.Fprintf(os.Stderr, "ut lab: %v\n", err)
 		return 1
 	}
-	fmt.Printf("key request filed (project %q, machine %s).\n", k.Project, k.Machine)
+	fmt.Printf("key request filed (project %q, requested from %s, Lab store %s).\n",
+		k.Project, k.Machine, shortLabStore(k.Store))
 	fmt.Printf("your key: %s\n", k.Key)
 	fmt.Printf("export it now so every ut lab command finds it:\n")
 	fmt.Printf("  export UT_LAB_KEY=%s\n", k.Key)
@@ -143,15 +144,27 @@ func labKeys(st *labsvc.Store) int {
 		fmt.Println("no keys.")
 		return 0
 	}
+	fmt.Printf("%-8s  %-8s  %-10s  %-14s  %-10s  %-16s  %s\n",
+		"KEY", "STATUS", "SET", "PROJECT", "STORE", "REQUESTED FROM", "CWD")
 	for _, k := range ks {
 		set := k.Set
 		if set == "" {
 			set = "-"
 		}
-		fmt.Printf("%-8s  %-8s  %-10s  %-14s  %s  %s\n",
-			k.Key[:8], k.Status, set, k.Project, k.Machine, k.Cwd)
+		fmt.Printf("%-8s  %-8s  %-10s  %-14s  %-10s  %-16s  %s\n",
+			k.Key[:8], k.Status, set, k.Project, shortLabStore(k.Store), k.Machine, k.Cwd)
 	}
 	return 0
+}
+
+func shortLabStore(id string) string {
+	if id == "" {
+		return "legacy"
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func labDecide(st *labsvc.Store, args []string, approve bool) int {
@@ -291,7 +304,8 @@ func labBrief(st *labsvc.Store, args []string) int {
 		fmt.Fprintf(os.Stderr, "ut lab: %v\n", err)
 		return 1
 	}
-	fmt.Printf("set %s  project %q  machine %s  cwd %s\n", b.Set.ID, b.Set.Project, b.Set.Machine, b.Set.Cwd)
+	fmt.Printf("set %s  project %q  store %s  requested-from %s  cwd %s\n",
+		b.Set.ID, b.Set.Project, shortLabStore(b.Set.Store), b.Set.Machine, b.Set.Cwd)
 	switch b.Policy {
 	case "all":
 		fmt.Println("policy: every run needs the human's approval (file with --intent, wait for the grant)")
@@ -310,6 +324,9 @@ func labBrief(st *labsvc.Store, args []string) int {
 		fmt.Println("\nruns:")
 		for _, r := range b.Runs {
 			line := fmt.Sprintf("  %-5s %-22s", r.ID, r.Status)
+			if r.Machine != "" {
+				line += " machine=" + r.Machine
+			}
 			if r.Group != "" {
 				line += " group=" + r.Group
 			}
@@ -355,7 +372,11 @@ func labShow(st *labsvc.Store, args []string) int {
 		fmt.Fprintf(os.Stderr, "ut lab: %v\n", err)
 		return 1
 	}
-	fmt.Printf("run %s  status %s\n", sum.ID, sum.Status)
+	fmt.Printf("run %s  status %s", sum.ID, sum.Status)
+	if sum.Machine != "" {
+		fmt.Printf("  machine %s", sum.Machine)
+	}
+	fmt.Println()
 	for _, e := range evs {
 		fmt.Printf("\n[%s] %s %s\n", e.Author, e.Time, e.Kind)
 		if e.Text != "" {
@@ -1029,6 +1050,8 @@ GETTING IN (once per project)
   2. export UT_LAB_KEY=<key>     every command below needs it
   3. wait for the human to approve the key. Until then every command
      errors. Once approved, "ut lab brief" prints your briefing.
+  A key follows its Lab store, not a hostname. It works from any node
+  mounting that store (including every Babel node on the shared home).
 
 START OF EVERY WORK SESSION
   ut lab brief                   the human's notes (treat them as ground

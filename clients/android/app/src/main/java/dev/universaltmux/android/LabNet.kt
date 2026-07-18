@@ -174,12 +174,13 @@ object LabNet {
 
     private fun parseSetMeta(o: JSONObject) = LabSetMeta(
         o.optString("id"), o.optString("project"), o.optString("machine"),
-        o.optString("cwd"), o.optString("created"),
+        o.stringOrNull("store"), o.optString("cwd"), o.optString("created"),
     )
 
     private fun parseKey(o: JSONObject) = LabKeyInfo(
         key = o.optString("key"), set = o.stringOrNull("set"), project = o.optString("project"),
-        machine = o.optString("machine"), cwd = o.optString("cwd"), session = o.stringOrNull("session"),
+        machine = o.optString("machine"), store = o.stringOrNull("store"), cwd = o.optString("cwd"),
+        session = o.stringOrNull("session"),
         status = o.optString("status"), created = o.optString("created"),
     )
 
@@ -199,7 +200,8 @@ object LabNet {
             setEvents = o.optJSONArray("setEvents")?.objects()?.map(::parseEvent).orEmpty(),
             runs = o.optJSONArray("runs")?.objects()?.map { run ->
                 LabRunSummary(
-                    id = run.optString("id"), group = run.stringOrNull("group"), tier = run.stringOrNull("tier"),
+                    id = run.optString("id"), machine = run.stringOrNull("machine"),
+                    group = run.stringOrNull("group"), tier = run.stringOrNull("tier"),
                     status = run.optString("status"), started = run.stringOrNull("started"),
                     stoppedAt = run.stringOrNull("stoppedAt"), stopReason = run.stringOrNull("stopReason"),
                     latest = run.stringOrNull("latest"), latestAt = run.stringOrNull("latestAt"),
@@ -236,7 +238,8 @@ object LabNet {
             LabEnvFacts(it.stringOrNull("os"), it.stringOrNull("arch"), it.stringOrNull("python"), it.stringOrNull("gpus"))
         }
         return LabEventData(
-            target = o.stringOrNull("target"), argv = o.optJSONArray("argv").strings(), cwd = o.stringOrNull("cwd"),
+            target = o.stringOrNull("target"), machine = o.stringOrNull("machine"),
+            argv = o.optJSONArray("argv").strings(), cwd = o.stringOrNull("cwd"),
             tier = o.stringOrNull("tier"), group = o.stringOrNull("group"),
             tmuxSession = o.stringOrNull("tmuxSession"), bind = o.stringOrNull("bind"), snapshot = snapshot,
             params = o.optJSONArray("params")?.objects()?.map(::parseFileRef).orEmpty(),

@@ -14,6 +14,7 @@ struct LabSetMeta: Codable, Hashable, Identifiable {
     let id: String
     let project: String
     let machine: String
+    var store: String? = nil
     let cwd: String
     let created: String
 }
@@ -23,6 +24,7 @@ struct LabKeyInfo: Codable, Hashable {
     var `set`: String?
     let project: String
     let machine: String
+    var store: String? = nil
     let cwd: String
     var session: String?
     let status: String
@@ -68,6 +70,7 @@ struct LabEnvFacts: Codable, Hashable {
 /// type decodes a hide marker, a run envelope, and a run ending alike.
 struct LabEventData: Codable, Hashable {
     var target: String?
+    var machine: String? = nil
     var argv: [String]?
     var cwd: String?
     var tier: String?
@@ -95,6 +98,7 @@ struct LabEventItem: Codable, Hashable, Identifiable {
 
 struct LabRunSummary: Codable, Hashable, Identifiable {
     let id: String
+    var machine: String? = nil
     var group: String?
     var tier: String?
     let status: String

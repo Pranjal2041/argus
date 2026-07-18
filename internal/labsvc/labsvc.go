@@ -203,20 +203,33 @@ func randomHex(n int) (string, error) {
 // the same NFS home), so store-wide writes need only reach one of them.
 func (s *Store) StoreID() string {
 	p := filepath.Join(s.root, "store-id")
-	if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
-		return strings.TrimSpace(string(b))
+	for attempt := 0; attempt < 50; attempt++ {
+		if b, err := os.ReadFile(p); err == nil {
+			if id := strings.TrimSpace(string(b)); id != "" {
+				return id
+			}
+			// O_EXCL exposes the file just before the winner writes its tiny id.
+			// Shared NFS peers wait instead of mistaking that transient empty file
+			// for a different/unknown authorization domain.
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		id, err := randomHex(16)
+		if err != nil {
+			return ""
+		}
+		// O_EXCL: on shared storage the first writer wins and everyone else reads.
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if _, err := f.WriteString(id); err != nil {
+			_ = f.Close()
+			return ""
+		}
+		_ = f.Close()
+		return id
 	}
-	id, err := randomHex(16)
-	if err != nil {
-		return ""
-	}
-	// O_EXCL: on shared storage the first writer wins and everyone else reads
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		b, _ := os.ReadFile(p)
-		return strings.TrimSpace(string(b))
-	}
-	_, _ = f.WriteString(id)
-	_ = f.Close()
-	return id
+	return ""
 }

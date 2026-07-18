@@ -28,7 +28,7 @@ A project contains experiment sets. A set contains runs, and runs can carry a gr
 
 A set is the isolation boundary and the unit of assignment. The human creates a set when assigning work to an agent. Access works through a key. Either the human creates the set in the hub and hands the key to the agent, or the agent runs `ut lab login`, which files a key request that appears in the hub and on the phone, and every other command fails until the request is authorized. Ordinarily the human approves it individually. When the human has explicitly enabled Unattended Mode, the Mac broker approves it on their behalf and records that fact on the key. One key corresponds to exactly one set. Every `ut lab` command carries the key, through the `UT_LAB_KEY` environment variable or through a `--key` flag. The human can list keys and revoke any key at any time. If an agent loses its key after compaction, it runs login again and the request goes through the same authorization path.
 
-A set belongs to the machine where it was created, and all of its data lives in that machine's store. Using a key on a different machine produces a clear error that names the home machine. If work genuinely spans two machines, the human issues a second set on the second machine. Experiments are tied to their machine, and the record of each run names that machine.
+A set belongs to one stable Lab store, and its key is authorized against that store rather than against the hostname that requested it. Any machine mounting the same store can use the key. This is essential on Babel, where `babel-*` nodes change while the NFS home—and therefore the Lab store—stays the same. The request hostname remains provenance only. Every proposal and run records the node that actually executed it, so a set may contain runs from several nodes without losing attribution. A machine using an unrelated store cannot use the key; moving work there requires mounting the original store or requesting a new set.
 
 A project is a label and nothing more. When an agent requests a key, the request suggests a project name taken from the folder it ran in, and the human can keep or change that name during approval. The folder path is recorded as metadata and plays no role in identity. This is how one project checked out in three places still shows up as one project in the hub.
 
@@ -88,10 +88,11 @@ The only thing asked of the agent's own memory is one line in the project's inst
 
 ## Storage, brokers, and sync
 
-The store lives on the machine where the work runs, in a directory of the following shape.
+The store is a directory that may be local to one machine or mounted by several machines. It has a persistent `store-id` used as the authorization and aggregation boundary, and the following shape.
 
 ```
 ~/.argus/lab/
+  store-id                     stable identity shared by every mounting node
   sets/<set-id>/
     events/<ulid>.json         set-level events, one file each
     runs/<run-id>/
@@ -104,7 +105,7 @@ The store lives on the machine where the work runs, in a directory of the follow
                                into place so a status change is atomic on NFS
 ```
 
-On babel the home directory is shared across nodes over NFS, so the whole cluster shares one store, and the one-file-per-event rule is what makes that safe.
+On Babel the home directory is shared across nodes over NFS, so the whole cluster shares one store and one set-bound key works from every node. The one-file-per-event rule is what makes concurrent use safe. A key-request hostname is retained for provenance, while each proposal and run carries its current execution hostname.
 
 The broker gets lab routes in the same style as the file and history services, covering the set list, keys, key decisions, briefs, and raw events. Those routes exist for the hub and the phone. The CLI itself operates on the store files directly, which is safe because every write is an exclusive create or a rename, so it does not matter how many processes write at once. A consequence worth naming is that `ut lab` works even on a machine where no broker is running yet; only remote viewing needs the broker.
 
@@ -116,7 +117,7 @@ Events, parameter files, snapshots, and small artifacts live on the host and in 
 
 ## The hub pane
 
-Most of the hub is composition over things Argus already has. An overview lists projects and sets, with each set showing its machine, its status, and a link to the terminal named in its advisory metadata when that session still exists. A table of runs shows parameters, group, status, machine, and the latest reported result. Opening a run shows the recorded envelope, the code snapshot rendered as a diff in the existing git viewer, artifacts that open in Files, the linked W&B run in the existing W&B view, the capped log, and the full event timeline. An approvals inbox lists pending key requests and run proposals, on the Mac and on the phone, through the same notification path that announces waiting agents today. Everywhere in the hub the human can hide content and attach notes. There is no training-curve viewer, because W&B already does that job and the record links to it.
+Most of the hub is composition over things Argus already has. An overview lists projects and sets, with each set showing its store, an online broker route, its status, and a link to the terminal named in its advisory metadata when that session still exists. A table of runs shows parameters, group, status, actual execution machine, and the latest reported result. Opening a run shows the recorded envelope, the code snapshot rendered as a diff in the existing git viewer, artifacts that open in Files, the linked W&B run in the existing W&B view, the capped log, and the full event timeline. An approvals inbox lists pending key requests and run proposals, on the Mac and on the phone, through the same notification path that announces waiting agents today. Everywhere in the hub the human can hide content and attach notes. There is no training-curve viewer, because W&B already does that job and the record links to it.
 
 ## Limits
 
@@ -144,4 +145,4 @@ The CLI comes before any UI because the CLI alone shows whether the protocol cha
 
 Status as of 2026-07-15: steps 1 through 5 are built on both macOS and Android. The desktop pane is a master-detail experiment browser: a sidebar of pending decisions, projects, sets, and runs, and a full page per selection. A run's page shows its results, log, parameter file contents, exact commit plus the colored diff of uncommitted changes, declared data files with drift flags, and environment, all served by the `/lab/file` route; it offers approve and reject for pending proposals, jumps to the agent's terminal and to the folder in Files, supports two-run comparison with a parameter diff, and can append a guarded manual stop event for an orphaned lifecycle. The set page has the notes editor, runs table, policy dropdown, and key revocation. Unattended Mode is broker-owned, off by default, auditable, store-deduplicated, and controllable from Lab, Settings, and Command Center on both native clients.
 
-Android has a native, theme-aware phone flow for the same protocol: approval inbox and evidence dossiers, the research/set/run ledger, artifact inspection, two-run comparison, policy and key controls, guarded manual lifecycle correction, archive/restore, offline Mac mirrors, and guidance at network, machine, project, and set scope. Lab gates are merged into the Android Command Center and open exact dossiers from system notifications. Its store reducer uses broker-reported store identity and an explicit `babel-*` shared-store fallback, so an NFS-backed experiment, key, or proposal appears once while actions still route to its owning node. Still open: the W&B run opens in the browser rather than an in-app view, rclone backup, and product-specific adapters.
+Android has a native, theme-aware phone flow for the same protocol: approval inbox and evidence dossiers, the research/set/run ledger, artifact inspection, two-run comparison, policy and key controls, guarded manual lifecycle correction, archive/restore, offline Mac mirrors, and guidance at network, machine, project, and set scope. Lab gates are merged into the Android Command Center and open exact dossiers from system notifications. Its store reducer uses broker-reported store identity and an explicit `babel-*` shared-store fallback, so an NFS-backed experiment, key, or proposal appears once while terminal actions route to the proposal/run's recorded execution node. Still open: the W&B run opens in the browser rather than an in-app view, rclone backup, and product-specific adapters.

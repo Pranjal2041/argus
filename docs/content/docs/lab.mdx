@@ -37,6 +37,11 @@ The request appears in Lab and in Command Center. Until you approve it, every pr
 fails. Once approved, `ut lab brief` becomes the agent's durable briefing: applicable human
 guidance, set policy, runs and their latest reported results, and pending or rejected proposals.
 
+The approved key follows the **Lab store**, not the hostname that requested it. On a shared
+filesystem, the same key therefore works from any machine mounting that store. Its request machine
+is retained as provenance, and each proposal and run records the machine that actually executes it.
+A machine using a different Lab store cannot use the key because the assigned set is not there.
+
 Plant the protocol reminder in a project's `CLAUDE.md` or `AGENTS.md` with:
 
 ```sh
@@ -167,8 +172,9 @@ its active state, so the automation is visible from the surface you monitor.
 
 On an NFS-backed cluster such as a fleet of `babel-*` nodes, every node can see the same Lab store.
 Argus uses the broker-reported store identity—and a cluster-prefix fallback—to show one experiment,
-key, proposal, or instruction rather than one replica per node. Actions still route to an online
-owner.
+key, proposal, or instruction rather than one replica per node. A set key works unchanged when the
+agent moves between those nodes. Data actions can use any online broker for the shared store, while
+terminal actions route to the machine recorded on the proposal or run.
 
 The Mac broker also mirrors remote Lab records. When a source machine goes offline, its mirrored
 sets remain readable and are marked as offline; actions that require the source are disabled. The
