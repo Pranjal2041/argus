@@ -101,8 +101,9 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("g", modifiers: [.control, .command])   // ⇧⌘G belongs to the Git panel (feature panels are ⇧⌘-x); shift+Enter in the find bar also works
             }
             CommandMenu("Terminal") {
-                // ⇧⌘M (faithful terminal / typeset) — ⇧⌘P belongs to Claude Code inside the terminal.
-                Button("Render Output…") { state.renderDocument = terminals.renderableDocument() }
+                // ⇧⌘M renders authoritative rich agent source when available,
+                // with the exact styled terminal frame retained as its fallback.
+                Button("Render Output…") { RenderLauncher.open(state: state, terminals: terminals) }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                 Button("W&B Run ⇄ Terminal") { if let sel = state.selection { terminals.toggleWandb(sel) } }
                     .keyboardShortcut("w", modifiers: [.control, .command])
@@ -1613,7 +1614,9 @@ struct CommandPalette: View {
         let actions: [(String, String, String, () -> Void)] = [
             ("plus", "New Session…", "⌘N", { state.showNew = true }),
             ("magnifyingglass", "Find in Terminal", "⌘F", { state.showFind = true; state.findFocusToken &+= 1 }),
-            ("sparkles", "Render Output (Terminal / Typeset)", "⇧⌘M", { state.renderDocument = terminals.renderableDocument() }),
+            ("sparkles", "Render Output", "⇧⌘M", {
+                RenderLauncher.open(state: state, terminals: terminals)
+            }),
             ("pencil", "Rename Current Session…", "⇧⌘R",
              { if let s = state.selection { state.renameText = s.session; state.renameTarget = s } }),
             ("trash", "Kill Current Session…", "⌘⌫", { if let s = state.selection { state.killTarget = s } }),

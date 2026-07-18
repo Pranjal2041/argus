@@ -50,7 +50,9 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // Chrome colors resolve against the active theme (default Argus = the original look).
 // @Composable getters so every existing `ink`/`panel`/… usage works unchanged and string
@@ -84,7 +86,7 @@ fun App(vm: AppViewModel) {
         var showTheme by remember { mutableStateOf(false) }
         var screen by remember { mutableStateOf(3) }   // 0 = terminal, 1 = files, 2 = ports, 3 = command center (home)
         var showFind by remember { mutableStateOf(false) }
-        var renderText by remember { mutableStateOf<String?>(null) }  // non-nil → Renders overlay
+        var renderDocument by remember { mutableStateOf<RenderContent?>(null) }
 
         // Notifications and Command Center own navigation through the view model;
         // consume requests here because the selected top-level screen is UI state.
@@ -178,7 +180,21 @@ fun App(vm: AppViewModel) {
                                 IconButton(onClick = { showFind = !showFind }) {
                                     Icon(Icons.Filled.Search, "Find", tint = if (showFind) accent else cText)
                                 }
-                                IconButton(onClick = { renderText = ActiveTerm.rt?.renderableText() }) {
+                                IconButton(onClick = {
+                                    val fallback = ActiveTerm.rt?.renderableText() ?: return@IconButton
+                                    val id = System.nanoTime()
+                                    renderDocument = RenderContent(id, fallback, "terminal")
+                                    // Open instantly, then replace only this still-open render
+                                    // with authored source when the broker can screen-match it.
+                                    scope.launch {
+                                        val rich = withContext(Dispatchers.IO) {
+                                            Net.renderSource(sel.first, sel.second)
+                                        }
+                                        if (rich != null && renderDocument?.id == id) {
+                                            renderDocument = RenderContent(id, rich.source, rich.origin)
+                                        }
+                                    }
+                                }) {
                                     Icon(Icons.Filled.AutoAwesome, "Render", tint = cText)
                                 }
                             }
@@ -257,7 +273,9 @@ fun App(vm: AppViewModel) {
                                 }
                             }
                         }
-                        renderText?.let { md -> RenderOverlay(md, onClose = { renderText = null }) }
+                        renderDocument?.let { document ->
+                            RenderOverlay(document, onClose = { renderDocument = null })
+                        }
                     }
                 }
             }

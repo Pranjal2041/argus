@@ -27,21 +27,28 @@ object ActiveTerm {
     var rt: RemoteTerminal? = null
 }
 
+data class RenderContent(
+    val id: Long,
+    val text: String,
+    val sourceOrigin: String,
+)
+
 /**
  * "Renders" (ported from the Mac): the terminal's markdown/LaTeX/code, typeset
  * properly in a full-screen overlay. Same OFFLINE bundle (assets/render:
- * marked + KaTeX + highlight.js) and the same extraction contract — a static
- * snapshot; the live terminal underneath is never touched.
+ * marked + KaTeX + highlight.js) and the same authored-source contract as Mac,
+ * with captured terminal text as the immediate fallback. The live terminal
+ * underneath is never touched.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun RenderOverlay(text: String, onClose: () -> Unit) {
+fun RenderOverlay(document: RenderContent, onClose: () -> Unit) {
     var fontSize by remember { mutableStateOf(16) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     val paper = Color(0xFFFBFBFA)
 
     fun push(wv: WebView, px: Int) {
-        wv.evaluateJavascript("window.UTRender.set(${JSONObject.quote(text)}, $px)", null)
+        wv.evaluateJavascript("window.UTRender.set(${JSONObject.quote(document.text)}, $px)", null)
     }
 
     Column(Modifier.fillMaxSize().background(paper)) {
@@ -51,7 +58,11 @@ fun RenderOverlay(text: String, onClose: () -> Unit) {
         ) {
             Text("Render", color = Color(0xFF1F2328), fontSize = 15.sp)
             Spacer(Modifier.width(8.dp))
-            Text("markdown · LaTeX · code", color = Color(0xFF6E7681), fontSize = 11.sp)
+            Text(
+                if (document.sourceOrigin.endsWith("-transcript")) "Markdown · LaTeX · tables · code"
+                else "rendered terminal fallback",
+                color = Color(0xFF6E7681), fontSize = 11.sp,
+            )
             Spacer(Modifier.weight(1f))
             ZoomButton("−") { fontSize = (fontSize - 1).coerceAtLeast(9); webView?.let { push(it, fontSize) } }
             Text("$fontSize", color = Color(0xFF6E7681), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp))
@@ -73,6 +84,10 @@ fun RenderOverlay(text: String, onClose: () -> Unit) {
                     webView = this
                 }
             },
+            // Re-push when the immediate terminal fallback is upgraded to the
+            // screen-matched transcript; AndroidView otherwise retains the
+            // original factory closure for the lifetime of this overlay.
+            update = { view -> push(view, fontSize) },
         )
     }
 }

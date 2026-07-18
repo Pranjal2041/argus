@@ -140,7 +140,7 @@
     root.style.removeProperty("color-scheme");
   }
 
-  function renderMarkdown(md) {
+  function renderMarkdown(md, repairTerminalSource) {
     markdownSurface();
     const out = document.getElementById("out");
     if (!md || !md.trim()) {
@@ -148,22 +148,75 @@
       return;
     }
 
-    // Code fences are explicit author intent — shield them before segmentation
-    // so a fence containing box art isn't split into a verbatim segment.
-    const code = [];
-    const text = md.replace(/^(```|~~~)[\s\S]*?^\1[ \t]*$/gm, (m) => {
-      code.push(m); return "⟦UTCODE" + (code.length - 1) + "⟧";
+    try {
+      window.UTRender.lastError = null;
+      // A transcript preserves real delimiters. The fallback terminal source
+      // may come from a TUI that consumed only the OUTER \[...\] or \(...\)
+      // escapes while leaving TeX commands intact; recover those bounded forms
+      // before Markdown sees them. This is deliberately evidence-based rather
+      // than treating every bracket/parenthesis as mathematics.
+      if (repairTerminalSource) md = recoverTerminalMath(md);
+
+      // Code fences are explicit author intent — shield them before segmentation
+      // so a fence containing box art isn't split into a verbatim segment.
+      const code = [];
+      const text = md.replace(/^(```|~~~)[\s\S]*?^\1[ \t]*$/gm, (m) => {
+        code.push(m); return "⟦UTCODE" + (code.length - 1) + "⟧";
+      });
+
+      jsonBlocks = [];
+      const html = segment(text)
+        .map((s) => s.verbatim
+          ? '<pre class="term">' + escapeHtml(s.text) + "</pre>"
+          : renderProse(s.text, code))
+        .join("\n");
+
+      out.innerHTML = html;
+      out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+    } catch (error) {
+      // Rich rendering must fail closed without losing the user's output.
+      window.UTRender.lastError = String(error && error.message || error);
+      const pre = document.createElement("pre");
+      pre.className = "term";
+      pre.textContent = md;
+      out.replaceChildren(pre);
+    }
+  }
+
+  function hasTeXSignal(text) {
+    return /\\[A-Za-z]+|[_^]\s*(?:\{|[A-Za-z0-9])/.test(text);
+  }
+
+  function recoverTerminalMath(text) {
+    // Never repair inside syntax that is already authoritative. In particular,
+    // parentheses inside a valid display equation (D_{KL}(...)) are not missing
+    // inline delimiters. Code is equally literal. Shield both before applying
+    // the terminal-only recovery rules, then restore byte-for-byte.
+    const protectedRuns = [];
+    const protect = (value) => {
+      protectedRuns.push(value);
+      return "⟦UTKEEP" + (protectedRuns.length - 1) + "⟧";
+    };
+    text = text
+      .replace(/^(```|~~~)[\s\S]*?^\1[ \t]*$/gm, protect)
+      .replace(/`[^`\n]*`/g, protect)
+      .replace(/\$\$[\s\S]*?\$\$/g, protect)
+      .replace(/\\\[[\s\S]*?\\\]/g, protect)
+      .replace(/\\\([\s\S]*?\\\)/g, protect);
+
+    // Codex/Claude Markdown TUIs commonly display \[ and \] as standalone [ ]
+    // rows. A leading heading marker can also be introduced when an equation's
+    // standalone '=' line was consumed as Setext syntax.
+    text = text.replace(/^[ \t]*(?:#{1,6}[ \t]+)?\[[ \t]*\n([\s\S]*?)\n[ \t]*(?:#{1,6}[ \t]+)?\][ \t]*$/gm,
+      (whole, body) => hasTeXSignal(body) ? "\\[\n" + body + "\n\\]" : whole);
+
+    // Inline \(...\) loses only the delimiter backslashes in the same TUIs,
+    // leaving forms such as (\lambda_c). Do not touch ordinary prose parens.
+    text = text.replace(/\(([^()\n]{1,400})\)/g, (whole, body, offset, full) => {
+      if (offset > 0 && full[offset - 1] === "\\") return whole;
+      return hasTeXSignal(body) ? "\\(" + body + "\\)" : whole;
     });
-
-    jsonBlocks = [];
-    const html = segment(text)
-      .map((s) => s.verbatim
-        ? '<pre class="term">' + escapeHtml(s.text) + "</pre>"
-        : renderProse(s.text, code))
-      .join("\n");
-
-    out.innerHTML = html;
-    out.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+    return text.replace(/⟦UTKEEP(\d+)⟧/g, (_, i) => protectedRuns[+i]);
   }
 
   function darkColor(hex) {
@@ -239,8 +292,11 @@
   let activeDocument = null;
   function presentDocument(doc, presentation) {
     activeDocument = doc;
-    if (presentation === "typeset") renderMarkdown((doc && doc.source) || "");
-    else renderTerminal(doc && doc.terminal);
+    const out = document.getElementById("out");
+    out.dataset.sourceOrigin = (doc && doc.sourceOrigin) || "terminal";
+    if (presentation === "terminal") renderTerminal(doc && doc.terminal);
+    else renderMarkdown((doc && doc.source) || "",
+      !!doc && (doc.sourceOrigin === "terminal" || doc.sourceOrigin === "selection"));
   }
 
   // Box-drawing, block elements, and legacy +---+ rules mark a line as
@@ -315,7 +371,7 @@
       try {
         return katex.renderToString(m.tex, { displayMode: m.display, throwOnError: false });
       } catch (e) {
-        return m.tex;
+        return escapeHtml(m.tex);
       }
     });
 
@@ -421,8 +477,9 @@
   });
 
   window.UTRender = {
+    lastError: null,
     // Backwards-compatible plain Markdown entry point used by Files preview.
-    set(md, px) { activeDocument = null; if (px) this.setZoom(px); renderMarkdown(md); },
+    set(md, px) { activeDocument = null; if (px) this.setZoom(px); renderMarkdown(md, false); },
     setDocument(doc, px, presentation) {
       if (px) this.setZoom(px);
       presentDocument(doc, presentation || "terminal");
@@ -439,6 +496,23 @@
       var light = document.getElementById("hljs-light"), dark = document.getElementById("hljs-dark");
       if (light) light.disabled = !!spec.dark;
       if (dark) dark.disabled = !spec.dark;
+    },
+    inspect() {
+      const out = document.getElementById("out");
+      return {
+        sourceOrigin: out.dataset.sourceOrigin || "",
+        headings: out.querySelectorAll("h1,h2,h3,h4,h5,h6").length,
+        tables: out.querySelectorAll("table").length,
+        codeBlocks: out.querySelectorAll("pre code").length,
+        highlightedCode: out.querySelectorAll("pre code.hljs").length,
+        displayMath: out.querySelectorAll(".katex-display").length,
+        inlineMath: out.querySelectorAll(".katex:not(.katex-display .katex)").length,
+        links: out.querySelectorAll("a[href]").length,
+        terminalRows: out.querySelectorAll(".terminal-row").length,
+        verbatimBlocks: out.querySelectorAll("pre.term").length,
+        text: out.innerText,
+        error: this.lastError,
+      };
     },
   };
 })();

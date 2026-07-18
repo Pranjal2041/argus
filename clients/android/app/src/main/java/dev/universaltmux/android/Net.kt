@@ -67,6 +67,8 @@ data class FsHome(val home: String, val roots: List<String>, val sep: String)
 
 data class PortInfo(val port: Int, val address: String, val process: String, val pid: Int)
 
+data class RenderSource(val source: String, val format: String, val origin: String)
+
 /** HTTP + WebSocket to brokers. All traffic rides the encrypted tailnet. */
 object Net {
     // Timeouts tuned for the phone's tailnet path, which is often DERP-RELAYED (no
@@ -116,6 +118,22 @@ object Net {
                     s.optString("id", "").ifEmpty { null },
                 )
             }
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Authored rich source for the response visible in this exact session.
+     *  A null result is normal: the caller keeps its terminal-text fallback. */
+    fun renderSource(b: Broker, session: String): RenderSource? = try {
+        val req = Request.Builder().url("${b.httpBase}/render-source?session=${enc(session)}").build()
+        client.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) return@use null
+            val o = JSONObject(r.body?.string() ?: return@use null)
+            val source = o.optString("source")
+            val format = o.optString("format")
+            if (source.isBlank() || format != "markdown") return@use null
+            RenderSource(source, format, o.optString("origin", "transcript"))
         }
     } catch (_: Exception) {
         null

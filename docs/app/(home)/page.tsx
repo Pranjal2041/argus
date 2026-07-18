@@ -226,7 +226,7 @@ export default function HomePage() {
             <p>Stream any session over a binary WebSocket — tmux control-mode on Unix, ConPTY on Windows — with full input, reflow, and a 100k-line scrollback. A live dot reads the screen to show running versus idle, with no cooperation from the agent.</p>
             <ul>
               <li><Check size={16} /> Running/idle detected from the screen — the &quot;esc to interrupt&quot; signal.</li>
-              <li><Check size={16} /> <span className="al-mono">⇧⌘M</span> preserves terminal color and layout, with an offline Markdown/LaTeX typeset mode.</li>
+              <li><Check size={16} /> <span className="al-mono">⇧⌘M</span> opens the authored response as an offline Markdown/LaTeX document, with an exact styled-terminal fallback.</li>
               <li><Check size={16} /> Keep the Mac awake and reachable while it&apos;s locked.</li>
             </ul>
           </div>

@@ -3,14 +3,13 @@ import SwiftTerm
 import SwiftUI
 import WebKit
 
-// MARK: - "Renders": preserve terminal fidelity and optionally typeset source (⇧⌘M)
+// MARK: - "Renders": authored document + exact terminal fallback (⇧⌘M)
 //
-// A terminal TUI often ALREADY parses the model's Markdown and expresses its
-// semantics through ANSI color, emphasis, spacing, and box-drawn tables. Plain
-// string extraction destroys that information before a Markdown parser ever
-// sees it. Render therefore carries two representations in one static document:
-// the styled SwiftTerm cell snapshot (faithful/default) and cleaned plain source
-// for explicit Markdown/KaTeX typesetting. The live pane is never touched.
+// A terminal TUI often consumes the model's Markdown before painting it, so a
+// capture cannot reconstruct every table delimiter or TeX escape. Render keeps
+// two representations in one static document: strongly screen-matched authored
+// source for the default rich view, and a styled SwiftTerm cell snapshot for an
+// exact terminal fallback. The live pane is never touched.
 
 struct RenderCellStyle: Codable, Equatable, Hashable {
     let foreground: String
@@ -47,11 +46,14 @@ struct RenderTerminalSnapshot: Codable, Equatable {
 struct RenderDocument: Codable, Equatable, Identifiable {
     let id: UUID
     let source: String
+    let sourceOrigin: String
     let terminal: RenderTerminalSnapshot
 
-    init(source: String, styled: StyledTerminalText, view: TerminalView, id: UUID = UUID()) {
+    init(source: String, styled: StyledTerminalText, view: TerminalView,
+         sourceOrigin: String = "terminal", id: UUID = UUID()) {
         self.id = id
         self.source = source
+        self.sourceOrigin = sourceOrigin
 
         var styles: [RenderCellStyle] = []
         var styleIDs: [RenderCellStyle: Int] = [:]
@@ -97,6 +99,20 @@ struct RenderDocument: Codable, Equatable, Identifiable {
         )
     }
 
+    private init(id: UUID, source: String, sourceOrigin: String,
+                 terminal: RenderTerminalSnapshot) {
+        self.id = id
+        self.source = source
+        self.sourceOrigin = sourceOrigin
+        self.terminal = terminal
+    }
+
+    /// Replace only the semantic source. The terminal snapshot remains the
+    /// exact frame captured on invocation, while a new id makes WebKit refresh.
+    func withAuthoritativeSource(_ source: String, origin: String) -> RenderDocument {
+        RenderDocument(id: UUID(), source: source, sourceOrigin: origin, terminal: terminal)
+    }
+
     private static func underlineName(_ attribute: Attribute) -> String? {
         guard attribute.style.contains(.underline) || attribute.underlineStyle != .none else { return nil }
         switch attribute.underlineStyle {
@@ -114,6 +130,53 @@ struct RenderDocument: Codable, Equatable, Identifiable {
                       Int((value.redComponent * 255).rounded()),
                       Int((value.greenComponent * 255).rounded()),
                       Int((value.blueComponent * 255).rounded()))
+    }
+}
+
+private struct RenderSourceResponse: Decodable {
+    let source: String
+    let format: String
+    let origin: String
+    let confidence: Double
+}
+
+/// One entry point for every ⇧⌘M surface. Open immediately from the lossless
+/// terminal frame, then upgrade to screen-matched transcript Markdown when the
+/// broker can prove it belongs to this exact pane. Explicit selections always
+/// win and are never replaced behind the user's back.
+@MainActor
+enum RenderLauncher {
+    static func open(state: AppState, terminals: TerminalController) {
+        guard let document = terminals.renderableDocument() else { return }
+        state.renderDocument = document
+        guard document.sourceOrigin == "terminal",
+              let ref = state.selection,
+              let machine = state.machine(for: ref) else { return }
+
+        let initialID = document.id
+        Task {
+            guard let response = await fetch(httpBase: machine.httpBase, session: ref.session),
+                  response.format == "markdown",
+                  !response.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  state.renderDocument?.id == initialID else { return }
+            state.renderDocument = document.withAuthoritativeSource(
+                response.source, origin: response.origin)
+        }
+    }
+
+    private static func fetch(httpBase: String, session: String) async -> RenderSourceResponse? {
+        guard var components = URLComponents(string: httpBase + "/render-source") else { return nil }
+        components.queryItems = [URLQueryItem(name: "session", value: session)]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return try JSONDecoder().decode(RenderSourceResponse.self, from: data)
+        } catch {
+            return nil
+        }
     }
 }
 
@@ -206,7 +269,7 @@ struct RenderPanel: View {
     let document: RenderDocument
 
     @AppStorage("ut.renderFontSize") private var fontSize = 16.0
-    @AppStorage("ut.renderPresentation") private var presentation = "terminal"
+    @State private var presentation = "rendered"
     @State private var copied = false
     @StateObject private var web = RenderWebProxy()
 
@@ -222,17 +285,21 @@ struct RenderPanel: View {
                 HStack(spacing: 10) {
                     Image(systemName: "sparkles").font(.system(size: 13)).foregroundStyle(Color(hex: "#B58A00"))
                     Text("Render").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(hex: "#1F2328"))
-                    Text(presentation == "terminal" ? "color · emphasis · layout" : "markdown · LaTeX · code")
+                    Text(presentation == "terminal"
+                         ? "exact terminal frame"
+                         : document.sourceOrigin.hasSuffix("-transcript")
+                            ? "Markdown · LaTeX · tables · code"
+                            : "rendered from terminal source")
                         .font(.system(size: 11)).foregroundStyle(inkDim)
                     Spacer()
                     Picker("Presentation", selection: $presentation) {
+                        Text("Rendered").tag("rendered")
                         Text("Terminal").tag("terminal")
-                        Text("Typeset").tag("typeset")
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 150)
-                    .help("Terminal preserves the exact styled grid; Typeset interprets the extracted source as Markdown")
+                    .help("Rendered uses authoritative agent Markdown when available; Terminal preserves the exact styled grid")
                     Button {
                         let pb = NSPasteboard.general
                         pb.clearContents()

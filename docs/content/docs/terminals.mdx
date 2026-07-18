@@ -46,10 +46,18 @@ and it is hidden on your phone too. Restore it whenever you want.
 ## Render output
 
 **Render Output** (`⇧⌘M`) lifts the current screen into a static reading view without touching the
-live session. **Terminal** mode is the default: it preserves the terminal's colors, bold/italic text,
-links, spacing, soft wraps, and already-formatted tables. Switch to **Typeset** when the agent printed
-raw source and you want Argus to interpret it as Markdown, LaTeX math, highlighted code, or JSON.
-Both modes run entirely offline, so nothing leaves your machine.
+live session. **Rendered** is the default: for Codex and Claude panels, Argus recovers the agent's
+authored response from its local transcript and uses the visible terminal text to prove that it belongs
+to this exact panel. That preserves Markdown headings and lists, GFM tables, links, fenced and
+syntax-highlighted code, JSON, and inline or display LaTeX together instead of trying to reconstruct
+source syntax that the terminal TUI has already consumed.
+
+The **Terminal** toggle preserves the exact captured grid—ANSI colors, bold and italic text,
+underlines, links, spacing, soft wraps, and already-formatted terminal tables. It is also the automatic
+fallback for shells, unsupported agents, or any response Argus cannot match with high confidence.
+Rendering a selection always uses that selection and is never replaced by transcript content. Source
+recovery happens only when you invoke Render Output, and both views run entirely offline, so nothing
+leaves your machine.
 
 ## Keeping a Mac reachable while locked
 

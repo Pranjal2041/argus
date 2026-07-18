@@ -40,7 +40,10 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     func update(enteredWaiting: [(ref: SessionRef, machine: String)], totalWaiting: Int) {
         waitingCount = totalWaiting
         updateBadge()
-        guard NotifyPrefs.enabled else { return }
+        // The command-palette and renderer suites construct AppState without an
+        // application bundle. UserNotifications aborts the XCTest process when
+        // asked for its singleton in that environment.
+        guard NotifyPrefs.enabled, !AppState.isRunningTests else { return }
         let center = UNUserNotificationCenter.current()
         for e in enteredWaiting {
             let c = UNMutableNotificationContent()
