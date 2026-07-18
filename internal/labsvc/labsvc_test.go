@@ -1,6 +1,7 @@
 package labsvc
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,21 +117,69 @@ func TestKeyLifecycle(t *testing.T) {
 		t.Fatalf("approve: %v %+v", err, ap)
 	}
 	meta, err := s.Meta(ap.Set)
-	if err != nil || meta.Project != "renamed" || meta.Machine != Hostname() {
+	if err != nil || meta.Project != "renamed" || meta.Machine != Hostname() || meta.Store == "" {
 		t.Fatalf("set meta: %v %+v", err, meta)
+	}
+	if ap.Store == "" || ap.Store != meta.Store {
+		t.Fatalf("key and set must share one store identity: key=%+v set=%+v", ap, meta)
 	}
 	// active key resolves, by prefix too
 	got, err := s.ActiveKey(ap.Key[:10])
 	if err != nil || got.Set != ap.Set {
 		t.Fatalf("active: %v %+v", err, got)
 	}
-	// machine tie: a key from another machine errors
+	// The hostname is provenance, not an authorization boundary. A key remains
+	// valid when another node mounts the same Lab store (the Babel case).
 	other := got
 	other.Key = strings.Repeat("f", 32)
 	other.Machine = "elsewhere"
-	s.writeKey(other)
-	if _, err := s.ActiveKey(other.Key); err == nil || !strings.Contains(err.Error(), "tied to their machine") {
-		t.Fatalf("machine tie not enforced: %v", err)
+	if err := s.writeKey(other); err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := s.ActiveKey(other.Key); err != nil || resolved.Set != ap.Set {
+		t.Fatalf("same-store key rejected after hostname changed: %v %+v", err, resolved)
+	}
+
+	// Existing installations have keys without a Store field. The first use on
+	// the store that already contains their set adopts and persists that store.
+	legacy := got
+	legacy.Key = strings.Repeat("e", 32)
+	legacy.Machine = "retired-babel-node"
+	legacy.Store = ""
+	if err := s.writeKey(legacy); err != nil {
+		t.Fatal(err)
+	}
+	var migrateWG sync.WaitGroup
+	migrationErrors := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		migrateWG.Add(1)
+		go func() {
+			defer migrateWG.Done()
+			migrated, err := s.ActiveKey(legacy.Key)
+			if err != nil {
+				migrationErrors <- err
+			} else if migrated.Store != ap.Store {
+				migrationErrors <- errors.New("legacy key migrated to the wrong store")
+			}
+		}()
+	}
+	migrateWG.Wait()
+	close(migrationErrors)
+	for err := range migrationErrors {
+		t.Fatalf("concurrent legacy migration failed: %v", err)
+	}
+	persisted, err := s.Lookup(legacy.Key)
+	if err != nil || persisted.Store != ap.Store {
+		t.Fatalf("legacy migration was not persisted: %v %+v", err, persisted)
+	}
+
+	// Copying only a key to an unrelated Lab store does not grant access.
+	unrelated := &Store{root: t.TempDir()}
+	if err := unrelated.writeKey(got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unrelated.ActiveKey(got.Key); err == nil || !strings.Contains(err.Error(), "belongs to Lab store") {
+		t.Fatalf("cross-store key accepted: %v", err)
 	}
 	// revoke ends access
 	if _, err := s.Revoke(ap.Key[:8]); err != nil {
@@ -138,6 +187,38 @@ func TestKeyLifecycle(t *testing.T) {
 	}
 	if _, err := s.ActiveKey(ap.Key); err == nil {
 		t.Fatal("revoked key accepted")
+	}
+}
+
+func TestStoreIDConcurrentStable(t *testing.T) {
+	root := t.TempDir()
+	const workers = 32
+	ids := make(chan string, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ids <- (&Store{root: root}).StoreID()
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	want := ""
+	for id := range ids {
+		if id == "" {
+			t.Fatal("concurrent StoreID returned an empty identity")
+		}
+		if want == "" {
+			want = id
+		} else if id != want {
+			t.Fatalf("one shared store produced multiple identities: %q and %q", want, id)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(root, "store-id"))
+	if err != nil || strings.TrimSpace(string(b)) != want {
+		t.Fatalf("store identity was not persisted: %v %q", err, string(b))
 	}
 }
 
@@ -186,7 +267,7 @@ func TestBriefAssembly(t *testing.T) {
 
 	run, _ := s.NewRun(ap.Set)
 	s.Append(s.RunDir(ap.Set, run), Event{Author: "machine", Kind: "run-start",
-		Data: map[string]any{"tier": "full", "group": "sweep"}})
+		Data: map[string]any{"machine": "babel-n9-31", "tier": "full", "group": "sweep"}})
 	result, _ := s.Append(s.RunDir(ap.Set, run), Event{Author: "agent", Kind: "result", Text: "loss 0.42"})
 	s.Append(s.RunDir(ap.Set, run), Event{Author: "machine", Kind: "run-end",
 		Data: map[string]any{"exit": float64(0), "durationSec": float64(3)}})
@@ -199,8 +280,43 @@ func TestBriefAssembly(t *testing.T) {
 		t.Fatalf("want 3 notes, got %d", len(b.Notes))
 	}
 	if len(b.Runs) != 1 || b.Runs[0].Status != "done" || b.Runs[0].Latest != "loss 0.42" ||
-		b.Runs[0].LatestAt != result.Time || b.Runs[0].Tier != "full" || b.Runs[0].Group != "sweep" {
+		b.Runs[0].LatestAt != result.Time || b.Runs[0].Machine != "babel-n9-31" ||
+		b.Runs[0].Tier != "full" || b.Runs[0].Group != "sweep" {
 		t.Fatalf("run summary wrong: %+v", b.Runs)
+	}
+}
+
+func TestBriefUsesCurrentMachineGuidance(t *testing.T) {
+	s := testStore(t)
+	k, err := s.CreateKeyRequest("proj", "/tmp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.Machine = "retired-babel-node"
+	if err := s.writeKey(k); err != nil {
+		t.Fatal(err)
+	}
+	ap, err := s.Decide(k.Key[:8], true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(s.NotesDir("machine", "retired-babel-node"), Event{
+		Author: "human", Kind: "hnote", Text: "old node only",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(s.NotesDir("machine", Hostname()), Event{
+		Author: "human", Kind: "hnote", Text: "current node guidance",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := s.Brief(ap.Set, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Notes) != 1 || b.Notes[0].Text != "current node guidance" {
+		t.Fatalf("brief used request-origin guidance instead of current-node guidance: %+v", b.Notes)
 	}
 }
 

@@ -186,7 +186,7 @@ It explains the isolation boundary in one short paragraph, then shows:
 - Machine
 - Folder
 - Suggested project label, editable before approval
-- Resulting guarantee: one key, one isolated set, machine-bound
+- Resulting guarantee: one key, one isolated set, bound to the Lab store (portable across nodes mounting it)
 
 Open Terminal is secondary. Approve and Deny use the same decision dock pattern.
 

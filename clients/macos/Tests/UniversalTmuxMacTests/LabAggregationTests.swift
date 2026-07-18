@@ -14,7 +14,7 @@ final class LabAggregationTests: XCTestCase {
                                 machine: "babel-n5-24", cwd: "/shared/vlm_gating",
                                 session: "vlm_gating", status: "active", created: "2026-07-11T15:00:00Z")
         let proposal = LabProposal(set: "s-93k08z", run: "R3", project: "vlm_gating",
-                                   machine: "babel-n5-24", intent: "compare router loss",
+                                   machine: "babel-u5-24", intent: "compare router loss",
                                    tier: "full", group: "ablation", argv: ["python", "train.py"],
                                    cwd: "/shared/vlm_gating", created: "2026-07-11T17:00:00Z")
         let global = LabHubNote(scope: "global", project: nil, id: "global-1",
@@ -36,6 +36,8 @@ final class LabAggregationTests: XCTestCase {
         XCTAssertEqual(result.accessKeys.count, 2, "the access registry includes pending and active keys once per store")
         XCTAssertEqual(result.pendingKeys.count, 1)
         XCTAssertEqual(result.pendingRuns.count, 1)
+        XCTAssertEqual(result.pendingRuns.first?.machineID, u5.id,
+                       "a run routes to its execution node, not the key-request node")
         XCTAssertEqual(result.hubNotes.count, 2, "machine-scoped guidance still needs one group per node")
         XCTAssertEqual(result.sets.first?.machineID, n5.id, "the set keeps its actual home machine")
         XCTAssertEqual(result.sets.first?.storeID, "shared:babel")

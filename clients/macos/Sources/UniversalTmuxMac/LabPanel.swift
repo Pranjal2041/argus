@@ -190,6 +190,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 var rd: [String: Any] = ["id": r.id, "status": r.status,
                                          "exitCode": r.exitCode,
                                          "archived": r.archived ?? false]
+                if let v = r.machine { rd["machine"] = v }
                 if let v = r.tier { rd["tier"] = v }
                 if let v = r.group { rd["group"] = v }
                 if let v = r.latest { rd["latest"] = v }
@@ -344,7 +345,22 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         }
     }
 
-    private func openWandb(_ reference: String, card: LabModel.SetCard, session: String) {
+    private func routedMachineID(named requested: String, fallback: String) -> String {
+        guard !requested.isEmpty, let state else { return fallback }
+        func normalized(_ raw: String) -> String {
+            var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if value.hasPrefix("ut-") { value.removeFirst(3) }
+            if value.hasSuffix(".local") { value.removeLast(6) }
+            return value.split(separator: ".", maxSplits: 1).first.map(String.init) ?? value
+        }
+        let target = normalized(requested)
+        return state.machines.first { machine in
+            [machine.id, machine.name, machine.host].contains { normalized($0) == target }
+        }?.id ?? fallback
+    }
+
+    private func openWandb(_ reference: String, card: LabModel.SetCard,
+                           session: String, machineName: String) {
         let rawURL = reference.hasPrefix("http://") || reference.hasPrefix("https://")
             ? reference : "https://wandb.ai/" + reference
         guard let url = URL(string: rawURL) else { return }
@@ -359,7 +375,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         } else {
             runID = path.last ?? reference
         }
-        let ref = SessionRef(machineID: card.machineID, session: session)
+        let ref = SessionRef(machineID: routedMachineID(named: machineName, fallback: card.machineID),
+                             session: session)
         let run = WandbRun(url: url, runId: runID, label: runID)
         terminals.mergeWandb([run], for: ref)
         terminals.showWandb(ref, run: run)
@@ -495,7 +512,8 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 }
             } else { reportAction(actionID, ok: false, message: "That experiment set is no longer available.") }
         case "openTerminal":
-            state.selection = SessionRef(machineID: str("machineID"), session: str("session"))
+            let machineID = routedMachineID(named: str("machineName"), fallback: str("machineID"))
+            state.selection = SessionRef(machineID: machineID, session: str("session"))
             state.showLab = false
         case "openFiles":
             if let c = card(), let m = state.machines.first(where: { $0.id == c.machineID }), let files {
@@ -503,7 +521,9 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 state.openWindowRequest = "files"
             }
         case "openWandb":
-            if let c = card() { openWandb(str("run"), card: c, session: str("session")) }
+            if let c = card() {
+                openWandb(str("run"), card: c, session: str("session"), machineName: str("machineName"))
+            }
         case "openURL":
             if let url = URL(string: str("url")), ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
                 NSWorkspace.shared.open(url)

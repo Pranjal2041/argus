@@ -8,6 +8,7 @@ data class LabSetMeta(
     val id: String,
     val project: String,
     val machine: String,
+    val store: String? = null,
     val cwd: String,
     val created: String,
 )
@@ -30,6 +31,7 @@ data class LabEnvFacts(
 
 data class LabEventData(
     val target: String? = null,
+    val machine: String? = null,
     val argv: List<String> = emptyList(),
     val cwd: String? = null,
     val tier: String? = null,
@@ -57,6 +59,7 @@ data class LabEvent(
 
 data class LabRunSummary(
     val id: String,
+    val machine: String? = null,
     val group: String? = null,
     val tier: String? = null,
     val status: String,
@@ -83,6 +86,7 @@ data class LabKeyInfo(
     val set: String? = null,
     val project: String,
     val machine: String,
+    val store: String? = null,
     val cwd: String,
     val session: String? = null,
     val status: String,

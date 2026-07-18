@@ -51,6 +51,28 @@ private val labRunning: Color @Composable get() = LocalTheme.current.working
 private val labWaiting: Color @Composable get() = LocalTheme.current.waiting
 private val labDanger: Color @Composable get() = LocalTheme.current.bad
 
+private fun labStoreLabel(storeID: String): String = when {
+    storeID == "shared:babel" -> "Babel shared store"
+    storeID.startsWith("store:") -> "Lab store"
+    storeID.startsWith("machine:") -> "Lab store"
+    storeID.startsWith("mirror/") -> "Offline mirror"
+    else -> "Lab store"
+}
+
+private fun normalizedLabMachine(raw: String): String =
+    raw.trim().lowercase().substringBefore('.').removePrefix("ut-").removeSuffix(".local")
+
+private fun labBrokerForMachine(vm: AppViewModel, machineName: String?, fallback: Broker): Broker {
+    val target = normalizedLabMachine(machineName.orEmpty())
+    if (target.isEmpty()) return fallback
+    return vm.brokers.firstOrNull { broker ->
+        listOf(broker.name, broker.host).any { normalizedLabMachine(it) == target }
+    } ?: fallback
+}
+
+private fun labRunMachine(card: LabSetCard, run: LabRunSummary, detail: LabRunDetail? = null): String =
+    detail?.envelope?.machine ?: run.machine ?: card.machineName
+
 @Composable
 fun LabScreen(vm: AppViewModel, onOpenTerminal: (Broker, String) -> Unit) {
     val route = vm.labRoute
@@ -210,11 +232,12 @@ private fun LabAccessDossier(vm: AppViewModel, item: LabPendingKey, onOpenTermin
         LabBackBar("ACCESS REQUEST", "agent boundary") { vm.setLabArea(LabArea.INBOX) }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(14.dp)) {
             Text("An agent wants a research set.", color = labText, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-            Text("Approval creates one machine-bound key and one isolated set. It grants no access to another agent's record.",
+            Text("Approval creates one store-bound key and one isolated set. Any machine mounting this Lab store may use it; another store or set cannot.",
                 color = labDim, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp, bottom = 18.dp))
             LabFacts(
                 listOf(
-                    "MACHINE" to item.machineName,
+                    "REQUESTED FROM" to item.machineName,
+                    "ACCESS SCOPE" to labStoreLabel(item.storeID),
                     "FOLDER" to item.key.cwd,
                     "SESSION" to item.key.session.orEmpty().ifEmpty { "not reported" },
                     "REQUESTED" to ago(item.key.created),
@@ -256,11 +279,17 @@ private fun LabProposalDossier(
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(14.dp)) {
             Text(item.proposal.intent.ifBlank { "Proposed experiment" }, color = labText,
                 fontSize = 23.sp, fontWeight = FontWeight.Bold)
-            LabMetaLine(card, item.proposal.tier, item.proposal.group)
+            LabMetaLine(card, item.proposal.tier, item.proposal.group,
+                detail?.envelope?.machine ?: item.proposal.machine)
             Spacer(Modifier.height(16.dp))
             LabApprovalEnvelope(detail, item.proposal)
             detail?.envelope?.tmuxSession?.takeIf(String::isNotEmpty)?.let { session ->
-                TextButton(onClick = { onOpenTerminal(card.broker, session) }) {
+                TextButton(onClick = {
+                    onOpenTerminal(
+                        labBrokerForMachine(vm, detail?.envelope?.machine ?: item.proposal.machine, card.broker),
+                        session,
+                    )
+                }) {
                     Icon(Icons.Filled.Terminal, null); Spacer(Modifier.width(6.dp)); Text("Open source terminal")
                 }
             }
@@ -378,7 +407,7 @@ private fun LabSetPage(vm: AppViewModel, cardID: String) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 Text(card.brief.set.project, color = labText, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-                Text("${card.machineName}  /  ${card.brief.set.cwd}", color = labFaint, fontSize = 11.sp,
+                Text("${labStoreLabel(card.storeID)}  /  via ${card.machineName}  /  ${card.brief.set.cwd}", color = labFaint, fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 5.dp))
                 if (card.offline) Text("Read-only mirror · last copied ${ago(card.mirroredAt)}", color = labWaiting,
                     fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
@@ -516,7 +545,7 @@ private fun LabRunPage(vm: AppViewModel, cardID: String, runID: String, onOpenTe
                     Spacer(Modifier.width(9.dp)); LabTag(label.uppercase(), color)
                     if (run.archived) { Spacer(Modifier.width(7.dp)); LabTag("ARCHIVED", labFaint) }
                 }
-                LabMetaLine(card, run.tier, run.group)
+                LabMetaLine(card, run.tier, run.group, labRunMachine(card, run, detail))
                 if (labRunPhase(run) == "stopped") {
                     LabLedgerCard(accent = labFaint) {
                         LabSectionLabel("WHY THIS RECORD WAS CLOSED", detail = "manual lifecycle correction")
@@ -547,7 +576,7 @@ private fun LabRunPage(vm: AppViewModel, cardID: String, runID: String, onOpenTe
                             enabled = note.isNotBlank() && !vm.labActionBusy, modifier = Modifier.padding(top = 6.dp)) { Text("Add note") }
                     }
                 }
-                item { LabReproducibility(d, card, onOpenTerminal) }
+                item { LabReproducibility(vm, d, card, run, onOpenTerminal) }
                 if (d.files.isNotEmpty()) item {
                     LabSectionLabel("STORED ARTIFACTS", detail = "tap to inspect")
                     d.files.forEach { file ->
@@ -805,7 +834,13 @@ private fun duration(seconds: Int?): String = when {
 private fun exit(run: LabRunSummary): String = run.exitCode.takeIf { it >= 0 }?.toString() ?: "—"
 
 @Composable
-private fun LabReproducibility(detail: LabRunDetail, card: LabSetCard, onOpenTerminal: (Broker, String) -> Unit) {
+private fun LabReproducibility(
+    vm: AppViewModel,
+    detail: LabRunDetail,
+    card: LabSetCard,
+    run: LabRunSummary,
+    onOpenTerminal: (Broker, String) -> Unit,
+) {
     val env = detail.envelope
     val end = detail.end
     LabLedgerCard {
@@ -813,6 +848,7 @@ private fun LabReproducibility(detail: LabRunDetail, card: LabSetCard, onOpenTer
         LabFacts(
             listOf(
                 "COMMAND" to env?.argv.orEmpty().joinToString(" ").ifEmpty { "not captured" },
+                "MACHINE" to labRunMachine(card, run, detail),
                 "WORKING DIR" to env?.cwd.orEmpty().ifEmpty { card.brief.set.cwd },
                 "BASE COMMIT" to env?.snapshot?.baseSha.orEmpty().ifEmpty { if (env?.snapshot?.noGit == true) "no repository" else "not captured" },
                 "ENVIRONMENT" to listOfNotNull(env?.env?.python, env?.env?.gpus, env?.env?.os, env?.env?.arch).joinToString(" · ").ifEmpty { "not captured" },
@@ -821,7 +857,9 @@ private fun LabReproducibility(detail: LabRunDetail, card: LabSetCard, onOpenTer
             ),
         )
         env?.tmuxSession?.takeIf(String::isNotEmpty)?.let { session ->
-            TextButton(onClick = { onOpenTerminal(card.broker, session) }) {
+            TextButton(onClick = {
+                onOpenTerminal(labBrokerForMachine(vm, labRunMachine(card, run, detail), card.broker), session)
+            }) {
                 Icon(Icons.Filled.Terminal, null); Spacer(Modifier.width(6.dp)); Text("Open terminal")
             }
         }
@@ -1134,9 +1172,9 @@ private fun LabTag(text: String, color: Color) {
 }
 
 @Composable
-private fun LabMetaLine(card: LabSetCard, tier: String?, group: String?) {
+private fun LabMetaLine(card: LabSetCard, tier: String?, group: String?, machineName: String = card.machineName) {
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("${card.brief.set.project}  /  ${card.machineName}  /  ${card.brief.set.id}", color = labFaint,
+        Text("${card.brief.set.project}  /  $machineName  /  ${card.brief.set.id}", color = labFaint,
             fontSize = 10.sp, fontFamily = FontFamily.Monospace)
         tier?.let { Spacer(Modifier.width(7.dp)); LabTag(it, labFaint) }
         group?.let { Spacer(Modifier.width(5.dp)); LabTag(it, labFaint) }

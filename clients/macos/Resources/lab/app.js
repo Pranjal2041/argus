@@ -103,6 +103,20 @@ function displayPath(value) {
   return `${prefix}${parts[0]}${separator}…${separator}${parts[parts.length - 1]}`;
 }
 
+function storeScopeLabel(storeID) {
+  const id = String(storeID || "");
+  if (id === "shared:babel") return "Babel shared store";
+  if (id.startsWith("store:")) return "Lab store";
+  if (id.startsWith("machine:")) return "Lab store";
+  if (id.startsWith("mirror/")) return "Offline mirror";
+  return "Lab store";
+}
+
+function runMachine(card, run, folded) {
+  const env = folded && folded.env || {};
+  return env.machine || run.machine || card.machineName || "unknown machine";
+}
+
 function normalizedReportText(value) {
   return String(value == null ? "" : value).replace(/\r\n?/g, "\n").trim();
 }
@@ -646,7 +660,7 @@ function renderAccessMain() {
     </div>
     <div class="section-head"><h2>${Lab.accessFilter === "all" ? "All credentials" : `${Lab.accessFilter} credentials`}</h2><span class="section-kicker">newest first</span></div>
     ${keys.length ? `<div class="key-ledger" role="table" aria-label="Lab access keys">
-      <div class="key-row key-head" role="row"><span>Status</span><span>Key / set</span><span>Project / folder</span><span>Machine</span><span>Created</span><span>Actions</span></div>
+      <div class="key-row key-head" role="row"><span>Status</span><span>Key / set</span><span>Project / folder</span><span>Store / route</span><span>Created</span><span>Actions</span></div>
       ${keys.map(key => {
         const status = keyStatusInfo(key.status);
         const open = key.card ? `<button class="button link small" type="button" data-action="open-key-set" data-card="${esc(key.card)}">Open set</button>` : "";
@@ -656,7 +670,7 @@ function renderAccessMain() {
           <span><span class="key-status tone-${status.tone}"><i></i>${esc(status.label)}</span></span>
           <span class="key-identity"><strong>${esc(key.prefix || "—")}</strong><small>${esc(key.setID || "no set assigned")}</small></span>
           <span class="key-project"><strong>${esc(key.project || "Unnamed project")}</strong><small title="${esc(key.cwd || "")}">${esc(displayPath(key.cwd || ""))}</small>${key.note ? `<small class="key-note">${esc(key.note)}</small>` : ""}</span>
-          <span>${esc(key.machineName || "—")}</span><span class="mono quiet">${esc(ago(key.created))}</span>
+          <span class="key-identity"><strong>${esc(storeScopeLabel(key.storeID))}</strong><small>via ${esc(key.machineName || "—")}</small></span><span class="mono quiet">${esc(ago(key.created))}</span>
           <span class="key-actions">${review}${open}${revoke}</span>
         </div>`;
       }).join("")}</div>` : emptyState("No credentials in this view", "Choose another access filter or wait for a Lab login request.")}
@@ -810,11 +824,12 @@ function renderAccessDossier(key) {
   return `<div class="main-content has-dock">
     <div class="eyebrow">Access request · ${esc(ago(key.created))}</div>
     <h1 class="display-title">An agent wants a research set.</h1>
-    <p class="lede">Approval creates one machine-bound key and one isolated experiment set. The agent may append records there; it does not gain access to another agent's set.</p>
+    <p class="lede">Approval creates one store-bound key and one isolated experiment set. Any machine mounting this Lab store may use the key; it grants no access to another store or set.</p>
     <section class="dossier"><div class="dossier-body">
       <div class="section-head" style="margin-top:0"><h2>Assignment boundary</h2></div>
       <div class="facts">
-        <div class="fact-label">Machine</div><div class="fact-value">${esc(key.machineName)}</div>
+        <div class="fact-label">Requested from</div><div class="fact-value">${esc(key.machineName)}</div>
+        <div class="fact-label">Access scope</div><div class="fact-value">${esc(storeScopeLabel(key.storeID))}</div>
         <div class="fact-label">Folder</div><div class="fact-value mono selectable">${esc(key.cwd)}</div>
         <div class="fact-label">Session</div><div class="fact-value">${esc(key.session || "not reported")}</div>
         <div class="fact-label">Requested</div><div class="fact-value">${esc(ago(key.created))} ago</div>
@@ -888,7 +903,7 @@ function decisionDock(kind, data) {
   const value = draft(key, isKey ? data.project : data.message);
   return `<div class="decision-dock" role="group" aria-label="Decision controls">
     ${isKey
-      ? `<div class="secondary human-copy">One key · one isolated set · this machine only</div>`
+      ? `<div class="secondary human-copy">One key · one isolated set · this Lab store</div>`
       : `<input class="text-input" data-draft="${esc(key)}" value="${esc(value)}" placeholder="Optional message back to the agent" aria-label="Message to agent">`}
     <button class="button danger" type="button" data-action="${isKey ? "decide-key" : "decide-run"}" data-approve="0" data-id="${esc(data.id || "")}" data-card="${esc(data.card || "")}" data-run="${esc(data.run || "")}">${isKey ? "Deny" : "Reject"}</button>
     <button class="button primary approve" type="button" data-action="${isKey ? "decide-key" : "decide-run"}" data-approve="1" data-id="${esc(data.id || "")}" data-card="${esc(data.card || "")}" data-run="${esc(data.run || "")}">Approve</button>
@@ -962,7 +977,7 @@ function renderSetPage() {
     ${breadcrumbs([{ label: card.project }])}
     <div class="page-head"><div class="page-head-main">
       <div class="eyebrow">Experiment set · ${esc(card.setID)}</div><h1 class="display-title">${esc(card.project)}</h1>
-      <div class="meta-line"><span>${esc(card.machineName)}</span><span class="meta-divider">/</span><span class="selectable">${esc(card.cwd)}</span><span class="meta-divider">/</span><span>${card.keyActive ? "key active" : "access closed"}</span>${card.archived ? `<span class="tag">archived set</span>` : ""}</div>
+      <div class="meta-line"><span>${esc(storeScopeLabel(card.storeID))}</span><span class="meta-divider">/</span><span>via ${esc(card.machineName)}</span><span class="meta-divider">/</span><span class="selectable">${esc(card.cwd)}</span><span class="meta-divider">/</span><span>${card.keyActive ? "key active" : "access closed"}</span>${card.archived ? `<span class="tag">archived set</span>` : ""}</div>
     </div><div class="page-actions">${card.offline ? "" : `<button class="button" type="button" data-action="files" data-card="${esc(card.id)}" data-cwd="${esc(card.cwd)}">${icon("folder")}Files</button>
       <button class="button ${card.archived ? "primary" : ""}" type="button" data-action="archive" data-card="${esc(card.id)}" data-on="${card.archived ? "0" : "1"}">${icon("archive")}${card.archived ? "Restore set" : "Archive set"}</button>`}</div></div>
     ${card.offline ? offlineBanner(card) : ""}
@@ -1040,7 +1055,7 @@ function renderRunRecord() {
   return `<div class="main-content wide ${pending ? "has-dock" : ""}">
     ${breadcrumbs([{ label: card.project, action: `data-select-set="${esc(card.id)}"` }, { label: run.id }])}
     <div class="page-head"><div class="page-head-main"><div class="eyebrow">Run record · ${esc(card.setID)}</div>
-      <h1 class="display-title mono">${esc(run.id)}</h1><div class="meta-line">${statusWord(run.status)}${run.tier ? `<span class="tag">${esc(run.tier)}</span>` : ""}${run.group ? `<span class="tag">${esc(run.group)}</span>` : ""}${run.archived ? `<span class="tag">archived run</span>` : ""}<span>${esc(card.machineName)}</span></div>
+      <h1 class="display-title mono">${esc(run.id)}</h1><div class="meta-line">${statusWord(run.status)}${run.tier ? `<span class="tag">${esc(run.tier)}</span>` : ""}${run.group ? `<span class="tag">${esc(run.group)}</span>` : ""}${run.archived ? `<span class="tag">archived run</span>` : ""}<span>${esc(runMachine(card, run, folded))}</span></div>
     </div><div class="page-actions">${runActions(card, run, folded)}</div></div>
     ${card.offline ? offlineBanner(card) : ""}
     ${evidenceSpine(folded, run, card)}
@@ -1063,9 +1078,10 @@ function runTabs(folded) {
 
 function runActions(card, run, folded) {
   const out = [];
-  if (!card.offline && folded.env.tmuxSession) out.push(`<button class="button small" type="button" data-action="terminal" data-machine="${esc(card.machineID)}" data-session="${esc(folded.env.tmuxSession)}">${icon("terminal")}Terminal</button>`);
+  const machine = runMachine(card, run, folded);
+  if (!card.offline && folded.env.tmuxSession) out.push(`<button class="button small" type="button" data-action="terminal" data-machine="${esc(card.machineID)}" data-machine-name="${esc(machine)}" data-session="${esc(folded.env.tmuxSession)}">${icon("terminal")}Terminal</button>`);
   if (!card.offline && folded.env.cwd) out.push(`<button class="button small" type="button" data-action="files" data-card="${esc(card.id)}" data-cwd="${esc(folded.env.cwd)}">${icon("folder")}Files</button>`);
-  if (!card.offline && folded.end && folded.end.data && folded.end.data.wandb && folded.end.data.wandb.length) out.push(`<button class="button small" type="button" data-action="wandb" data-card="${esc(card.id)}" data-session="${esc(folded.env.tmuxSession || "")}" data-run-ref="${esc(folded.end.data.wandb[0])}">${icon("external")}W&amp;B</button>`);
+  if (!card.offline && folded.end && folded.end.data && folded.end.data.wandb && folded.end.data.wandb.length) out.push(`<button class="button small" type="button" data-action="wandb" data-card="${esc(card.id)}" data-machine-name="${esc(machine)}" data-session="${esc(folded.env.tmuxSession || "")}" data-run-ref="${esc(folded.end.data.wandb[0])}">${icon("external")}W&amp;B</button>`);
   if (card.runs.length > 1) out.push(`<button class="button small" type="button" data-action="compare-from" data-card="${esc(card.id)}" data-run="${esc(run.id)}">${icon("compare")}Compare</button>`);
   if (!card.offline && statusInfo(run.status).key === "running") out.push(`<button class="button small" type="button" data-action="open-stop" data-card="${esc(card.id)}" data-run="${esc(run.id)}">${icon("stop")}Mark stopped</button>`);
   if (!card.offline) out.push(`<button class="button small" type="button" data-action="archive" data-card="${esc(card.id)}" data-run="${esc(run.id)}" data-on="${run.archived ? "0" : "1"}">${icon("archive")}${run.archived ? "Unarchive" : "Archive"}</button>`);
@@ -1095,7 +1111,7 @@ function evidenceSpine(folded, run, card) {
   return `<div class="evidence-spine" aria-label="Run lifecycle">
     ${node("Proposed", proposed, proposed ? "complete" : "", proposed && proposed.text)}
     ${node("Decision", decision, decisionState, decisionNote)}
-    ${node("Started", startedEvidence, startedEvidence ? "complete" : approved ? "queued" : "", started ? card.machineName : startedEvidence ? "summary record" : "")}
+    ${node("Started", startedEvidence, startedEvidence ? "complete" : approved ? "queued" : "", started ? runMachine(card, run, folded) : startedEvidence ? "summary record" : "")}
     ${stopped
       ? node("Stopped", stopped, "stopped", stopped.text || run.stopReason || "manually closed")
       : node("Ended", ended, failed ? "failed" : ended ? "complete" : phase === "finished" ? "complete" : startedEvidence ? "current" : "", ended ? `exit ${ended.data && ended.data.exit != null ? ended.data.exit : run.exitCode}` : phase === "finished" ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : failed ? `exit ${run.exitCode >= 0 ? run.exitCode : "recorded"} · detail unavailable` : startedEvidence ? "in progress" : "")}
@@ -1127,7 +1143,7 @@ function renderSummary(folded, card, run) {
   </div><aside class="summary-stack">
     <section><div class="section-head" style="margin-top:0"><h2>Envelope</h2></div><div class="facts">
       <div class="fact-label">Project</div><div class="fact-value">${esc(card.project)}</div>
-      <div class="fact-label">Machine</div><div class="fact-value">${esc(card.machineName)}</div>
+      <div class="fact-label">Machine</div><div class="fact-value">${esc(runMachine(card, run, folded))}</div>
       <div class="fact-label">Folder</div><div class="fact-value mono selectable">${esc(env.cwd || card.cwd)}</div>
       <div class="fact-label">Tier</div><div class="fact-value">${esc(env.tier || run.tier || "—")}</div>
       <div class="fact-label">Group</div><div class="fact-value">${esc(env.group || run.group || "—")}</div>
@@ -1136,7 +1152,7 @@ function renderSummary(folded, card, run) {
       <div class="fact-label">Python</div><div class="fact-value">${esc(env.env && env.env.python || "—")}</div>
       <div class="fact-label">GPU</div><div class="fact-value">${esc(env.env && env.env.gpus || "—")}</div>
     </div></section>
-    ${end.wandb && end.wandb.length ? `<section><div class="section-head"><h2>Weights &amp; Biases</h2></div>${end.wandb.map(ref => card.offline ? `<span class="mono secondary selectable">${esc(ref)}</span>` : `<button class="button link mono" type="button" data-action="wandb" data-card="${esc(card.id)}" data-session="${esc(env.tmuxSession || "")}" data-run-ref="${esc(ref)}">${esc(ref)}</button>`).join("")}</section>` : ""}
+    ${end.wandb && end.wandb.length ? `<section><div class="section-head"><h2>Weights &amp; Biases</h2></div>${end.wandb.map(ref => card.offline ? `<span class="mono secondary selectable">${esc(ref)}</span>` : `<button class="button link mono" type="button" data-action="wandb" data-card="${esc(card.id)}" data-machine-name="${esc(runMachine(card, run, folded))}" data-session="${esc(env.tmuxSession || "")}" data-run-ref="${esc(ref)}">${esc(ref)}</button>`).join("")}</section>` : ""}
   </aside></div>`;
 }
 
@@ -1500,9 +1516,9 @@ document.addEventListener("click", event => {
   if (kind === "open-key-set") { selectSet(action.dataset.card); return; }
   if (kind === "open-set-guidance") { Lab.area = "guidance"; Lab.selection = null; Lab.guidanceScopeKey = `set:${action.dataset.card}`; Lab.drawerOpen = false; resetMainScroll(); render(); return; }
   if (kind === "refresh") { post({ type: "refresh" }); toast("Refreshing Lab…"); return; }
-  if (kind === "terminal") { post({ type: "openTerminal", machineID: action.dataset.machine, session: action.dataset.session }); return; }
+  if (kind === "terminal") { post({ type: "openTerminal", machineID: action.dataset.machine, machineName: action.dataset.machineName || "", session: action.dataset.session }); return; }
   if (kind === "files") { post({ type: "openFiles", card: action.dataset.card, cwd: action.dataset.cwd }); return; }
-  if (kind === "wandb") { post({ type: "openWandb", card: action.dataset.card, session: action.dataset.session, run: action.dataset.runRef }); return; }
+  if (kind === "wandb") { post({ type: "openWandb", card: action.dataset.card, machineName: action.dataset.machineName || "", session: action.dataset.session, run: action.dataset.runRef }); return; }
   if (kind === "copy") { copyText(action.dataset.copy || ""); return; }
   if (kind === "artifact") {
     const key = detailKey(action.dataset.card, action.dataset.run);

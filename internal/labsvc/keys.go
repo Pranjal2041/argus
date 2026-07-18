@@ -13,16 +13,18 @@ import (
 )
 
 // Key is a human-approved credential. One key corresponds to exactly one
-// experiment set, the key is inert until the human approves it, and it only
-// works on the machine where it was requested, because experiments are tied
-// to their machine (LAB-DESIGN.md, Hierarchy and access). Each key lives in
-// its own file under keys/, rewritten whole via rename, so status changes
-// stay atomic on NFS.
+// experiment set and is inert until the human approves it. Authorization is
+// bound to the Lab store, not the hostname: every node mounting one shared
+// store (for example babel-*) can use the same key, while an unrelated store
+// cannot. Machine records where the request originated; each run separately
+// records where it actually executed. Each key lives in its own file under
+// keys/, rewritten whole via rename, so status changes stay atomic on NFS.
 type Key struct {
 	Key     string `json:"key"`
 	Set     string `json:"set,omitempty"` // assigned at approval
 	Project string `json:"project"`
-	Machine string `json:"machine"`
+	Machine string `json:"machine"`         // request origin; never an authorization boundary
+	Store   string `json:"store,omitempty"` // stable StoreID; absent on legacy records
 	Cwd     string `json:"cwd"`
 	Session string `json:"session,omitempty"` // tmux session at login (advisory, for the hub)
 	Status  string `json:"status"`            // pending | active | denied | revoked
@@ -31,8 +33,8 @@ type Key struct {
 	Decided string `json:"decided,omitempty"`
 }
 
-// Hostname is the short host name, which is what ties keys and sets to a
-// machine.
+// Hostname is the short host name recorded as request/run provenance and used
+// to select machine-scoped guidance. It is deliberately not a key boundary.
 func Hostname() string {
 	h, _ := os.Hostname()
 	if i := strings.Index(h, "."); i > 0 {
@@ -51,11 +53,27 @@ func (s *Store) writeKey(k Key) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(s.keysDir(), ".tmp-"+k.Key)
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	// A unique temp file matters on a shared store: two Babel nodes can race to
+	// migrate the same legacy key. Both renames may safely publish identical
+	// content; neither writer can steal the other's fixed temp path.
+	tmp, err := os.CreateTemp(s.keysDir(), ".tmp-"+k.Key+"-")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(s.keysDir(), k.Key+".json"))
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filepath.Join(s.keysDir(), k.Key+".json"))
 }
 
 // CreateKeyRequest files a pending key. The suggested project name usually
@@ -70,10 +88,14 @@ func (s *Store) CreateKeyRequest(project, cwd, session string) (Key, error) {
 		Key:     kh,
 		Project: project,
 		Machine: Hostname(),
+		Store:   s.StoreID(),
 		Cwd:     cwd,
 		Session: session,
 		Status:  "pending",
 		Created: time.Now().UTC().Format(time.RFC3339),
+	}
+	if k.Store == "" {
+		return Key{}, errors.New("could not establish Lab store identity")
 	}
 	return k, s.writeKey(k)
 }
@@ -142,6 +164,12 @@ func (s *Store) Decide(prefix string, approve bool, project, note string) (Key, 
 	}
 	k.Decided = time.Now().UTC().Format(time.RFC3339)
 	k.Note = note
+	if k.Store == "" {
+		k.Store = s.StoreID() // migrate pending keys created before store-bound access
+	}
+	if k.Store == "" {
+		return k, errors.New("could not establish Lab store identity")
+	}
 	if !approve {
 		k.Status = "denied"
 		return k, s.writeKey(k)
@@ -161,7 +189,8 @@ func (s *Store) Decide(prefix string, approve bool, project, note string) (Key, 
 	_, err = s.Append(s.SetDir(set), Event{
 		Author: "human", Kind: "set-created",
 		Text: "set created for project " + k.Project,
-		Data: map[string]any{"project": k.Project, "machine": k.Machine, "cwd": k.Cwd, "key": k.Key[:8]},
+		Data: map[string]any{"project": k.Project, "machine": k.Machine, "store": k.Store,
+			"cwd": k.Cwd, "key": k.Key[:8]},
 	})
 	return k, err
 }
@@ -181,7 +210,10 @@ func (s *Store) Revoke(prefix string) (Key, error) {
 }
 
 // ActiveKey resolves the key a CLI command should use: the explicit value
-// beats $UT_LAB_KEY. It enforces status and the machine tie.
+// beats $UT_LAB_KEY. It enforces status and the store boundary. A legacy key
+// without Store is adopted by the store that already contains both the key and
+// its assigned set, then atomically rewritten; its old Machine remains origin
+// provenance and never prevents use from another node mounting that store.
 func (s *Store) ActiveKey(val string) (Key, error) {
 	if val == "" {
 		val = os.Getenv("UT_LAB_KEY")
@@ -200,17 +232,47 @@ func (s *Store) ActiveKey(val string) (Key, error) {
 	default:
 		return k, fmt.Errorf("key %s is %s", k.Key[:8], k.Status)
 	}
-	if k.Machine != Hostname() {
-		return k, fmt.Errorf("this key belongs to a set on %q and this machine is %q; experiments are tied to their machine, request a separate set here", k.Machine, Hostname())
+	currentStore := s.StoreID()
+	if currentStore == "" {
+		return k, errors.New("could not establish Lab store identity")
+	}
+	if k.Store != "" && k.Store != currentStore {
+		return k, fmt.Errorf("key %s belongs to Lab store %s, but this machine is using store %s",
+			k.Key[:8], shortStore(k.Store), shortStore(currentStore))
+	}
+	if k.Set == "" {
+		return k, fmt.Errorf("active key %s has no experiment set", k.Key[:8])
+	}
+	meta, err := s.Meta(k.Set)
+	if err != nil {
+		return k, fmt.Errorf("key %s points to missing set %s: %w", k.Key[:8], k.Set, err)
+	}
+	if meta.Store != "" && meta.Store != currentStore {
+		return k, fmt.Errorf("set %s belongs to Lab store %s, but this machine is using store %s",
+			k.Set, shortStore(meta.Store), shortStore(currentStore))
+	}
+	if k.Store == "" {
+		k.Store = currentStore
+		if err := s.writeKey(k); err != nil {
+			return k, fmt.Errorf("migrate legacy key to store identity: %w", err)
+		}
 	}
 	return k, nil
+}
+
+func shortStore(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // SetMeta mirrors sets/<id>/set.json, written once at approval.
 type SetMeta struct {
 	ID      string `json:"id"`
 	Project string `json:"project"`
-	Machine string `json:"machine"`
+	Machine string `json:"machine"`         // key-request origin, retained for provenance
+	Store   string `json:"store,omitempty"` // authorization/storage boundary
 	Cwd     string `json:"cwd"`
 	Created string `json:"created"`
 }
@@ -228,7 +290,7 @@ func (s *Store) newSet(k Key) (string, error) {
 			}
 			return "", err
 		}
-		m := SetMeta{ID: id, Project: k.Project, Machine: k.Machine, Cwd: k.Cwd,
+		m := SetMeta{ID: id, Project: k.Project, Machine: k.Machine, Store: k.Store, Cwd: k.Cwd,
 			Created: time.Now().UTC().Format(time.RFC3339)}
 		b, _ := json.MarshalIndent(m, "", " ")
 		if err := os.WriteFile(filepath.Join(dir, "set.json"), b, 0o644); err != nil {
@@ -246,7 +308,15 @@ func (s *Store) Meta(set string) (SetMeta, error) {
 	if err != nil {
 		return m, err
 	}
-	return m, json.Unmarshal(b, &m)
+	if err := json.Unmarshal(b, &m); err != nil {
+		return m, err
+	}
+	// Virtual migration keeps old set.json records readable and makes every API
+	// response explicit without rewriting an otherwise immutable metadata file.
+	if m.Store == "" {
+		m.Store = s.StoreID()
+	}
+	return m, nil
 }
 
 // Sets lists every set on this store, oldest first.

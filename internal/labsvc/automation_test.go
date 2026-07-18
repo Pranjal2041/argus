@@ -75,3 +75,31 @@ func TestDecideRunRejectsDuplicateDecision(t *testing.T) {
 		t.Fatalf("wrote %d decision events, want 1", decisions)
 	}
 }
+
+func TestPendingProposalReportsExecutionMachine(t *testing.T) {
+	store := testStore(t)
+	request, _ := store.CreateKeyRequest("project", "/tmp/project", "agent")
+	request.Machine = "babel-request-node"
+	if err := store.writeKey(request); err != nil {
+		t.Fatal(err)
+	}
+	key, err := store.Decide(request.Key, true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _ := store.NewRun(key.Set)
+	if _, err := store.Append(store.RunDir(key.Set, run), Event{
+		Author: "machine", Kind: "proposal", Text: "test on another node",
+		Data: map[string]any{"machine": "babel-execution-node", "tier": "full"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	proposals, err := store.PendingProposals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 1 || proposals[0].Machine != "babel-execution-node" {
+		t.Fatalf("proposal routed to request origin instead of execution node: %+v", proposals)
+	}
+}
