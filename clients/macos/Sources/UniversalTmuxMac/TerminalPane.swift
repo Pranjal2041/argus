@@ -1088,7 +1088,8 @@ final class TerminalController: ObservableObject {
             let styled = v.getStyledSelection()
                 ?? v.getTerminal().getStyledText(maxVisualLines: 400)
             let source = RenderExtract.clean(RenderExtract.joiningWrappedRows(styled))
-            return RenderDocument(source: source, styled: styled, view: v)
+            return RenderDocument(source: source, styled: styled, view: v,
+                                  sourceOrigin: "selection")
         }
         let terminal = v.getTerminal()
         let styled = terminal.getStyledText(maxVisualLines: 400)
@@ -1096,7 +1097,8 @@ final class TerminalController: ObservableObject {
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !styled.lines.isEmpty else {
             return nil
         }
-        return RenderDocument(source: source, styled: styled, view: v)
+        return RenderDocument(source: source, styled: styled, view: v,
+                              sourceOrigin: "terminal")
     }
 
     /// ⌘V: if the clipboard holds an image, bridge it to the visible session's host;

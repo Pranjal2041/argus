@@ -298,6 +298,31 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, text)
 	})
+	// /render-source — exact agent-authored Markdown for the response currently
+	// visible in a terminal. Resolution is transcript-backed and screen-matched;
+	// a miss is a normal 404 so old/non-agent sessions retain the styled-terminal
+	// fallback in clients. Nothing is sampled in the background: this runs only
+	// when the user explicitly invokes Render Output.
+	mux.HandleFunc("/render-source", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		name := r.URL.Query().Get("session")
+		if name == "" {
+			name = *session
+		}
+		source, err := mgr.RenderSource(name)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(source)
+	})
 	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

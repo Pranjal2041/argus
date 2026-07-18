@@ -18,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
 )
 
@@ -496,6 +497,32 @@ func (m *Manager) Recent(name string, lines int) (string, error) {
 		return "", fmt.Errorf("capture not supported on this backend")
 	}
 	return c.Capture(name, lines)
+}
+
+// RenderSource returns the authoritative Markdown behind the agent response
+// visible in a session. The transcript resolver must prove strong overlap with
+// the rendered screen; if it cannot, callers fall back to their lossless styled
+// terminal snapshot instead of ever showing text from the wrong agent.
+func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
+	text, err := m.Recent(name, 600)
+	if err != nil {
+		return rendersource.Result{}, err
+	}
+	var cwd string
+	for _, info := range m.Sessions() {
+		if info.Name == name {
+			cwd = info.Path
+			break
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return rendersource.Result{}, fmt.Errorf("resolve home directory: %w", err)
+	}
+	if home == "" {
+		return rendersource.Result{}, fmt.Errorf("resolve home directory: empty path")
+	}
+	return rendersource.Resolve(home, cwd, text)
 }
 
 // Sessions returns the cached session list (refreshed in the background). Always

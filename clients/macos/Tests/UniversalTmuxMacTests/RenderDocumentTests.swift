@@ -39,6 +39,7 @@ final class RenderDocumentTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         XCTAssertNotNil(object["terminal"])
         XCTAssertEqual(object["source"] as? String, "# Heading")
+        XCTAssertEqual(object["sourceOrigin"] as? String, "terminal")
     }
 
     func testPlainSourceCleanupDoesNotAlterRichTerminalRows() {
@@ -52,6 +53,7 @@ final class RenderDocumentTests: XCTestCase {
         let document = RenderDocument(source: source, styled: rawStyled, view: view)
 
         XCTAssertEqual(document.source, "**answer**")
+        XCTAssertEqual(document.sourceOrigin, "terminal")
         XCTAssertEqual(document.terminal.lines[0].runs.map(\.text).joined(), "⏺ **answer**")
     }
 
