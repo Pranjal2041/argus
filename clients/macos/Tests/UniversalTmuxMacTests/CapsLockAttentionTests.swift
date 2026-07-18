@@ -1,4 +1,5 @@
 import XCTest
+import IOKit.hidsystem
 @testable import UniversalTmuxMac
 
 final class CapsLockAttentionTests: XCTestCase {
@@ -40,8 +41,16 @@ final class CapsLockAttentionTests: XCTestCase {
     }
 
     func testCompletionCannotInterruptNeedsYou() {
-        XCTAssertFalse(shouldStartCapsLockPulse(.completion, while: .needsYou))
-        XCTAssertTrue(shouldStartCapsLockPulse(.needsYou, while: .completion))
+        XCTAssertFalse(shouldStartCompletionPulse(
+            enabled: true, transitionIDs: ["agent-a"], needsYouPending: true))
+        XCTAssertTrue(shouldStartCompletionPulse(
+            enabled: true, transitionIDs: ["agent-a"], needsYouPending: false))
+    }
+
+    func testHIDAccessIsNotReportedAsHardwareCompatibility() {
+        XCTAssertEqual(capsLockInputAccess(from: kIOHIDAccessTypeGranted), .granted)
+        XCTAssertEqual(capsLockInputAccess(from: kIOHIDAccessTypeDenied), .denied)
+        XCTAssertEqual(capsLockInputAccess(from: kIOHIDAccessTypeUnknown), .notDetermined)
     }
 
     func testVisibleWorkingToIdleIsACompletion() {

@@ -55,6 +55,11 @@ cp -R Argus.app /Applications/ && open /Applications/Argus.app
 The app discovers brokers automatically by probing your tailnet — no hostnames to configure.
 Terminal font size and UI scale are independently adjustable in Settings.
 
+`build-app.sh` signs installed builds with the single stable code-signing identity in your Keychain.
+If you have multiple valid identities, set `UT_CODESIGN_IDENTITY` to the intended certificate name
+or SHA-1 hash. The script refuses to install an ad-hoc-signed app because changing its code identity
+would discard macOS privacy grants on the next rebuild.
+
 </Tab>
 
 <Tab value="Android app">

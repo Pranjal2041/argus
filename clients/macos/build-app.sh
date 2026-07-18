@@ -21,8 +21,29 @@ cp -R Resources/wrapped "$APP/Contents/Resources/" 2>/dev/null || true   # Argus
 cp -R Resources/lab "$APP/Contents/Resources/" 2>/dev/null || true       # the Lab experiments hub (â§âL)
 
 # SwiftPM linker-signs the loose executable before these bundle resources exist.
-# Re-sign the finished bundle so its resource seal is valid after installation.
-codesign --force --deep --sign - --timestamp=none "$APP"
+# Re-sign the finished bundle with a stable identity so its resource seal is
+# valid and macOS privacy grants survive app updates. Never silently install an
+# ad-hoc-signed build: its designated requirement is tied to that one binary.
+SIGN_IDENTITY="${UT_CODESIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+    VALID_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk '/^[[:space:]]*[0-9]+\)/ { print $2 }')"
+    IDENTITY_COUNT="$(printf '%s\n' "$VALID_IDENTITIES" \
+        | awk 'NF { count++ } END { print count + 0 }')"
+    if [ "$IDENTITY_COUNT" -eq 1 ]; then
+        SIGN_IDENTITY="$(printf '%s\n' "$VALID_IDENTITIES" | awk 'NF { print; exit }')"
+    else
+        echo "Error: expected one stable code-signing identity, found $IDENTITY_COUNT." >&2
+        echo "Set UT_CODESIGN_IDENTITY to the certificate name or SHA-1 hash." >&2
+        exit 1
+    fi
+fi
+if [ "$SIGN_IDENTITY" = "-" ] && [ "${UT_NO_INSTALL:-0}" != "1" ]; then
+    echo "Error: refusing to install an ad-hoc-signed Argus.app." >&2
+    exit 1
+fi
+codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
+echo "Signed with stable identity: $SIGN_IDENTITY"
 
 echo "Built $(pwd)/$APP"
 
