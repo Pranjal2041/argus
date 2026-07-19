@@ -127,6 +127,88 @@ def terminal_table_document() -> dict:
     }
 
 
+def contaminated_transcript_document() -> dict:
+    default = 0
+    yellow = 1
+    stale_green = 2
+    stale_purple = 3
+    genuine_green = 4
+
+    def run(text: str, style: int = default) -> dict:
+        return {"text": text, "style": style, "link": None}
+
+    def line(*runs: dict) -> dict:
+        return {"runs": list(runs), "wrapped": False}
+
+    def style(foreground: str, background: str = "#11131A", bold: bool = False) -> dict:
+        return {
+            "foreground": foreground,
+            "background": background,
+            "bold": bold,
+            "italic": False,
+            "underline": None,
+            "underlineColor": None,
+            "strikethrough": False,
+        }
+
+    source = """Measured uniformly using the emitted reasoning prefix—not hidden model internals:
+
+| Model/mode | Raw coverage | Mean CoT/action |
+|---|---:|---:|
+| Dense2305 full | 128/128 | **104.89** |
+| Router-trained Step900 router | 128/128 | **68.36** |
+| No-router Stage B step900 full | 128/128 | **89.86** |
+| Router-trained Step900 full | 128/128 | **70.31** |
+
+Main observations follow.
+"""
+    return {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "source": source,
+        "sourceOrigin": "codex-transcript",
+        "terminal": {
+            "columns": 78,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [
+                style("#E8E9EE"),
+                style("#F1D18A", bold=True),
+                style("#AAB2BD", background="#31443A"),
+                style("#AAB2BD", background="#513040"),
+                style("#35C46A", bold=True),
+            ],
+            "lines": [
+                line(run("Main "), run("observations", stale_green), run(" follow.")),
+                line(),
+                line(run("Edited report: "), run("reason", stale_green), run(" "),
+                     run("router", stale_green), run(" "), run("68", stale_green),
+                     run(" "), run("66", stale_purple), run(" "), run("full", stale_green)),
+                line(),
+                line(run("Measured uniformly using the emitted reasoning prefix—not hidden model internals:")),
+                line(),
+                line(run(" Model/mode", yellow), run(" " * 22),
+                     run("Raw coverage", yellow), run("    "), run("Mean CoT/action", yellow)),
+                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
+                line(run(" Dense2305 full                   128/128         104.89")),
+                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
+                line(run(" Router-                          128/128         "),
+                     run("68.36", genuine_green)),
+                line(run(" trained")),
+                line(run(" Step900")),
+                line(run(" router")),
+                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
+                line(run(" No-router Stage B step900 full  128/128         89.86")),
+                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
+                line(run(" Router-trained Step900 full     128/128         70.31")),
+                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
+                line(),
+                line(run("Main observations follow.")),
+            ],
+        },
+    }
+
+
 def endpoint_source(endpoint: str, session: str) -> tuple[str, str]:
     query = urllib.parse.urlencode({"session": session})
     with urllib.request.urlopen(f"{endpoint.rstrip('/')}/render-source?{query}", timeout=10) as response:
@@ -236,6 +318,16 @@ def main() -> None:
             "element => getComputedStyle(element).color")
         assert pass_color != "rgb(31, 35, 40)", pass_color
         page.screenshot(path=str(output_dir / "borderless-table-rendered.png"), full_page=True)
+
+        contaminated = contaminated_transcript_document()
+        page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'rendered')", [contaminated])
+        contaminated_report = page.evaluate("window.UTRender.inspect()")
+        assert contaminated_report["error"] is None, contaminated_report["error"]
+        assert contaminated_report["tables"] == 1
+        assert page.locator('.terminal-accent[style*="background-color"]').count() == 0
+        assert page.locator('th [data-terminal-style="1"]').count() == 3
+        assert page.locator('td [data-terminal-style="4"]').text_content() == "68.36"
+        page.screenshot(path=str(output_dir / "context-aligned-colors.png"), full_page=True)
 
         page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'terminal')", [active_document])
         terminal = page.evaluate("window.UTRender.inspect()")
