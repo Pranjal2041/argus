@@ -143,6 +143,108 @@ final class RenderWebIntegrationTests: XCTestCase {
         XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
     }
 
+    func testTranscriptStylesRequireMatchingTerminalContext() async throws {
+        let webView = try await loadRenderer()
+        let source = """
+        Measured uniformly using the emitted reasoning prefix—not hidden model internals:
+
+        | Model/mode | Raw coverage | Mean CoT/action |
+        |---|---:|---:|
+        | Dense2305 full | 128/128 | **104.89** |
+        | Router-trained Step900 router | 128/128 | **68.36** |
+        | No-router Stage B step900 full | 128/128 | **89.86** |
+        | Router-trained Step900 full | 128/128 | **70.31** |
+
+        Main observations follow.
+        """
+        let terminal: [String: Any] = [
+            "columns": 78,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [
+                terminalStyle(foreground: "#E8E9EE"),
+                terminalStyle(foreground: "#F1D18A", bold: true),
+                terminalStyle(foreground: "#AAB2BD", background: "#31443A"),
+                terminalStyle(foreground: "#AAB2BD", background: "#513040"),
+                terminalStyle(foreground: "#35C46A", bold: true),
+            ],
+            "lines": [
+                // Even an exact line repeated earlier must not override the
+                // latest copy that belongs to the selected response.
+                terminalLine([
+                    terminalRun("Main "),
+                    terminalRun("observations", style: 2),
+                    terminalRun(" follow."),
+                ]),
+                terminalLine([]),
+                // These styled fragments belong to an earlier diff in the same
+                // scrollback snapshot. Bare substring replay used to paint the
+                // matching fragments in the later response below.
+                terminalLine([
+                    terminalRun("Edited report: "),
+                    terminalRun("reason", style: 2),
+                    terminalRun(" "),
+                    terminalRun("router", style: 2),
+                    terminalRun(" "),
+                    terminalRun("68", style: 2),
+                    terminalRun(" "),
+                    terminalRun("66", style: 3),
+                    terminalRun(" "),
+                    terminalRun("full", style: 2),
+                ]),
+                terminalLine([]),
+                terminalLine([terminalRun("Measured uniformly using the emitted reasoning prefix—not hidden model internals:")]),
+                terminalLine([]),
+                terminalLine([
+                    terminalRun(" Model/mode", style: 1),
+                    terminalRun("                      "),
+                    terminalRun("Raw coverage", style: 1),
+                    terminalRun("    "),
+                    terminalRun("Mean CoT/action", style: 1),
+                ]),
+                terminalLine([terminalRun(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")]),
+                terminalLine([terminalRun(" Dense2305 full                   128/128         104.89")]),
+                terminalLine([terminalRun(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")]),
+                terminalLine([
+                    terminalRun(" Router-                          128/128         "),
+                    terminalRun("68.36", style: 4),
+                ]),
+                terminalLine([terminalRun(" trained")]),
+                terminalLine([terminalRun(" Step900")]),
+                terminalLine([terminalRun(" router")]),
+                terminalLine([terminalRun(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")]),
+                terminalLine([terminalRun(" No-router Stage B step900 full  128/128         89.86")]),
+                terminalLine([terminalRun(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")]),
+                terminalLine([terminalRun(" Router-trained Step900 full     128/128         70.31")]),
+                terminalLine([terminalRun(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")]),
+                terminalLine([]),
+                terminalLine([terminalRun("Main observations follow.")]),
+            ],
+        ]
+        try await setDocument(webView, source: source, origin: "codex-transcript",
+                              presentation: "rendered", terminal: terminal)
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.int("tables"), 1)
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+
+        let leakedBackgrounds = try await webView.evaluateJavaScript(
+            "document.querySelectorAll('.terminal-accent[style*=\"background-color\"]').length"
+        ) as? NSNumber
+        XCTAssertEqual(leakedBackgrounds?.intValue, 0)
+
+        let styledHeader = try await webView.evaluateJavaScript(
+            "document.querySelectorAll('th [data-terminal-style=\"1\"]').length"
+        ) as? NSNumber
+        XCTAssertEqual(styledHeader?.intValue, 3)
+
+        let genuineValue = try await webView.evaluateJavaScript(
+            "document.querySelector('td [data-terminal-style=\"4\"]')?.textContent"
+        ) as? String
+        XCTAssertEqual(genuineValue, "68.36")
+    }
+
     func testTerminalFallbackDoesNotTurnURLWithUnderscoresIntoMath() async throws {
         let webView = try await loadRenderer()
         let source = """

@@ -615,52 +615,336 @@
       .replace(/⟦UTTERMTABLE(\d+)⟧/g, (_, index) => tables[+index] || "");
   }
 
-  // Semantic Markdown stays semantic, but accent-colored terminal runs are
-  // re-applied after parsing. Styling after marked avoids wrapping `##`, `**`,
-  // or link delimiters in spans and accidentally disabling Markdown itself.
+  // Semantic Markdown stays semantic, but intentional terminal colors can be
+  // carried onto it after parsing. A terminal snapshot contains considerably
+  // more than the selected answer (old tool diffs, prompts, status chrome), so
+  // a colored run is NEVER located by its text alone. Instead, complete prose
+  // lines and complete table rows must first align to one unique DOM block;
+  // only styles at the corresponding character offsets are then transferred.
+  // This keeps real accents while making short values such as "62" incapable
+  // of borrowing a background from an unrelated line in scrollback.
   function applyTerminalAccents(root, term, excludedLineIndexes) {
     if (!term || !Array.isArray(term.lines) || !Array.isArray(term.styles)) return;
     const excluded = excludedLineIndexes || new Set();
-    for (let lineIndex = 0; lineIndex < term.lines.length; lineIndex++) {
-      if (excluded.has(lineIndex)) continue;
-      for (const run of (term.lines[lineIndex].runs || [])) {
-        const style = term.styles[run.style] || {};
-        const foregroundDiffers = style.foreground &&
-          String(style.foreground).toLowerCase() !== String(term.foreground || "").toLowerCase();
-        const backgroundDiffers = style.background &&
-          String(style.background).toLowerCase() !== String(term.background || "").toLowerCase();
-        if (!foregroundDiffers && !backgroundDiffers) continue;
+    const table = terminalTableStyleUnits(term, excluded);
+    const units = table.units.concat(terminalProseStyleUnits(term, excluded, table.lineIndexes));
+    const tableCandidates = contextCandidates(root, "table");
+    const proseCandidates = contextCandidates(root, "prose");
+    const operations = [];
+    const prepared = units.map((unit) => ({ unit, normalized: normalizeStyledSegments(unit.segments) }));
+    const latestContext = new Map();
+    for (let i = 0; i < prepared.length; i++) {
+      latestContext.set(prepared[i].unit.kind + "\u0000" + prepared[i].normalized.text, i);
+    }
 
-        let needle = (run.text || "").trim()
-          .replace(/^(?:⏺|⎿)\s+/, "")
-          .replace(/^(?:#{1,6}|>|[-+*]|\d+\.)\s+/, "")
-          .replace(/^(?:\*\*|__|~~|`)+|(?:\*\*|__|~~|`)+$/g, "")
-          .trim();
-        if (needle.length < 2 || needle.length > 500 || terminalTableColumns(needle)) continue;
-        wrapFirstTerminalAccent(root, needle, term, run.style);
+    for (let unitIndex = 0; unitIndex < prepared.length; unitIndex++) {
+      const { unit, normalized } = prepared[unitIndex];
+      if (!credibleStyleContext(normalized.text)) continue;
+      // The same output can appear more than once in scrollback (for example,
+      // once in a tool diff and again in the final answer). The selected answer
+      // is the newest occurrence, so an older identical context is stale.
+      if (latestContext.get(unit.kind + "\u0000" + normalized.text) !== unitIndex) continue;
+      const candidates = unit.kind === "table" ? tableCandidates : proseCandidates;
+      const matches = [];
+      for (const candidate of candidates) {
+        const at = uniqueOccurrence(candidate.normalized.text, normalized.text);
+        if (at >= 0) matches.push({ candidate, at });
       }
+      // Nested/repeated prose and repeated historical output are deliberately
+      // ambiguous. Dropping an accent is preferable to coloring the wrong text.
+      if (matches.length !== 1) continue;
+      collectStyleOperations(operations, matches[0].candidate, matches[0].at,
+        normalized.styles, term);
+    }
+    applyStyleOperations(operations, term);
+  }
+
+  function styleHasAccent(term, styleIndex) {
+    if (styleIndex === null || styleIndex === undefined) return false;
+    const style = (term.styles && term.styles[styleIndex]) || {};
+    const foregroundDiffers = style.foreground &&
+      String(style.foreground).toLowerCase() !== String(term.foreground || "").toLowerCase();
+    const backgroundDiffers = style.background &&
+      String(style.background).toLowerCase() !== String(term.background || "").toLowerCase();
+    return !!(foregroundDiffers || backgroundDiffers);
+  }
+
+  function terminalTableStyleUnits(term, excluded) {
+    const units = [];
+    const lineIndexes = new Set();
+    for (let i = 0; i < term.lines.length;) {
+      if (excluded.has(i) || !terminalLineText(term.lines[i]).trim()) { i++; continue; }
+      const start = i;
+      while (i < term.lines.length && !excluded.has(i) && terminalLineText(term.lines[i]).trim()) i++;
+      const end = i;
+      const lines = term.lines.slice(start, end);
+      let columns = null;
+      for (const line of lines) {
+        columns = terminalTableColumns(terminalLineText(line));
+        if (columns) break;
+      }
+      if (!columns) continue;
+
+      const chunks = [];
+      let current = [];
+      let ruleCount = 0;
+      for (const line of lines) {
+        if (terminalTableColumns(terminalLineText(line))) {
+          if (current.length) chunks.push(current);
+          current = [];
+          ruleCount++;
+        } else {
+          current.push(line);
+        }
+      }
+      if (current.length) chunks.push(current);
+      if (!ruleCount) continue;
+
+      for (let line = start; line < end; line++) lineIndexes.add(line);
+      for (const chunk of chunks) {
+        // Codex draws a rule between every body row. In that form, every
+        // visual line between rules is one logical row even when the first
+        // cell itself wraps ("Router-" / "trained" / "Step900" / "router").
+        // A one-rule Markdown table has no body separators and still needs the
+        // first-column row-start heuristic used by the fallback renderer.
+        const rows = ruleCount > 1
+          ? [chunk.map((line) => sliceTerminalTableLine(line, columns))]
+          : splitTerminalTableChunk(chunk, columns);
+        for (const row of rows) {
+          const segments = [];
+          const columnCount = row[0] ? row[0].length : 0;
+          for (let column = 0; column < columnCount; column++) {
+            const visualCells = row.map((visualLine) => visualLine[column])
+              .filter((cells) => cells && cells.length);
+            if (!visualCells.length) continue;
+            if (segments.length) segments.push({ text: " ", style: null });
+            let previousCellText = "";
+            for (const cells of visualCells) {
+              // A TUI line break after a hyphen is a word continuation, not
+              // authored whitespace (Router- + trained => Router-trained).
+              if (previousCellText && !/[-‐‑‒–—]$/.test(previousCellText)) {
+                segments.push({ text: " ", style: null });
+              }
+              appendCellSegments(segments, cells);
+              previousCellText = terminalCellText(cells).trimEnd();
+            }
+          }
+          if (segments.length) units.push({ kind: "table", segments });
+        }
+      }
+    }
+    return { units, lineIndexes };
+  }
+
+  function appendCellSegments(segments, cells) {
+    for (const cell of cells) {
+      const previous = segments[segments.length - 1];
+      if (previous && previous.style === cell.style) previous.text += cell.character;
+      else segments.push({ text: cell.character, style: cell.style });
     }
   }
 
-  function wrapFirstTerminalAccent(root, needle, term, styleIndex) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      const parent = node.parentElement;
-      if (!parent || parent.closest("pre,code,.katex,.terminal-table,[data-terminal-style]")) continue;
-      const at = node.nodeValue.indexOf(needle);
-      if (at < 0) continue;
+  function terminalProseStyleUnits(term, excluded, tableLineIndexes) {
+    const units = [];
+    let current = null;
+    const flush = () => {
+      if (current && current.segments.length) units.push(current);
+      current = null;
+    };
+    for (let i = 0; i < term.lines.length; i++) {
+      const line = term.lines[i];
+      const text = terminalLineText(line);
+      if (excluded.has(i) || tableLineIndexes.has(i) || terminalTableColumns(text) || !text.trim()) {
+        flush();
+        continue;
+      }
+      if (!line.wrapped || !current) {
+        flush();
+        current = { kind: "prose", segments: [] };
+      }
+      for (const run of (line.runs || [])) {
+        current.segments.push({ text: run.text || "", style: run.style });
+      }
+    }
+    flush();
+    return units;
+  }
+
+  function normalizeStyledSegments(segments) {
+    let text = "";
+    const styles = [];
+    let pendingSpace = false;
+    let pendingSpaceStyle;
+    for (const segment of segments) {
+      const value = segment.text || "";
+      for (let i = 0; i < value.length; i++) {
+        const character = value[i];
+        if (/\s/.test(character)) {
+          if (text.length > 0) {
+            if (!pendingSpace) pendingSpaceStyle = segment.style;
+            else if (pendingSpaceStyle !== segment.style) pendingSpaceStyle = null;
+            pendingSpace = true;
+          }
+          continue;
+        }
+        if (pendingSpace) {
+          text += " ";
+          styles.push(pendingSpaceStyle === undefined ? null : pendingSpaceStyle);
+          pendingSpace = false;
+          pendingSpaceStyle = undefined;
+        }
+        text += character;
+        styles.push(segment.style === undefined ? null : segment.style);
+      }
+    }
+    // Agent/list chrome is not part of the authored Markdown DOM. Removing it
+    // here (with the parallel style slots) keeps offsets aligned afterwards.
+    const prefix = text.match(/^(?:(?:⏺|⎿|›|•|[-+*]|\d+\.)\s+)/);
+    if (prefix) {
+      text = text.slice(prefix[0].length);
+      styles.splice(0, prefix[0].length);
+    }
+    return { text, styles };
+  }
+
+  function credibleStyleContext(text) {
+    if (!text || text.length < 12 || text.length > 2000) return false;
+    return (text.match(/[\p{L}\p{N}]+/gu) || []).length >= 2;
+  }
+
+  function contextCandidates(root, kind) {
+    const selector = kind === "table"
+      ? "table:not(.terminal-table) tr"
+      : "h1,h2,h3,h4,h5,h6,p,li,blockquote";
+    return Array.from(root.querySelectorAll(selector))
+      .filter((element) => !element.closest("pre,code,.katex,.terminal-table,[data-terminal-style]"))
+      .filter((element) => kind === "table" || !element.querySelector("p,li,blockquote"))
+      .map((element) => ({ element, normalized: normalizedElementMap(element) }))
+      .filter((candidate) => candidate.normalized.text.length > 0);
+  }
+
+  // Build normalized visible text together with the exact DOM character that
+  // produced each position. Table cells need a virtual separator because raw
+  // textContent concatenates adjacent TD/TH nodes without whitespace.
+  function normalizedElementMap(element) {
+    const raw = [];
+    const virtualSpace = () => raw.push({ character: " ", node: null, offset: -1 });
+    const visit = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const value = node.nodeValue || "";
+        for (let i = 0; i < value.length; i++) {
+          raw.push({ character: value[i], node, offset: i });
+        }
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.tagName === "BR") { virtualSpace(); return; }
+      const children = Array.from(node.childNodes);
+      for (let i = 0; i < children.length; i++) {
+        if (i > 0 && node.tagName === "TR") virtualSpace();
+        visit(children[i]);
+      }
+    };
+    visit(element);
+
+    let text = "";
+    const map = [];
+    let pendingSpace = false;
+    let pendingSpaceMap = null;
+    for (const item of raw) {
+      if (/\s/.test(item.character)) {
+        if (text.length > 0) {
+          pendingSpace = true;
+          if (!pendingSpaceMap && item.node) {
+            pendingSpaceMap = { node: item.node, offset: item.offset };
+          }
+        }
+        continue;
+      }
+      if (pendingSpace) {
+        text += " ";
+        map.push(pendingSpaceMap);
+        pendingSpace = false;
+        pendingSpaceMap = null;
+      }
+      text += item.character;
+      map.push(item.node ? { node: item.node, offset: item.offset } : null);
+    }
+    return { text, map };
+  }
+
+  function uniqueOccurrence(haystack, needle) {
+    const first = haystack.indexOf(needle);
+    if (first < 0) return -1;
+    return haystack.indexOf(needle, first + 1) < 0 ? first : -1;
+  }
+
+  function collectStyleOperations(operations, candidate, contextStart, styles, term) {
+    let i = 0;
+    while (i < styles.length) {
+      const styleIndex = styles[i];
+      let end = i + 1;
+      while (end < styles.length && styles[end] === styleIndex) end++;
+      if (styleHasAccent(term, styleIndex)) {
+        let runStart = -1;
+        let previous = null;
+        for (let offset = i; offset < end; offset++) {
+          const mapped = candidate.normalized.map[contextStart + offset];
+          const contiguous = mapped && previous && mapped.node === previous.node &&
+            mapped.offset === previous.offset + 1;
+          if (!mapped || (previous && !contiguous)) {
+            if (runStart >= 0 && previous) {
+              operations.push({ node: previous.node, start: runStart,
+                end: previous.offset + 1, style: styleIndex });
+            }
+            runStart = mapped ? mapped.offset : -1;
+          } else if (!previous) {
+            runStart = mapped.offset;
+          }
+          previous = mapped;
+        }
+        if (runStart >= 0 && previous) {
+          operations.push({ node: previous.node, start: runStart,
+            end: previous.offset + 1, style: styleIndex });
+        }
+      }
+      i = end;
+    }
+  }
+
+  function applyStyleOperations(operations, term) {
+    const byNode = new Map();
+    for (const operation of operations) {
+      if (!operation.node || operation.start >= operation.end) continue;
+      const list = byNode.get(operation.node) || [];
+      if (!list.some((item) => item.start === operation.start && item.end === operation.end &&
+        item.style === operation.style)) {
+        list.push(operation);
+        byNode.set(operation.node, list);
+      }
+    }
+    for (const [node, values] of byNode) {
+      values.sort((a, b) => a.start - b.start || a.end - b.end);
+      const accepted = [];
+      for (const value of values) {
+        if (!accepted.length || value.start >= accepted[accepted.length - 1].end) accepted.push(value);
+      }
+      if (!accepted.length || !node.parentNode) continue;
+      const source = node.nodeValue || "";
       const fragment = document.createDocumentFragment();
-      fragment.appendChild(document.createTextNode(node.nodeValue.slice(0, at)));
-      const span = document.createElement("span");
-      span.className = "terminal-accent";
-      span.dataset.terminalStyle = String(styleIndex);
-      span.style.cssText = terminalStyleCSS(term, styleIndex);
-      span.textContent = needle;
-      fragment.appendChild(span);
-      fragment.appendChild(document.createTextNode(node.nodeValue.slice(at + needle.length)));
+      let cursor = 0;
+      for (const value of accepted) {
+        fragment.appendChild(document.createTextNode(source.slice(cursor, value.start)));
+        const span = document.createElement("span");
+        span.className = "terminal-accent";
+        span.dataset.terminalStyle = String(value.style);
+        span.style.cssText = terminalStyleCSS(term, value.style);
+        span.textContent = source.slice(value.start, value.end);
+        fragment.appendChild(span);
+        cursor = value.end;
+      }
+      fragment.appendChild(document.createTextNode(source.slice(cursor)));
       node.parentNode.replaceChild(fragment, node);
-      return;
     }
   }
 
