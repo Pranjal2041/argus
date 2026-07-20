@@ -7,6 +7,7 @@ struct Machine: Identifiable, Hashable {
     var name: String
     var host: String = ""  // broker's OS hostname from /whoami; equals /history's `node`, so a
                            // history row maps to this machine even when name (--name) differs
+    var os: String = ""    // runtime.GOOS from /whoami; empty only for older brokers
     var isLocal: Bool
     var httpBase: String // e.g. http://127.0.0.1:8722
     var wsBase: String   // e.g. ws://127.0.0.1:8722
@@ -1495,7 +1496,7 @@ func discoverMachines() -> [Machine] {
         // the Tailscale app) serves plain http/ws. Hardcoding https made those
         // brokers discoverable but their /sessions + /ws unreachable.
         let ws = probe.scheme == "https" ? "wss" : "ws"
-        let m = Machine(id: dns, name: probe.name, host: probe.host, isLocal: false,
+        let m = Machine(id: dns, name: probe.name, host: probe.host, os: probe.os, isLocal: false,
                         httpBase: "\(probe.scheme)://\(dns):8722", wsBase: "\(ws)://\(dns):8722")
         lock.lock(); found.append(m); lock.unlock()
     }
@@ -1507,19 +1508,19 @@ func discoverMachines() -> [Machine] {
 /// display name iff `:8722/whoami` returns our marker — so an unrelated service on
 /// that port is never treated as a broker. Tries HTTPS (tsnet brokers serve a real
 /// `*.ts.net` cert) then plain HTTP (a broker bound to a host's own tailnet IP).
-private func probeBroker(dns: String) -> (name: String, host: String, scheme: String)? {
+private func probeBroker(dns: String) -> (name: String, host: String, os: String, scheme: String)? {
     for scheme in ["https", "http"] {
-        if let r = probeWhoami("\(scheme)://\(dns):8722/whoami") { return (r.name, r.host, scheme) }
+        if let r = probeWhoami("\(scheme)://\(dns):8722/whoami") { return (r.name, r.host, r.os, scheme) }
     }
     return nil
 }
 
-private func probeWhoami(_ urlString: String) -> (name: String, host: String)? {
+private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String)? {
     guard let url = URL(string: urlString) else { return nil }
     var req = URLRequest(url: url)
     req.timeoutInterval = 2.5
     let sem = DispatchSemaphore(value: 0)
-    var result: (name: String, host: String)?
+    var result: (name: String, host: String, os: String)?
     URLSession.shared.dataTask(with: req) { data, _, err in
         defer { sem.signal() }
         guard err == nil, let data,
@@ -1527,7 +1528,8 @@ private func probeWhoami(_ urlString: String) -> (name: String, host: String)? {
               obj["service"] as? String == "universal-tmux-broker" else { return }
         let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "broker"
         let host = (obj["host"] as? String) ?? ""  // older brokers omit it; host-match just won't fire
-        result = (name, host)
+        let os = (obj["os"] as? String) ?? ""      // older brokers: server-side path repair still applies
+        result = (name, host, os)
     }.resume()
     _ = sem.wait(timeout: .now() + 3)
     return result

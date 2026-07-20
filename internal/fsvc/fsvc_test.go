@@ -110,6 +110,46 @@ func TestStatMissingIsBestEffort(t *testing.T) {
 	}
 }
 
+func TestNormalizeWindowsDrivePath(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`/D:/gym_anything_for_robotics/plan.md`, `D:/gym_anything_for_robotics/plan.md`},
+		{`\D:\gym_anything_for_robotics\plan.md`, `D:\gym_anything_for_robotics\plan.md`},
+		{`/d:\work\plan.md`, `d:\work\plan.md`},
+		{`\d:/work/plan.md`, `d:/work/plan.md`},
+		{`/usr/local/file.md`, `/usr/local/file.md`},
+		{`\rooted\file.md`, `\rooted\file.md`},
+		{`//server/share/file.md`, `//server/share/file.md`},
+		{`\\server\share\file.md`, `\\server\share\file.md`},
+		{`\\?\D:\work\file.md`, `\\?\D:\work\file.md`},
+		{`/D:relative.md`, `/D:relative.md`},
+		{`D:/already/absolute.md`, `D:/already/absolute.md`},
+	}
+	for _, tt := range tests {
+		if got := normalizeWindowsDrivePath(tt.in); got != tt.want {
+			t.Errorf("normalizeWindowsDrivePath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestStatSlashPrefixedDrivePathOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path semantics")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clicked.md")
+	if err := os.WriteFile(path, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	slashPrefixed := "/" + filepath.ToSlash(path)
+	s := Stat(slashPrefixed, `C:\irrelevant-base`)
+	if !s.Exists || filepath.Clean(s.Path) != filepath.Clean(path) {
+		t.Fatalf("Stat(%q): got %+v, want existing %q", slashPrefixed, s, path)
+	}
+}
+
 func TestListAbsolute(t *testing.T) {
 	base := tree(t)
 	res, err := List(base, "")

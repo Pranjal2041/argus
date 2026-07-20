@@ -50,6 +50,21 @@ private struct GrepResp: Codable {
 private struct HomeResp: Codable { let home: String; let roots: [String]; let sep: String }
 private struct StatResp: Codable { let path: String; let name: String; let isDir: Bool; let exists: Bool; let size: Int64 }
 
+/// Terminal link/file-URL detection on macOS represents a Windows drive path as
+/// `/D:/folder/file`. Windows treats that as drive-relative and the old broker
+/// consequently resolved it as `C:\D:\folder\file`. Repair only for a confirmed
+/// Windows host; POSIX is allowed to have a literal `/D:` directory.
+func normalizedTerminalPath(_ rawPath: String, remoteOS: String) -> String {
+    guard remoteOS.caseInsensitiveCompare("windows") == .orderedSame else { return rawPath }
+    let bytes = Array(rawPath.utf8)
+    guard bytes.count >= 4,
+          bytes[0] == 47 || bytes[0] == 92,                 // / or \
+          (bytes[1] >= 65 && bytes[1] <= 90) || (bytes[1] >= 97 && bytes[1] <= 122),
+          bytes[2] == 58,                                   // :
+          bytes[3] == 47 || bytes[3] == 92 else { return rawPath }
+    return String(rawPath.dropFirst())
+}
+
 // MARK: - tree node (reference type for lazy expansion)
 
 final class FileNode: ObservableObject, Identifiable {
@@ -778,8 +793,9 @@ final class FilesModel: ObservableObject {
         let t = FileTab(machine: machine)
         tabs.append(t)
         activeID = t.id
+        let path = normalizedTerminalPath(rawPath, remoteOS: machine.os)
         Task {
-            if let s = await Self.stat(machine.httpBase, path: rawPath, base: base) {
+            if let s = await Self.stat(machine.httpBase, path: path, base: base) {
                 await t.openResolved(s.path, isDir: s.isDir, exists: s.exists, name: s.name, size: s.size, line: line)
             } else {
                 t.start()   // old broker without /fs/stat → fall back to home
