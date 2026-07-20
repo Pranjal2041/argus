@@ -75,6 +75,29 @@ func expandUser(p string) string {
 	return p
 }
 
+// normalizeWindowsDrivePath repairs the slash-prefixed drive form commonly
+// produced by terminal link detectors and file URLs on Windows:
+//
+//	/D:/work/file.md  -> D:/work/file.md
+//	\D:\work\file.md -> D:\work\file.md
+//
+// Windows does not consider the input form absolute. filepath.Join therefore
+// resolves it below the current drive (for example C:\D:\work\file.md). Only
+// strip the prefix when a real drive designator is followed by a separator;
+// ordinary rooted paths and UNC/device paths must remain untouched.
+func normalizeWindowsDrivePath(p string) string {
+	if len(p) >= 4 && isPathSeparator(p[0]) && isASCIILetter(p[1]) && p[2] == ':' && isPathSeparator(p[3]) {
+		return p[1:]
+	}
+	return p
+}
+
+func isPathSeparator(b byte) bool { return b == '/' || b == '\\' }
+
+func isASCIILetter(b byte) bool {
+	return b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
 // resolveCandidates expands ~ and $VAR/${VAR} in path and returns the cleaned
 // candidate paths to try, in priority order:
 //   - an absolute path stands alone;
@@ -92,6 +115,10 @@ func resolveCandidates(path, base string) []string {
 		p = os.ExpandEnv(p)
 	}
 	base = strings.TrimSpace(base)
+	if runtime.GOOS == "windows" {
+		p = normalizeWindowsDrivePath(p)
+		base = normalizeWindowsDrivePath(base)
+	}
 
 	var cands []string
 	rooted := strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
