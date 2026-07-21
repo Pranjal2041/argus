@@ -6,7 +6,7 @@ import {
   Workflow, Terminal, FileCode2, ListTodo, Cable, History, Palette,
   Check, ArrowRight, Cpu, Laptop, Smartphone, Monitor,
   Radar, LineChart, Notebook, StickyNote, RefreshCw, Coffee,
-  ShieldCheck, Sparkles, TerminalSquare, GitBranch, BookOpen, FlaskConical,
+  ShieldCheck, Sparkles, TerminalSquare, GitBranch, BookOpen, FlaskConical, Archive,
 } from 'lucide-react';
 
 function Github({ size = 17 }: { size?: number }) {
@@ -57,6 +57,7 @@ const tiles = [
   { icon: RefreshCw, t: 'Cross-device sync', d: 'Workflows, todos, and notes follow you from Mac to phone, with your Mac as the sync host.' },
   { icon: Coffee, t: 'Awake while locked', d: 'Keep the Mac reachable behind a lock screen, so tmux, the broker, and your jobs keep running.' },
   { icon: BookOpen, t: 'Activity journal', d: 'A local, append-only record of what you saw, said, and did across Mac and phone, with a first-class in-app ledger.' },
+  { icon: Archive, t: 'Panel artifacts', d: 'Save an exact Render PDF on purpose, then find it later by panel or filename in one local library.' },
   { icon: Sparkles, t: 'Argus Wrapped', d: 'A living story and dashboard of your fleet, rhythm, delegation, interventions, experiments, and shipped work — derived from the journal.' },
 ];
 

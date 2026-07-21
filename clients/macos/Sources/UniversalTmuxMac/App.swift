@@ -14,6 +14,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var wrappedHost = WrappedPanelHost()  // Argus Wrapped deck/dashboard webview (kept alive)
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
     @StateObject private var lab = LabModel()                      // Argus Lab (experiments hub)
+    @StateObject private var artifacts = ArtifactStore()           // explicit Render → PDF library
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
 
     var body: some Scene {
@@ -29,6 +30,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(ledgerHost)
                 .environmentObject(commandCenter)
                 .environmentObject(lab)
+                .environmentObject(artifacts)
                 .environmentObject(themeStore)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
@@ -59,18 +61,27 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false } }
+                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
-                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showNotes = false; state.showLedger = false; state.showLab = false } }
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
-                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showTodos = false; state.showLedger = false; state.showLab = false } }
+                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLab = false } }
+                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
-                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLedger = false } }
+                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
+                Button("Artifacts…") {
+                    if state.showArtifacts {
+                        state.showArtifacts = false
+                    } else {
+                        artifacts.openLibrary()
+                        state.presentArtifacts()
+                    }
+                }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
                 Button("Argus Wrapped…") { state.openWindowRequest = "wrapped" }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
@@ -423,6 +434,7 @@ struct HiddenPanelsView: View {
                                 state.unhide(it.ref)
                                 state.selection = it.ref
                                 state.showOverview = false
+                                state.showArtifacts = false
                                 state.showHiddenPicker = false
                             }
                         }
@@ -660,6 +672,7 @@ struct RootView: View {
     @EnvironmentObject var ledgerHost: LedgerPanelHost
     @EnvironmentObject var commandCenter: CommandCenterModel
     @EnvironmentObject var lab: LabModel
+    @EnvironmentObject var artifacts: ArtifactStore
     @ViewBuilder private var ledgerPane: some View {
         LedgerView(panel: ledgerHost.panel).onAppear { ledgerHost.panel.refresh() }
     }
@@ -701,7 +714,9 @@ struct RootView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             Group {
-                if state.showLab {
+                if state.showArtifacts {
+                    ArtifactsView()
+                } else if state.showLab {
                     LabCenterView()
                 } else if state.showLedger {
                     ledgerPane
@@ -721,12 +736,24 @@ struct RootView: View {
         .ignoresSafeArea() // fill the entire window; columns space their own top edge
         .overlay {
             if let document = state.renderDocument {
-                RenderPanel(document: document).environmentObject(state)
+                RenderPanel(document: document)
+                    .environmentObject(state)
+                    .environmentObject(artifacts)
             }
         }
         .background(WindowAccessor(onFullscreen: { isFullscreen = $0 }))
         .onAppear {
             MainThreadStallMonitor.shared.start()
+            ledgerHost.panel.onOpenArtifact = { id in
+                guard let record = artifacts.records.first(where: { $0.id == id }) else {
+                    artifacts.errorMessage = "That PDF is no longer in the artifact library."
+                    artifacts.openLibrary()
+                    state.presentArtifacts()
+                    return
+                }
+                artifacts.open(artifact: record)
+                state.presentArtifacts()
+            }
             AttentionNotifier.shared.attach(state)
             commandCenter.bind(state)
             // Preserve the command center's prior lazy-start behavior unless the
@@ -761,7 +788,7 @@ struct RootView: View {
                     // adding a new one now becomes a compile-time requirement instead of
                     // an EnvironmentObject runtime trap when the palette first renders.
                     CommandPalette(machineName: machineName, state: state,
-                                   terminals: terminals, lab: lab)
+                                   terminals: terminals, lab: lab, artifacts: artifacts)
                 }
             } else {
                 PaletteWindow.shared.hide()
@@ -915,11 +942,11 @@ struct RootView: View {
             IconButton(system: "rectangle.on.rectangle.angled", help: "Dashboards") { openWindow(id: "dashboards") }
             IconButton(system: "book.closed", help: "Activity Ledger (⇧⌘J)") {
                 state.showLedger.toggle()
-                if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLab = false }
+                if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false }
             }
             IconButton(system: "flask", help: "Lab (⇧⌘L)") {
                 state.showLab.toggle()
-                if state.showLab { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLedger = false }
+                if state.showLab { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false }
             }
         }
         .frame(height: 34)
@@ -1036,7 +1063,7 @@ struct RootView: View {
                         unseen: state.unseen.contains(ref.id),
                         folderText: state.folderDisplay((s.path?.isEmpty == false) ? s.path! : "—", isLocal: m.isLocal),
                         selected: state.selection == ref,
-                        onTap: { state.selection = ref; state.showOverview = false },
+                        onTap: { state.selection = ref; state.showOverview = false; state.showArtifacts = false },
                         onRename: { state.renameText = s.name; state.renameTarget = ref },
                         onKill: { state.killTarget = ref },
                         onCopyName: {
@@ -1045,7 +1072,7 @@ struct RootView: View {
                         },
                         onHide: { state.hide(ref) },
                         wandbRuns: terminals.wandbRuns(for: ref),
-                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; terminals.showWandb(ref, run: run) },
+                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; state.showArtifacts = false; terminals.showWandb(ref, run: run) },
                         onClearWandb: { run in terminals.clearWandb(run, for: ref) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
@@ -1055,7 +1082,7 @@ struct RootView: View {
                             : nil,
                         onGit: !state.resolveBase(for: ref).isEmpty
                             ? {
-                                state.selection = ref; state.showOverview = false
+                                state.selection = ref; state.showOverview = false; state.showArtifacts = false
                                 if !terminals.isGitShown(ref) {
                                     terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.resolveBase(for: ref))
                                 }
@@ -1083,7 +1110,7 @@ struct RootView: View {
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Theme.accent.opacity(0.16) : Color.clear))
         .contentShape(Rectangle())
-        .onTapGesture { notebooks.select(nb.id) }
+        .onTapGesture { notebooks.select(nb.id); state.showArtifacts = false }
     }
 
     private func folderLabel(_ text: String) -> some View {
@@ -1334,6 +1361,18 @@ struct RootView: View {
                 IconButton(system: "safari", help: "Open in browser") { nb.tab.openInSystemBrowser() }
             } else {
                 if let ref = state.selection {
+                    if let context = state.artifactContext(for: ref) {
+                        let artifactCount = artifacts.count(for: context.key)
+                        IconButton(
+                            system: artifactCount > 0 ? "archivebox.fill" : "archivebox",
+                            help: artifactCount == 0
+                                ? "Artifacts for this panel"
+                                : "Artifacts for this panel (\(artifactCount) PDF\(artifactCount == 1 ? "" : "s"))"
+                        ) {
+                            artifacts.open(panel: context)
+                            state.presentArtifacts()
+                        }
+                    }
                     // Git panel toggle: lazygit in this session's folder, in place of
                     // the terminal (⇧⌘G).
                     IconButton(system: terminals.isGitShown(ref) ? "terminal" : "arrow.triangle.branch",
@@ -1594,6 +1633,7 @@ struct CommandPalette: View {
     @ObservedObject var state: AppState
     @ObservedObject var terminals: TerminalController
     @ObservedObject var lab: LabModel
+    @ObservedObject var artifacts: ArtifactStore
     @State private var query = ""
     @State private var sel = 0
     @FocusState private var focused: Bool
@@ -1616,6 +1656,7 @@ struct CommandPalette: View {
                 out.append(Item(id: "s:" + ref.id, icon: "terminal", title: ref.session, subtitle: mn) {
                     state.selection = ref
                     state.showOverview = false
+                    state.showArtifacts = false
                 })
             }
         }
@@ -1625,6 +1666,10 @@ struct CommandPalette: View {
             ("magnifyingglass", "Find in Terminal", "⌘F", { state.showFind = true; state.findFocusToken &+= 1 }),
             ("sparkles", "Render Output", "⇧⌘M", {
                 RenderLauncher.open(state: state, terminals: terminals)
+            }),
+            ("archivebox", "Open Artifacts", "⇧⌘I", {
+                artifacts.openLibrary()
+                state.presentArtifacts()
             }),
             ("pencil", "Rename Current Session…", "⇧⌘R",
              { if let s = state.selection { state.renameText = s.session; state.renameTarget = s } }),

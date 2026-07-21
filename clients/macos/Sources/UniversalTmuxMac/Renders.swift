@@ -148,6 +148,7 @@ private struct RenderSourceResponse: Decodable {
 enum RenderLauncher {
     static func open(state: AppState, terminals: TerminalController) {
         guard let document = terminals.renderableDocument() else { return }
+        state.renderArtifactContext = state.selection.flatMap { state.artifactContext(for: $0) }
         state.renderDocument = document
         guard document.sourceOrigin == "terminal",
               let ref = state.selection,
@@ -158,6 +159,7 @@ enum RenderLauncher {
             guard let response = await fetch(httpBase: machine.httpBase, session: ref.session),
                   response.format == "markdown",
                   !response.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !state.renderPDFCaptureInProgress,
                   state.renderDocument?.id == initialID else { return }
             state.renderDocument = document.withAuthoritativeSource(
                 response.source, origin: response.origin)
@@ -233,13 +235,18 @@ enum RenderExtract {
 
 /// Bridge for panel-header actions that must reach the hosted WKWebView
 /// (PDF export needs the live web view, not SwiftUI state).
+@MainActor
 final class RenderWebProxy: ObservableObject {
     weak var webView: WKWebView?
 
     /// Snapshot the FULL rendered document (not just the viewport) into a
-    /// one-page PDF via WebKit's native renderer, then ask where to save it.
-    func exportPDF(suggestedName: String) {
-        guard let wv = webView else { return }
+    /// one-page PDF via WebKit's native renderer. The caller owns persistence:
+    /// Render's PDF button archives these exact bytes before any optional export.
+    func createPDF(completion: @escaping (Result<Data, Error>) -> Void) {
+        guard let wv = webView else {
+            completion(.failure(RenderPDFError.webViewUnavailable))
+            return
+        }
         wv.evaluateJavaScript("({ width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth), height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) })") { dimensions, _ in
             let values = dimensions as? [String: Any]
             let width = (values?["width"] as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.width
@@ -249,16 +256,17 @@ final class RenderWebProxy: ObservableObject {
                               width: max(width, wv.bounds.width),
                               height: max(height, wv.bounds.height))
             wv.createPDF(configuration: cfg) { result in
-                guard case .success(let data) = result else { NSSound.beep(); return }
-                let panel = NSSavePanel()
-                panel.nameFieldStringValue = suggestedName
-                if #available(macOS 12.0, *) { panel.allowedContentTypes = [.pdf] }
-                panel.begin { resp in
-                    guard resp == .OK, let url = panel.url else { return }
-                    try? data.write(to: url)
-                }
+                completion(result)
             }
         }
+    }
+}
+
+private enum RenderPDFError: LocalizedError {
+    case webViewUnavailable
+
+    var errorDescription: String? {
+        "The rendered document is not ready yet."
     }
 }
 
@@ -266,11 +274,15 @@ final class RenderWebProxy: ObservableObject {
 /// Esc and ⌘+/−/0 are handled by a local key monitor while the panel is up.
 struct RenderPanel: View {
     @EnvironmentObject var state: AppState
+    @EnvironmentObject var artifacts: ArtifactStore
     let document: RenderDocument
 
     @AppStorage("ut.renderFontSize") private var fontSize = 16.0
     @State private var presentation = "rendered"
     @State private var copied = false
+    @State private var savingPDF = false
+    @State private var savedArtifact: ArtifactRecord?
+    @State private var pdfError: String?
     @StateObject private var web = RenderWebProxy()
 
     // Light chrome to match the light document below it — the panel reads as a
@@ -299,6 +311,7 @@ struct RenderPanel: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 150)
+                    .disabled(savingPDF)
                     .help("Rendered uses authoritative agent Markdown when available; Terminal preserves the exact styled grid")
                     Button {
                         let pb = NSPasteboard.general
@@ -312,25 +325,50 @@ struct RenderPanel: View {
                     }
                     .buttonStyle(.plain)
                     .help("Copy the extracted text the renderer received (handy for debugging a bad render)")
-                    Button {
-                        web.exportPDF(suggestedName: "\(state.selection?.session ?? "render").pdf")
-                    } label: {
-                        Label("PDF", systemImage: "arrow.down.doc")
-                            .font(.system(size: 11)).foregroundStyle(inkDim)
+                    if let savedArtifact {
+                        Label("Saved", systemImage: "checkmark")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color(hex: "#337A48"))
+                        Button("View") {
+                            artifacts.open(artifact: savedArtifact)
+                            state.presentArtifacts()
+                            close()
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color(hex: "#356A78"))
+                        .help("Open this PDF in Artifacts")
+                    } else {
+                        Button { savePDF() } label: {
+                            Group {
+                                if savingPDF {
+                                    ProgressView().controlSize(.mini).scaleEffect(0.75)
+                                } else {
+                                    Label("PDF", systemImage: "arrow.down.doc")
+                                        .font(.system(size: 11)).foregroundStyle(inkDim)
+                                }
+                            }
+                            .frame(minWidth: 34)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(savingPDF || state.renderArtifactContext == nil)
+                        .help(state.renderArtifactContext == nil
+                              ? "Select a panel before saving a PDF"
+                              : "Save this exact document to Artifacts")
                     }
-                    .buttonStyle(.plain)
-                    .help("Save the rendered document as a PDF")
                     HStack(spacing: 2) {
                         zoomButton("minus") { adjustZoom(-1) }
                         Text("\(Int(fontSize))").font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(inkDim).frame(width: 22)
                         zoomButton("plus") { adjustZoom(1) }
                     }
+                    .disabled(savingPDF)
                     Button { close() } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 15))
                             .foregroundStyle(inkDim)
                     }
                     .buttonStyle(.plain)
+                    .disabled(savingPDF)
                     .help("Close (Esc)")
                 }
                 .padding(.horizontal, 14).frame(height: 40)
@@ -350,6 +388,14 @@ struct RenderPanel: View {
         }
         .onAppear { installMonitor() }
         .onDisappear { removeMonitor() }
+        .alert("Couldn’t save PDF", isPresented: Binding(
+            get: { pdfError != nil },
+            set: { if !$0 { pdfError = nil } }
+        )) {
+            Button("OK") { pdfError = nil }
+        } message: {
+            Text(pdfError ?? "The PDF could not be saved.")
+        }
     }
 
     private func zoomButton(_ icon: String, _ action: @escaping () -> Void) -> some View {
@@ -362,7 +408,42 @@ struct RenderPanel: View {
     }
 
     private func adjustZoom(_ d: Double) { fontSize = min(28, max(9, fontSize + d)) }
-    private func close() { state.renderDocument = nil }
+    private func close() {
+        guard !savingPDF else { return }
+        state.renderDocument = nil
+        state.renderArtifactContext = nil
+        state.renderPDFCaptureInProgress = false
+    }
+
+    private func savePDF() {
+        guard !savingPDF, savedArtifact == nil,
+              let panel = state.renderArtifactContext else { return }
+        savingPDF = true
+        state.renderPDFCaptureInProgress = true
+        let capturedPresentation = presentation
+        web.createPDF { result in
+            switch result {
+            case .failure(let error):
+                savingPDF = false
+                state.renderPDFCaptureInProgress = false
+                pdfError = error.localizedDescription
+            case .success(let data):
+                Task {
+                    do {
+                        savedArtifact = try await artifacts.savePDF(
+                            data,
+                            panel: panel,
+                            presentation: capturedPresentation
+                        )
+                    } catch {
+                        pdfError = error.localizedDescription
+                    }
+                    savingPDF = false
+                    state.renderPDFCaptureInProgress = false
+                }
+            }
+        }
+    }
 
     // Esc closes; ⌘+/−/0 zoom the rendered content (standing requirement: every
     // content pane gets keyboard zoom) without reaching the terminal behind.

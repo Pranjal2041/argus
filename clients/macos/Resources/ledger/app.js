@@ -13,6 +13,7 @@ const KINDS = {
   note:       ["var(--n)",  "note"],
   fileSave:   ["var(--f)",  "hand edit"],
   wandbRun:   ["var(--wb)", "artifact"],
+  artifactSaved:["var(--a)", "saved PDF"],
 };
 const kcolor = k => (KINDS[k] || ["var(--ink-dim)"])[0];
 const $ = id => document.getElementById(id);
@@ -60,6 +61,8 @@ function gist(e) {
     case "note": return "added a note";
     case "fileSave": return "saved <b>" + esc(e.path||"?") + "</b>";
     case "wandbRun": return 'new W&B run <b>' + esc(e.runId||"") + "</b>";
+    case "artifactSaved": return 'saved PDF <span class="artifact-link" data-artifact="' +
+      esc(e.artifactID||"") + '">' + esc(e.filename||"render.pdf") + "</span>";
     default: return '<span class="quiet">' + esc(JSON.stringify(e)).slice(0,110) + "</span>";
   }
 }
@@ -216,6 +219,12 @@ function renderLedger() {
       const i = +el.dataset.i;
       if (state.open.has(i)) { state.open.delete(i); el.classList.remove("open"); el.querySelector(".detail").innerHTML = ""; }
       else { state.open.add(i); el.classList.add("open"); el.querySelector(".detail").innerHTML = detail(evs[i]); }
+    };
+  });
+  document.querySelectorAll(".artifact-link").forEach(link => {
+    link.onclick = event => {
+      event.stopPropagation();
+      post("openArtifact", { id: link.dataset.artifact });
     };
   });
   $("foot").textContent = "append-only · local only · " + (state.day || "");

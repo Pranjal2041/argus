@@ -308,6 +308,8 @@ final class AppState: ObservableObject {
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
     @Published var showOverview = true          // command-center panel is the home view (⇧⌘A); set false when diving into a session
     @Published var renderDocument: RenderDocument? // non-nil → styled/static Render overlay is up
+    @Published var renderArtifactContext: ArtifactPanelContext? // immutable panel identity captured with Render
+    @Published var renderPDFCaptureInProgress = false // freezes semantic/visual changes during WebKit PDF capture
     @Published var searchFocusToken = 0   // bumped to request focusing the filter field
     @Published var isRefreshing = false
     private var lastRTTPublishedAt: [String: Date] = [:]
@@ -438,6 +440,7 @@ final class AppState: ObservableObject {
         workflowPick = nil
         showWorkflows = false
         showOverview = false
+        showArtifacts = false
         let ref = SessionRef(machineID: m.id, session: wf.name)
         if (sessionsByMachine[m.id] ?? []).contains(where: { $0.name == wf.name }) {
             selection = ref                              // already running → just open it
@@ -581,6 +584,7 @@ final class AppState: ObservableObject {
 
     @Published var showNotes = false
     @Published var showLedger = false   // in-app Activity Ledger (⇧⌘J), a fleet-wide top-level view
+    @Published var showArtifacts = false // local library of explicit Render → PDF captures
     // Argus Lab (⇧⌘L). UT_OPEN_LAB=1 opens it on launch — the hook the
     // screenshot-verification harness uses to capture the real pane.
     @Published var showLab = ProcessInfo.processInfo.environment["UT_OPEN_LAB"] == "1"
@@ -909,6 +913,46 @@ final class AppState: ObservableObject {
         (sessionsByMachine[ref.machineID] ?? []).first { $0.name == ref.session }
     }
 
+    /// Snapshot the selected panel for artifact attribution.  This is called
+    /// when Render opens, not when PDF generation finishes, so refreshes and
+    /// renames cannot move a capture to a different panel.
+    func artifactContext(for ref: SessionRef) -> ArtifactPanelContext? {
+        guard let machine = machine(for: ref) else { return nil }
+        let info = session(for: ref)
+        return ArtifactPanelContext(
+            machineID: machine.id,
+            machineName: machine.name,
+            machineHost: machine.host,
+            sessionName: ref.session,
+            stableSessionID: info?.tmuxID,
+            folder: resolveBase(for: ref)
+        )
+    }
+
+    /// Resolve an archived panel identity back to the current live name. tmux's
+    /// stable id makes this continue to work after a rename.
+    func liveRef(for panel: ArtifactPanelContext) -> SessionRef? {
+        guard machines.contains(where: { $0.id == panel.machineID }) else { return nil }
+        let sessions = sessionsByMachine[panel.machineID] ?? []
+        let live: SessionInfo?
+        if let stable = panel.stableSessionID, !stable.isEmpty {
+            live = sessions.first { $0.tmuxID == stable }
+        } else {
+            live = sessions.first { $0.name == panel.sessionName }
+        }
+        return live.map { SessionRef(machineID: panel.machineID, session: $0.name) }
+    }
+
+    /// Present the Artifact library as the one active top-level surface.
+    func presentArtifacts() {
+        showArtifacts = true
+        showOverview = false
+        showTodos = false
+        showNotes = false
+        showLedger = false
+        showLab = false
+    }
+
     /// The user's pinned working dir for a session, if set (nil/blank → not pinned).
     func pathOverride(for ref: SessionRef) -> String? {
         let v = pathOverrides[ref.id]?.trimmingCharacters(in: .whitespaces)
@@ -1165,6 +1209,7 @@ final class AppState: ObservableObject {
         }
         showHistory = false
         showOverview = false
+        showArtifacts = false
     }
 
     func refresh(
@@ -1315,7 +1360,11 @@ final class AppState: ObservableObject {
         var extra: [String: String] = [:]
         if let dir, !dir.isEmpty { extra["dir"] = dir }
         control(machineID, action: "create", session: name, extra: extra) { ok in
-            if ok { self.selection = SessionRef(machineID: machineID, session: name) }
+            if ok {
+                self.selection = SessionRef(machineID: machineID, session: name)
+                self.showOverview = false
+                self.showArtifacts = false
+            }
             self.refreshAll()
         }
     }

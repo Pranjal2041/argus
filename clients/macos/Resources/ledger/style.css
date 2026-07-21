@@ -4,7 +4,7 @@
   --phos: #e8b34b; --phos-dim: rgba(232,179,75,.16);
   --u: #e8b34b; --o: #a9863f; --v: #6fb3c0; --s: #7aa2f7; --ms: #a8c0ff;
   --g: #b48ead; --w: #8fbf7f; --sn: #8fbf7f; --sk: #c77f7f; --t: #d9c66a;
-  --n: #d08fae; --f: #6fc0a8; --wb: #e09b5a;
+  --n: #d08fae; --f: #6fc0a8; --wb: #e09b5a; --a: #6fb3c0;
   --serif: "Iowan Old Style", "Palatino", "Georgia", serif;
   --mono: "SF Mono", "Menlo", ui-monospace, monospace;
 }
@@ -117,6 +117,8 @@ select:focus { border-color: var(--phos); box-shadow: 0 0 0 2.5px var(--phos-dim
 .gist .keys { color: var(--ink-dim); }
 .gist .quiet { color: var(--ink-dim); }
 .gist .redacted { color: var(--sk, #c77); }
+.artifact-link { color: var(--a); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.artifact-link:hover { color: var(--ink); }
 .lock { color: #c98a8a; }
 
 /* expanded detail */

@@ -10,6 +10,7 @@ import WebKit
 @MainActor
 final class LedgerPanel: NSObject, WKScriptMessageHandler {
     let webView: WKWebView
+    var onOpenArtifact: ((UUID) -> Void)?
     private var ready = false
 
     override init() {
@@ -39,6 +40,10 @@ final class LedgerPanel: NSObject, WKScriptMessageHandler {
             if let d = currentDay { sendDay(d) }
         case "openFolder":
             NSWorkspace.shared.open(ActivityJournal.dirURL)
+        case "openArtifact":
+            if let raw = body["id"] as? String, let id = UUID(uuidString: raw) {
+                onOpenArtifact?(id)
+            }
         default: break
         }
     }

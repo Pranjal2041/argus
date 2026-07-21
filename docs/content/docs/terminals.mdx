@@ -59,6 +59,15 @@ Rendering a selection always uses that selection and is never replaced by transc
 recovery happens only when you invoke Render Output, and both views run entirely offline, so nothing
 leaves your machine.
 
+Clicking **PDF** saves the exact presentation currently on screen—Rendered or Terminal—to Argus's
+local **Artifacts** library. Opening Render alone does not save anything, and opening an unrelated
+PDF in Files does not add it. Artifacts are grouped by panel and remain available after that panel is
+hidden, renamed, stopped, or removed. Open the library with `⇧⌘I`, from the command palette, or from
+the archive button in a panel header; there you can search filenames, sort, read, rename, export, or
+delete the saved PDFs. The library copy is canonical, while **Export** creates an ordinary copy
+wherever you choose. Each explicit save also adds a linked `artifactSaved` entry to the Activity
+Ledger.
+
 ## Keeping a Mac reachable while locked
 
 On macOS, locking the screen does not pause anything — your sessions, the broker, and the processes
