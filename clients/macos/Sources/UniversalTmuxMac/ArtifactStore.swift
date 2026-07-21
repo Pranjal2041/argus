@@ -1,5 +1,10 @@
 import Foundation
 
+enum ArtifactKind {
+    static let renderPDF = "render-pdf"
+    static let screenshotPNG = "screenshot-png"
+}
+
 /// The identity captured at the moment Render opens.  Keeping this alongside
 /// the PDF means the library survives panel removal, host outages, and session
 /// renames instead of depending on whatever happens to be live later.
@@ -36,6 +41,7 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         id: UUID = UUID(),
         filename: String,
         createdAt: Date = Date(),
+        kind: String = ArtifactKind.renderPDF,
         panel: ArtifactPanelContext,
         presentation: String,
         relativePath: String,
@@ -45,11 +51,22 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         self.id = id
         self.filename = filename
         self.createdAt = createdAt
-        kind = "render-pdf"
+        self.kind = kind
         self.panel = panel
         self.presentation = presentation
         self.relativePath = relativePath
         self.byteCount = byteCount
+    }
+
+    var isImage: Bool {
+        kind == ArtifactKind.screenshotPNG
+            || ["png", "jpg", "jpeg", "heic"].contains(fileExtension)
+    }
+
+    var fileExtension: String {
+        let ext = (relativePath as NSString).pathExtension.lowercased()
+        if !ext.isEmpty { return ext }
+        return kind == ArtifactKind.screenshotPNG ? "png" : "pdf"
     }
 }
 
@@ -149,23 +166,39 @@ enum ArtifactLibraryQuery {
 }
 
 enum ArtifactFilename {
-    static func generated(for panel: ArtifactPanelContext, at date: Date) -> String {
+    static func generated(
+        for panel: ArtifactPanelContext,
+        at date: Date,
+        fileExtension: String = "pdf"
+    ) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return normalized(panel.sessionName + " — " + formatter.string(from: date) + ".pdf")
+        return normalized(
+            panel.sessionName + " — " + formatter.string(from: date),
+            fileExtension: fileExtension
+        )
     }
 
-    static func normalized(_ raw: String) -> String {
+    static func normalized(_ raw: String, fileExtension: String = "pdf") -> String {
         var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         for scalar in ["/", ":", "\n", "\r", "\t"] {
             name = name.replacingOccurrences(of: scalar, with: "-")
         }
         while name.contains("  ") { name = name.replacingOccurrences(of: "  ", with: " ") }
         if name.isEmpty { name = "Render" }
-        if !name.lowercased().hasSuffix(".pdf") { name += ".pdf" }
+        let ext = fileExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        for knownExtension in ["pdf", "png", "jpg", "jpeg", "heic"] {
+            if name.lowercased().hasSuffix("." + knownExtension) {
+                name.removeLast(knownExtension.count + 1)
+                break
+            }
+        }
+        name += "." + (ext.isEmpty ? "pdf" : ext)
         if name.count > 180 {
-            name = String(name.prefix(176)).trimmingCharacters(in: .whitespaces) + ".pdf"
+            let suffix = "." + (ext.isEmpty ? "pdf" : ext)
+            name = String(name.prefix(max(1, 180 - suffix.count)))
+                .trimmingCharacters(in: .whitespaces) + suffix
         }
         return name
     }
@@ -228,8 +261,9 @@ actor ArtifactDiskStore {
         let persistedCreatedAt = Date(timeIntervalSince1970: floor(createdAt.timeIntervalSince1970))
         let record = ArtifactRecord(
             id: id,
-            filename: ArtifactFilename.generated(for: panel, at: persistedCreatedAt),
+            filename: ArtifactFilename.generated(for: panel, at: persistedCreatedAt, fileExtension: "pdf"),
             createdAt: persistedCreatedAt,
+            kind: ArtifactKind.renderPDF,
             panel: panel,
             presentation: presentation,
             relativePath: relativePath,
@@ -246,9 +280,46 @@ actor ArtifactDiskStore {
         }
     }
 
+    func saveScreenshotPNG(
+        _ data: Data,
+        panel: ArtifactPanelContext,
+        createdAt: Date = Date(),
+        id: UUID = UUID()
+    ) throws -> ArtifactRecord {
+        try prepareDirectories()
+        let relativePath = "images/" + id.uuidString.lowercased() + ".png"
+        let persistedCreatedAt = Date(timeIntervalSince1970: floor(createdAt.timeIntervalSince1970))
+        let record = ArtifactRecord(
+            id: id,
+            filename: ArtifactFilename.generated(
+                for: panel,
+                at: persistedCreatedAt,
+                fileExtension: "png"
+            ),
+            createdAt: persistedCreatedAt,
+            kind: ArtifactKind.screenshotPNG,
+            panel: panel,
+            presentation: "clipboard-screenshot",
+            relativePath: relativePath,
+            byteCount: Int64(data.count)
+        )
+        let imageURL = try contentURL(for: record)
+        do {
+            try data.write(to: imageURL, options: .atomic)
+            try writeManifest(record)
+            return record
+        } catch {
+            try? FileManager.default.removeItem(at: imageURL)
+            throw error
+        }
+    }
+
     func rename(_ record: ArtifactRecord, to requestedName: String) throws -> ArtifactRecord {
         var updated = record
-        updated.filename = ArtifactFilename.normalized(requestedName)
+        updated.filename = ArtifactFilename.normalized(
+            requestedName,
+            fileExtension: record.fileExtension
+        )
         try writeManifest(updated)
         return updated
     }
@@ -266,10 +337,12 @@ actor ArtifactDiskStore {
 
     private var recordsURL: URL { rootURL.appendingPathComponent("records", isDirectory: true) }
     private var pdfURL: URL { rootURL.appendingPathComponent("pdf", isDirectory: true) }
+    private var imagesURL: URL { rootURL.appendingPathComponent("images", isDirectory: true) }
 
     private func prepareDirectories() throws {
         try FileManager.default.createDirectory(at: recordsURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: pdfURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
     }
 
     private func manifestURL(for id: UUID) -> URL {
@@ -380,22 +453,16 @@ final class ArtifactStore: ObservableObject {
         presentation: String
     ) async throws -> ArtifactRecord {
         let record = try await disk.savePDF(data, panel: panel, presentation: presentation)
-        records.removeAll { $0.id == record.id }
-        records.insert(record, at: 0)
-        errorMessage = nil
-        if logEvents {
-            var fields: [String: Any] = [
-                "artifactID": record.id.uuidString.lowercased(),
-                "filename": record.filename,
-                "machineID": panel.machineID,
-                "machine": panel.machineName,
-                "session": panel.sessionName,
-                "panelKey": panel.key,
-                "presentation": presentation,
-            ]
-            if !panel.folder.isEmpty { fields["folder"] = panel.folder }
-            ActivityJournal.shared.log("artifactSaved", fields)
-        }
+        publish(record)
+        return record
+    }
+
+    func saveScreenshotPNG(
+        _ data: Data,
+        panel: ArtifactPanelContext
+    ) async throws -> ArtifactRecord {
+        let record = try await disk.saveScreenshotPNG(data, panel: panel)
+        publish(record)
         return record
     }
 
@@ -413,5 +480,24 @@ final class ArtifactStore: ObservableObject {
         records.removeAll { $0.id == record.id }
         if selectedArtifactID == record.id { selectedArtifactID = nil }
         errorMessage = nil
+    }
+
+    private func publish(_ record: ArtifactRecord) {
+        records.removeAll { $0.id == record.id }
+        records.insert(record, at: 0)
+        errorMessage = nil
+        guard logEvents else { return }
+        var fields: [String: Any] = [
+            "artifactID": record.id.uuidString.lowercased(),
+            "filename": record.filename,
+            "kind": record.kind,
+            "machineID": record.panel.machineID,
+            "machine": record.panel.machineName,
+            "session": record.panel.sessionName,
+            "panelKey": record.panel.key,
+            "presentation": record.presentation,
+        ]
+        if !record.panel.folder.isEmpty { fields["folder"] = record.panel.folder }
+        ActivityJournal.shared.log("artifactSaved", fields)
     }
 }
