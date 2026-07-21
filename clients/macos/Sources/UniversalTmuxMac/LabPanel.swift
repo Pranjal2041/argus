@@ -546,6 +546,7 @@ func openLabAttention(in state: AppState, kind: String, id: String) {
     state.showTodos = false
     state.showNotes = false
     state.showLedger = false
+    state.showArtifacts = false
     if !kind.isEmpty, !id.isEmpty { LabWebPanel.shared.openAttention(kind: kind, id: id) }
 }
 

@@ -1,9 +1,30 @@
+import PDFKit
 import WebKit
 import XCTest
 @testable import UniversalTmuxMac
 
 @MainActor
 final class RenderWebIntegrationTests: XCTestCase {
+    func testPDFCaptureProducesTheFullCurrentRenderedDocument() async throws {
+        let webView = try await loadRenderer()
+        let source = (1...80).map { "## Finding \($0)\n\nA saved result with **evidence** and enough body text to extend the document." }
+            .joined(separator: "\n\n")
+        try await setDocument(webView, source: source, origin: "codex-transcript",
+                              presentation: "rendered")
+        let proxy = RenderWebProxy()
+        proxy.webView = webView
+
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            proxy.createPDF { continuation.resume(with: $0) }
+        }
+        let pdf = try XCTUnwrap(PDFDocument(data: data))
+
+        XCTAssertGreaterThan(data.count, 1_000)
+        XCTAssertEqual(pdf.pageCount, 1, "Render PDF is one full-document page, not a viewport screenshot")
+        XCTAssertGreaterThan(try XCTUnwrap(pdf.page(at: 0)).bounds(for: .mediaBox).height,
+                             webView.bounds.height)
+    }
+
     func testRenderedPresentationHandlesMarkdownMathTablesCodeAndTerminalArtTogether() async throws {
         let webView = try await loadRenderer()
         let source = #"""

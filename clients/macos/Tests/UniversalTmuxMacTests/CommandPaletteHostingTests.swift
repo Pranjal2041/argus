@@ -10,7 +10,8 @@ final class CommandPaletteHostingTests: XCTestCase {
             machineName: { $0 },
             state: AppState(isolatedForTesting: true),
             terminals: TerminalController(),
-            lab: LabModel()
+            lab: LabModel(),
+            artifacts: ArtifactStore(loadImmediately: false, logEvents: false)
         )
         let host = NSHostingView(rootView: palette)
         host.frame = NSRect(x: 0, y: 0, width: 560, height: 407)
