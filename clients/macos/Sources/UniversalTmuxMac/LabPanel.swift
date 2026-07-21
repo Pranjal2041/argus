@@ -517,7 +517,11 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             state.showLab = false
         case "openFiles":
             if let c = card(), let m = state.machines.first(where: { $0.id == c.machineID }), let files {
-                files.addTab(m, startPath: str("cwd"))
+                let session = str("session")
+                let sourcePanel = session.isEmpty
+                    ? nil
+                    : state.artifactContext(for: SessionRef(machineID: c.machineID, session: session))
+                files.addTab(m, startPath: str("cwd"), sourcePanel: sourcePanel)
                 state.openWindowRequest = "files"
             }
         case "openWandb":

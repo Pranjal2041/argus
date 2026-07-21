@@ -1,11 +1,13 @@
 import AppKit
 import PDFKit
+import QuickLookUI
 import SwiftUI
 import UniformTypeIdentifiers
 
 /// A deliberately small library: panel-backed captures, the artifacts for one
 /// panel, and the artifact itself. Opening files elsewhere in Argus never feeds
-/// this view; only explicit Render PDFs and opted-in foreground screenshots do.
+/// this view; only explicit Render PDFs, opted-in foreground screenshots, and
+/// files explicitly added from Files do.
 struct ArtifactsView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var artifacts: ArtifactStore
@@ -60,7 +62,7 @@ struct ArtifactsView: View {
                 .foregroundStyle(Theme.textSecondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Artifacts").font(cf(20, .bold)).foregroundStyle(Theme.textPrimary)
-                Text("Renders and screenshots, grouped by panel")
+                Text("Renders, screenshots, and saved files, grouped by panel")
                     .font(cf(11.5)).foregroundStyle(Theme.textTertiary)
             }
             Spacer(minLength: 12)
@@ -86,7 +88,7 @@ struct ArtifactsView: View {
                     emptyState(
                         icon: "doc.badge.plus",
                         title: "No artifacts yet",
-                        detail: "Save a Render PDF or take a clipboard screenshot in a panel."
+                        detail: "Save a render, screenshot, or explicit file snapshot from a panel."
                     )
                 } else {
                     ForEach(panels) { panel in
@@ -176,7 +178,7 @@ struct ArtifactsView: View {
                             icon: artifacts.query.isEmpty ? "doc.badge.plus" : "magnifyingglass",
                             title: artifacts.query.isEmpty ? "No artifacts for this panel" : "No matching artifacts",
                             detail: artifacts.query.isEmpty
-                                ? "Save a Render PDF or take a clipboard screenshot here."
+                                ? "Save a render, screenshot, or explicit file snapshot here."
                                 : "Try a different filename."
                         )
                     } else {
@@ -222,7 +224,7 @@ struct ArtifactsView: View {
     private func artifactRow(_ record: ArtifactRecord, showsPanel: Bool) -> some View {
         Button { artifacts.open(artifact: record) } label: {
             HStack(spacing: 14) {
-                Image(systemName: record.isImage ? "photo" : "doc.richtext")
+                Image(systemName: artifactIcon(record))
                     .font(cf(15, .medium))
                     .foregroundStyle(Theme.accent)
                     .frame(width: 24, height: 24)
@@ -315,6 +317,12 @@ struct ArtifactsView: View {
         return panel.machineName + " · \(count) saved artifact\(count == 1 ? "" : "s")"
     }
 
+    private func artifactIcon(_ record: ArtifactRecord) -> String {
+        if record.isImage { return "photo" }
+        if record.isPDF { return "doc.richtext" }
+        return iconForFile(record.filename)
+    }
+
     private func relativeTime(_ date: Date) -> String {
         if abs(date.timeIntervalSinceNow) < 60 { return "just now" }
         let formatter = RelativeDateTimeFormatter()
@@ -342,16 +350,22 @@ private struct ArtifactDocumentView: View {
     }
 
     private var liveRef: SessionRef? { state.liveRef(for: record.panel) }
+    private var viewerKind: ArtifactViewerKind { ArtifactViewerKind(record) }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Theme.border)
             Group {
-                if record.isImage {
+                switch viewerKind {
+                case .image:
                     ArtifactImageView(url: artifacts.fileURL(for: record), zoom: zoom)
-                } else {
+                case .pdf:
                     ArtifactPDFView(url: artifacts.fileURL(for: record), zoom: zoom)
+                case .text:
+                    ArtifactTextView(record: record, url: artifacts.fileURL(for: record), zoom: zoom)
+                case .quickLook:
+                    ArtifactQuickLookView(url: artifacts.fileURL(for: record))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -392,14 +406,24 @@ private struct ArtifactDocumentView: View {
                     .font(cf(15, .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Text(documentSubtitle)
                     .font(cf(10.5)).foregroundStyle(Theme.textTertiary).lineLimit(1)
+                if let sourcePath = record.sourcePath {
+                    Text(sourcePath)
+                        .font(cf(9.5)).monospaced()
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(sourcePath)
+                }
             }
             Spacer(minLength: 16)
-            HStack(spacing: 2) {
-                compactButton("minus", help: "Zoom out") { zoom = max(0.45, zoom - 0.1) }
-                Text("\(Int((zoom * 100).rounded()))%")
-                    .font(cf(10.5, .medium)).monospacedDigit()
-                    .foregroundStyle(Theme.textSecondary).frame(width: 40)
-                compactButton("plus", help: "Zoom in") { zoom = min(3, zoom + 0.1) }
+            if viewerKind.supportsZoom {
+                HStack(spacing: 2) {
+                    compactButton("minus", help: "Zoom out") { zoom = max(0.45, zoom - 0.1) }
+                    Text("\(Int((zoom * 100).rounded()))%")
+                        .font(cf(10.5, .medium)).monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary).frame(width: 40)
+                    compactButton("plus", help: "Zoom in") { zoom = min(3, zoom + 0.1) }
+                }
             }
             if let liveRef {
                 Button("Open Panel") {
@@ -437,7 +461,11 @@ private struct ArtifactDocumentView: View {
 
     private var documentSubtitle: String {
         let mode: String
-        if record.isImage {
+        if record.presentation == "file-draft" {
+            mode = "Draft snapshot"
+        } else if record.isFileSnapshot {
+            mode = "File snapshot"
+        } else if record.isImage {
             mode = "Screenshot"
         } else {
             mode = record.presentation == "terminal" ? "Terminal" : "Rendered"
@@ -479,19 +507,121 @@ private struct ArtifactDocumentView: View {
         let source = artifacts.fileURL(for: record)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = record.filename
-        panel.allowedContentTypes = [record.isImage ? .png : .pdf]
+        if let type = UTType(filenameExtension: record.fileExtension), !record.fileExtension.isEmpty {
+            panel.allowedContentTypes = [type]
+        } else {
+            panel.allowedContentTypes = [.data]
+        }
         panel.canCreateDirectories = true
         panel.begin { response in
             guard response == .OK, let destination = panel.url else { return }
             Task.detached(priority: .utility) {
                 do {
-                    let data = try Data(contentsOf: source)
-                    try data.write(to: destination, options: .atomic)
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.removeItem(at: destination)
+                    }
+                    try FileManager.default.copyItem(at: source, to: destination)
                 } catch {
                     await MainActor.run { artifacts.errorMessage = error.localizedDescription }
                 }
             }
         }
+    }
+}
+
+private enum ArtifactViewerKind: Equatable {
+    case image
+    case pdf
+    case text
+    case quickLook
+
+    init(_ record: ArtifactRecord) {
+        if record.isImage {
+            self = .image
+        } else if record.isPDF {
+            self = .pdf
+        } else if record.contentType?.lowercased().hasPrefix("text/") == true
+                    || Self.textExtensions.contains(record.fileExtension)
+                    || UTType(filenameExtension: record.fileExtension)?.conforms(to: .text) == true {
+            self = .text
+        } else {
+            self = .quickLook
+        }
+    }
+
+    var supportsZoom: Bool { self != .quickLook }
+
+    private static let textExtensions: Set<String> = [
+        "c", "cc", "cpp", "css", "csv", "go", "h", "hpp", "html", "ini", "java", "js", "json",
+        "jsx", "kt", "log", "lua", "md", "mjs", "plist", "properties", "py", "rb", "rs", "sh",
+        "sql", "swift", "toml", "ts", "tsx", "txt", "xml", "yaml", "yml"
+    ]
+}
+
+private struct ArtifactTextView: View {
+    let record: ArtifactRecord
+    let url: URL
+    let zoom: CGFloat
+    @State private var text: String?
+    @State private var error: String?
+
+    var body: some View {
+        Group {
+            if let text {
+                CodeMirrorView(
+                    text: text,
+                    filename: record.filename,
+                    path: url.path,
+                    fontSize: 13 * zoom,
+                    editable: false,
+                    scrollToLine: nil,
+                    onChange: { _ in }
+                )
+            } else if let error {
+                VStack(spacing: 10) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 25, weight: .light))
+                    Text(error).font(.system(size: 12)).multilineTextAlignment(.center)
+                }
+                .foregroundStyle(Theme.textSecondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .task(id: url) {
+            do {
+                guard record.byteCount <= 20 * 1024 * 1024 else {
+                    error = "This text file is too large to preview. Use Export to open the saved copy elsewhere."
+                    return
+                }
+                let loaded = try await Task.detached(priority: .utility) {
+                    let data = try Data(contentsOf: url)
+                    guard let string = String(data: data, encoding: .utf8) else {
+                        throw CocoaError(.fileReadInapplicableStringEncoding)
+                    }
+                    return string
+                }.value
+                text = loaded
+            } catch {
+                self.error = "This saved file could not be displayed as text. Use Export to open it elsewhere."
+            }
+        }
+    }
+}
+
+private struct ArtifactQuickLookView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> QLPreviewView {
+        let view = QLPreviewView(frame: .zero, style: .normal)!
+        view.autostarts = true
+        view.previewItem = url as NSURL
+        return view
+    }
+
+    func updateNSView(_ view: QLPreviewView, context: Context) {
+        if (view.previewItem as? URL) != url { view.previewItem = url as NSURL }
     }
 }
 

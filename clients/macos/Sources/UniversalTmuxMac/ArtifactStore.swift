@@ -3,6 +3,7 @@ import Foundation
 enum ArtifactKind {
     static let renderPDF = "render-pdf"
     static let screenshotPNG = "screenshot-png"
+    static let fileSnapshot = "file-snapshot"
 }
 
 /// The identity captured at the moment Render opens.  Keeping this alongside
@@ -36,6 +37,10 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
     let presentation: String
     let relativePath: String
     let byteCount: Int64
+    /// Populated for explicit snapshots created from Files. Optional fields keep
+    /// existing V1 render/screenshot manifests fully backwards compatible.
+    let sourcePath: String?
+    let contentType: String?
 
     init(
         id: UUID = UUID(),
@@ -45,7 +50,9 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         panel: ArtifactPanelContext,
         presentation: String,
         relativePath: String,
-        byteCount: Int64
+        byteCount: Int64,
+        sourcePath: String? = nil,
+        contentType: String? = nil
     ) {
         schemaVersion = 1
         self.id = id
@@ -56,17 +63,25 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         self.presentation = presentation
         self.relativePath = relativePath
         self.byteCount = byteCount
+        self.sourcePath = sourcePath
+        self.contentType = contentType
     }
 
     var isImage: Bool {
         kind == ArtifactKind.screenshotPNG
-            || ["png", "jpg", "jpeg", "heic"].contains(fileExtension)
+            || contentType?.lowercased().hasPrefix("image/") == true
+            || ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "ico", "icns"]
+                .contains(fileExtension)
     }
+
+    var isPDF: Bool { fileExtension == "pdf" || contentType?.lowercased() == "application/pdf" }
+    var isFileSnapshot: Bool { kind == ArtifactKind.fileSnapshot }
 
     var fileExtension: String {
         let ext = (relativePath as NSString).pathExtension.lowercased()
         if !ext.isEmpty { return ext }
-        return kind == ArtifactKind.screenshotPNG ? "png" : "pdf"
+        if kind == ArtifactKind.screenshotPNG { return "png" }
+        return kind == ArtifactKind.renderPDF ? "pdf" : ""
     }
 }
 
@@ -187,20 +202,39 @@ enum ArtifactFilename {
         }
         while name.contains("  ") { name = name.replacingOccurrences(of: "  ", with: " ") }
         if name.isEmpty { name = "Render" }
-        let ext = fileExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-        for knownExtension in ["pdf", "png", "jpg", "jpeg", "heic"] {
-            if name.lowercased().hasSuffix("." + knownExtension) {
-                name.removeLast(knownExtension.count + 1)
-                break
-            }
+        let ext = safeExtension(fileExtension)
+        let suppliedExtension = (name as NSString).pathExtension
+        // Generated capture names end in a timestamp (`12.00.02`) before their
+        // real extension is appended. Do not mistake the final seconds for an
+        // extension; do replace actual extensions supplied during Rename.
+        let suppliedLooksLikeType = suppliedExtension.unicodeScalars.contains {
+            CharacterSet.letters.contains($0)
         }
-        name += "." + (ext.isEmpty ? "pdf" : ext)
+        if !suppliedExtension.isEmpty,
+           suppliedExtension.caseInsensitiveCompare(ext) == .orderedSame || suppliedLooksLikeType {
+            name = (name as NSString).deletingPathExtension
+        }
+        if !ext.isEmpty { name += "." + ext }
         if name.count > 180 {
-            let suffix = "." + (ext.isEmpty ? "pdf" : ext)
+            let suffix = ext.isEmpty ? "" : "." + ext
             name = String(name.prefix(max(1, 180 - suffix.count)))
                 .trimmingCharacters(in: .whitespaces) + suffix
         }
         return name
+    }
+
+    /// Preserve the source file's useful name and extension while removing path
+    /// separators/control characters. Extension filtering also prevents a remote
+    /// filename from escaping the immutable UUID blob path on disk.
+    static func snapshot(_ sourceName: String) -> String {
+        let ext = safeExtension((sourceName as NSString).pathExtension)
+        return normalized(sourceName, fileExtension: ext)
+    }
+
+    static func safeExtension(_ raw: String) -> String {
+        String(raw.lowercased().unicodeScalars.filter {
+            CharacterSet.alphanumerics.contains($0)
+        }.prefix(24))
     }
 }
 
@@ -314,6 +348,75 @@ actor ArtifactDiskStore {
         }
     }
 
+    func saveFile(
+        _ data: Data,
+        filename: String,
+        panel: ArtifactPanelContext,
+        sourcePath: String,
+        contentType: String?,
+        presentation: String,
+        createdAt: Date = Date(),
+        id: UUID = UUID()
+    ) throws -> ArtifactRecord {
+        try prepareDirectories()
+        let record = fileRecord(
+            filename: filename,
+            byteCount: Int64(data.count),
+            panel: panel,
+            sourcePath: sourcePath,
+            contentType: contentType,
+            presentation: presentation,
+            createdAt: createdAt,
+            id: id
+        )
+        let destination = try contentURL(for: record)
+        do {
+            try data.write(to: destination, options: .atomic)
+            try writeManifest(record)
+            return record
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
+    /// Streamed variant used for files that are not already visible in the Files
+    /// editor. URLSession owns the temporary download; copy it into the immutable
+    /// artifact store before that temporary file goes out of scope.
+    func saveFile(
+        at sourceURL: URL,
+        filename: String,
+        panel: ArtifactPanelContext,
+        sourcePath: String,
+        contentType: String?,
+        presentation: String,
+        createdAt: Date = Date(),
+        id: UUID = UUID()
+    ) throws -> ArtifactRecord {
+        try prepareDirectories()
+        let attributes = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let record = fileRecord(
+            filename: filename,
+            byteCount: byteCount,
+            panel: panel,
+            sourcePath: sourcePath,
+            contentType: contentType,
+            presentation: presentation,
+            createdAt: createdAt,
+            id: id
+        )
+        let destination = try contentURL(for: record)
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            try writeManifest(record)
+            return record
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
     func rename(_ record: ArtifactRecord, to requestedName: String) throws -> ArtifactRecord {
         var updated = record
         updated.filename = ArtifactFilename.normalized(
@@ -338,11 +441,40 @@ actor ArtifactDiskStore {
     private var recordsURL: URL { rootURL.appendingPathComponent("records", isDirectory: true) }
     private var pdfURL: URL { rootURL.appendingPathComponent("pdf", isDirectory: true) }
     private var imagesURL: URL { rootURL.appendingPathComponent("images", isDirectory: true) }
+    private var filesURL: URL { rootURL.appendingPathComponent("files", isDirectory: true) }
 
     private func prepareDirectories() throws {
         try FileManager.default.createDirectory(at: recordsURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: pdfURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: filesURL, withIntermediateDirectories: true)
+    }
+
+    private func fileRecord(
+        filename: String,
+        byteCount: Int64,
+        panel: ArtifactPanelContext,
+        sourcePath: String,
+        contentType: String?,
+        presentation: String,
+        createdAt: Date,
+        id: UUID
+    ) -> ArtifactRecord {
+        let persistedCreatedAt = Date(timeIntervalSince1970: floor(createdAt.timeIntervalSince1970))
+        let ext = ArtifactFilename.safeExtension((filename as NSString).pathExtension)
+        let suffix = ext.isEmpty ? "" : "." + ext
+        return ArtifactRecord(
+            id: id,
+            filename: ArtifactFilename.snapshot(filename),
+            createdAt: persistedCreatedAt,
+            kind: ArtifactKind.fileSnapshot,
+            panel: panel,
+            presentation: presentation,
+            relativePath: "files/" + id.uuidString.lowercased() + suffix,
+            byteCount: byteCount,
+            sourcePath: sourcePath,
+            contentType: contentType
+        )
     }
 
     private func manifestURL(for id: UUID) -> URL {
@@ -466,6 +598,46 @@ final class ArtifactStore: ObservableObject {
         return record
     }
 
+    func saveFile(
+        _ data: Data,
+        filename: String,
+        panel: ArtifactPanelContext,
+        sourcePath: String,
+        contentType: String?,
+        presentation: String
+    ) async throws -> ArtifactRecord {
+        let record = try await disk.saveFile(
+            data,
+            filename: filename,
+            panel: panel,
+            sourcePath: sourcePath,
+            contentType: contentType,
+            presentation: presentation
+        )
+        publish(record)
+        return record
+    }
+
+    func saveFile(
+        at sourceURL: URL,
+        filename: String,
+        panel: ArtifactPanelContext,
+        sourcePath: String,
+        contentType: String?,
+        presentation: String
+    ) async throws -> ArtifactRecord {
+        let record = try await disk.saveFile(
+            at: sourceURL,
+            filename: filename,
+            panel: panel,
+            sourcePath: sourcePath,
+            contentType: contentType,
+            presentation: presentation
+        )
+        publish(record)
+        return record
+    }
+
     func rename(_ record: ArtifactRecord, to name: String) async throws -> ArtifactRecord {
         let updated = try await disk.rename(record, to: name)
         if let index = records.firstIndex(where: { $0.id == record.id }) {
@@ -498,6 +670,8 @@ final class ArtifactStore: ObservableObject {
             "presentation": record.presentation,
         ]
         if !record.panel.folder.isEmpty { fields["folder"] = record.panel.folder }
+        if let sourcePath = record.sourcePath { fields["sourcePath"] = sourcePath }
+        if let contentType = record.contentType { fields["contentType"] = contentType }
         ActivityJournal.shared.log("artifactSaved", fields)
     }
 }

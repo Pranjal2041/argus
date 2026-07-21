@@ -166,6 +166,7 @@ struct UniversalTmuxApp: App {
             FilesView()
                 .environmentObject(state)
                 .environmentObject(files)
+                .environmentObject(artifacts)
                 .preferredColorScheme(.dark)
                 .allowsFullScreen()
         }
@@ -1109,7 +1110,14 @@ struct RootView: View {
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
                             : nil,
                         onRevealFiles: (s.path?.isEmpty == false)
-                            ? { files.addTab(m, startPath: state.resolveBase(for: ref)); openWindow(id: "files") }
+                            ? {
+                                files.addTab(
+                                    m,
+                                    startPath: state.resolveBase(for: ref),
+                                    sourcePanel: state.artifactContext(for: ref)
+                                )
+                                openWindow(id: "files")
+                            }
                             : nil,
                         onGit: !state.resolveBase(for: ref).isEmpty
                             ? {
@@ -1225,7 +1233,11 @@ struct RootView: View {
                             onOpenFile: { p in
                                 // Open the containing folder in Files (startPath expects a dir).
                                 let abs = p.hasPrefix("/") ? p : dir + "/" + p
-                                files.addTab(m, startPath: (abs as NSString).deletingLastPathComponent)
+                                files.addTab(
+                                    m,
+                                    startPath: (abs as NSString).deletingLastPathComponent,
+                                    sourcePanel: state.artifactContext(for: ref)
+                                )
                                 openWindow(id: "files")
                             }))
                     } else {
@@ -1258,7 +1270,13 @@ struct RootView: View {
             terminals.openPathHandler = { path, line in
                 guard let ref = state.selection, let m = state.machine(for: ref) else { return }
                 let cwd = state.resolveBase(for: ref)   // honor a user-pinned working dir
-                files.openTerminalPath(m, rawPath: path, base: cwd, line: line)
+                files.openTerminalPath(
+                    m,
+                    rawPath: path,
+                    base: cwd,
+                    line: line,
+                    sourcePanel: state.artifactContext(for: ref)
+                )
                 openWindow(id: "files")
             }
             // Route a terminal ⌘-click on a localhost URL to the Dashboards window for
@@ -1398,7 +1416,7 @@ struct RootView: View {
                             system: artifactCount > 0 ? "archivebox.fill" : "archivebox",
                             help: artifactCount == 0
                                 ? "Artifacts for this panel"
-                                : "Artifacts for this panel (\(artifactCount) PDF\(artifactCount == 1 ? "" : "s"))"
+                                : "Artifacts for this panel (\(artifactCount))"
                         ) {
                             artifacts.open(panel: context)
                             state.presentArtifacts()

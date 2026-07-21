@@ -17,6 +17,7 @@ enum Flat {
 struct FilesView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var model: FilesModel
+    @EnvironmentObject var artifacts: ArtifactStore
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
 
     private var machines: [Machine] { state.machines }
@@ -41,6 +42,29 @@ struct FilesView: View {
         .background(grepShortcut)
         .background(goToShortcut)
         .onAppear { if model.tabs.isEmpty, let m = (machines.first { $0.isLocal } ?? machines.first) { model.addTab(m) } }
+        .sheet(item: $model.pendingArtifact) { request in
+            FileArtifactDestinationSheet(
+                request: request,
+                destinations: artifactDestinations,
+                onSave: { destination in
+                    model.savePendingArtifact(request, to: destination, artifacts: artifacts)
+                }
+            )
+        }
+    }
+
+    private var artifactDestinations: [ArtifactPanelContext] {
+        var seen = Set<String>()
+        return state.allSessions.compactMap { ref in
+            guard let context = state.artifactContext(for: ref), seen.insert(context.key).inserted else { return nil }
+            return context
+        }
+        .sorted {
+            let machine = $0.machineName.localizedCaseInsensitiveCompare($1.machineName)
+            return machine == .orderedSame
+                ? $0.sessionName.localizedCaseInsensitiveCompare($1.sessionName) == .orderedAscending
+                : machine == .orderedAscending
+        }
     }
 
     private var quickOpenShortcut: some View {
@@ -197,6 +221,7 @@ private struct TabPane: View {
             Divider().overlay(Flat.hairline)
             if let up = tab.uploading { transferBanner("Uploading", up) }
             if let down = tab.downloading { transferBanner("Downloading", down) }
+            if let notice = tab.artifactNotice { artifactBanner(notice) }
             HSplitView {
                 sidebar
                 FileContentView(tab: tab)
@@ -285,6 +310,34 @@ private struct TabPane: View {
                 Text("\(Int(t.progress * 100))%").font(.system(size: s(10), design: .monospaced)).foregroundStyle(Flat.faint)
                 Spacer()
             }.padding(.horizontal, 12).padding(.vertical, 5)
+            Divider().overlay(Flat.hairline)
+        }
+    }
+
+    private func artifactBanner(_ notice: FileArtifactNotice) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                if notice.isSaving {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: notice.isError ? "exclamationmark.triangle.fill" : "archivebox.fill")
+                        .foregroundStyle(notice.isError ? Theme.waiting : Flat.accent)
+                }
+                Text(notice.message)
+                    .font(.system(size: s(11), weight: .medium))
+                    .foregroundStyle(notice.isError ? Theme.waiting : Flat.dim)
+                    .lineLimit(1)
+                Spacer()
+                if !notice.isSaving {
+                    Button { tab.artifactNotice = nil } label: {
+                        Image(systemName: "xmark").font(.system(size: s(9), weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Flat.faint)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
             Divider().overlay(Flat.hairline)
         }
     }
@@ -401,6 +454,7 @@ private struct FileRow: View {
     let depth: Int
     @EnvironmentObject private var model: FilesModel
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var artifacts: ArtifactStore
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     private func s(_ v: CGFloat) -> CGFloat { v * uiScale }
 
@@ -467,6 +521,11 @@ private struct FileRow: View {
         } else {
             Button("Open") { tab.open(node) }
             Button("Download…") { download() }
+            Button {
+                model.requestArtifact(node.entry, from: tab, artifacts: artifacts)
+            } label: {
+                Label(artifactActionTitle, systemImage: "archivebox")
+            }
             Divider()
         }
         if tab.isLocal {
@@ -487,8 +546,13 @@ private struct FileRow: View {
 
     private func openInNewTab() {
         if let m = appState.machines.first(where: { $0.id == tab.machineID }) {
-            model.addTab(m, startPath: node.entry.path)
+            model.addTab(m, startPath: node.entry.path, sourcePanel: tab.sourcePanel)
         }
+    }
+
+    private var artifactActionTitle: String {
+        if let panel = tab.sourcePanel { return "Add to \(panel.sessionName) Artifacts" }
+        return "Add to Artifacts…"
     }
 
     private func download() {
@@ -507,6 +571,125 @@ private struct FileRow: View {
 
     private var icon: String { node.entry.isDir ? (node.expanded ? "folder.fill" : "folder") : iconForFile(node.entry.name) }
     private var iconColor: Color { node.entry.isDir ? Flat.accent.opacity(0.9) : Flat.dim }
+}
+
+// MARK: - explicit file artifact destination
+
+private struct FileArtifactDestinationSheet: View {
+    let request: PendingFileArtifact
+    let destinations: [ArtifactPanelContext]
+    let onSave: (ArtifactPanelContext) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedKey: String
+
+    init(
+        request: PendingFileArtifact,
+        destinations: [ArtifactPanelContext],
+        onSave: @escaping (ArtifactPanelContext) -> Void
+    ) {
+        self.request = request
+        self.destinations = destinations
+        self.onSave = onSave
+        _selectedKey = State(initialValue: request.suggestedPanel?.key ?? destinations.first?.key ?? "")
+    }
+
+    private var destination: ArtifactPanelContext? {
+        if let suggested = request.suggestedPanel { return suggested }
+        return destinations.first { $0.key == selectedKey }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(Flat.accent)
+                    .frame(width: 26)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(request.requiresLargeConfirmation ? "Add large file to Artifacts?" : "Add to Artifacts")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Flat.text)
+                    Text(request.entry.name)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Flat.dim)
+                        .lineLimit(1)
+                    Text(request.entry.path)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Flat.faint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            if request.requiresLargeConfirmation {
+                HStack(spacing: 8) {
+                    Image(systemName: "externaldrive")
+                    Text("This saves a \(byteSize(request.byteCount)) local copy in Argus.")
+                }
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Theme.waiting)
+                .padding(.horizontal, 11)
+                .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Theme.waiting.opacity(0.1)))
+            }
+
+            if let suggested = request.suggestedPanel {
+                destinationRow(suggested)
+            } else if destinations.isEmpty {
+                Text("No active panels are available. Open or restore a session, then try again.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Flat.dim)
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("PANEL")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(1.1)
+                        .foregroundStyle(Flat.faint)
+                    Picker("Panel", selection: $selectedKey) {
+                        ForEach(destinations, id: \.key) { panel in
+                            Text(panel.sessionName + " — " + panel.machineName).tag(panel.key)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(request.requiresLargeConfirmation ? "Add File" : "Add") {
+                    guard let destination else { return }
+                    onSave(destination)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(destination == nil)
+            }
+        }
+        .padding(22)
+        .frame(width: 470)
+        .background(Flat.bg)
+    }
+
+    private func destinationRow(_ panel: ArtifactPanelContext) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "terminal")
+                .foregroundStyle(Flat.accent)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(panel.sessionName).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Flat.text)
+                Text(panel.machineName).font(.system(size: 10.5)).foregroundStyle(Flat.faint)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 11)
+        .frame(minHeight: 48)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Flat.sidebar))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Flat.hairline, lineWidth: 1))
+    }
 }
 
 /// Pick local file(s) and upload them into `dir` on the tab's host.
