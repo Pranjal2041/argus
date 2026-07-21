@@ -95,6 +95,72 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(loaded, [renamed])
     }
 
+    func testExplicitFileSnapshotPreservesBytesSourceAndType() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let bytes = Data("{\"verdict\":\"keep\"}".utf8)
+        let id = UUID(uuidString: "CCCCCCCC-DDDD-EEEE-FFFF-AAAAAAAAAAAA")!
+
+        let saved = try await disk.saveFile(
+            bytes,
+            filename: "analysis.json",
+            panel: panel(name: "spatial_sol"),
+            sourcePath: "/workspace/results/analysis.json",
+            contentType: "application/json",
+            presentation: "file-snapshot",
+            id: id
+        )
+        let loaded = try await disk.load()
+
+        XCTAssertEqual(loaded, [saved])
+        XCTAssertEqual(saved.kind, ArtifactKind.fileSnapshot)
+        XCTAssertEqual(saved.filename, "analysis.json")
+        XCTAssertEqual(saved.relativePath, "files/cccccccc-dddd-eeee-ffff-aaaaaaaaaaaa.json")
+        XCTAssertEqual(saved.sourcePath, "/workspace/results/analysis.json")
+        XCTAssertEqual(saved.contentType, "application/json")
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(saved.relativePath)), bytes)
+    }
+
+    func testStreamedFileSnapshotCopiesBeforeTemporarySourceDisappears() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let source = root.appendingPathComponent("incoming-model.bin")
+        let bytes = Data(repeating: 0xA5, count: 4096)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try bytes.write(to: source)
+
+        let saved = try await disk.saveFile(
+            at: source,
+            filename: "model.bin",
+            panel: panel(),
+            sourcePath: "/remote/model.bin",
+            contentType: "application/octet-stream",
+            presentation: "file-snapshot"
+        )
+        try FileManager.default.removeItem(at: source)
+        let loaded = try await disk.load()
+
+        XCTAssertEqual(saved.byteCount, Int64(bytes.count))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(saved.relativePath)), bytes)
+        XCTAssertEqual(loaded, [saved])
+    }
+
+    func testFileSnapshotRenameKeepsStoredType() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let saved = try await disk.saveFile(
+            Data("notes".utf8),
+            filename: "notes.md",
+            panel: panel(),
+            sourcePath: "/workspace/notes.md",
+            contentType: "text/markdown",
+            presentation: "file-draft"
+        )
+
+        let renamed = try await disk.rename(saved, to: "review.txt")
+
+        XCTAssertEqual(renamed.filename, "review.md")
+        XCTAssertEqual(renamed.relativePath, saved.relativePath)
+        XCTAssertEqual(renamed.presentation, "file-draft")
+    }
+
     func testDeleteRemovesManifestAndPDF() async throws {
         let disk = ArtifactDiskStore(rootURL: root)
         let saved = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered")
@@ -183,6 +249,15 @@ final class ArtifactStoreTests: XCTestCase {
             panel: panel(name: "vlm_gating", stableID: "$7"),
             createdAt: Date(timeIntervalSinceNow: 2)
         )
+        _ = try await disk.saveFile(
+            Data("# Saved decision\n\nKeep the current result.\n".utf8),
+            filename: "decision.md",
+            panel: panel(name: "spatial_sol", stableID: "$8"),
+            sourcePath: "/tmp/work/decision.md",
+            contentType: "text/markdown",
+            presentation: "file-draft",
+            createdAt: Date(timeIntervalSinceNow: 3)
+        )
         let store = ArtifactStore(rootURL: root, loadImmediately: false, logEvents: false)
         await store.reload()
         switch ProcessInfo.processInfo.environment["UT_ARTIFACT_SCREENSHOT_MODE"] {
@@ -190,6 +265,10 @@ final class ArtifactStoreTests: XCTestCase {
             if let context = store.records.first?.panel { store.open(panel: context) }
         case "viewer":
             if let record = store.records.first { store.open(artifact: record) }
+        case "file-viewer":
+            if let record = store.records.first(where: { $0.kind == ArtifactKind.fileSnapshot }) {
+                store.open(artifact: record)
+            }
         default:
             break
         }

@@ -61,7 +61,10 @@ leaves your machine.
 
 Clicking **PDF** saves the exact presentation currently on screen—Rendered or Terminal—to Argus's
 local **Artifacts** library. Opening Render alone does not save anything, and opening an unrelated
-PDF in Files does not add it. Artifacts are grouped by panel and remain available after that panel is
+PDF in Files does not add it automatically. A file becomes an artifact only when you explicitly
+right-click it in Files and choose **Add to Artifacts**; a Files tab opened from a session remembers
+that panel, while a manually opened tab asks for a destination. Unsaved text is captured as the visible
+draft. Artifacts are grouped by panel and remain available after that panel is
 hidden, renamed, stopped, or removed. Open the library with `⇧⌘I`, from the command palette, or from
 the archive button in a panel header; there you can search filenames, sort, read, rename, export, or
 delete the saved artifacts. The library copy is canonical, while **Export** creates an ordinary copy

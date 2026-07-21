@@ -66,14 +66,15 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session
-  (read passively from the screen, so it works with nothing attached). Render PDFs and foreground
-  clipboard screenshots can be saved into a local, searchable per-panel Artifacts library and
-  reopened after the session ends. On macOS, an opt-in toggle keeps the Mac awake and reachable
+  (read passively from the screen, so it works with nothing attached). Render PDFs, foreground
+  clipboard screenshots, and files explicitly saved from Files can live in a local, searchable
+  per-panel Artifacts library and be reopened after the session ends. On macOS, an opt-in toggle keeps the Mac awake and reachable
   while the screen is locked.
 - **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
   per-file tabs, `⌘P` quick-open, `⇧⌘G` Go to Folder, content search, Git-aware tree coloring,
   live Markdown preview, syntax highlighting, image / PDF / media preview, upload & download, and
-  *reveal-from-session* to jump to a session's working directory.
+  *reveal-from-session* to jump to a session's working directory. Right-click any file to save an
+  explicit point-in-time copy to that panel's Artifacts; unsaved editor drafts are preserved as seen.
 - **Git & pull-request review** — inspect working trees, commit graphs, blame, branches, and GitHub
   PR dossiers on the host that owns the repo. Ask free-form questions or generate cached agent
   insights over one commit, a range, a whole branch, or a PR; use explicit `gh` actions or jump

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 /// A URLSession that never serves cached responses — so re-opening a file after a
 /// save (or an external change) always reflects what's on disk, not a stale, still
@@ -112,6 +113,10 @@ final class OpenDoc: ObservableObject, Identifiable {
     @Published var dirty = false
     @Published var draft = ""   // @Published so a live markdown preview re-renders as you type
     var originalText = ""
+    /// Original bytes for image/PDF/binary previews. Artifacts use these rather
+    /// than re-reading the remote file, so the saved snapshot matches what the
+    /// user was actually looking at.
+    var loadedBytes: Data?
     @Published var zoom: CGFloat = 1.0
     @Published var pendingLine: Int? = nil
     @Published var previewMode: PreviewMode = .editor
@@ -149,7 +154,7 @@ final class OpenDoc: ObservableObject, Identifiable {
     }
     /// Adopt freshly-loaded text as the clean baseline.
     func loadedText(_ s: String) { draft = s; originalText = s; dirty = false; content = .text(s, name: name, path: path) }
-    func markSaved() { originalText = draft; dirty = false }
+    func markSaved() { originalText = draft; loadedBytes = Data(draft.utf8); dirty = false }
 
     func zoomIn()    { zoom = min(4.0, zoom * 1.15) }
     func zoomOut()   { zoom = max(0.4, zoom / 1.15) }
@@ -161,6 +166,31 @@ struct NewItem: Identifiable { let id = UUID(); let parent: String; let isDir: B
 
 /// Progress of an in-flight upload (drives the upload banner).
 struct UploadState { let name: String; var progress: Double }
+
+struct FileArtifactNotice: Identifiable {
+    let id = UUID()
+    let message: String
+    let isError: Bool
+    let isSaving: Bool
+}
+
+struct FileArtifactMaterial {
+    let data: Data
+    let contentType: String?
+    let presentation: String
+}
+
+enum FileArtifactError: LocalizedError {
+    case invalidPath
+    case http(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPath: return "The file path could not be opened."
+        case .http(let status): return "The file server returned HTTP \(status)."
+        }
+    }
+}
 
 /// URLSession task delegate that reports upload byte progress.
 private final class UploadProgress: NSObject, URLSessionTaskDelegate {
@@ -195,6 +225,10 @@ final class FileTab: ObservableObject, Identifiable {
     let machineName: String
     let httpBase: String
     let isLocal: Bool
+    /// Set only when Files was opened from a panel-facing surface. It remains
+    /// attached while the user navigates, so explicit snapshots keep the panel
+    /// they came from without relying on whichever terminal is selected later.
+    let sourcePanel: ArtifactPanelContext?
 
     @Published var title: String
     @Published var rootPath: String = ""
@@ -306,14 +340,16 @@ final class FileTab: ObservableObject, Identifiable {
     @Published var deleting: FileNode? = nil
     @Published var uploading: UploadState? = nil
     @Published var downloading: UploadState? = nil
+    @Published var artifactNotice: FileArtifactNotice? = nil
 
     private let textCap: Int64 = 5_000_000   // above this, don't auto-load as text
 
-    init(machine: Machine) {
+    init(machine: Machine, sourcePanel: ArtifactPanelContext? = nil) {
         machineID = machine.id
         machineName = machine.name
         httpBase = machine.httpBase
         isLocal = machine.isLocal
+        self.sourcePanel = sourcePanel
         title = machine.name
     }
 
@@ -409,6 +445,91 @@ final class FileTab: ObservableObject, Identifiable {
                 ActivityJournal.shared.log("fileSave", ["machineID": machineID, "path": path])
             }
         }
+    }
+
+    /// The exact already-visible value for a file, if Files has one. A dirty
+    /// editor contributes its draft; clean text, images and PDFs contribute the
+    /// bytes loaded when the preview opened. Non-loaded files are streamed from
+    /// the broker by `saveArtifact` instead.
+    func artifactMaterial(for entry: FileEntry) -> FileArtifactMaterial? {
+        guard let doc = openDocs.first(where: { $0.path == entry.path }) else { return nil }
+        let fallbackType = contentType(for: entry.name)
+        switch doc.content {
+        case .text:
+            // `content` intentionally retains the originally loaded value so
+            // Monaco is not reset on every edit. `draft` is the authoritative
+            // visible value both before and after an in-place save.
+            let visible = doc.draft
+            return FileArtifactMaterial(
+                data: Data(visible.utf8),
+                contentType: fallbackType ?? "text/plain",
+                presentation: doc.dirty ? "file-draft" : "file-snapshot"
+            )
+        case .image, .pdf, .binary:
+            guard let bytes = doc.loadedBytes else { return nil }
+            return FileArtifactMaterial(data: bytes, contentType: fallbackType, presentation: "file-snapshot")
+        default:
+            return nil
+        }
+    }
+
+    func artifactSize(for entry: FileEntry) -> Int64 {
+        artifactMaterial(for: entry).map { Int64($0.data.count) } ?? max(0, entry.size)
+    }
+
+    func saveArtifact(_ entry: FileEntry, to panel: ArtifactPanelContext, artifacts: ArtifactStore) {
+        let saving = FileArtifactNotice(
+            message: "Adding \(entry.name) to \(panel.sessionName)…",
+            isError: false,
+            isSaving: true
+        )
+        artifactNotice = saving
+        Task {
+            do {
+                if let material = artifactMaterial(for: entry) {
+                    _ = try await artifacts.saveFile(
+                        material.data,
+                        filename: entry.name,
+                        panel: panel,
+                        sourcePath: entry.path,
+                        contentType: material.contentType,
+                        presentation: material.presentation
+                    )
+                } else {
+                    guard let url = readURL(entry.path) else { throw FileArtifactError.invalidPath }
+                    let (temporaryURL, response) = try await fsSession.download(from: url)
+                    if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                        throw FileArtifactError.http(http.statusCode)
+                    }
+                    _ = try await artifacts.saveFile(
+                        at: temporaryURL,
+                        filename: entry.name,
+                        panel: panel,
+                        sourcePath: entry.path,
+                        contentType: response.mimeType ?? contentType(for: entry.name),
+                        presentation: "file-snapshot"
+                    )
+                }
+                showArtifactNotice("Added \(entry.name) to \(panel.sessionName)", isError: false)
+            } catch {
+                showArtifactNotice("Couldn’t add \(entry.name): \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    private func showArtifactNotice(_ message: String, isError: Bool) {
+        let notice = FileArtifactNotice(message: message, isError: isError, isSaving: false)
+        artifactNotice = notice
+        Task {
+            try? await Task.sleep(nanoseconds: isError ? 6_000_000_000 : 3_000_000_000)
+            if artifactNotice?.id == notice.id { artifactNotice = nil }
+        }
+    }
+
+    private func contentType(for filename: String) -> String? {
+        let ext = (filename as NSString).pathExtension
+        guard !ext.isEmpty else { return nil }
+        return UTType(filenameExtension: ext)?.preferredMIMEType
     }
 
     /// Focus an already-open doc (or no-op). Keeps the tree highlight in sync.
@@ -679,6 +800,7 @@ final class FileTab: ObservableObject, Identifiable {
             if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
                 doc.content = .error("HTTP \(http.statusCode)"); return
             }
+            doc.loadedBytes = data
             switch kind {
             case .image:
                 doc.content = NSImage(data: data).map { .image($0) } ?? .binary(e)
@@ -772,14 +894,21 @@ final class FileTab: ObservableObject, Identifiable {
 
 @MainActor
 final class FilesModel: ObservableObject {
+    static let largeArtifactThreshold: Int64 = 100 * 1024 * 1024
+
     @Published var tabs: [FileTab] = []
     @Published var activeID: UUID?
+    @Published var pendingArtifact: PendingFileArtifact?
 
     var active: FileTab? { tabs.first { $0.id == activeID } }
 
     @discardableResult
-    func addTab(_ machine: Machine, startPath: String? = nil) -> FileTab {
-        let t = FileTab(machine: machine)
+    func addTab(
+        _ machine: Machine,
+        startPath: String? = nil,
+        sourcePanel: ArtifactPanelContext? = nil
+    ) -> FileTab {
+        let t = FileTab(machine: machine, sourcePanel: sourcePanel)
         tabs.append(t)
         activeID = t.id
         t.start(at: startPath)
@@ -789,8 +918,14 @@ final class FilesModel: ObservableObject {
     /// Open a path clicked in `machine`'s terminal: resolve+classify it on that host
     /// (relative paths against the session cwd `base`), then root the tree / preview
     /// the file. `line` jumps the editor when a `file:line` was clicked.
-    func openTerminalPath(_ machine: Machine, rawPath: String, base: String, line: Int?) {
-        let t = FileTab(machine: machine)
+    func openTerminalPath(
+        _ machine: Machine,
+        rawPath: String,
+        base: String,
+        line: Int?,
+        sourcePanel: ArtifactPanelContext? = nil
+    ) {
+        let t = FileTab(machine: machine, sourcePanel: sourcePanel)
         tabs.append(t)
         activeID = t.id
         let path = normalizedTerminalPath(rawPath, remoteOS: machine.os)
@@ -815,4 +950,40 @@ final class FilesModel: ObservableObject {
         tabs.removeAll { $0.id == id }
         if activeID == id { activeID = tabs.last?.id }
     }
+
+    func requestArtifact(_ entry: FileEntry, from tab: FileTab, artifacts: ArtifactStore) {
+        guard !entry.isDir else { return }
+        let byteCount = tab.artifactSize(for: entry)
+        let isLarge = byteCount > Self.largeArtifactThreshold
+        if let destination = tab.sourcePanel, !isLarge {
+            tab.saveArtifact(entry, to: destination, artifacts: artifacts)
+        } else {
+            pendingArtifact = PendingFileArtifact(
+                tabID: tab.id,
+                entry: entry,
+                suggestedPanel: tab.sourcePanel,
+                byteCount: byteCount,
+                requiresLargeConfirmation: isLarge
+            )
+        }
+    }
+
+    func savePendingArtifact(
+        _ request: PendingFileArtifact,
+        to panel: ArtifactPanelContext,
+        artifacts: ArtifactStore
+    ) {
+        pendingArtifact = nil
+        guard let tab = tabs.first(where: { $0.id == request.tabID }) else { return }
+        tab.saveArtifact(request.entry, to: panel, artifacts: artifacts)
+    }
+}
+
+struct PendingFileArtifact: Identifiable {
+    let id = UUID()
+    let tabID: UUID
+    let entry: FileEntry
+    let suggestedPanel: ArtifactPanelContext?
+    let byteCount: Int64
+    let requiresLargeConfirmation: Bool
 }

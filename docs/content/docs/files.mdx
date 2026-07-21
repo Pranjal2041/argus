@@ -28,6 +28,25 @@ preview, and transfer files on any of your machines, the same way you reach thei
   live as you type and matches your app theme.
 - **Preview anything** — images, PDF, audio, and video, with independent zoom.
 - **Transfer** — upload and download files, with progress.
+- **Save a meaningful file to Artifacts** — right-click a file and choose **Add to Artifacts**. Files
+  reached from a terminal, session sidebar, Git view, or Lab already know their source panel and save
+  there in one click. A manually opened Files tab asks which panel should own the snapshot.
+
+## Add a file to a panel's Artifacts
+
+Files are never collected merely because you browse or preview them. When a particular file matters,
+right-click it in the tree and choose **Add to _panel_ Artifacts**. Argus stores an immutable local copy
+at that moment and adds it to the same simple per-panel library used by Render PDFs and screenshots.
+Text, images, and PDFs reopen directly in Argus; other formats use the system preview when available
+and can always be exported.
+
+If the file is already open, the snapshot matches the visible version. In particular, an unsaved
+Monaco draft is captured without modifying the remote file and is labeled **Draft snapshot**. Files
+that are not already loaded are streamed from their host instead of being held in memory. Copies over
+100 MB require confirmation and show their size before Argus saves them.
+
+Opening an ordinary file or PDF still does nothing automatically. This action is deliberately explicit,
+so low-value browsing never fills the library.
 
 ## How it works
 

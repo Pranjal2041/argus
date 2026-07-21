@@ -57,7 +57,7 @@ const tiles = [
   { icon: RefreshCw, t: 'Cross-device sync', d: 'Workflows, todos, and notes follow you from Mac to phone, with your Mac as the sync host.' },
   { icon: Coffee, t: 'Awake while locked', d: 'Keep the Mac reachable behind a lock screen, so tmux, the broker, and your jobs keep running.' },
   { icon: BookOpen, t: 'Activity journal', d: 'A local, append-only record of what you saw, said, and did across Mac and phone, with a first-class in-app ledger.' },
-  { icon: Archive, t: 'Panel artifacts', d: 'Keep exact Render PDFs and foreground clipboard screenshots with their panel in one local library.' },
+  { icon: Archive, t: 'Panel artifacts', d: 'Keep exact Render PDFs, foreground screenshots, and explicitly chosen files with their panel in one local library.' },
   { icon: Sparkles, t: 'Argus Wrapped', d: 'A living story and dashboard of your fleet, rhythm, delegation, interventions, experiments, and shipped work — derived from the journal.' },
 ];
 
