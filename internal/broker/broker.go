@@ -828,10 +828,27 @@ func (m *Manager) Serve(ctx context.Context, c *websocket.Conn, name string) err
 
 // Create makes a new detached session (optionally rooted at startDir).
 func (m *Manager) Create(name, startDir string) error {
+	return m.create(name, startDir, false)
+}
+
+// CreateAgentShell makes the persistent stateful shell behind `ut sh`. It is
+// mesh-owned from its first observable cache entry, so desktop/phone clients
+// never briefly surface it as a normal panel before the provider refreshes.
+func (m *Manager) CreateAgentShell(name, startDir string) error {
+	return m.create(name, startDir, true)
+}
+
+func (m *Manager) create(name, startDir string, agentShell bool) error {
 	if m.reservesStableIDs() && isStableSessionID(name) {
 		return fmt.Errorf("session name %q is reserved for a stable session handle", name)
 	}
-	err := m.prov.Create(name, startDir)
+	existed := m.prov.Has(name)
+	var err error
+	if agentShell {
+		err = m.prov.CreateAgentShell(name, startDir)
+	} else {
+		err = m.prov.Create(name, startDir)
+	}
 	if err == nil {
 		// Optimistically add to the cache so a client's refresh-after-create sees the
 		// new session immediately; the background refresh fills in the real details.
@@ -843,9 +860,9 @@ func (m *Manager) Create(name, startDir string) error {
 				break
 			}
 		}
-		if !seen {
+		if !seen && !existed {
 			c := append([]session.Info(nil), m.sessCache...)
-			c = append(c, session.Info{Name: name, Windows: 1, Path: startDir, State: "idle"})
+			c = append(c, session.Info{Name: name, Windows: 1, Path: startDir, State: "idle", Agent: agentShell})
 			m.sessCache = c
 		}
 		m.sessMu.Unlock()

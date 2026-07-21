@@ -39,18 +39,27 @@ the target host's broker.
 |---|---|
 | `ut ls` | list every session across all reachable hosts |
 | `ut exec <@host[:shell]> <cmd…>` | run a command on a host and return its output |
-| `ut sh <@host> [name]` | create a persistent shell on a host (keeps env / cwd / venv) |
+| `ut sh <@host> [name]` | create a persistent **agent shell** on a host (keeps env / cwd / venv; hidden by default) |
+| `ut sh --visible <@host> <name>` | explicitly create a persistent user-visible shell |
 | `ut run <host:shell> <cmd…>` | run a command inside one of those persistent shells |
 | `ut spawn [--idle <dur>] <@host[:name]> <cmd…>` | fire a long job into a fresh session |
 | `ut send <@host:shell> <text…>` | type text into a session |
 | `ut tail <@host:session>` | read a session's recent output |
 | `ut cp <src> <dst>` | copy a file (either side may be `host:path`) |
 
-A session started by `ut spawn` is an **agent session**: hidden from the app by default and
-**auto-reaped** once it has sat idle past its leash (`--idle`, a few hours by default), so a swarm of
-short-lived helpers does not pile up. A live command is not removed. After the command finishes,
-the retained terminal is removed after at most seven days even when `--idle 0` disables the shorter
-idle cleanup.
+Sessions created by the mesh are **agent sessions**, so agents can orchestrate freely without filling
+the main sidebar:
+
+- `ut sh` creates a stateful agent shell, hidden by default and removed after seven days without
+  activity. Its cwd, exports, and activated environment still persist across `ut run` calls.
+- `ut spawn` creates a background job session, hidden by default and **auto-reaped** once the finished
+  job has sat idle past its leash (`--idle`, a few hours by default). A live command is not removed.
+  After completion, its retained terminal is removed after at most seven days even when `--idle 0`
+  disables the shorter cleanup.
+
+Use `ut sh --visible` only when the persistent shell is deliberately part of the user's normal panel
+workspace. Sessions created with the Argus **New Session** control and interactive `ut <name>` remain
+user-visible.
 
 ## The Lab research protocol
 

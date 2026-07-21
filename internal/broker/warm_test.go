@@ -9,14 +9,30 @@ import (
 
 type warmProvider struct {
 	exists      bool
+	agent       bool
 	createCalls int
 	dialCalls   int
 }
 
-func (p *warmProvider) List() []session.Info { return nil }
+func (p *warmProvider) List() []session.Info {
+	if !p.exists {
+		return nil
+	}
+	return []session.Info{{Name: "shell", Agent: p.agent}}
+}
 func (p *warmProvider) Create(string, string) error {
 	p.createCalls++
 	p.exists = true
+	p.agent = false
+	return nil
+}
+func (p *warmProvider) CreateAgentShell(string, string) error {
+	p.createCalls++
+	if p.exists {
+		return nil
+	}
+	p.exists = true
+	p.agent = true
 	return nil
 }
 func (p *warmProvider) Kill(string) error                           { return nil }
@@ -48,13 +64,48 @@ func (s *warmSession) Close()                        {}
 
 func TestWarmExistingDoesNotCreateMissingFallback(t *testing.T) {
 	p := &warmProvider{}
-	m := &Manager{ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{}}
+	m := &Manager{
+		ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{},
+		hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+	}
 
 	if err := m.WarmExisting("universal_tmux"); err != nil {
 		t.Fatalf("WarmExisting missing fallback: %v", err)
 	}
 	if p.exists || p.createCalls != 0 || p.dialCalls != 0 {
 		t.Fatalf("missing fallback was mutated: exists=%v createCalls=%d dialCalls=%d", p.exists, p.createCalls, p.dialCalls)
+	}
+}
+
+func TestCreateAgentShellIsAgentInOptimisticCache(t *testing.T) {
+	p := &warmProvider{}
+	m := &Manager{
+		ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{},
+		hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+	}
+	if err := m.CreateAgentShell("shell", ""); err != nil {
+		t.Fatalf("CreateAgentShell: %v", err)
+	}
+
+	got := m.Sessions()
+	if len(got) != 1 || got[0].Name != "shell" || !got[0].Agent {
+		t.Fatalf("cached sessions = %+v, want one agent shell", got)
+	}
+}
+
+func TestCreateAgentShellDoesNotOptimisticallyHideExistingUserSession(t *testing.T) {
+	p := &warmProvider{exists: true, agent: false}
+	m := &Manager{
+		ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{},
+		hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+	}
+	if err := m.CreateAgentShell("shell", ""); err != nil {
+		t.Fatalf("CreateAgentShell existing: %v", err)
+	}
+	for _, got := range m.Sessions() {
+		if got.Name == "shell" && got.Agent {
+			t.Fatalf("existing user session was transiently marked agent: %+v", got)
+		}
 	}
 }
 

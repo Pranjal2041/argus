@@ -104,6 +104,9 @@ func dropDimAndAnsi(b []byte) string {
 	return string(out)
 }
 func (p *Provider) Create(name, dir string) error { return CreateSession(p.socket, name, dir) }
+func (p *Provider) CreateAgentShell(name, dir string) error {
+	return CreateAgentShell(p.socket, name, dir)
+}
 func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
 	return SpawnSession(p.socket, name, dir, cmd, idleSec)
 }
@@ -390,8 +393,12 @@ type Client struct {
 	primary string // pane id of the session's first pane
 	outCh   chan Output
 	writeMu sync.Mutex
-	lastW   int // last size emitted from %layout-change (readLoop goroutine only)
-	lastH   int
+	// Agent-session use is persisted at most once/minute while a user types in a
+	// connected viewer. CLI run/send paths touch the same marker directly.
+	meshOwned bool
+	lastTouch int64
+	lastW     int // last size emitted from %layout-change (readLoop goroutine only)
+	lastH     int
 }
 
 // Dial starts a control-mode client attached to an EXISTING named session.
@@ -415,7 +422,14 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 	}
 	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 30, Cols: 100})
 
-	c := &Client{cmd: cmd, ptmx: ptmx, socket: socket, session: session, primary: discoverPane(socket, id), outCh: make(chan Output, 1024)}
+	meshOwned := false
+	if out, e := exec.Command("tmux", tmuxArgs(socket, "show-options", "-v", "-t", id, optAgent)...).Output(); e == nil {
+		meshOwned = strings.TrimSpace(string(out)) == "1"
+	}
+	c := &Client{
+		cmd: cmd, ptmx: ptmx, socket: socket, session: session,
+		primary: discoverPane(socket, id), outCh: make(chan Output, 1024), meshOwned: meshOwned,
+	}
 	go c.readLoop(ptmx)
 	return c, nil
 }
@@ -439,16 +453,49 @@ func CreateSession(socket, name, startDir string) error {
 	return nil
 }
 
-// tmux user-options that mark a session as agent-created (via `ut spawn`) and
-// record its cleanup timing. @ut_agent hides it from the app UI (shown only
-// behind a toggle); @ut_reap_idle is the per-session idle budget in seconds
-// (0 skips early idle cleanup); @ut_done_at records when the command finished
-// so every finished agent session can be retained for at most seven days.
+// CreateAgentShell creates the persistent stateful shell behind `ut sh` and
+// records its lifecycle at the same time as creation. It remains a normal tmux
+// shell — `ut run` can reuse its cwd/env/venv — but clients hide it by default
+// and the reaper may remove it after seven days without activity. Existing
+// sessions keep their original classification: provenance is assigned only by
+// the path that actually created the session.
+func CreateAgentShell(socket, name, startDir string) error {
+	if HasSession(socket, name) {
+		return nil // attach-or-create without silently reclassifying a user session
+	}
+	args := []string{"new-session", "-d", "-s", name}
+	if startDir != "" {
+		args = append(args, "-c", startDir)
+	}
+	// Send one tmux command sequence so no /sessions refresh can observe the new
+	// shell before its agent marker is installed (which would make it flash in
+	// the main sidebar). `;` is a tmux command separator when passed as argv.
+	args = append(args,
+		";", "set-option", "-t", name, optAgent, "1",
+		";", "set-option", "-t", name, optAgentShell, "1",
+		";", "set-option", "-t", name, optOrigin, "cli-sh",
+		";", "set-option", "-t", name, optLastUsed, strconv.FormatInt(time.Now().Unix(), 10),
+	)
+	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create agent shell %q: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// tmux user-options that mark mesh-created sessions and record their lifecycle.
+// @ut_agent hides them from the app UI (shown only behind a toggle);
+// @ut_agent_shell distinguishes persistent `ut sh` shells from `ut spawn`
+// jobs; @ut_last_used is the explicit activity clock; and spawn-specific
+// @ut_reap_idle / @ut_done_at drive completion-based cleanup.
 const (
-	optAgent    = "@ut_agent"
-	optReapIdle = "@ut_reap_idle"
-	optDone     = "@ut_done" // set by the wrapper the instant cmd returns — the deterministic "job finished" signal
-	optDoneAt   = "@ut_done_at"
+	optAgent      = "@ut_agent"
+	optAgentShell = "@ut_agent_shell"
+	optOrigin     = "@ut_origin"
+	optLastUsed   = "@ut_last_used"
+	optReapIdle   = "@ut_reap_idle"
+	optDone       = "@ut_done" // set by the wrapper the instant cmd returns — the deterministic "job finished" signal
+	optDoneAt     = "@ut_done_at"
 )
 
 // SpawnSession creates a detached session that RUNS cmd directly as its process
@@ -497,49 +544,70 @@ var reapableShells = map[string]bool{
 	"zsh": true, "bash": true, "fish": true, "ksh": true, "tcsh": true, "csh": true, "sh": true, "dash": true,
 }
 
-// ReapIdleAgentSessions kills agent (@ut_agent) sessions whose command has
-// finished (@ut_done) and which have either sat idle longer than their
-// @ut_reap_idle setting or passed the seven-day post-completion maximum. It
-// returns the reaped names. Deterministic and
+// ReapIdleAgentSessions removes both kinds of mesh-owned sessions:
+//   - `ut spawn`: only after its command finished, using its requested idle
+//     leash or the seven-day post-completion maximum;
+//   - `ut sh`: after seven days without activity.
+//
+// In both cases a non-shell foreground process prevents removal, so a silent
+// long-running job is safe. It returns the reaped names. Deterministic and
 // conservative — a session is removed ONLY when ALL hold:
 //   - it is tagged agent (@ut_agent==1),
-//   - its job has finished (@ut_done==1) — a still-running job, even a silent
-//     one, never sets this, so live work is never touched,
-//   - its idle setting or the hard maximum has expired,
+//   - either its spawned job finished or its persistent shell has been inactive
+//     for seven days,
 //   - its foreground is an interactive shell (guards the rare case of a new job
 //     started by hand in the post-job shell).
 //
 // Called periodically by the broker.
 func ReapIdleAgentSessions(socket string) []string {
 	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		fmt.Sprintf("#{session_name}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{session_activity}",
-			optAgent, optDone, optReapIdle, optDoneAt))...).Output()
+		fmt.Sprintf("#{session_name}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{session_activity}",
+			optAgent, optAgentShell, optDone, optReapIdle, optDoneAt, optLastUsed))...).Output()
 	if err != nil {
 		return nil
 	}
 	now := time.Now().Unix()
 	var reaped []string
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		f := strings.SplitN(line, "\t", 6)
-		if len(f) < 6 || f[1] != "1" || f[2] != "1" { // not agent, or job not finished
+		f := strings.SplitN(line, "\t", 8)
+		if len(f) < 8 || f[1] != "1" { // not mesh-owned
 			continue
 		}
 		name := f[0]
+		if isInternalSession(name) {
+			continue // infrastructure is never user/agent cleanup material
+		}
+		agentShell := f[2] == "1"
+		done := f[3] == "1"
 		leash := session.DefaultReapIdleSec
-		if f[3] != "" {
-			if n, e := strconv.Atoi(f[3]); e == nil {
+		if f[4] != "" {
+			if n, e := strconv.Atoi(f[4]); e == nil {
 				leash = n
 			}
 		}
-		doneAt, _ := strconv.ParseInt(f[4], 10, 64)
-		act, _ := strconv.ParseInt(f[5], 10, 64)
-		if doneAt <= 0 {
-			// Sessions created before @ut_done_at was introduced still carry a
-			// reliable @ut_done marker. Their last tmux activity is the safest
-			// available approximation of completion time.
-			doneAt = act
+		doneAt, _ := strconv.ParseInt(f[5], 10, 64)
+		lastUsed, _ := strconv.ParseInt(f[6], 10, 64)
+		act, _ := strconv.ParseInt(f[7], 10, 64)
+		expired := false
+		if agentShell {
+			expired = session.AgentShellExpired(now, lastUsed)
+		} else if done {
+			if doneAt <= 0 {
+				// Sessions created before @ut_done_at was introduced still carry a
+				// reliable @ut_done marker. Their last tmux activity is the safest
+				// available approximation of completion time.
+				doneAt = act
+			}
+			idleSince := act
+			if doneAt > idleSince {
+				idleSince = doneAt
+			}
+			if lastUsed > idleSince {
+				idleSince = lastUsed
+			}
+			expired = session.AgentSessionExpired(now, idleSince, doneAt, leash)
 		}
-		if !session.AgentSessionExpired(now, act, doneAt, leash) {
+		if !expired {
 			continue
 		}
 		// Finished + expired — reap unless a NEW job is now running.
@@ -649,7 +717,30 @@ func (c *Client) SendKeys(pane string, data []byte) error {
 		b.WriteByte(hexdigits[by>>4])
 		b.WriteByte(hexdigits[by&0x0f])
 	}
-	return c.send(b.String())
+	if err := c.send(b.String()); err != nil {
+		return err
+	}
+	c.touchAgentSession()
+	return nil
+}
+
+// touchAgentSession cheaply records interactive use without forking a process per
+// keystroke. The command rides the existing tmux control connection and is
+// debounced to one write per minute. Pane ids are tmux-issued safe targets, so
+// no user-controlled session name is interpolated into the control command.
+func (c *Client) touchAgentSession() {
+	if !c.meshOwned || c.primary == "" {
+		return
+	}
+	now := time.Now().Unix()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.lastTouch > 0 && now-c.lastTouch < 60 {
+		return
+	}
+	if _, err := io.WriteString(c.ptmx, fmt.Sprintf("set-option -t %s %s %d\n", c.primary, optLastUsed, now)); err == nil {
+		c.lastTouch = now
+	}
 }
 
 // Resize sizes the window to this client's view. It is an ASK, not a command:

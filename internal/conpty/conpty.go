@@ -43,10 +43,11 @@ type winSession struct {
 	outCh chan session.Output
 	once  sync.Once
 
-	agent    bool // created by the mesh (ut spawn): hidden from the UI, idle-reaped
-	reapIdle int  // idle seconds before early cleanup (0 = retain until the seven-day maximum)
-	doneFile string
-	doneAt   int64
+	agent      bool // created by the mesh (ut spawn / default ut sh): hidden from the UI
+	agentShell bool // persistent `ut sh`: seven-day inactivity cleanup instead of completion-based cleanup
+	reapIdle   int  // spawned-job idle seconds before early cleanup (0 = retain until the seven-day maximum)
+	doneFile   string
+	doneAt     int64
 
 	mu      sync.Mutex
 	ring    []byte
@@ -61,6 +62,11 @@ func (s *winSession) Pane() string                  { return "%0" }
 
 func (s *winSession) SendKeys(_ string, data []byte) error {
 	_, err := s.cpty.Write(data)
+	if err == nil && len(data) > 0 {
+		s.mu.Lock()
+		s.lastOut = time.Now().Unix() // input is activity even before the shell echoes it
+		s.mu.Unlock()
+	}
 	return err
 }
 
@@ -243,12 +249,19 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 }
 
 func (p *Provider) Create(name, dir string) error {
+	_, _, err := p.create(name, dir, false, false, 0, "")
+	return err
+}
+
+// create installs lifecycle metadata before publishing the session in the
+// provider map, so a concurrent inventory refresh can never observe an agent
+// shell/job as a transient user-visible panel.
+func (p *Provider) create(name, dir string, agent, agentShell bool, reapIdle int, doneFile string) (*winSession, bool, error) {
 	p.mu.Lock()
-	if _, ok := p.sessions[name]; ok { // attach-or-create: existing is a no-op
+	if s, ok := p.sessions[name]; ok { // attach-or-create: existing is a no-op
 		p.mu.Unlock()
-		return nil
+		return s, false, nil
 	}
-	p.mu.Unlock()
 
 	if dir == "" {
 		dir, _ = os.UserHomeDir()
@@ -257,14 +270,15 @@ func (p *Provider) Create(name, dir string) error {
 		conpty.ConPtyDimensions(defCols, defRows),
 		conpty.ConPtyWorkDir(dir))
 	if err != nil {
-		return fmt.Errorf("start ConPTY for %q: %w", name, err)
+		p.mu.Unlock()
+		return nil, false, fmt.Errorf("start ConPTY for %q: %w", name, err)
 	}
 	s := &winSession{
 		name: name, dir: dir, cpty: cpty,
 		outCh: make(chan session.Output, 256), lastOut: time.Now().Unix(),
 		cols: defCols, rows: defRows,
+		agent: agent, agentShell: agentShell, reapIdle: reapIdle, doneFile: doneFile,
 	}
-	p.mu.Lock()
 	p.sessions[name] = s
 	p.mu.Unlock()
 
@@ -273,7 +287,16 @@ func (p *Provider) Create(name, dir string) error {
 		_, _ = cpty.Wait(context.Background())
 		p.remove(name)
 	}()
-	return nil
+	return s, true, nil
+}
+
+// CreateAgentShell creates the persistent stateful shell used by `ut sh` and
+// marks it as mesh-owned. Existing sessions retain their original provenance;
+// invoking `ut sh` must not silently hide a user-created panel with the same
+// name.
+func (p *Provider) CreateAgentShell(name, dir string) error {
+	_, _, err := p.create(name, dir, true, true, 0, "")
+	return err
 }
 
 func (p *Provider) Kill(name string) error {
@@ -338,24 +361,25 @@ func (p *Provider) Spawn(name, dir, cmd string, idleSec int) error {
 	_ = done.Close()
 	_ = os.Remove(doneFile)
 
-	if err := p.Create(name, dir); err != nil {
+	s, _, err := p.create(name, dir, true, false, idleSec, doneFile)
+	if err != nil {
 		_ = os.Remove(doneFile)
 		return err
 	}
-	p.mu.Lock()
-	if s := p.sessions[name]; s != nil {
-		s.mu.Lock()
-		oldDoneFile := s.doneFile
-		s.agent = true
-		s.reapIdle = idleSec
-		s.doneFile = doneFile
-		s.doneAt = 0
-		s.mu.Unlock()
-		if oldDoneFile != "" {
-			_ = os.Remove(oldDoneFile)
-		}
+	// An existing session retains Spawn's historical attach-and-run behavior;
+	// update its metadata now. A newly created session already carried these
+	// fields before it became observable.
+	s.mu.Lock()
+	oldDoneFile := s.doneFile
+	s.agent = true
+	s.agentShell = false
+	s.reapIdle = idleSec
+	s.doneFile = doneFile
+	s.doneAt = 0
+	s.mu.Unlock()
+	if oldDoneFile != "" && oldDoneFile != doneFile {
+		_ = os.Remove(oldDoneFile)
 	}
-	p.mu.Unlock()
 	time.Sleep(400 * time.Millisecond) // let the shell come up before typing
 	return p.SendText(name, commandWithDoneFile(p.shell, cmd, doneFile), true)
 }
@@ -371,11 +395,11 @@ func commandWithDoneFile(shell, cmd, path string) string {
 	return cmd + "; printf done > '" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
 }
 
-// ReapAgents removes finished agent sessions after their requested idle time or
-// the seven-day maximum. The completion file is written by the shell only after
-// the spawned command returns; a silent live command therefore remains safe.
-// The visible "working" guard also protects a new agent turn started in the
-// retained shell. Returns reaped names. Called periodically by the broker.
+// ReapAgents removes finished spawned jobs after their requested idle time or
+// seven-day maximum, and persistent agent shells after seven days without
+// activity. The completion file proves a spawned command returned; the visible
+// "working" guard protects both a silent live command and a new command started
+// in a retained shell. Returns reaped names. Called periodically by the broker.
 func (p *Provider) ReapAgents() []string {
 	now := time.Now().Unix()
 	var stale []string
@@ -387,7 +411,14 @@ func (p *Provider) ReapAgents() []string {
 				s.doneAt = info.ModTime().Unix()
 			}
 		}
-		expired := s.agent && session.AgentSessionExpired(now, s.lastOut, s.doneAt, s.reapIdle)
+		expired := false
+		if s.agent {
+			if s.agentShell {
+				expired = session.AgentShellExpired(now, s.lastOut)
+			} else {
+				expired = session.AgentSessionExpired(now, s.lastOut, s.doneAt, s.reapIdle)
+			}
+		}
 		idle := expired && detectState(s.ring) != "working"
 		s.mu.Unlock()
 		if idle {
@@ -414,8 +445,7 @@ func (p *Provider) SendText(name, text string, enter bool) error {
 	if enter {
 		data += "\r"
 	}
-	_, err := s.cpty.Write([]byte(data))
-	return err
+	return s.SendKeys("%0", []byte(data))
 }
 
 // Exec runs a command on this Windows host. One-shot only for now (fresh

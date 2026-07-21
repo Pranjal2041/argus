@@ -28,7 +28,7 @@ type Info struct {
 	Activity int64  `json:"activity"` // unix seconds of last activity
 	Path     string `json:"path"`     // active pane cwd (folder grouping)
 	State    string `json:"state"`    // attention: working | waiting | idle
-	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn): hidden by default and auto-reaped after completion
+	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn / default ut sh): hidden by default and automatically reaped
 	Hidden   bool   `json:"hidden"`   // user-hidden in a client UI; broker-owned so the hide syncs across devices
 	ID       string `json:"id"`       // backend's STABLE session handle (tmux $N): unchanged across rename, so clients connect by it to survive a rename across any reconnect
 }
@@ -67,6 +67,7 @@ type ExecResult struct {
 type Provider interface {
 	List() []Info
 	Create(name, dir string) error
+	CreateAgentShell(name, dir string) error // persistent mesh shell: hidden by default, reaped after seven idle days
 	Kill(name string) error
 	Rename(from, to string) error
 	Has(name string) bool
@@ -100,6 +101,16 @@ const (
 	// finished is never eligible for either cleanup rule.
 	MaxAgentRetentionSec = 7 * 24 * 3600
 )
+
+// AgentShellExpired reports whether a persistent agent shell has gone unused
+// for the full retention window. Unlike `ut spawn`, a shell has no single job
+// whose completion can mark it done: it may service many `ut run` calls over
+// its lifetime. Providers therefore combine this inactivity check with a
+// foreground-process guard before removing it, so a long-running silent job is
+// never killed merely because the shell produced no output.
+func AgentShellExpired(now, lastActivity int64) bool {
+	return lastActivity > 0 && now >= lastActivity && now-lastActivity >= int64(MaxAgentRetentionSec)
+}
 
 // AgentSessionExpired reports whether a finished agent session has reached
 // either its requested idle cleanup time or the seven-day hard maximum. The
