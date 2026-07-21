@@ -1122,13 +1122,18 @@ final class TerminalController: ObservableObject {
         guard let v = visible?.view else { return nil }
         if let sel = v.getSelection(), !sel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let styled = v.getStyledSelection()
-                ?? v.getTerminal().getStyledText(maxVisualLines: 400)
+                ?? RenderCapture.completeTerminal(v.getTerminal())
             let source = RenderExtract.clean(RenderExtract.joiningWrappedRows(styled))
             return RenderDocument(source: source, styled: styled, view: v,
                                   sourceOrigin: "selection")
         }
         let terminal = v.getTerminal()
-        let styled = terminal.getStyledText(maxVisualLines: 400)
+        // Render is an explicit snapshot of what the user can scroll through,
+        // not an arbitrary tail. The terminal already bounds retained history
+        // (100k rows); silently clipping that buffer to 400 rows cut long agent
+        // answers in the middle, especially when transcript recovery was not
+        // available on an older/remote broker.
+        let styled = RenderCapture.completeTerminal(terminal)
         let source = RenderExtract.clean(RenderExtract.joiningWrappedRows(styled))
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !styled.lines.isEmpty else {
             return nil

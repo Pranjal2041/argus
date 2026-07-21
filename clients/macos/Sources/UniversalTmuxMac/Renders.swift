@@ -233,6 +233,15 @@ enum RenderExtract {
     }
 }
 
+enum RenderCapture {
+    /// Render is a snapshot of the complete terminal history still retained by
+    /// SwiftTerm. Keeping this policy in one testable seam prevents a small
+    /// status-oriented tail limit from silently returning to the document path.
+    static func completeTerminal(_ terminal: Terminal) -> StyledTerminalText {
+        terminal.getStyledText(maxVisualLines: nil)
+    }
+}
+
 /// Bridge for panel-header actions that must reach the hosted WKWebView
 /// (PDF export needs the live web view, not SwiftUI state).
 @MainActor

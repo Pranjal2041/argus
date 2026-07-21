@@ -51,11 +51,12 @@ public struct StyledTerminalText: Equatable {
 }
 
 public extension Terminal {
-    /// Styled rows from the tail of the currently displayed buffer, including
-    /// scrollback. The visual rows are deliberately not joined: preserving their
-    /// cell geometry is what keeps terminal-rendered tables and aligned output
-    /// intact in downstream views.
-    func getStyledText(maxVisualLines: Int = 400) -> StyledTerminalText {
+    /// Styled rows from the currently displayed buffer, including scrollback.
+    /// Pass a line count to request a bounded tail, or `nil` to snapshot every
+    /// retained row. The visual rows are deliberately not joined: preserving
+    /// their cell geometry is what keeps terminal-rendered tables and aligned
+    /// output intact in downstream views.
+    func getStyledText(maxVisualLines: Int? = 400) -> StyledTerminalText {
         let source = displayBuffer
         var end = source.lines.count
 
@@ -67,7 +68,7 @@ public extension Terminal {
             if !row.runs.isEmpty { break }
             end -= 1
         }
-        let start = max(0, end - max(0, maxVisualLines))
+        let start = maxVisualLines.map { max(0, end - max(0, $0)) } ?? 0
         let rows = (start..<end).map { styledLine(source.lines[$0], startCol: 0, endCol: -1) }
         return StyledTerminalText(columns: source.cols, lines: rows)
     }

@@ -340,6 +340,25 @@ final class RenderWebIntegrationTests: XCTestCase {
         XCTAssertEqual(color?.lowercased(), "rgb(10, 120, 240)")
     }
 
+    func testTerminalPresentationKeepsRowsBeyondLegacyFourHundredLineTail() async throws {
+        let webView = try await loadRenderer()
+        let terminal: [String: Any] = [
+            "columns": 24,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [terminalStyle(foreground: "#E8E9EE")],
+            "lines": (0..<650).map { terminalLine([terminalRun("point-\($0)")]) },
+        ]
+        try await setDocument(webView, source: "point-0\npoint-649", origin: "terminal",
+                              presentation: "terminal", terminal: terminal)
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.int("terminalRows"), 650)
+        XCTAssertTrue(report.string("text").contains("point-0"))
+        XCTAssertTrue(report.string("text").contains("point-649"))
+    }
+
     private func loadRenderer() async throws -> WKWebView {
         let webView = WKWebView(frame: .init(x: 0, y: 0, width: 900, height: 700))
         let loaded = expectation(description: "offline renderer loaded")
