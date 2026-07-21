@@ -76,4 +76,18 @@ final class RenderDocumentTests: XCTestCase {
 
         XCTAssertEqual(RenderExtract.joiningWrappedRows(styled), "wrappedline\n\nnext")
     }
+
+    func testRenderCaptureIncludesContentOlderThanFourHundredRows() {
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let terminal = view.getTerminal()
+        terminal.changeScrollback(1_000)
+        terminal.resize(cols: 20, rows: 5)
+        terminal.feed(text: (0..<650).map { "point-\($0)" }.joined(separator: "\r\n"))
+
+        let styled = RenderCapture.completeTerminal(terminal)
+
+        XCTAssertEqual(styled.lines.count, 650)
+        XCTAssertEqual(styled.lines.first?.text, "point-0")
+        XCTAssertEqual(styled.lines.last?.text, "point-649")
+    }
 }

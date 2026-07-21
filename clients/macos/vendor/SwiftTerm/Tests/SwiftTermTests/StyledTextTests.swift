@@ -52,6 +52,22 @@ final class StyledTextTests: XCTestCase {
         XCTAssertEqual(tail.lines.map(\.text), ["last"])
     }
 
+    func testUnboundedStyledSnapshotIncludesRowsOlderThanLegacyRenderTail() {
+        let terminal = Terminal(delegate: Delegate(), options: TerminalOptions(
+            cols: 20, rows: 5, scrollback: 1_000
+        ))
+        terminal.feed(text: (0..<650).map { "row-\($0)" }.joined(separator: "\r\n"))
+
+        let bounded = terminal.getStyledText(maxVisualLines: 400)
+        let complete = terminal.getStyledText(maxVisualLines: nil)
+
+        XCTAssertEqual(bounded.lines.count, 400)
+        XCTAssertEqual(bounded.lines.first?.text, "row-250")
+        XCTAssertEqual(complete.lines.count, 650)
+        XCTAssertEqual(complete.lines.first?.text, "row-0")
+        XCTAssertEqual(complete.lines.last?.text, "row-649")
+    }
+
     func testStyledSelectionUsesExclusiveEndAndRetainsAttributes() {
         let terminal = Terminal(delegate: Delegate(), options: TerminalOptions(
             cols: 20, rows: 3, scrollback: 20

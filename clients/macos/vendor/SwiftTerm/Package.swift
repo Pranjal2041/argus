@@ -9,8 +9,8 @@
 //   that temporary buffer to materialized content rather than 100k capacity.
 // - Buffer.resize iterates populated lines rather than scrollback capacity. The
 //   upstream loop materialized 100k blank rows on a normal pane resize in Argus.
-// - StyledText exposes bounded, attributed terminal snapshots so print/render
-//   surfaces do not have to discard ANSI styling and reconstruct it heuristically.
+// - StyledText exposes optionally bounded, attributed terminal snapshots so
+//   print/render surfaces do not discard ANSI styling or retained history.
 // - macOS display scheduling skips hidden views and exposes a redraw FPS cap;
 //   terminal parsing/history remain lossless while cached panes avoid wasted paint.
 import PackageDescription
