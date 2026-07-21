@@ -68,9 +68,12 @@ func execOneShot(cmd, dir string, timeout time.Duration) session.ExecResult {
 // the group's output. The broker then polls for DONE locally and reads the raw
 // bytes — no terminal scrape, no ANSI, no wrap reflow.
 func execInSession(socket, name, cmd string, timeout time.Duration) session.ExecResult {
-	if !HasSession(socket, name) {
+	sessionID, ok := sessionIDForName(socket, name)
+	if !ok {
 		return session.ExecResult{Error: fmt.Sprintf("no such session %q", name), Exit: -1}
 	}
+	touchSessionID(socket, sessionID)
+	defer touchSessionID(socket, sessionID)
 	id := execID()
 	base := fmt.Sprintf("%s/.ut-exec-%s", os.TempDir(), id)
 	script, out, errf, done := base+".sh", base+".out", base+".err", base+".done"
@@ -87,10 +90,10 @@ func execInSession(socket, name, cmd string, timeout time.Duration) session.Exec
 	// One line, fixed format (the variable part is the script path, not the
 	// user's command), submitted with Enter.
 	line := fmt.Sprintf("{ . %s ; } >%s 2>%s ; printf %%s \"$?\" >%s", script, out, errf, done)
-	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", name, "-l", line)...).Run(); err != nil {
+	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", sessionID, "-l", line)...).Run(); err != nil {
 		return session.ExecResult{Error: "send-keys: " + err.Error(), Exit: -1}
 	}
-	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", name, "Enter")...).Run(); err != nil {
+	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", sessionID, "Enter")...).Run(); err != nil {
 		return session.ExecResult{Error: "send-keys Enter: " + err.Error(), Exit: -1}
 	}
 
@@ -116,18 +119,31 @@ func execInSession(socket, name, cmd string, timeout time.Duration) session.Exec
 // immediately without capturing output — for firing a long job or interactive
 // input. -l sends the bytes literally.
 func (p *Provider) SendText(name, text string, enter bool) error {
-	if !HasSession(p.socket, name) {
+	sessionID, ok := sessionIDForName(p.socket, name)
+	if !ok {
 		return fmt.Errorf("no such session %q", name)
 	}
 	if text != "" {
-		if err := exec.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", name, "-l", text)...).Run(); err != nil {
+		if err := exec.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "-l", text)...).Run(); err != nil {
 			return err
 		}
 	}
 	if enter {
-		return exec.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", name, "Enter")...).Run()
+		if err := exec.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "Enter")...).Run(); err != nil {
+			return err
+		}
 	}
+	touchSessionID(p.socket, sessionID)
 	return nil
+}
+
+// touchSessionID records supported CLI activity on a persistent shell. tmux's
+// session_activity is its creation/structural timestamp, not a reliable last-I/O
+// clock, so lifecycle cleanup must use an explicit marker. Callers resolve the
+// exact stable id once for both execution and this update; a concurrent kill
+// simply makes the best-effort set-option fail harmlessly.
+func touchSessionID(socket, sessionID string) {
+	_ = exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", sessionID, optLastUsed, strconv.FormatInt(time.Now().Unix(), 10))...).Run()
 }
 
 func mustRead(p string) []byte { b, _ := os.ReadFile(p); return b }

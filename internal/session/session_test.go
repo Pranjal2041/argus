@@ -28,3 +28,25 @@ func TestAgentSessionExpired(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentShellExpired(t *testing.T) {
+	now := int64(2_000_000_000)
+	cases := []struct {
+		name         string
+		lastActivity int64
+		want         bool
+	}{
+		{"missing activity is retained", 0, false},
+		{"recent shell is retained", now - MaxAgentRetentionSec + 1, false},
+		{"seven idle days expires", now - MaxAgentRetentionSec, true},
+		{"older shell expires", now - MaxAgentRetentionSec - 1, true},
+		{"future activity is retained", now + 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AgentShellExpired(now, tc.lastActivity); got != tc.want {
+				t.Fatalf("AgentShellExpired() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

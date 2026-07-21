@@ -251,19 +251,31 @@ func cmdExec(args []string) int {
 // --- sh: create or list persistent shells -----------------------------------
 
 func cmdSh(args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: ut sh <@machine> [shell-name]")
+	visible, args, err := extractVisibleFlag(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ut sh:", err)
+		return 2
+	}
+	if len(args) < 1 || len(args) > 2 || (visible && len(args) != 2) {
+		fmt.Fprintln(os.Stderr, "usage: ut sh [--visible] <@machine> [shell-name]")
 		return 2
 	}
 	host, _ := parseTarget(args[0])
 	if len(args) >= 2 { // create (attach-or-create) a named shell
 		name := args[1]
 		q := url.Values{"action": {"create"}, "session": {name}}
+		if !visible {
+			q.Set("kind", "agent-shell")
+		}
 		if _, code, err := httpPost(peerURL(host, "/control", q), nil, 15*time.Second); err != nil || code != 200 {
 			fmt.Fprintf(os.Stderr, "ut sh: create failed (%v)\n", err)
 			return 1
 		}
-		fmt.Printf("shell %q ready on %s — run in it with:  ut run %s:%s <command>\n", name, host, host, name)
+		kind := "agent shell"
+		if visible {
+			kind = "visible shell"
+		}
+		fmt.Printf("%s %q ready on %s — run in it with:  ut run %s:%s <command>\n", kind, name, host, host, name)
 		return 0
 	}
 	// list shells (= sessions) on the machine
@@ -280,6 +292,26 @@ func cmdSh(args []string) int {
 		fmt.Printf("%-22s %-8s %s\n", s.Name, s.State, s.Path)
 	}
 	return 0
+}
+
+// extractVisibleFlag gives persistent mesh shells an explicit human-facing
+// opt-out. Agent ownership is command semantics, never inferred from fragile
+// process environment variables such as CLAUDECODE or CODEX_*.
+func extractVisibleFlag(args []string) (visible bool, rest []string, err error) {
+	for _, arg := range args {
+		switch {
+		case arg == "--visible":
+			if visible {
+				return false, nil, fmt.Errorf("--visible may be specified only once")
+			}
+			visible = true
+		case strings.HasPrefix(arg, "--"):
+			return false, nil, fmt.Errorf("unknown option %q", arg)
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return visible, rest, nil
 }
 
 // --- spawn: fire a long job into a fresh session ----------------------------
@@ -473,7 +505,8 @@ Files, shells, and commands work the same everywhere.
 USAGE
   ut ls                                 list every machine and its sessions
   ut exec  @<machine> <command...>      run a one-shot command, print its output
-  ut sh    @<machine> <name>            create a persistent shell (keeps cwd/env/venv)
+  ut sh    @<machine> <name>            create a persistent agent shell (keeps cwd/env/venv)
+  ut sh --visible @<machine> <name>      create a persistent user-visible shell
   ut sh    @<machine>                   list a machine's shells
   ut run   @<machine>:<shell> <cmd...>  run a command INSIDE a shell (state persists)
   ut spawn @<machine>[:name] <cmd...>   start a long job in a session (returns its name)
@@ -503,6 +536,9 @@ NOTES
     so it behaves like running locally.
   • A "shell" persists state (cwd, exports, activated venv) across run/send calls;
     one-shot exec runs a fresh process each time.
+  • Shells created by ` + "`ut sh`" + ` are AGENT sessions: hidden from the desktop/phone
+    app by default and removed after seven days without activity. Use ` + "`--visible`" + `
+    only when the user deliberately wants a permanent panel in the main sidebar.
   • Spawned sessions are AGENT sessions: hidden from the desktop/phone app by default
     (shown there only behind a "Show agent sessions" toggle), and marked [agent] in 'ut ls'.
     They auto-clean when left IDLE at a shell prompt for their idle leash (default 6h) —

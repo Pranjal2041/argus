@@ -336,7 +336,14 @@ func main() {
 		var err error
 		switch q.Get("action") {
 		case "create":
-			err = mgr.Create(q.Get("session"), q.Get("dir"))
+			switch q.Get("kind") {
+			case "", "visible":
+				err = mgr.Create(q.Get("session"), q.Get("dir"))
+			case "agent-shell":
+				err = mgr.CreateAgentShell(q.Get("session"), q.Get("dir"))
+			default:
+				err = fmt.Errorf("unknown session kind %q", q.Get("kind"))
+			}
 		case "spawn": // create a session RUNNING the POST-body command (no keystroke race)
 			body, _ := io.ReadAll(r.Body)
 			idleSec := sess.DefaultReapIdleSec // idle cleanup; ?idle=SEC overrides (0 = retain until the 7d maximum)
