@@ -25,6 +25,9 @@ const (
 	maxSourceBytes     = 2 << 20
 	candidateMaxAge    = 30 * 24 * time.Hour
 	minimumConfidence  = 0.58
+	matchAnchorTokens  = 8
+	minimumMatchTokens = 16
+	maxAnchorPositions = 12
 )
 
 var ErrNoMatch = errors.New("no authoritative agent source matches this terminal")
@@ -370,44 +373,73 @@ func overlapScore(source, screen []string) float64 {
 	if len(source) < 8 || len(screen) < 8 {
 		return 0
 	}
-	const gramSize = 3
-	// Keep the LAST position of each shingle. The response nearest the terminal
-	// prompt is the current one; earlier progress updates can also be present in
-	// the same capture and sometimes have deceptively perfect short-text overlap.
-	screenGrams := make(map[string]int, len(screen))
-	for i := 0; i+gramSize <= len(screen); i++ {
-		screenGrams[strings.Join(screen[i:i+gramSize], "\x1f")] = i
+
+	// Codex virtualizes long answers. Depending on the TUI's scroll position,
+	// capture-pane can contain only the BEGINNING of the current response while
+	// still retaining the complete preceding response. Matching only the end of
+	// every transcript candidate therefore makes the preceding turn look like a
+	// perfect (but stale) answer. Instead, locate a strong contiguous anchor
+	// anywhere in each candidate and use where that anchor occurs on screen to
+	// identify the response nearest the prompt.
+	anchorSize := min(matchAnchorTokens, min(len(source), len(screen)))
+	screenAnchors := make(map[string][]int, len(screen))
+	for i := 0; i+anchorSize <= len(screen); i++ {
+		key := strings.Join(screen[i:i+anchorSize], "\x1f")
+		positions := append(screenAnchors[key], i)
+		if len(positions) > maxAnchorPositions {
+			positions = positions[len(positions)-maxAnchorPositions:]
+		}
+		screenAnchors[key] = positions
 	}
 
-	// The end of an answer is the strongest anchor because it sits immediately
-	// above the terminal prompt even when a very long response has scrolled.
-	start := 0
-	if len(source) > 240 {
-		start = len(source) - 240
+	type anchorRun struct {
+		lastSource int
+		lastScreen int
+		anchors    int
 	}
-	total, matched := 0, 0
-	var positions []int
-	for i := start; i+gramSize <= len(source); i++ {
-		total++
-		if position, ok := screenGrams[strings.Join(source[i:i+gramSize], "\x1f")]; ok {
-			matched++
-			positions = append(positions, position)
+	runs := make(map[int]anchorRun)
+	requiredTokens := min(minimumMatchTokens, len(source))
+	// A real answer may be followed by a small amount of prompt/status chrome,
+	// but not by another prose response. This guard is what makes failure safe:
+	// if the newest text cannot be resolved yet, Render keeps the exact terminal
+	// snapshot instead of upgrading to a confidently matched previous turn.
+	allowedTrailing := max(64, len(screen)/100)
+	allowedTrailing = min(160, allowedTrailing)
+	best := 0.0
+
+	for sourcePos := 0; sourcePos+anchorSize <= len(source); sourcePos++ {
+		key := strings.Join(source[sourcePos:sourcePos+anchorSize], "\x1f")
+		for _, screenPos := range screenAnchors[key] {
+			diagonal := screenPos - sourcePos
+			run := runs[diagonal]
+			if run.lastSource == sourcePos-1 && run.lastScreen == screenPos-1 {
+				run.anchors++
+			} else {
+				run.anchors = 1
+			}
+			run.lastSource = sourcePos
+			run.lastScreen = screenPos
+			runs[diagonal] = run
+
+			matchedTokens := run.anchors + anchorSize - 1
+			if matchedTokens < requiredTokens {
+				continue
+			}
+			screenEnd := screenPos + anchorSize
+			if len(screen)-screenEnd > allowedTrailing {
+				continue
+			}
+
+			position := float64(screenEnd) / float64(len(screen))
+			evidenceTarget := min(80, len(source))
+			evidence := min(1, float64(matchedTokens)/float64(evidenceTarget))
+			score := 0.85*position + 0.15*evidence
+			if score > best {
+				best = score
+			}
 		}
 	}
-	if total == 0 || matched < 4 {
-		return 0
-	}
-	coverage := float64(matched) / float64(total)
-	if coverage < 0.58 {
-		return 0
-	}
-	// One generic shingle can repeat near the prompt. The median position tracks
-	// the candidate's actual contiguous cluster instead of being hijacked by that
-	// outlier (the earlier furthest-match rule selected progress commentary).
-	sort.Ints(positions)
-	middle := positions[len(positions)/2]
-	position := float64(middle+gramSize) / float64(len(screen))
-	return 0.55*coverage + 0.45*position
+	return best
 }
 
 func samePath(a, b string) bool {

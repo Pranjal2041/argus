@@ -130,6 +130,49 @@ The exact reward is R_{\rm TP}=0.42, and this is the answer that belongs immedia
 	}
 }
 
+func TestResolveUsesCurrentLongAnswerWhenOnlyItsPrefixIsOnScreen(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	previous := `Yes—enormously. If the ansatz is exactly as written, this is an explicit disproof.
+
+The certificate is short enough that independent verification should be straightforward.`
+	currentPrefix := `I was solving the wrong generative problem. I searched directly in polynomial coefficient space and in established normal forms. Your construction was found by factoring through carefully chosen rational coordinates and arranging for every denominator to cancel.`
+	current := currentPrefix + `
+
+The missing idea is to organize the search around rational coordinates first, then impose exact pole cancellation. That changes both the parameterization and the equations one should solve.
+
+In one sentence: I searched for special polynomials, while the successful object is a special rational factorization whose poles cancel to produce polynomials.`
+	writeCodexMessages(t, home, "session.jsonl", cwd, previous, current)
+
+	// This is the failure mode from the live open_conjecture pane: the TUI has
+	// painted a complete previous turn plus only a prefix of the much longer
+	// current turn. The authoritative result must still be the FULL current turn.
+	screen := previous + "\n\n" + currentPrefix
+	got, err := Resolve(home, cwd, screen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != current {
+		t.Fatalf("wanted full current answer, got %q", got.Source)
+	}
+}
+
+func TestResolveDoesNotUpgradeToPreviousTurnWhenNewTailIsUnmatched(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	previous := `The completed audit contains a verified determinant identity and a concise exact certificate for independent reproduction.`
+	writeCodexMessages(t, home, "session.jsonl", cwd, previous)
+
+	// A new response can appear before its structured transcript record is
+	// flushed. Returning the previous turn is worse than retaining the exact
+	// styled-terminal fallback, so substantial unmatched tail text must reject it.
+	newTail := `A different investigation is now underway. It begins from a new coordinate system and follows an unrelated sequence of symbolic reductions. The current response continues with enough distinct prose to establish that the earlier certificate is no longer the answer nearest the prompt. Until this response is present in the transcript, the renderer must preserve the terminal snapshot instead of presenting stale authored Markdown from the prior turn.`
+	_, err := Resolve(home, cwd, previous+"\n\n"+newTail)
+	if !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("expected stale previous turn to be rejected, got %v", err)
+	}
+}
+
 func writeCodex(t *testing.T, home, name, cwd, source string) {
 	t.Helper()
 	writeCodexMessages(t, home, name, cwd, source)
