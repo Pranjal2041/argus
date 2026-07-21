@@ -14,8 +14,11 @@ struct UniversalTmuxApp: App {
     @StateObject private var wrappedHost = WrappedPanelHost()  // Argus Wrapped deck/dashboard webview (kept alive)
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
     @StateObject private var lab = LabModel()                      // Argus Lab (experiments hub)
-    @StateObject private var artifacts = ArtifactStore()           // explicit Render → PDF library
+    @StateObject private var artifacts = ArtifactStore()           // explicit panel artifact library
+    @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
+    @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
+    private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
 
     var body: some Scene {
         WindowGroup {
@@ -34,6 +37,17 @@ struct UniversalTmuxApp: App {
                 .environmentObject(themeStore)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
+                .onAppear {
+                    screenshotArtifacts.bind(
+                        state: state,
+                        notebooks: notebooks,
+                        artifacts: artifacts,
+                        enabled: screenshotArtifactsEnabled
+                    )
+                }
+                .onChange(of: screenshotArtifactsEnabled) {
+                    screenshotArtifacts.setEnabled($0)
+                }
         }
         .defaultSize(width: 1440, height: 900)
         .commands {
@@ -197,6 +211,8 @@ struct SettingsView: View {
     @AppStorage(CapsLockAttentionPrefs.reminderMinutesKey) private var capsLockReminderMinutes = CapsLockAttentionPrefs.defaultReminderMinutes
     @AppStorage(CapsLockAttentionPrefs.completionEnabledKey) private var capsLockCompletionEnabled = false
     @AppStorage(CapsLockAttentionPrefs.completionDurationKey) private var capsLockCompletionDuration = CapsLockAttentionPrefs.defaultCompletionDuration
+    @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
+    private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
 
     var body: some View {
         Form {
@@ -245,6 +261,18 @@ struct SettingsView: View {
                 Text("Sessions")
             } footer: {
                 Text("Agent sessions are started by `ut spawn` (the mesh) as background jobs. They're hidden from the sidebar by default and auto-clean when left idle. Turn this on to see and open them here.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle(
+                    "Save foreground clipboard screenshots to Artifacts",
+                    isOn: $screenshotArtifactsEnabled
+                )
+            } header: {
+                Text("Artifacts")
+            } footer: {
+                Text("When the main Argus window is in front and a panel is visible, a new clipboard image is saved to that panel. Clipboard changes made while Argus is inactive are ignored permanently. Argus checks only the pasteboard generation during normal operation and uses no keyboard hooks, file watchers, or additional permissions.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -1926,6 +1954,7 @@ struct WindowAccessor: NSViewRepresentable {
             NSApp.appearance = NSAppearance(named: Theme.current.isLight ? .aqua : .darkAqua)
             guard let w = v.window else { return }
             w.titlebarAppearsTransparent = true
+            w.identifier = ArgusWindowIdentity.main
             w.titleVisibility = .hidden
             w.title = ""
             w.styleMask.insert(.fullSizeContentView)

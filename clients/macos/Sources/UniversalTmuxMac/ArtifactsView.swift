@@ -3,9 +3,9 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A deliberately small library: panels that have saved Render PDFs, the PDFs
-/// for one panel, and the document itself.  Opening files elsewhere in Argus
-/// never feeds this view; only the explicit PDF action in Render does.
+/// A deliberately small library: panel-backed captures, the artifacts for one
+/// panel, and the artifact itself. Opening files elsewhere in Argus never feeds
+/// this view; only explicit Render PDFs and opted-in foreground screenshots do.
 struct ArtifactsView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var artifacts: ArtifactStore
@@ -60,7 +60,7 @@ struct ArtifactsView: View {
                 .foregroundStyle(Theme.textSecondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Artifacts").font(cf(20, .bold)).foregroundStyle(Theme.textPrimary)
-                Text("PDFs saved from Render")
+                Text("Renders and screenshots, grouped by panel")
                     .font(cf(11.5)).foregroundStyle(Theme.textTertiary)
             }
             Spacer(minLength: 12)
@@ -85,8 +85,8 @@ struct ArtifactsView: View {
                 if panels.isEmpty {
                     emptyState(
                         icon: "doc.badge.plus",
-                        title: "No saved PDFs yet",
-                        detail: "Open a panel, use Render, then click PDF."
+                        title: "No artifacts yet",
+                        detail: "Save a Render PDF or take a clipboard screenshot in a panel."
                     )
                 } else {
                     ForEach(panels) { panel in
@@ -116,7 +116,7 @@ struct ArtifactsView: View {
                 if records.isEmpty {
                     emptyState(
                         icon: "magnifyingglass",
-                        title: "No matching PDFs",
+                        title: "No matching artifacts",
                         detail: "Search uses the saved filename."
                     )
                 } else {
@@ -174,9 +174,9 @@ struct ArtifactsView: View {
                     if records.isEmpty {
                         emptyState(
                             icon: artifacts.query.isEmpty ? "doc.badge.plus" : "magnifyingglass",
-                            title: artifacts.query.isEmpty ? "No saved PDFs for this panel" : "No matching PDFs",
+                            title: artifacts.query.isEmpty ? "No artifacts for this panel" : "No matching artifacts",
                             detail: artifacts.query.isEmpty
-                                ? "Use Render’s PDF button to save one here."
+                                ? "Save a Render PDF or take a clipboard screenshot here."
                                 : "Try a different filename."
                         )
                     } else {
@@ -206,7 +206,7 @@ struct ArtifactsView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
-                Text("\(panel.count) PDF\(panel.count == 1 ? "" : "s")")
+                Text("\(panel.count) artifact\(panel.count == 1 ? "" : "s")")
                     .font(cf(12.5, .medium)).foregroundStyle(Theme.textSecondary)
                 Text(relativeTime(panel.lastSavedAt))
                     .font(cf(10.5)).foregroundStyle(Theme.textTertiary)
@@ -222,7 +222,7 @@ struct ArtifactsView: View {
     private func artifactRow(_ record: ArtifactRecord, showsPanel: Bool) -> some View {
         Button { artifacts.open(artifact: record) } label: {
             HStack(spacing: 14) {
-                Image(systemName: "doc.richtext")
+                Image(systemName: record.isImage ? "photo" : "doc.richtext")
                     .font(cf(15, .medium))
                     .foregroundStyle(Theme.accent)
                     .frame(width: 24, height: 24)
@@ -311,8 +311,8 @@ struct ArtifactsView: View {
     }
 
     private func panelSubtitle(_ panel: ArtifactPanelContext?, count: Int) -> String {
-        guard let panel else { return "\(count) saved PDF\(count == 1 ? "" : "s")" }
-        return panel.machineName + " · \(count) saved PDF\(count == 1 ? "" : "s")"
+        guard let panel else { return "\(count) saved artifact\(count == 1 ? "" : "s")" }
+        return panel.machineName + " · \(count) saved artifact\(count == 1 ? "" : "s")"
     }
 
     private func relativeTime(_ date: Date) -> String {
@@ -347,27 +347,33 @@ private struct ArtifactDocumentView: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Theme.border)
-            ArtifactPDFView(url: artifacts.fileURL(for: record), zoom: zoom)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.surface.opacity(0.25))
+            Group {
+                if record.isImage {
+                    ArtifactImageView(url: artifacts.fileURL(for: record), zoom: zoom)
+                } else {
+                    ArtifactPDFView(url: artifacts.fileURL(for: record), zoom: zoom)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.surface.opacity(0.25))
         }
         .background(Theme.appBackground)
-        .alert("Rename PDF", isPresented: $renameShown) {
+        .alert("Rename Artifact", isPresented: $renameShown) {
             TextField("Filename", text: $renameText)
             Button("Rename") { rename() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This changes the name shown in Artifacts; the saved PDF stays intact.")
+            Text("This changes the name shown in Artifacts; the saved file stays intact.")
         }
         .confirmationDialog(
             "Delete “\(record.filename)”?",
             isPresented: $deleteShown,
             titleVisibility: .visible
         ) {
-            Button("Delete PDF", role: .destructive) { delete() }
+            Button("Delete Artifact", role: .destructive) { delete() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This permanently removes the PDF from the local artifact library.")
+            Text("This permanently removes the file from the local artifact library.")
         }
     }
 
@@ -410,13 +416,13 @@ private struct ArtifactDocumentView: View {
                 }
                 Button("Export…") { export() }
                 Divider()
-                Button("Delete PDF", role: .destructive) { deleteShown = true }
+                Button("Delete Artifact", role: .destructive) { deleteShown = true }
             } label: {
                 Image(systemName: "ellipsis.circle").font(cf(12.5))
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("PDF actions")
+            .help("Artifact actions")
             Button { state.showArtifacts = false } label: {
                 Image(systemName: "xmark").font(cf(14, .medium))
             }
@@ -430,7 +436,12 @@ private struct ArtifactDocumentView: View {
     }
 
     private var documentSubtitle: String {
-        let mode = record.presentation == "terminal" ? "Terminal" : "Rendered"
+        let mode: String
+        if record.isImage {
+            mode = "Screenshot"
+        } else {
+            mode = record.presentation == "terminal" ? "Terminal" : "Rendered"
+        }
         return record.panel.sessionName + " · " + record.panel.machineName + " · "
             + record.createdAt.formatted(date: .abbreviated, time: .shortened) + " · " + mode
     }
@@ -468,7 +479,7 @@ private struct ArtifactDocumentView: View {
         let source = artifacts.fileURL(for: record)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = record.filename
-        panel.allowedContentTypes = [.pdf]
+        panel.allowedContentTypes = [record.isImage ? .png : .pdf]
         panel.canCreateDirectories = true
         panel.begin { response in
             guard response == .OK, let destination = panel.url else { return }
@@ -482,6 +493,58 @@ private struct ArtifactDocumentView: View {
             }
         }
     }
+}
+
+private struct ArtifactImageView: View {
+    let url: URL
+    let zoom: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            let inset: CGFloat = 24
+            let fittedWidth = max(1, proxy.size.width - inset * 2)
+            let fittedHeight = max(1, proxy.size.height - inset * 2)
+            let scaledWidth = fittedWidth * zoom
+            let scaledHeight = fittedHeight * zoom
+            ScrollView([.horizontal, .vertical]) {
+                ZStack {
+                    ArtifactImageContent(url: url)
+                        .frame(width: scaledWidth, height: scaledHeight)
+                }
+                .frame(
+                    width: max(proxy.size.width, scaledWidth + inset * 2),
+                    height: max(proxy.size.height, scaledHeight + inset * 2)
+                )
+            }
+        }
+    }
+}
+
+private struct ArtifactImageContent: NSViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSImageView {
+        let view = NSImageView()
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.imageAlignment = .alignCenter
+        view.animates = false
+        update(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: NSImageView, context: Context) {
+        update(view, context: context)
+    }
+
+    private func update(_ view: NSImageView, context: Context) {
+        guard context.coordinator.loadedURL != url else { return }
+        context.coordinator.loadedURL = url
+        view.image = NSImage(contentsOf: url)
+    }
+
+    final class Coordinator { var loadedURL: URL? }
 }
 
 private struct ArtifactPDFView: NSViewRepresentable {

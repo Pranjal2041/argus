@@ -64,9 +64,17 @@ local **Artifacts** library. Opening Render alone does not save anything, and op
 PDF in Files does not add it. Artifacts are grouped by panel and remain available after that panel is
 hidden, renamed, stopped, or removed. Open the library with `⇧⌘I`, from the command palette, or from
 the archive button in a panel header; there you can search filenames, sort, read, rename, export, or
-delete the saved PDFs. The library copy is canonical, while **Export** creates an ordinary copy
+delete the saved artifacts. The library copy is canonical, while **Export** creates an ordinary copy
 wherever you choose. Each explicit save also adds a linked `artifactSaved` entry to the Activity
 Ledger.
+
+For quick visual notes, enable **Save foreground clipboard screenshots to Artifacts** in Settings.
+When the main Argus window is in front and a panel is visible, a new image placed on the clipboard
+(for example with `⌃⇧⌘4`) is copied into that panel's artifact history. Argus stops checking when it
+is inactive and resets its clipboard baseline before it resumes, so screenshots taken in other apps
+are never imported later. Normal checks read only the pasteboard generation twice per second; image
+data is read only after a foreground change, with no keyboard hook, screenshot-folder watcher, or
+additional macOS permission.
 
 ## Keeping a Mac reachable while locked
 

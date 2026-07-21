@@ -584,7 +584,7 @@ final class AppState: ObservableObject {
 
     @Published var showNotes = false
     @Published var showLedger = false   // in-app Activity Ledger (⇧⌘J), a fleet-wide top-level view
-    @Published var showArtifacts = false // local library of explicit Render → PDF captures
+    @Published var showArtifacts = false // local library of panel renders and screenshots
     // Argus Lab (⇧⌘L). UT_OPEN_LAB=1 opens it on launch — the hook the
     // screenshot-verification harness uses to capture the real pane.
     @Published var showLab = ProcessInfo.processInfo.environment["UT_OPEN_LAB"] == "1"

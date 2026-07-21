@@ -58,6 +58,43 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: originalURL), bytes)
     }
 
+    func testScreenshotPNGAndManifestRoundTripAsPanelArtifact() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let context = panel(name: "spatial_sol", stableID: "$4")
+        let created = Calendar.current.date(from: DateComponents(
+            year: 2024, month: 7, day: 20, hour: 12, minute: 1, second: 2
+        ))!
+        let id = UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!
+        let bytes = Data("png-image-bytes".utf8)
+
+        let saved = try await disk.saveScreenshotPNG(
+            bytes,
+            panel: context,
+            createdAt: created,
+            id: id
+        )
+        let loaded = try await disk.load()
+
+        XCTAssertEqual(loaded, [saved])
+        XCTAssertEqual(saved.kind, ArtifactKind.screenshotPNG)
+        XCTAssertTrue(saved.isImage)
+        XCTAssertEqual(saved.filename, "spatial_sol — 2024-07-20 12.01.02.png")
+        XCTAssertEqual(saved.relativePath, "images/bbbbbbbb-cccc-dddd-eeee-ffffffffffff.png")
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(saved.relativePath)), bytes)
+    }
+
+    func testScreenshotRenamePreservesItsImageExtension() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let saved = try await disk.saveScreenshotPNG(Data("png".utf8), panel: panel())
+
+        let renamed = try await disk.rename(saved, to: "comparison.final.pdf")
+        let loaded = try await disk.load()
+
+        XCTAssertEqual(renamed.filename, "comparison.final.png")
+        XCTAssertEqual(renamed.relativePath, saved.relativePath)
+        XCTAssertEqual(loaded, [renamed])
+    }
+
     func testDeleteRemovesManifestAndPDF() async throws {
         let disk = ArtifactDiskStore(rootURL: root)
         let saved = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered")
@@ -141,6 +178,11 @@ final class ArtifactStoreTests: XCTestCase {
             presentation: "terminal",
             createdAt: Date()
         )
+        _ = try await disk.saveScreenshotPNG(
+            samplePNG(),
+            panel: panel(name: "vlm_gating", stableID: "$7"),
+            createdAt: Date(timeIntervalSinceNow: 2)
+        )
         let store = ArtifactStore(rootURL: root, loadImmediately: false, logEvents: false)
         await store.reload()
         switch ProcessInfo.processInfo.environment["UT_ARTIFACT_SCREENSHOT_MODE"] {
@@ -178,6 +220,18 @@ final class ArtifactStoreTests: XCTestCase {
             stableSessionID: stableID,
             folder: "/tmp/work"
         )
+    }
+
+    private func samplePNG() -> Data {
+        let image = NSImage(size: NSSize(width: 640, height: 360), flipped: false) { rect in
+            NSColor(calibratedRed: 0.09, green: 0.10, blue: 0.13, alpha: 1).setFill()
+            rect.fill()
+            NSColor(calibratedRed: 0.35, green: 0.75, blue: 0.88, alpha: 1).setFill()
+            NSRect(x: 36, y: 42, width: rect.width - 72, height: 8).fill()
+            return true
+        }
+        let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
+        return bitmap.representation(using: .png, properties: [:])!
     }
 
     private func record(
