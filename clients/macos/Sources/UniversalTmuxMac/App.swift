@@ -707,7 +707,10 @@ struct RootView: View {
         // trick can remove (the source of the fullscreen top band). A manual layout fills
         // the window exactly — each column controls its own top spacing via topReserve.
         HStack(spacing: 0) {
-            if state.columns != .detailOnly {
+            // Artifacts is a library destination, not a panel detail. Give it the
+            // entire window while preserving the user's normal sidebar setting
+            // so closing the library restores the workspace exactly as it was.
+            if state.columns != .detailOnly && !state.showArtifacts {
                 sidebar
                     .frame(width: 272)
                     .frame(maxHeight: .infinity)
