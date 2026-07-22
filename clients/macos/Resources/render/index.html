@@ -132,6 +132,24 @@
   html.dark #empty { color: #6e7681; }
   html.dark .jtoggle { color: #8b949e; background: #161b22d8; border-color: #30363d; }
   html.dark .jtoggle:hover { color: #e6edf3; background: #161b22; }
+  /* Artifact documents are already a full-screen reading destination. Let the
+     copy use that space instead of inheriting Render's intentionally narrow
+     740px folio. The width remains responsive at small window sizes, while the
+     upper bound prevents truly unbounded lines on an ultrawide display. */
+  html.artifact-reader body {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: min(1120px, calc(100vw - 48px));
+    padding-left: clamp(24px, 5vw, 76px);
+    padding-right: clamp(24px, 5vw, 76px);
+  }
+  @media (max-width: 720px) {
+    html.artifact-reader body {
+      max-width: 100%;
+      padding-left: 22px;
+      padding-right: 22px;
+    }
+  }
 </style>
 <script src="marked.min.js"></script>
 <script src="katex/katex.min.js"></script>
@@ -1112,6 +1130,9 @@
       presentDocument(doc, presentation || "terminal");
     },
     setZoom(px) { document.body.style.fontSize = px + "px"; },
+    setLayout(layout) {
+      document.documentElement.classList.toggle("artifact-reader", layout === "artifact");
+    },
     // Opt-in theming (the editor preview calls this; the Renders panel never does,
     // so it stays light). spec = { dark:bool, bg:'#hex', fg:'#hex' }.
     setTheme(spec) {

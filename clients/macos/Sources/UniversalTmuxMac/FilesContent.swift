@@ -409,10 +409,16 @@ private struct DocPane: View {
 
 // MARK: - markdown preview (reuses the offline render bundle: marked + KaTeX + hljs)
 
+enum MarkdownPreviewLayout: String {
+    case compact
+    case artifact
+}
+
 struct MarkdownPreviewView: NSViewRepresentable {
     let markdown: String
     let fontSize: Double
     var proxy: MarkdownPreviewProxy? = nil
+    var layout: MarkdownPreviewLayout = .compact
 
     func makeCoordinator() -> Coordinator { Coordinator(proxy: proxy) }
     func makeNSView(context: Context) -> WKWebView {
@@ -420,22 +426,23 @@ struct MarkdownPreviewView: NSViewRepresentable {
         proxy?.attach(wv)
         wv.navigationDelegate = context.coordinator
         if #available(macOS 12.0, *) { wv.underPageBackgroundColor = paneBG }   // app bg, so no light flash in dark mode
-        context.coordinator.pending = (markdown, fontSize)
+        context.coordinator.pending = (markdown, fontSize, layout)
         let dir = Bundle.main.resourceURL!.appendingPathComponent("render")
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
         return wv
     }
     func updateNSView(_ wv: WKWebView, context: Context) {
         proxy?.attach(wv)
-        context.coordinator.update(wv, markdown, fontSize)
+        context.coordinator.update(wv, markdown, fontSize, layout)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         weak var proxy: MarkdownPreviewProxy?
-        var pending: (String, Double)?
+        var pending: (String, Double, MarkdownPreviewLayout)?
         private var ready = false
         private var shownText: String?
         private var shownSize: Double = 0
+        private var shownLayout: MarkdownPreviewLayout?
 
         init(proxy: MarkdownPreviewProxy?) {
             self.proxy = proxy
@@ -444,7 +451,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
             applyTheme(webView)   // match the app (dark/light + bg/fg) before painting
-            if let p = pending { push(webView, p.0, p.1); pending = nil }
+            if let p = pending { push(webView, p.0, p.1, p.2); pending = nil }
         }
         private func applyTheme(_ wv: WKWebView) {
             func hex(_ c: NSColor) -> String {
@@ -454,15 +461,27 @@ struct MarkdownPreviewView: NSViewRepresentable {
             let spec = "{dark:\(!Theme.current.isLight),bg:'\(hex(Theme.nsAppBackground))',fg:'\(hex(Theme.nsForeground))'}"
             wv.evaluateJavaScript("window.UTRender.setTheme && window.UTRender.setTheme(\(spec))")
         }
-        func update(_ wv: WKWebView, _ text: String, _ size: Double) {
-            guard ready else { pending = (text, size); return }
-            if shownText != text { push(wv, text, size) }
+        func update(
+            _ wv: WKWebView,
+            _ text: String,
+            _ size: Double,
+            _ layout: MarkdownPreviewLayout
+        ) {
+            guard ready else { pending = (text, size, layout); return }
+            if shownText != text || shownLayout != layout { push(wv, text, size, layout) }
             else if shownSize != size { shownSize = size; wv.evaluateJavaScript("window.UTRender.setZoom(\(Int(size)))") }
         }
-        private func push(_ wv: WKWebView, _ text: String, _ size: Double) {
-            shownText = text; shownSize = size
+        private func push(
+            _ wv: WKWebView,
+            _ text: String,
+            _ size: Double,
+            _ layout: MarkdownPreviewLayout
+        ) {
+            shownText = text; shownSize = size; shownLayout = layout
             proxy?.renderingStarted()
-            wv.evaluateJavaScript("window.UTRender.set(\(js(text)), \(Int(size)))") { [weak self] _, error in
+            let script = "window.UTRender.setLayout(\(js(layout.rawValue))); "
+                + "window.UTRender.set(\(js(text)), \(Int(size)))"
+            wv.evaluateJavaScript(script) { [weak self] _, error in
                 self?.proxy?.renderingFinished(successfully: error == nil)
             }
         }

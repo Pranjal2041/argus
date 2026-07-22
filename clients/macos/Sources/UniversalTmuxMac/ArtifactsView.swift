@@ -345,7 +345,10 @@ private struct ArtifactDocumentView: View {
     @State private var renameShown = false
     @State private var renameText = ""
     @State private var deleteShown = false
-    @State private var markdownMode = ArtifactMarkdownMode.preview
+    @State private var markdownMode = ArtifactMarkdownMode.read
+    @State private var markdownPDFData: Data?
+    @State private var markdownPDFError: String?
+    @State private var generatingMarkdownPDF = false
     @State private var exportingMarkdown = false
     @StateObject private var markdownPreview = MarkdownPreviewProxy()
 
@@ -372,7 +375,11 @@ private struct ArtifactDocumentView: View {
                         url: artifacts.fileURL(for: record),
                         zoom: zoom,
                         markdownMode: markdownMode,
-                        markdownProxy: markdownPreview
+                        markdownProxy: markdownPreview,
+                        markdownPDFData: markdownPDFData,
+                        markdownPDFError: markdownPDFError,
+                        generatingMarkdownPDF: generatingMarkdownPDF,
+                        onRetryPDF: generateMarkdownPDFIfPossible
                     )
                 case .text:
                     ArtifactTextView(record: record, url: artifacts.fileURL(for: record), zoom: zoom)
@@ -400,6 +407,11 @@ private struct ArtifactDocumentView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This permanently removes the file from the local artifact library.")
+        }
+        .onChange(of: markdownPreview.isReady) { ready in
+            if ready && markdownMode == .pages {
+                generateMarkdownPDFIfPossible()
+            }
         }
     }
 
@@ -433,9 +445,9 @@ private struct ArtifactDocumentView: View {
                 if viewerKind == .markdown {
                     markdownModeControl
                     markdownExportMenu
-                    if exportingMarkdown {
+                    if exportingMarkdown || generatingMarkdownPDF {
                         ProgressView().controlSize(.mini)
-                            .help("Creating reading copy")
+                            .help(generatingMarkdownPDF ? "Preparing pages" : "Saving a copy")
                     }
                 }
                 if viewerKind.supportsZoom {
@@ -512,12 +524,12 @@ private struct ArtifactDocumentView: View {
 
     private var markdownExportMenu: some View {
         Menu {
-            Button("Rendered PDF…") { exportMarkdownPDF() }
-                .disabled(exportingMarkdown || !markdownPreview.isReady)
-            Button("EPUB…") { exportMarkdownEPUB() }
+            Button("Save PDF…") { exportMarkdownPDF() }
+                .disabled(exportingMarkdown || generatingMarkdownPDF || !markdownPreview.isReady)
+            Button("Save EPUB…") { exportMarkdownEPUB() }
                 .disabled(exportingMarkdown)
             Divider()
-            Button("Original Markdown…") { exportOriginal() }
+            Button("Save original Markdown…") { exportOriginal() }
                 .disabled(exportingMarkdown)
         } label: {
             Image(systemName: "square.and.arrow.up")
@@ -526,21 +538,19 @@ private struct ArtifactDocumentView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(markdownPreview.isReady
-              ? "Create a PDF or EPUB reading copy"
-              : "The preview is loading; EPUB and original export are already available")
+        .help("Save a copy outside Argus")
     }
 
     private var markdownModeControl: some View {
         HStack(spacing: 0) {
             ForEach(ArtifactMarkdownMode.allCases, id: \.self) { mode in
                 Button {
-                    markdownMode = mode
+                    selectMarkdownMode(mode)
                 } label: {
                     Text(mode.title)
                         .font(cf(10.5, markdownMode == mode ? .semibold : .regular))
                         .foregroundStyle(markdownMode == mode ? Theme.accent : Theme.textSecondary)
-                        .frame(width: 67, height: 23)
+                        .frame(width: 61, height: 23)
                         .background(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
                                 .fill(markdownMode == mode ? Theme.accent.opacity(0.14) : .clear)
@@ -555,7 +565,32 @@ private struct ArtifactDocumentView: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(Theme.border, lineWidth: 1)
         )
-        .help("Switch between the rendered document and its Markdown source")
+        .help("Reader reflows like EPUB; Pages opens the generated PDF directly in Argus")
+    }
+
+    private func selectMarkdownMode(_ mode: ArtifactMarkdownMode) {
+        markdownMode = mode
+        if mode == .pages {
+            generateMarkdownPDFIfPossible()
+        }
+    }
+
+    private func generateMarkdownPDFIfPossible() {
+        guard markdownPDFData == nil,
+              !generatingMarkdownPDF,
+              markdownPreview.isReady
+        else { return }
+        generatingMarkdownPDF = true
+        markdownPDFError = nil
+        markdownPreview.createPDF { result in
+            switch result {
+            case .success(let data):
+                markdownPDFData = data
+            case .failure(let error):
+                markdownPDFError = error.localizedDescription
+            }
+            generatingMarkdownPDF = false
+        }
     }
 
     private func rename() {
@@ -608,24 +643,32 @@ private struct ArtifactDocumentView: View {
         panel.begin { response in
             guard response == .OK, let destination = panel.url else { return }
             exportingMarkdown = true
+            if let markdownPDFData {
+                savePDFData(markdownPDFData, to: destination)
+                return
+            }
             markdownPreview.createPDF { result in
                 switch result {
                 case .failure(let error):
                     artifacts.errorMessage = error.localizedDescription
                     exportingMarkdown = false
                 case .success(let data):
-                    Task {
-                        do {
-                            try await Task.detached(priority: .utility) {
-                                try data.write(to: destination, options: .atomic)
-                            }.value
-                        } catch {
-                            artifacts.errorMessage = error.localizedDescription
-                        }
-                        exportingMarkdown = false
-                    }
+                    savePDFData(data, to: destination)
                 }
             }
+        }
+    }
+
+    private func savePDFData(_ data: Data, to destination: URL) {
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try data.write(to: destination, options: .atomic)
+                }.value
+            } catch {
+                artifacts.errorMessage = error.localizedDescription
+            }
+            exportingMarkdown = false
         }
     }
 
@@ -660,10 +703,17 @@ private struct ArtifactDocumentView: View {
 }
 
 private enum ArtifactMarkdownMode: String, CaseIterable, Hashable {
-    case preview
+    case read
+    case pages
     case source
 
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .read: return "Reader"
+        case .pages: return "Pages"
+        case .source: return "Source"
+        }
+    }
 }
 
 private enum ArtifactViewerKind: Equatable {
@@ -704,6 +754,10 @@ private struct ArtifactTextView: View {
     let zoom: CGFloat
     var markdownMode: ArtifactMarkdownMode? = nil
     var markdownProxy: MarkdownPreviewProxy? = nil
+    var markdownPDFData: Data? = nil
+    var markdownPDFError: String? = nil
+    var generatingMarkdownPDF = false
+    var onRetryPDF: () -> Void = {}
     @State private var text: String?
     @State private var error: String?
 
@@ -715,12 +769,16 @@ private struct ArtifactTextView: View {
                         MarkdownPreviewView(
                             markdown: text,
                             fontSize: 13 * zoom,
-                            proxy: markdownProxy
+                            proxy: markdownProxy,
+                            layout: .artifact
                         )
-                        .opacity(markdownMode == .preview ? 1 : 0)
-                        .allowsHitTesting(markdownMode == .preview)
-                        .accessibilityHidden(markdownMode != .preview)
-                        if markdownMode == .source {
+                        .opacity(markdownMode == .read ? 1 : 0)
+                        .allowsHitTesting(markdownMode == .read)
+                        .accessibilityHidden(markdownMode != .read)
+                        if markdownMode == .pages {
+                            markdownPages
+                                .background(Theme.appBackground)
+                        } else if markdownMode == .source {
                             sourceView(text)
                                 .background(Theme.appBackground)
                         }
@@ -770,6 +828,37 @@ private struct ArtifactTextView: View {
             scrollToLine: nil,
             onChange: { _ in }
         )
+    }
+
+    @ViewBuilder private var markdownPages: some View {
+        if let markdownPDFData {
+            ArtifactPDFDataView(data: markdownPDFData, zoom: zoom)
+        } else if let markdownPDFError {
+            VStack(spacing: 12) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(Theme.textTertiary)
+                Text("The PDF view could not be prepared")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                Text(markdownPDFError)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textTertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                Button("Try Again", action: onRetryPDF)
+                    .buttonStyle(.bordered)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text(generatingMarkdownPDF ? "Preparing PDF view…" : "Waiting for the reader…")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }
 
@@ -838,6 +927,54 @@ private struct ArtifactImageContent: NSViewRepresentable {
     }
 
     final class Coordinator { var loadedURL: URL? }
+}
+
+private struct ArtifactPDFDataView: NSViewRepresentable {
+    let data: Data
+    let zoom: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.backgroundColor = Theme.nsAppBackground
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.displaysPageBreaks = true
+        view.autoScales = true
+        view.document = PDFDocument(data: data)
+        context.coordinator.data = data
+        DispatchQueue.main.async {
+            view.autoScales = false
+            view.scaleFactor = context.coordinator.widthFit(for: view) * zoom
+        }
+        return view
+    }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        if context.coordinator.data != data {
+            context.coordinator.data = data
+            view.document = PDFDocument(data: data)
+            context.coordinator.fit = 0
+        }
+        view.scaleFactor = context.coordinator.widthFit(for: view) * zoom
+    }
+
+    final class Coordinator {
+        var fit: CGFloat = 0
+        var fittedViewWidth: CGFloat = 0
+        var data: Data?
+
+        func widthFit(for view: PDFView) -> CGFloat {
+            let viewWidth = max(1, view.bounds.width - 40)
+            if fit == 0 || abs(viewWidth - fittedViewWidth) > 1 {
+                let pageWidth = view.document?.page(at: 0)?.bounds(for: .mediaBox).width ?? viewWidth
+                fit = max(0.1, viewWidth / max(1, pageWidth))
+                fittedViewWidth = viewWidth
+            }
+            return fit
+        }
+    }
 }
 
 private struct ArtifactPDFView: NSViewRepresentable {
