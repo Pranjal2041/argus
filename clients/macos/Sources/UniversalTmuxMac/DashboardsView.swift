@@ -273,9 +273,29 @@ struct DashboardsView: View {
                 .padding(.horizontal, 8)
             }
             Spacer(minLength: 0)
+            if !model.tabs.isEmpty {
+                Menu {
+                    if let active = model.active {
+                        tabManagementCommands(for: active)
+                    } else {
+                        Button("Close All Tabs", role: .destructive) { model.closeAllTabs() }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: s(13), weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: s(28), height: s(26))
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Manage dashboard tabs")
+            }
             Button { model.refreshForwards(); showAdd.toggle() } label: {
                 Image(systemName: "plus").font(.system(size: s(12), weight: .semibold)).foregroundStyle(Theme.accent)
-                    .frame(width: s(26), height: s(22))
+                    .frame(width: s(28), height: s(26))
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Open a dashboard")
@@ -295,20 +315,47 @@ struct DashboardsView: View {
             }
             Text(tab.displayTitle).font(.system(size: s(11.5))).lineLimit(1).foregroundStyle(activeTab ? Theme.textPrimary : Theme.textSecondary)
             Button { model.close(tab.id) } label: {
-                Image(systemName: "xmark").font(.system(size: s(8), weight: .bold)).foregroundStyle(Theme.textTertiary)
-            }.buttonStyle(.plain)
+                Image(systemName: "xmark")
+                    .font(.system(size: s(10), weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+                    .frame(width: s(24), height: s(24))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close tab")
         }
-        .padding(.horizontal, 9).padding(.vertical, 5)
+        .padding(.leading, 9).padding(.trailing, 3).padding(.vertical, 3)
         .background(RoundedRectangle(cornerRadius: 7).fill(activeTab ? Theme.accent.opacity(0.18) : Color.white.opacity(0.04)))
         .overlay(RoundedRectangle(cornerRadius: 7).stroke(activeTab ? Theme.accent.opacity(0.5) : Color.clear, lineWidth: 1))
         .frame(maxWidth: s(220))
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { startRename(tab) }     // double-click to rename
-        .onTapGesture { model.activeID = tab.id }
+        .onTapGesture { model.select(tab.id) }
         .contextMenu {
             Button("Rename…") { startRename(tab) }
-            Button("Close") { model.close(tab.id) }
+            Divider()
+            tabManagementCommands(for: tab)
         }
+    }
+
+    @ViewBuilder
+    private func tabManagementCommands(for tab: DashboardTab) -> some View {
+        let index = model.tabs.firstIndex(where: { $0.id == tab.id })
+        let inactiveCount = model.inactiveTabCount()
+
+        Button("Close Tab") { model.close(tab.id) }
+        Button("Close Tabs to the Left") { model.closeTabs(toLeftOf: tab.id) }
+            .disabled(index == nil || index == 0)
+        Button("Close Tabs to the Right") { model.closeTabs(toRightOf: tab.id) }
+            .disabled(index == nil || index == model.tabs.count - 1)
+        Button("Close Other Tabs") { model.closeOtherTabs(keeping: tab.id) }
+            .disabled(model.tabs.count < 2)
+        Divider()
+        Button("Close Tabs Inactive for 24 Hours (\(inactiveCount))") {
+            model.closeInactiveTabs()
+        }
+        .disabled(inactiveCount == 0)
+        Button("Close All Tabs", role: .destructive) { model.closeAllTabs() }
     }
 
     private var addPopover: some View {

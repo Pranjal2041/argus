@@ -10,6 +10,9 @@ import WebKit
 @MainActor
 final class DashboardTab: ObservableObject, Identifiable {
     let id = UUID()
+    /// Most recent time this tab was brought to the front. Bulk cleanup uses activity,
+    /// rather than creation time, so a long-lived dashboard that is still in use survives.
+    var lastViewedAt: Date
     @Published var url: URL?            // target to load — set this to navigate
     @Published var title: String       // auto title (page <title> or the url host)
     @Published var customTitle: String? // user-renamed; overrides the auto title
@@ -38,7 +41,9 @@ final class DashboardTab: ObservableObject, Identifiable {
     /// What the tab chip shows: the user's name if set, else the live page title.
     var displayTitle: String { customTitle?.isEmpty == false ? customTitle! : title }
 
-    init(title: String, host: String, url: URL?, status: String? = nil) {
+    init(title: String, host: String, url: URL?, status: String? = nil,
+         lastViewedAt: Date = Date()) {
+        self.lastViewedAt = lastViewedAt
         self.title = title
         self.host = host
         self.url = url
@@ -120,35 +125,60 @@ final class DashboardsModel: ObservableObject {
     /// The local Mac broker is the forward agent (same as the Ports hub).
     private let agent = "http://127.0.0.1:8722"
     private var timer: Timer?
+    private let persistTabState: Bool
+    private let tabDefaults: UserDefaults
+    private let tabsKey: String
 
-    init() {
+    init(restoreSavedTabs: Bool = true, startPolling: Bool = true,
+         persistTabState: Bool = true, tabDefaults: UserDefaults = .standard,
+         tabsKey: String = "ut.dash.tabs.v1") {
+        self.persistTabState = persistTabState
+        self.tabDefaults = tabDefaults
+        self.tabsKey = tabsKey
         // Poll the forward agent so the "+" list stays fresh and auto-open keeps up.
-        timer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.poll() }
+        if startPolling {
+            timer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
+                Task { @MainActor in await self?.poll() }
+            }
+            refreshForwards()
         }
-        refreshForwards()
-        restoreTabs()
+        if restoreSavedTabs { restoreTabs() }
     }
 
     // ---- persist open tabs across launches (notebooks already do this) ----
-    private struct SavedTab: Codable { let url: String; let host: String; let title: String? }
-    private let tabsKey = "ut.dash.tabs.v1"
+    private struct SavedTab: Codable {
+        let url: String
+        let host: String
+        let title: String?
+        /// Optional keeps the v1 payload backward-compatible. Tabs restored from an older
+        /// build are treated as freshly viewed instead of being deleted during migration.
+        let lastViewedAt: Date?
+    }
     func saveTabs() {
+        guard persistTabState else { return }
         let saved = tabs.compactMap { t -> SavedTab? in
             guard let u = t.url?.absoluteString, !u.isEmpty else { return nil }
-            return SavedTab(url: u, host: t.host, title: t.customTitle)
+            return SavedTab(url: u, host: t.host, title: t.customTitle,
+                            lastViewedAt: t.lastViewedAt)
         }
-        if let d = try? JSONEncoder().encode(saved) { UserDefaults.standard.set(d, forKey: tabsKey) }
+        if let d = try? JSONEncoder().encode(saved) { tabDefaults.set(d, forKey: tabsKey) }
     }
     private func restoreTabs() {
-        guard let d = UserDefaults.standard.data(forKey: tabsKey),
+        guard persistTabState else { return }
+        guard let d = tabDefaults.data(forKey: tabsKey),
               let saved = try? JSONDecoder().decode([SavedTab].self, from: d) else { return }
+        let migrationDate = Date()
         for st in saved {
-            let t = DashboardTab(title: st.title ?? (URL(string: st.url)?.host ?? st.url), host: st.host, url: URL(string: st.url))
+            let t = DashboardTab(title: st.title ?? (URL(string: st.url)?.host ?? st.url),
+                                 host: st.host, url: URL(string: st.url),
+                                 lastViewedAt: st.lastViewedAt ?? migrationDate)
             t.customTitle = st.title
             tabs.append(t)
         }
         activeID = tabs.first?.id
+        active?.lastViewedAt = migrationDate
+        // Rewrite old payloads with activity timestamps after a lossless migration.
+        if saved.contains(where: { $0.lastViewedAt == nil }) { saveTabs() }
     }
 
     private func poll() async {
@@ -157,6 +187,15 @@ final class DashboardsModel: ObservableObject {
     }
 
     var active: DashboardTab? { tabs.first { $0.id == activeID } }
+
+    /// Select a tab and record real use. Keeping this in the model makes age cleanup
+    /// deterministic and prevents a frequently visited old tab from looking abandoned.
+    func select(_ id: UUID, at date: Date = Date()) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        activeID = id
+        tab.lastViewedAt = date
+        saveTabs()
+    }
 
     // MARK: opening tabs
 
@@ -175,7 +214,10 @@ final class DashboardsModel: ObservableObject {
     /// tab if it's already open.
     func openForward(_ f: PortForward) {
         let key = "\(f.brokerHost):\(f.remotePort)"
-        if let existing = tabs.first(where: { $0.forwardKey == key }) { activeID = existing.id; return }
+        if let existing = tabs.first(where: { $0.forwardKey == key }) {
+            select(existing.id)
+            return
+        }
         let t = DashboardTab(title: "\(f.brokerName):\(f.remotePort)", host: f.brokerName,
                              url: URL(string: "http://127.0.0.1:\(f.localPort)"))
         t.forwardKey = key
@@ -186,6 +228,7 @@ final class DashboardsModel: ObservableObject {
     /// Appends without stealing focus from the current tab.
     func openAllForwards() {
         let prev = activeID
+        var addedAny = false
         for f in forwards {
             let key = "\(f.brokerHost):\(f.remotePort)"
             guard !tabs.contains(where: { $0.forwardKey == key }) else { continue }
@@ -193,9 +236,11 @@ final class DashboardsModel: ObservableObject {
                                  url: URL(string: "http://127.0.0.1:\(f.localPort)"))
             t.forwardKey = key
             tabs.append(t)
+            addedAny = true
         }
         if let prev, tabs.contains(where: { $0.id == prev }) { activeID = prev }
         else { activeID = activeID ?? tabs.first?.id }
+        if addedAny { saveTabs() }
     }
 
     /// The ⌘-click flow: open a `localhost:port` URL that was printed in a session,
@@ -257,15 +302,84 @@ final class DashboardsModel: ObservableObject {
         }
     }
 
-    func close(_ id: UUID) {
-        tabs.removeAll { $0.id == id }
-        if activeID == id { activeID = tabs.last?.id }
+    @discardableResult
+    func close(_ id: UUID) -> Int {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return 0 }
+        let fallbackID: UUID? = {
+            guard activeID == id else { return activeID }
+            if index + 1 < tabs.count { return tabs[index + 1].id }
+            if index > 0 { return tabs[index - 1].id }
+            return nil
+        }()
+        return removeTabs(withIDs: [id], preferredActiveID: fallbackID)
+    }
+
+    @discardableResult
+    func closeTabs(toLeftOf id: UUID) -> Int {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), index > 0 else { return 0 }
+        return removeTabs(withIDs: Set(tabs[..<index].map(\.id)), preferredActiveID: id)
+    }
+
+    @discardableResult
+    func closeTabs(toRightOf id: UUID) -> Int {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), index + 1 < tabs.count else { return 0 }
+        return removeTabs(withIDs: Set(tabs[(index + 1)...].map(\.id)), preferredActiveID: id)
+    }
+
+    @discardableResult
+    func closeOtherTabs(keeping id: UUID) -> Int {
+        guard tabs.contains(where: { $0.id == id }) else { return 0 }
+        return removeTabs(withIDs: Set(tabs.lazy.filter { $0.id != id }.map(\.id)),
+                          preferredActiveID: id)
+    }
+
+    func inactiveTabCount(for interval: TimeInterval = 86_400,
+                          now: Date = Date()) -> Int {
+        let cutoff = now.addingTimeInterval(-interval)
+        return tabs.lazy.filter { $0.id != self.activeID && $0.lastViewedAt < cutoff }.count
+    }
+
+    /// Close only background tabs that have not been selected during the interval. The
+    /// current tab is deliberately protected even if its timestamp is old.
+    @discardableResult
+    func closeInactiveTabs(for interval: TimeInterval = 86_400,
+                           now: Date = Date()) -> Int {
+        let cutoff = now.addingTimeInterval(-interval)
+        let ids = Set(tabs.lazy
+            .filter { $0.id != self.activeID && $0.lastViewedAt < cutoff }
+            .map(\.id))
+        return removeTabs(withIDs: ids, preferredActiveID: activeID)
+    }
+
+    @discardableResult
+    func closeAllTabs() -> Int {
+        removeTabs(withIDs: Set(tabs.map(\.id)), preferredActiveID: nil)
+    }
+
+    @discardableResult
+    private func removeTabs(withIDs ids: Set<UUID>, preferredActiveID: UUID?) -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let removedCount = tabs.lazy.filter { ids.contains($0.id) }.count
+        guard removedCount > 0 else { return 0 }
+        let activeWasRemoved = activeID.map(ids.contains) ?? false
+        tabs.removeAll { ids.contains($0.id) }
+        if activeWasRemoved {
+            if let preferredActiveID,
+               tabs.contains(where: { $0.id == preferredActiveID }) {
+                activeID = preferredActiveID
+            } else {
+                activeID = tabs.last?.id
+            }
+            active?.lastViewedAt = Date()
+        }
         saveTabs()
+        return removedCount
     }
 
     private func add(_ t: DashboardTab) {
         tabs.append(t)
         activeID = t.id
+        t.lastViewedAt = Date()
         saveTabs()
     }
 
