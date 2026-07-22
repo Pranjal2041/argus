@@ -75,6 +75,16 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
     }
 
     var isPDF: Bool { fileExtension == "pdf" || contentType?.lowercased() == "application/pdf" }
+    var isMarkdown: Bool {
+        let mediaType = contentType?
+            .lowercased()
+            .split(separator: ";", maxSplits: 1)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return mediaType == "text/markdown"
+            || mediaType == "text/x-markdown"
+            || ["md", "markdown", "mdown", "mkd"].contains(fileExtension)
+    }
     var isFileSnapshot: Bool { kind == ArtifactKind.fileSnapshot }
 
     var fileExtension: String {

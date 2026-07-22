@@ -409,13 +409,15 @@ private struct DocPane: View {
 
 // MARK: - markdown preview (reuses the offline render bundle: marked + KaTeX + hljs)
 
-private struct MarkdownPreviewView: NSViewRepresentable {
+struct MarkdownPreviewView: NSViewRepresentable {
     let markdown: String
     let fontSize: Double
+    var proxy: MarkdownPreviewProxy? = nil
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(proxy: proxy) }
     func makeNSView(context: Context) -> WKWebView {
         let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        proxy?.attach(wv)
         wv.navigationDelegate = context.coordinator
         if #available(macOS 12.0, *) { wv.underPageBackgroundColor = paneBG }   // app bg, so no light flash in dark mode
         context.coordinator.pending = (markdown, fontSize)
@@ -423,13 +425,22 @@ private struct MarkdownPreviewView: NSViewRepresentable {
         wv.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
         return wv
     }
-    func updateNSView(_ wv: WKWebView, context: Context) { context.coordinator.update(wv, markdown, fontSize) }
+    func updateNSView(_ wv: WKWebView, context: Context) {
+        proxy?.attach(wv)
+        context.coordinator.update(wv, markdown, fontSize)
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
+        weak var proxy: MarkdownPreviewProxy?
         var pending: (String, Double)?
         private var ready = false
         private var shownText: String?
         private var shownSize: Double = 0
+
+        init(proxy: MarkdownPreviewProxy?) {
+            self.proxy = proxy
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
             applyTheme(webView)   // match the app (dark/light + bg/fg) before painting
@@ -450,7 +461,10 @@ private struct MarkdownPreviewView: NSViewRepresentable {
         }
         private func push(_ wv: WKWebView, _ text: String, _ size: Double) {
             shownText = text; shownSize = size
-            wv.evaluateJavaScript("window.UTRender.set(\(js(text)), \(Int(size)))")
+            proxy?.renderingStarted()
+            wv.evaluateJavaScript("window.UTRender.set(\(js(text)), \(Int(size)))") { [weak self] _, error in
+                self?.proxy?.renderingFinished(successfully: error == nil)
+            }
         }
         private func js(_ s: String) -> String {
             guard let d = try? JSONSerialization.data(withJSONObject: [s]),

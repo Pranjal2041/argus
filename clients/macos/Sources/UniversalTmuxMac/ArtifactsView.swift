@@ -21,6 +21,7 @@ struct ArtifactsView: View {
         Group {
             if let artifact = artifacts.selectedArtifact {
                 ArtifactDocumentView(record: artifact)
+                    .id(artifact.id)
             } else if let panelKey = artifacts.selectedPanelKey {
                 panelView(panelKey)
             } else {
@@ -344,6 +345,9 @@ private struct ArtifactDocumentView: View {
     @State private var renameShown = false
     @State private var renameText = ""
     @State private var deleteShown = false
+    @State private var markdownMode = ArtifactMarkdownMode.preview
+    @State private var exportingMarkdown = false
+    @StateObject private var markdownPreview = MarkdownPreviewProxy()
 
     private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size * uiScale, weight: weight)
@@ -362,6 +366,14 @@ private struct ArtifactDocumentView: View {
                     ArtifactImageView(url: artifacts.fileURL(for: record), zoom: zoom)
                 case .pdf:
                     ArtifactPDFView(url: artifacts.fileURL(for: record), zoom: zoom)
+                case .markdown:
+                    ArtifactTextView(
+                        record: record,
+                        url: artifacts.fileURL(for: record),
+                        zoom: zoom,
+                        markdownMode: markdownMode,
+                        markdownProxy: markdownPreview
+                    )
                 case .text:
                     ArtifactTextView(record: record, url: artifacts.fileURL(for: record), zoom: zoom)
                 case .quickLook:
@@ -415,44 +427,59 @@ private struct ArtifactDocumentView: View {
                         .help(sourcePath)
                 }
             }
-            Spacer(minLength: 16)
-            if viewerKind.supportsZoom {
-                HStack(spacing: 2) {
-                    compactButton("minus", help: "Zoom out") { zoom = max(0.45, zoom - 0.1) }
-                    Text("\(Int((zoom * 100).rounded()))%")
-                        .font(cf(10.5, .medium)).monospacedDigit()
-                        .foregroundStyle(Theme.textSecondary).frame(width: 40)
-                    compactButton("plus", help: "Zoom in") { zoom = min(3, zoom + 0.1) }
+            .frame(minWidth: 100, idealWidth: 230, maxWidth: 340, alignment: .leading)
+            Spacer(minLength: 8)
+            HStack(spacing: 10) {
+                if viewerKind == .markdown {
+                    markdownModeControl
+                    markdownExportMenu
+                    if exportingMarkdown {
+                        ProgressView().controlSize(.mini)
+                            .help("Creating reading copy")
+                    }
                 }
-            }
-            if let liveRef {
-                Button("Open Panel") {
-                    state.selection = liveRef
-                    state.showArtifacts = false
+                if viewerKind.supportsZoom {
+                    HStack(spacing: 2) {
+                        compactButton("minus", help: "Zoom out") { zoom = max(0.45, zoom - 0.1) }
+                        Text("\(Int((zoom * 100).rounded()))%")
+                            .font(cf(10.5, .medium)).monospacedDigit()
+                            .foregroundStyle(Theme.textSecondary).frame(width: 40)
+                        compactButton("plus", help: "Zoom in") { zoom = min(3, zoom + 0.1) }
+                    }
                 }
-                .font(cf(11.5, .medium))
-                .buttonStyle(.borderless)
-            }
-            Menu {
-                Button("Rename…") {
-                    renameText = record.filename
-                    renameShown = true
+                if let liveRef {
+                    Button("Open Panel") {
+                        state.selection = liveRef
+                        state.showArtifacts = false
+                    }
+                    .font(cf(11.5, .medium))
+                    .buttonStyle(.borderless)
                 }
-                Button("Export…") { export() }
-                Divider()
-                Button("Delete Artifact", role: .destructive) { deleteShown = true }
-            } label: {
-                Image(systemName: "ellipsis.circle").font(cf(12.5))
+                Menu {
+                    Button("Rename…") {
+                        renameText = record.filename
+                        renameShown = true
+                    }
+                    if viewerKind != .markdown {
+                        Button("Export…") { exportOriginal() }
+                    }
+                    Divider()
+                    Button("Delete Artifact", role: .destructive) { deleteShown = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(cf(12.5))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Artifact actions")
+                Button { state.showArtifacts = false } label: {
+                    Image(systemName: "xmark").font(cf(14, .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.textSecondary)
+                .help("Close Artifacts")
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Artifact actions")
-            Button { state.showArtifacts = false } label: {
-                Image(systemName: "xmark").font(cf(14, .medium))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary)
-            .help("Close Artifacts")
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(2)
         }
         .padding(.horizontal, 18)
         .padding(.top, 30)
@@ -483,6 +510,54 @@ private struct ArtifactDocumentView: View {
         .help(help)
     }
 
+    private var markdownExportMenu: some View {
+        Menu {
+            Button("Rendered PDF…") { exportMarkdownPDF() }
+                .disabled(exportingMarkdown || !markdownPreview.isReady)
+            Button("EPUB…") { exportMarkdownEPUB() }
+                .disabled(exportingMarkdown)
+            Divider()
+            Button("Original Markdown…") { exportOriginal() }
+                .disabled(exportingMarkdown)
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(cf(12, .medium))
+                .frame(width: 24, height: 24)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(markdownPreview.isReady
+              ? "Create a PDF or EPUB reading copy"
+              : "The preview is loading; EPUB and original export are already available")
+    }
+
+    private var markdownModeControl: some View {
+        HStack(spacing: 0) {
+            ForEach(ArtifactMarkdownMode.allCases, id: \.self) { mode in
+                Button {
+                    markdownMode = mode
+                } label: {
+                    Text(mode.title)
+                        .font(cf(10.5, markdownMode == mode ? .semibold : .regular))
+                        .foregroundStyle(markdownMode == mode ? Theme.accent : Theme.textSecondary)
+                        .frame(width: 67, height: 23)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(markdownMode == mode ? Theme.accent.opacity(0.14) : .clear)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.surface))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Theme.border, lineWidth: 1)
+        )
+        .help("Switch between the rendered document and its Markdown source")
+    }
+
     private func rename() {
         Task {
             do {
@@ -503,7 +578,7 @@ private struct ArtifactDocumentView: View {
         }
     }
 
-    private func export() {
+    private func exportOriginal() {
         let source = artifacts.fileURL(for: record)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = record.filename
@@ -527,11 +602,74 @@ private struct ArtifactDocumentView: View {
             }
         }
     }
+
+    private func exportMarkdownPDF() {
+        let panel = exportPanel(fileExtension: "pdf")
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            exportingMarkdown = true
+            markdownPreview.createPDF { result in
+                switch result {
+                case .failure(let error):
+                    artifacts.errorMessage = error.localizedDescription
+                    exportingMarkdown = false
+                case .success(let data):
+                    Task {
+                        do {
+                            try await Task.detached(priority: .utility) {
+                                try data.write(to: destination, options: .atomic)
+                            }.value
+                        } catch {
+                            artifacts.errorMessage = error.localizedDescription
+                        }
+                        exportingMarkdown = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func exportMarkdownEPUB() {
+        let panel = exportPanel(fileExtension: "epub")
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            exportingMarkdown = true
+            Task {
+                do {
+                    try await MarkdownEPUBExporter.export(
+                        sourceURL: artifacts.fileURL(for: record),
+                        destinationURL: destination,
+                        title: MarkdownEPUBExporter.suggestedTitle(for: record.filename)
+                    )
+                } catch {
+                    artifacts.errorMessage = error.localizedDescription
+                }
+                exportingMarkdown = false
+            }
+        }
+    }
+
+    private func exportPanel(fileExtension: String) -> NSSavePanel {
+        let panel = NSSavePanel()
+        let base = (record.filename as NSString).deletingPathExtension
+        panel.nameFieldStringValue = ArtifactFilename.normalized(base, fileExtension: fileExtension)
+        panel.allowedContentTypes = [UTType(filenameExtension: fileExtension) ?? .data]
+        panel.canCreateDirectories = true
+        return panel
+    }
+}
+
+private enum ArtifactMarkdownMode: String, CaseIterable, Hashable {
+    case preview
+    case source
+
+    var title: String { rawValue.capitalized }
 }
 
 private enum ArtifactViewerKind: Equatable {
     case image
     case pdf
+    case markdown
     case text
     case quickLook
 
@@ -540,6 +678,8 @@ private enum ArtifactViewerKind: Equatable {
             self = .image
         } else if record.isPDF {
             self = .pdf
+        } else if record.isMarkdown {
+            self = .markdown
         } else if record.contentType?.lowercased().hasPrefix("text/") == true
                     || Self.textExtensions.contains(record.fileExtension)
                     || UTType(filenameExtension: record.fileExtension)?.conforms(to: .text) == true {
@@ -562,21 +702,32 @@ private struct ArtifactTextView: View {
     let record: ArtifactRecord
     let url: URL
     let zoom: CGFloat
+    var markdownMode: ArtifactMarkdownMode? = nil
+    var markdownProxy: MarkdownPreviewProxy? = nil
     @State private var text: String?
     @State private var error: String?
 
     var body: some View {
         Group {
             if let text {
-                CodeMirrorView(
-                    text: text,
-                    filename: record.filename,
-                    path: url.path,
-                    fontSize: 13 * zoom,
-                    editable: false,
-                    scrollToLine: nil,
-                    onChange: { _ in }
-                )
+                if let markdownMode {
+                    ZStack {
+                        MarkdownPreviewView(
+                            markdown: text,
+                            fontSize: 13 * zoom,
+                            proxy: markdownProxy
+                        )
+                        .opacity(markdownMode == .preview ? 1 : 0)
+                        .allowsHitTesting(markdownMode == .preview)
+                        .accessibilityHidden(markdownMode != .preview)
+                        if markdownMode == .source {
+                            sourceView(text)
+                                .background(Theme.appBackground)
+                        }
+                    }
+                } else {
+                    sourceView(text)
+                }
             } else if let error {
                 VStack(spacing: 10) {
                     Image(systemName: "doc.text.magnifyingglass")
@@ -607,6 +758,18 @@ private struct ArtifactTextView: View {
                 self.error = "This saved file could not be displayed as text. Use Export to open it elsewhere."
             }
         }
+    }
+
+    private func sourceView(_ text: String) -> some View {
+        CodeMirrorView(
+            text: text,
+            filename: record.filename,
+            path: url.path,
+            fontSize: 13 * zoom,
+            editable: false,
+            scrollToLine: nil,
+            onChange: { _ in }
+        )
     }
 }
 
