@@ -5,6 +5,47 @@ import XCTest
 
 @MainActor
 final class RenderWebIntegrationTests: XCTestCase {
+    func testArtifactReaderUsesTheWideResponsiveLayout() async throws {
+        let webView = try await loadRenderer()
+        webView.frame = .init(x: 0, y: 0, width: 1_600, height: 900)
+        _ = try await webView.evaluateJavaScript(
+            "window.UTRender.setLayout('artifact'); window.UTRender.set('# Wide reader\\n\\nReadable body.', 16)"
+        )
+        let value = try await webView.evaluateJavaScript(
+            "({ body: document.body.getBoundingClientRect().width, viewport: document.documentElement.clientWidth, "
+                + "artifact: document.documentElement.classList.contains('artifact-reader') })"
+        )
+        let metrics = try XCTUnwrap(value as? [String: Any])
+        let bodyWidth = try XCTUnwrap(metrics["body"] as? NSNumber).doubleValue
+        let viewportWidth = try XCTUnwrap(metrics["viewport"] as? NSNumber).doubleValue
+
+        XCTAssertEqual(metrics["artifact"] as? Bool, true)
+        XCTAssertGreaterThan(bodyWidth, 1_000, "Artifact reading must not fall back to the 740px Render folio")
+        XCTAssertLessThanOrEqual(bodyWidth, viewportWidth - 48 + 1)
+    }
+
+    func testMarkdownPagesModeCanCreateAnInMemoryPDF() async throws {
+        let webView = try await loadRenderer()
+        _ = try await webView.evaluateJavaScript(
+            "window.UTRender.setLayout('artifact'); "
+                + "window.UTRender.set('# In-app pages\\n\\nA **rendered** Markdown document.', 16)"
+        )
+        let proxy = MarkdownPreviewProxy()
+        proxy.attach(webView)
+        proxy.renderingFinished(successfully: true)
+
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            proxy.createPDF { continuation.resume(with: $0) }
+        }
+        let document = try XCTUnwrap(PDFDocument(data: data))
+
+        XCTAssertGreaterThan(data.count, 1_000)
+        XCTAssertEqual(document.pageCount, 1)
+        XCTAssertTrue(document.string?.contains("In-app pages") == true)
+        let pageWidth = try XCTUnwrap(document.page(at: 0)).bounds(for: .mediaBox).width
+        XCTAssertLessThan(pageWidth, webView.bounds.width - 20, "PDF pages should crop unused reader margins")
+    }
+
     func testPDFCaptureProducesTheFullCurrentRenderedDocument() async throws {
         let webView = try await loadRenderer()
         let source = (1...80).map { "## Finding \($0)\n\nA saved result with **evidence** and enough body text to extend the document." }

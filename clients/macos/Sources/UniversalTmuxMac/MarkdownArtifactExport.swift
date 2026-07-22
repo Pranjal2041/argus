@@ -48,23 +48,25 @@ final class MarkdownPreviewProxy: ObservableObject {
             return
         }
         webView.evaluateJavaScript(
-            "({ width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth), "
-                + "height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) })"
+            "(() => { const body = document.body.getBoundingClientRect(); return { x: body.left, "
+                + "width: body.width, height: Math.max(document.body.scrollHeight, "
+                + "document.documentElement.scrollHeight) }; })()"
         ) { dimensions, error in
             if let error {
                 completion(.failure(error))
                 return
             }
             let values = dimensions as? [String: Any]
+            let x = (values?["x"] as? NSNumber).map { CGFloat(truncating: $0) } ?? 0
             let width = (values?["width"] as? NSNumber).map { CGFloat(truncating: $0) }
                 ?? webView.bounds.width
             let height = (values?["height"] as? NSNumber).map { CGFloat(truncating: $0) }
                 ?? webView.bounds.height
             let configuration = WKPDFConfiguration()
             configuration.rect = CGRect(
-                x: 0,
+                x: max(0, x),
                 y: 0,
-                width: max(width, webView.bounds.width),
+                width: max(1, width),
                 height: max(height, webView.bounds.height)
             )
             webView.createPDF(configuration: configuration, completionHandler: completion)
