@@ -161,6 +161,45 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(renamed.presentation, "file-draft")
     }
 
+    func testMarkdownSnapshotsAreRecognizedByExtensionOrMediaType() {
+        let extensionRecord = ArtifactRecord(
+            filename: "notes.md",
+            panel: panel(),
+            presentation: "file-snapshot",
+            relativePath: "files/notes.md",
+            byteCount: 1,
+            contentType: "application/octet-stream"
+        )
+        let mediaTypeRecord = ArtifactRecord(
+            filename: "README",
+            panel: panel(),
+            presentation: "file-snapshot",
+            relativePath: "files/readme",
+            byteCount: 1,
+            contentType: "text/markdown; charset=utf-8"
+        )
+        let plainTextRecord = ArtifactRecord(
+            filename: "notes.txt",
+            panel: panel(),
+            presentation: "file-snapshot",
+            relativePath: "files/notes.txt",
+            byteCount: 1,
+            contentType: "text/plain"
+        )
+
+        XCTAssertTrue(extensionRecord.isMarkdown)
+        XCTAssertTrue(mediaTypeRecord.isMarkdown)
+        XCTAssertFalse(plainTextRecord.isMarkdown)
+    }
+
+    func testMarkdownReadingCopyUsesAUsefulTitle() {
+        XCTAssertEqual(
+            MarkdownEPUBExporter.suggestedTitle(for: "Experiment notes.md"),
+            "Experiment notes"
+        )
+        XCTAssertEqual(MarkdownEPUBExporter.suggestedTitle(for: ""), "Argus Markdown")
+    }
+
     func testDeleteRemovesManifestAndPDF() async throws {
         let disk = ArtifactDiskStore(rootURL: root)
         let saved = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered")
