@@ -476,7 +476,7 @@ final class CommandCenterModel: ObservableObject {
     private func consumeOverrides(machine: Machine) async {
         guard let url = URL(string: machine.httpBase + "/ccoverride") else { return }
         var req = URLRequest(url: url); req.timeoutInterval = 6
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+        guard let (data, resp) = try? await brokerSession.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
         struct Ov: Decodable { let session: String; let label: String; let ts: Int64 }
         struct Wrap: Decodable { let overrides: [Ov] }
@@ -490,7 +490,7 @@ final class CommandCenterModel: ObservableObject {
             guard let enc = ov.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                   let cu = URL(string: machine.httpBase + "/ccoverride?session=\(enc)&clear=\(ov.ts)") else { continue }
             var creq = URLRequest(url: cu); creq.httpMethod = "POST"; creq.timeoutInterval = 6
-            URLSession.shared.dataTask(with: creq).resume()
+            brokerSession.dataTask(with: creq).resume()
         }
     }
 
@@ -574,7 +574,7 @@ final class CommandCenterModel: ObservableObject {
             guard let url = URL(string: m.httpBase + "/ccstatus"),
                   let body = try? JSONEncoder().encode(["items": items]) else { continue }
             var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 6
-            URLSession.shared.dataTask(with: req).resume()
+            brokerSession.dataTask(with: req).resume()
         }
     }
 
@@ -582,7 +582,7 @@ final class CommandCenterModel: ObservableObject {
         guard let enc = session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "\(httpBase)/recent?session=\(enc)&lines=300") else { return nil }
         var req = URLRequest(url: url); req.timeoutInterval = 8
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+        guard let (data, resp) = try? await brokerSession.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return String(decoding: data, as: UTF8.self)
     }

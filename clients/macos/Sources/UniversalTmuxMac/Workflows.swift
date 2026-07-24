@@ -445,7 +445,7 @@ private struct FolderPickerView: View {
     }
     private func get<T: Decodable>(_ url: URL) async -> T? {
         var req = URLRequest(url: url); req.timeoutInterval = 10
-        guard let (d, _) = try? await URLSession.shared.data(for: req) else { return nil }
+        guard let (d, _) = try? await brokerSession.data(for: req) else { return nil }
         return try? JSONDecoder().decode(T.self, from: d)
     }
 }

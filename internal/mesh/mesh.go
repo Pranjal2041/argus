@@ -30,6 +30,12 @@ type Peer struct {
 	Host   string `json:"host"`   // tailnet host:port-less address to reach it
 	Scheme string `json:"scheme"` // http | https
 	Os     string `json:"os"`     // runtime.GOOS — lets a client pick the Mac as sync host
+
+	// A TLS broker remains named by Host (HTTP Host, SNI, and certificate), but
+	// can be dialed by its authoritative tailnet IP when MagicDNS is stale.
+	// These routing details remain process-local and are not serialized.
+	dialHost      string
+	tlsServerName string
 }
 
 // Mesh routes to peer brokers. ts is nil in local mode (use the host network).
@@ -37,9 +43,22 @@ type Mesh struct {
 	ts     *tsnet.Server
 	self   string
 	client *http.Client // dials tailnet peers (over tsnet, or host net)
+	dial   func(context.Context, string, string) (net.Conn, error)
 }
 
 func New(ts *tsnet.Server, selfName string) *Mesh {
+	dial := (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	if ts != nil {
+		dial = ts.Dial
+	}
+	transport := peerTransport(dial, "", "")
+	return &Mesh{
+		ts: ts, self: selfName, dial: dial,
+		client: &http.Client{Transport: transport, Timeout: 0},
+	}
+}
+
+func peerTransport(dial func(context.Context, string, string) (net.Conn, error), dialHost, tlsServerName string) *http.Transport {
 	transport := &http.Transport{
 		// Force HTTP/1.1: an h2 connection windows/buffers the response body, so a
 		// live feed (/stream behind `ut tail`) would arrive in batches instead of
@@ -47,10 +66,27 @@ func New(ts *tsnet.Server, selfName string) *Mesh {
 		ForceAttemptHTTP2: false,
 		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
-	if ts != nil {
-		transport.DialContext = ts.Dial
+	transport.DialContext = dial
+	if dialHost != "" {
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			return dial(ctx, network, net.JoinHostPort(dialHost, port))
+		}
 	}
-	return &Mesh{ts: ts, self: selfName, client: &http.Client{Transport: transport, Timeout: 0}}
+	if tlsServerName != "" {
+		transport.TLSClientConfig = &tls.Config{ServerName: tlsServerName, MinVersion: tls.VersionTLS12}
+	}
+	return transport
+}
+
+func (m *Mesh) routedClient(dialHost, tlsServerName string) *http.Client {
+	if dialHost == "" {
+		return m.client
+	}
+	return &http.Client{Transport: peerTransport(m.dial, dialHost, tlsServerName), Timeout: 0}
 }
 
 // candidate is a tailnet device we'll probe for a broker.
@@ -184,29 +220,54 @@ func hostTailscalePeers(ctx context.Context) []candidate {
 	return cs
 }
 
-// probe confirms a device runs a broker via /whoami, returning the address +
-// scheme that worked. Tries the FQDN over https (tsnet brokers serve real TLS),
-// then the IPs over http (brokers bound to their tailnet IP, e.g. Windows/Mac).
-func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
-	ctx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
-	defer cancel()
-	type attempt struct{ host, scheme string }
-	var attempts []attempt
-	if c.dns != "" {
-		attempts = append(attempts, attempt{c.dns, "https"})
-	}
+type probeAttempt struct {
+	host, scheme, dialHost, tlsServerName string
+}
+
+func probeAttempts(c candidate) []probeAttempt {
+	var attempts []probeAttempt
 	for _, ip := range c.ips {
-		attempts = append(attempts, attempt{ip, "http"})
+		if c.dns != "" {
+			// The URL retains the DNS name for Host/SNI and certificate validation;
+			// only the socket destination bypasses name resolution.
+			attempts = append(attempts, probeAttempt{c.dns, "https", ip, c.dns})
+		}
+		// Native host brokers (rather than tsnet TLS listeners) use HTTP by design.
+		attempts = append(attempts, probeAttempt{ip, "http", "", ""})
 	}
-	for _, a := range attempts {
+	if len(c.ips) == 0 && c.dns != "" {
+		// Compatibility for old status payloads that omitted TailscaleIPs.
+		attempts = append(attempts,
+			probeAttempt{c.dns, "https", "", ""},
+			probeAttempt{c.dns, "http", "", ""},
+		)
+	}
+	return attempts
+}
+
+// probe confirms a device runs a broker via /whoami. TLS peers are dialed by
+// the IP already present in tailnet status while retaining their DNS identity.
+// This avoids stale system DNS without weakening certificate verification.
+func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
+	for _, a := range probeAttempts(c) {
+		attemptCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
 		url := a.scheme + "://" + net.JoinHostPort(a.host, brokerPort) + "/whoami"
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		resp, err := m.client.Do(req)
+		req, _ := http.NewRequestWithContext(attemptCtx, http.MethodGet, url, nil)
+		client := m.routedClient(a.dialHost, a.tlsServerName)
+		resp, err := client.Do(req)
 		if err != nil {
+			if a.dialHost != "" {
+				client.CloseIdleConnections()
+			}
+			cancel()
 			continue
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
+		if a.dialHost != "" {
+			client.CloseIdleConnections()
+		}
+		cancel()
 		var who struct {
 			Service string `json:"service"`
 			Name    string `json:"name"`
@@ -217,7 +278,10 @@ func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
 			if name == "" {
 				name = a.host
 			}
-			return Peer{Name: name, Host: a.host, Scheme: a.scheme, Os: who.Os}, true
+			return Peer{
+				Name: name, Host: a.host, Scheme: a.scheme, Os: who.Os,
+				dialHost: a.dialHost, tlsServerName: a.tlsServerName,
+			}, true
 		}
 	}
 	return Peer{}, false
@@ -252,10 +316,10 @@ func (m *Mesh) Proxy(w http.ResponseWriter, r *http.Request) {
 		m.proxyWS(w, r, peer, target)
 		return
 	}
-	m.proxyHTTP(w, r, target)
+	m.proxyHTTP(w, r, peer, target)
 }
 
-func (m *Mesh) proxyHTTP(w http.ResponseWriter, r *http.Request, target string) {
+func (m *Mesh) proxyHTTP(w http.ResponseWriter, r *http.Request, peer Peer, target string) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -269,7 +333,11 @@ func (m *Mesh) proxyHTTP(w http.ResponseWriter, r *http.Request, target string) 
 			req.Header.Add(k, v)
 		}
 	}
-	resp, err := m.client.Do(req)
+	client := m.routedClient(peer.dialHost, peer.tlsServerName)
+	if peer.dialHost != "" {
+		defer client.CloseIdleConnections()
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "mesh relay: "+err.Error(), http.StatusBadGateway)
 		return
@@ -305,7 +373,13 @@ func (m *Mesh) proxyHTTP(w http.ResponseWriter, r *http.Request, target string) 
 // remote session attach / tail), copying binary frames both ways.
 func (m *Mesh) proxyWS(w http.ResponseWriter, r *http.Request, peer Peer, target string) {
 	wsTarget := strings.Replace(target, "http", "ws", 1) // http→ws, https→wss
-	upstream, _, err := websocket.Dial(r.Context(), wsTarget, &websocket.DialOptions{HTTPClient: m.client})
+	upstreamClient := m.routedClient(peer.dialHost, peer.tlsServerName)
+	if peer.dialHost != "" {
+		defer upstreamClient.CloseIdleConnections()
+	}
+	upstream, _, err := websocket.Dial(r.Context(), wsTarget, &websocket.DialOptions{
+		HTTPClient: upstreamClient,
+	})
 	if err != nil {
 		http.Error(w, "mesh ws dial: "+err.Error(), http.StatusBadGateway)
 		return

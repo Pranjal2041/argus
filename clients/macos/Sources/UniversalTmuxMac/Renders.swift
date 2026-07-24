@@ -173,7 +173,7 @@ enum RenderLauncher {
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await brokerSession.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             return try JSONDecoder().decode(RenderSourceResponse.self, from: data)
         } catch {

@@ -153,7 +153,7 @@ final class BrokerClient {
 
         epoch &+= 1
         let myEpoch = epoch
-        let t = URLSession.shared.webSocketTask(with: url)
+        let t = brokerSession.webSocketTask(with: url)
         // A session's scrollback snapshot can exceed URLSession's default 1 MiB
         // message cap — which fails the receive with EMSGSIZE and, since the
         // reconnect re-sends it, loops forever ("reconnecting"). The broker now

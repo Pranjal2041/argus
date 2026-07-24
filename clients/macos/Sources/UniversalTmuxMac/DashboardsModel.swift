@@ -281,7 +281,7 @@ final class DashboardsModel: ObservableObject {
             guard let u = URL(string: httpBase + "/jupyter") else { t.status = "bad broker URL"; return }
             var req = URLRequest(url: u)
             req.timeoutInterval = 130   // cold start on a loaded SLURM node can be ~60–90s
-            guard let (d, resp) = try? await URLSession.shared.data(for: req),
+            guard let (d, resp) = try? await brokerSession.data(for: req),
                   (resp as? HTTPURLResponse)?.statusCode == 200,
                   let info = try? JSONDecoder().decode(JupyterResp.self, from: d) else {
                 t.status = "couldn't start JupyterLab on \(name)"
@@ -402,7 +402,7 @@ final class DashboardsModel: ObservableObject {
         ]
         guard let url = c.url else { return nil }
         var req = URLRequest(url: url); req.httpMethod = "POST"
-        _ = try? await URLSession.shared.data(for: req)
+        _ = try? await brokerSession.data(for: req)
         for _ in 0..<16 {   // up to ~4.8s for the tunnel to bind
             try? await Task.sleep(nanoseconds: 300_000_000)
             if let f = (await fetchForwards()).first(where: { $0.brokerHost == brokerHost && $0.remotePort == remotePort }) {
@@ -414,7 +414,7 @@ final class DashboardsModel: ObservableObject {
 
     private func fetchForwards() async -> [PortForward] {
         guard let url = URL(string: agent + "/forwards"),
-              let (d, _) = try? await URLSession.shared.data(from: url),
+              let (d, _) = try? await brokerSession.data(from: url),
               let r = try? JSONDecoder().decode(DashForwardsResp.self, from: d) else { return [] }
         return r.forwards ?? []
     }

@@ -484,7 +484,7 @@ final class AppState: ObservableObject {
               let url = URL(string: "\(m.httpBase)/send?session=\(enc)&enter=\(enter ? "1" : "0")") else { return }
         var req = URLRequest(url: url); req.httpMethod = "POST"
         req.httpBody = text.data(using: .utf8); req.timeoutInterval = 6
-        URLSession.shared.dataTask(with: req).resume()
+        brokerSession.dataTask(with: req).resume()
     }
 
     // MARK: Todo Maps — per-session checklists that outlive the session.
@@ -666,7 +666,7 @@ final class AppState: ObservableObject {
         guard let base = syncHostBase, let url = URL(string: "\(base)/journal/peek") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 8
-        URLSession.shared.dataTask(with: req) { data, _, _ in
+        brokerSession.dataTask(with: req) { data, _, _ in
             guard let data,
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let off = obj["off"] as? Int64 ?? (obj["off"] as? Int).map(Int64.init),
@@ -679,7 +679,7 @@ final class AppState: ObservableObject {
                 var areq = URLRequest(url: ack)
                 areq.httpMethod = "POST"
                 areq.timeoutInterval = 8
-                URLSession.shared.dataTask(with: areq).resume()
+                brokerSession.dataTask(with: areq).resume()
             }
         }.resume()
     }
@@ -692,7 +692,7 @@ final class AppState: ObservableObject {
         guard let body = try? enc.encode(SyncEnvelope(updatedAt: ts, data: data,
                                                       allowDestructive: allowDestructive)) else { return }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 8
-        URLSession.shared.dataTask(with: req).resume()
+        brokerSession.dataTask(with: req).resume()
     }
 
     /// Reconcile both keys with the sync store: adopt the remote when it's newer, push the
@@ -707,7 +707,7 @@ final class AppState: ObservableObject {
 
     private func syncWorkflows() {
         guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=workflows") else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        brokerSession.dataTask(with: url) { data, _, _ in
             let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
             var remoteTs: Int64 = 0; var remote: [Workflow]?
             if let data, let env = try? dec.decode(SyncEnvelope<[Workflow]>.self, from: data) {
@@ -734,7 +734,7 @@ final class AppState: ObservableObject {
 
     private func syncTodos() {
         guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=todos") else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        brokerSession.dataTask(with: url) { data, _, _ in
             let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
             var remoteTs: Int64 = 0; var remote: [TodoBoard]?
             if let data, let env = try? dec.decode(SyncEnvelope<[TodoBoard]>.self, from: data) {
@@ -763,7 +763,7 @@ final class AppState: ObservableObject {
 
     private func syncNotes() {
         guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=notes") else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        brokerSession.dataTask(with: url) { data, _, _ in
             let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
             var remoteTs: Int64 = 0; var remote: [Note]?
             if let data, let env = try? dec.decode(SyncEnvelope<[Note]>.self, from: data) {
@@ -848,7 +848,7 @@ final class AppState: ObservableObject {
               let enc = ref.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "\(m.httpBase)/hidden?session=\(enc)&hidden=\(hidden)") else { return }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 6
-        URLSession.shared.dataTask(with: req).resume()
+        brokerSession.dataTask(with: req).resume()
     }
 
     /// Reconcile this machine's hidden membership with the broker's `hidden` flags (the
@@ -1125,7 +1125,7 @@ final class AppState: ObservableObject {
             var req = URLRequest(url: url)
             req.timeoutInterval = 8
             group.enter()
-            URLSession.shared.dataTask(with: req) { data, _, _ in
+            brokerSession.dataTask(with: req) { data, _, _ in
                 defer { group.leave() }
                 guard let data,
                       let decoded = try? JSONDecoder().decode(SessionHistoryResponse.self, from: data) else { return }
@@ -1234,7 +1234,7 @@ final class AppState: ObservableObject {
         req.timeoutInterval = 8
         let started = Date()
         group?.enter()
-        URLSession.shared.dataTask(with: req) { data, response, err in
+        brokerSession.dataTask(with: req) { data, response, err in
             let httpOK = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
             let decoded = data.flatMap { try? JSONDecoder().decode(SessionsResponse.self, from: $0) }
             let reachable = err == nil && httpOK && decoded != nil
@@ -1419,7 +1419,7 @@ final class AppState: ObservableObject {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 6
-        URLSession.shared.dataTask(with: req) { data, resp, err in
+        brokerSession.dataTask(with: req) { data, resp, err in
             // Real success check: transport ok, 2xx, and the broker's {"ok":true}
             // (older brokers may omit the body — treat 2xx as success then).
             let http = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -1524,7 +1524,7 @@ func discoverMachines() -> [Machine] {
     var peers: [[String: Any]] = []
     if let p = json["Peer"] as? [String: [String: Any]] { peers.append(contentsOf: p.values) }
 
-    var dnsNames: [String] = []
+    var brokerCandidates: [(dns: String, ips: [String])] = []
     var seen = Set<String>()
     for peer in peers {
         guard (peer["Online"] as? Bool) == true else { continue }
@@ -1532,21 +1532,26 @@ func discoverMachines() -> [Machine] {
         if dns.hasSuffix(".") { dns.removeLast() }
         guard !dns.isEmpty, !seen.contains(dns) else { continue }
         seen.insert(dns)
-        dnsNames.append(dns)
+        let ips = peer["TailscaleIPs"] as? [String] ?? []
+        if let address = ips.first(where: { !$0.contains(":") }) ?? ips.first {
+            registerBrokerTLSAddress(address, dnsName: dns)
+        }
+        brokerCandidates.append((dns, ips))
     }
 
     let lock = NSLock()
     var found: [Machine] = []
-    DispatchQueue.concurrentPerform(iterations: dnsNames.count) { i in
-        let dns = dnsNames[i]
-        guard let probe = probeBroker(dns: dns) else { return }
+    DispatchQueue.concurrentPerform(iterations: brokerCandidates.count) { i in
+        let candidate = brokerCandidates[i]
+        guard let probe = probeBroker(dns: candidate.dns, ips: candidate.ips) else { return }
         // Use the scheme that actually answered: tsnet brokers serve real TLS
         // (https/wss), but a broker on a host's own tailnet IP (e.g. Windows via
         // the Tailscale app) serves plain http/ws. Hardcoding https made those
         // brokers discoverable but their /sessions + /ws unreachable.
         let ws = probe.scheme == "https" ? "wss" : "ws"
-        let m = Machine(id: dns, name: probe.name, host: probe.host, os: probe.os, isLocal: false,
-                        httpBase: "\(probe.scheme)://\(dns):8722", wsBase: "\(ws)://\(dns):8722")
+        let endpoint = brokerURLHost(probe.address)
+        let m = Machine(id: candidate.dns, name: probe.name, host: probe.host, os: probe.os, isLocal: false,
+                        httpBase: "\(probe.scheme)://\(endpoint):8722", wsBase: "\(ws)://\(endpoint):8722")
         lock.lock(); found.append(m); lock.unlock()
     }
     machines.append(contentsOf: found.sorted { $0.name < $1.name })
@@ -1555,13 +1560,43 @@ func discoverMachines() -> [Machine] {
 
 /// Probe one tailnet peer for the universal_tmux broker handshake, returning its
 /// display name iff `:8722/whoami` returns our marker — so an unrelated service on
-/// that port is never treated as a broker. Tries HTTPS (tsnet brokers serve a real
-/// `*.ts.net` cert) then plain HTTP (a broker bound to a host's own tailnet IP).
-private func probeBroker(dns: String) -> (name: String, host: String, os: String, scheme: String)? {
-    for scheme in ["https", "http"] {
-        if let r = probeWhoami("\(scheme)://\(dns):8722/whoami") { return (r.name, r.host, r.os, scheme) }
+/// that port is never treated as a broker. HTTPS keeps the peer's DNS identity while
+/// the broker session routes its socket to the peer IP from Tailscale status. Plain
+/// HTTP is tried only against peer IPs, for native Windows/Mac brokers that serve it.
+private func probeBroker(dns: String, ips: [String]) -> (name: String, host: String, os: String, scheme: String, address: String)? {
+    for attempt in brokerProbeAttempts(dns: dns, ips: ips) {
+        let endpoint = brokerURLHost(attempt.address)
+        if let r = probeWhoami("\(attempt.scheme)://\(endpoint):8722/whoami") {
+            return (r.name, r.host, r.os, attempt.scheme, attempt.address)
+        }
     }
     return nil
+}
+
+struct BrokerProbeAttempt: Equatable {
+    let scheme: String
+    let address: String
+}
+
+/// Ordered separately from the network call so the compatibility contract is
+/// regression-testable: HTTPS keeps its TLS hostname while its socket uses the
+/// registered peer IP, and known TLS-only brokers are never sent a plain-HTTP
+/// request by DNS name.
+func brokerProbeAttempts(dns: String, ips: [String]) -> [BrokerProbeAttempt] {
+    var attempts = [BrokerProbeAttempt(scheme: "https", address: dns)]
+    for ip in ips {
+        attempts.append(BrokerProbeAttempt(scheme: "http", address: ip))
+    }
+    // Older `tailscale status` versions may omit TailscaleIPs. Preserve their
+    // legacy HTTP discovery behavior only when no authoritative IP is available.
+    if ips.isEmpty {
+        attempts.append(BrokerProbeAttempt(scheme: "http", address: dns))
+    }
+    return attempts
+}
+
+func brokerURLHost(_ address: String) -> String {
+    address.contains(":") && !address.hasPrefix("[") ? "[\(address)]" : address
 }
 
 private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String)? {
@@ -1570,7 +1605,7 @@ private func probeWhoami(_ urlString: String) -> (name: String, host: String, os
     req.timeoutInterval = 2.5
     let sem = DispatchSemaphore(value: 0)
     var result: (name: String, host: String, os: String)?
-    URLSession.shared.dataTask(with: req) { data, _, err in
+    brokerSession.dataTask(with: req) { data, _, err in
         defer { sem.signal() }
         guard err == nil, let data,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

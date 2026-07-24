@@ -9,7 +9,7 @@ private let fsSession: URLSession = {
     let cfg = URLSessionConfiguration.default
     cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
     cfg.urlCache = nil
-    return URLSession(configuration: cfg)
+    return makeBrokerSession(configuration: cfg)
 }()
 
 // MARK: - wire types (mirror the broker's /fs JSON)
@@ -605,7 +605,7 @@ final class FileTab: ObservableObject, Identifiable {
         Task {
             downloading = UploadState(name: entry.name, progress: 0)
             let delegate = DownloadProgress { [weak self] p in self?.downloading?.progress = p }
-            if let (tmp, resp) = try? await URLSession.shared.download(from: url, delegate: delegate),
+            if let (tmp, resp) = try? await brokerSession.download(from: url, delegate: delegate),
                ((resp as? HTTPURLResponse)?.statusCode ?? 200) < 400 {
                 try? FileManager.default.removeItem(at: dest)
                 try? FileManager.default.moveItem(at: tmp, to: dest)
@@ -628,7 +628,7 @@ final class FileTab: ObservableObject, Identifiable {
         guard let url = c.url else { return false }
         var req = URLRequest(url: url); req.httpMethod = "POST"
         let delegate = UploadProgress { [weak self] p in self?.uploading?.progress = p }
-        guard let (_, resp) = try? await URLSession.shared.upload(for: req, from: data, delegate: delegate) else { return false }
+        guard let (_, resp) = try? await brokerSession.upload(for: req, from: data, delegate: delegate) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -639,7 +639,7 @@ final class FileTab: ObservableObject, Identifiable {
         c.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
         guard let url = c.url else { return false }
         var req = URLRequest(url: url); req.httpMethod = "POST"
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        guard let (_, resp) = try? await brokerSession.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
     private func postWrite(_ path: String, _ body: Data) async -> Bool {
@@ -647,7 +647,7 @@ final class FileTab: ObservableObject, Identifiable {
         c.queryItems = [URLQueryItem(name: "path", value: path)]
         guard let url = c.url else { return false }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        guard let (_, resp) = try? await brokerSession.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
     private func refresh(_ dir: String) async {
