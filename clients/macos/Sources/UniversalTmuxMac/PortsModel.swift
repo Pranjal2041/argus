@@ -52,7 +52,7 @@ final class PortsModel: ObservableObject {
 
     func refreshActive() {
         guard let url = URL(string: agent + "/forwards") else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        brokerSession.dataTask(with: url) { data, _, _ in
             guard let data, let r = try? JSONDecoder().decode(ForwardsResp.self, from: data) else { return }
             DispatchQueue.main.async { self.active = r.forwards ?? [] }
         }.resume()
@@ -62,7 +62,7 @@ final class PortsModel: ObservableObject {
     func fetchPorts(host: String, base: String) {
         guard let url = URL(string: base + "/ports") else { return }
         DispatchQueue.main.async { self.loadingPortsFor = host }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        brokerSession.dataTask(with: url) { data, _, _ in
             let ports = (data.flatMap { try? JSONDecoder().decode(PortsResp.self, from: $0) }?.ports ?? [])
                 .sorted { $0.port < $1.port }
             DispatchQueue.main.async {
@@ -84,7 +84,7 @@ final class PortsModel: ObservableObject {
         ]
         guard let url = comps.url else { return }
         var req = URLRequest(url: url); req.httpMethod = "POST"
-        URLSession.shared.dataTask(with: req) { _, _, _ in
+        brokerSession.dataTask(with: req) { _, _, _ in
             DispatchQueue.main.async {
                 self.refreshActive()
                 let s = SavedForward(brokerHost: host, brokerName: name, scheme: scheme, remotePort: remotePort, label: label)
@@ -98,7 +98,7 @@ final class PortsModel: ObservableObject {
         comps.queryItems = [.init(name: "id", value: id)]
         guard let url = comps.url else { return }
         var req = URLRequest(url: url); req.httpMethod = "DELETE"
-        URLSession.shared.dataTask(with: req) { _, _, _ in DispatchQueue.main.async { self.refreshActive() } }.resume()
+        brokerSession.dataTask(with: req) { _, _, _ in DispatchQueue.main.async { self.refreshActive() } }.resume()
     }
 
     func run(_ s: SavedForward) { start(host: s.brokerHost, name: s.brokerName, scheme: s.scheme, remotePort: s.remotePort, label: s.label) }

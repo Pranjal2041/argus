@@ -428,7 +428,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         Task {
             var home = "", sep = "/"
             if let u = URL(string: httpBase + "/fs/home"),
-               let (d, _) = try? await URLSession.shared.data(from: u),
+               let (d, _) = try? await brokerSession.data(from: u),
                let h = try? JSONDecoder().decode(PasteHome.self, from: d) {
                 home = h.home; sep = h.sep
             }
@@ -450,7 +450,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         c.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
         guard let url = c.url else { return false }
         var req = URLRequest(url: url); req.httpMethod = "POST"
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        guard let (_, resp) = try? await brokerSession.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -459,7 +459,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         c.queryItems = [URLQueryItem(name: "path", value: path)]
         guard let url = c.url else { return false }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = data
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        guard let (_, resp) = try? await brokerSession.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -873,7 +873,7 @@ final class TerminalController: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let (d, resp) = try await URLSession.shared.data(for: req)
+                let (d, resp) = try await brokerSession.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 struct R: Decodable { let session: String?; let error: String? }
                 let r = try? JSONDecoder().decode(R.self, from: d)

@@ -773,7 +773,7 @@ final class LabModel: ObservableObject {
         guard let url = c?.url else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
-        guard let (d, resp) = try? await URLSession.shared.data(for: req),
+        guard let (d, resp) = try? await brokerSession.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return String(data: d.prefix(2_000_000), encoding: .utf8)
     }
@@ -787,7 +787,7 @@ final class LabModel: ObservableObject {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 8
-        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        guard let (_, resp) = try? await brokerSession.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -795,7 +795,7 @@ final class LabModel: ObservableObject {
         guard let u = URL(string: url) else { return nil }
         var req = URLRequest(url: u)
         req.timeoutInterval = 6
-        guard let (d, resp) = try? await URLSession.shared.data(for: req),
+        guard let (d, resp) = try? await brokerSession.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONDecoder().decode(T.self, from: d)
     }

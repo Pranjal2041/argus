@@ -611,7 +611,7 @@ private struct ServiceCatalogView: View {
         for m in state.machines {
             loading.insert(m.id)
             guard let url = URL(string: m.httpBase + "/ports?probe=1") else { loading.remove(m.id); continue }
-            URLSession.shared.dataTask(with: url) { data, _, _ in
+            brokerSession.dataTask(with: url) { data, _, _ in
                 struct R: Codable { let ports: [PortInfo]? }
                 let ports = (data.flatMap { try? JSONDecoder().decode(R.self, from: $0) }?.ports ?? [])
                     .sorted { $0.port < $1.port }

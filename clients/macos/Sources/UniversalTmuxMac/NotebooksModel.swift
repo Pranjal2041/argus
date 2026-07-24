@@ -127,7 +127,7 @@ final class NotebooksModel: ObservableObject {
         var req = URLRequest(url: u); req.timeoutInterval = 200   // must outlast the broker's 180s readiness wait so its result wins
         let info: NBJupyterResp
         do {
-            let (d, resp) = try await URLSession.shared.data(for: req)
+            let (d, resp) = try await brokerSession.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard code == 200 else {
                 let body = String(data: d, encoding: .utf8) ?? ""
@@ -184,7 +184,7 @@ final class NotebooksModel: ObservableObject {
         while Date() < deadline {
             var req = URLRequest(url: url); req.timeoutInterval = 5
             req.setValue("token \(token)", forHTTPHeaderField: "Authorization")
-            if let (_, resp) = try? await URLSession.shared.data(for: req),
+            if let (_, resp) = try? await brokerSession.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200 { return true }
             try? await Task.sleep(nanoseconds: 600_000_000)
         }
@@ -208,7 +208,7 @@ final class NotebooksModel: ObservableObject {
         ]
         guard let url = c.url else { return nil }
         var req = URLRequest(url: url); req.httpMethod = "POST"
-        _ = try? await URLSession.shared.data(for: req)
+        _ = try? await brokerSession.data(for: req)
         for _ in 0..<16 {
             try? await Task.sleep(nanoseconds: 300_000_000)
             if let f = (await fetchForwards()).first(where: { $0.brokerHost == brokerHost && $0.remotePort == remotePort }) {
@@ -220,7 +220,7 @@ final class NotebooksModel: ObservableObject {
 
     private func fetchForwards() async -> [PortForward] {
         guard let url = URL(string: agent + "/forwards"),
-              let (d, _) = try? await URLSession.shared.data(from: url),
+              let (d, _) = try? await brokerSession.data(from: url),
               let r = try? JSONDecoder().decode(NBForwardsResp.self, from: d) else { return [] }
         return r.forwards ?? []
     }

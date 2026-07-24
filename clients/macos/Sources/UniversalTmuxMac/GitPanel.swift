@@ -292,7 +292,7 @@ final class GitPanel: NSObject, WKScriptMessageHandler {
             done(.failure(StringError("bad url"))); return
         }
         var req = URLRequest(url: url); req.timeoutInterval = 30; req.httpMethod = method
-        URLSession.shared.dataTask(with: req) { data, resp, err in
+        brokerSession.dataTask(with: req) { data, resp, err in
             DispatchQueue.main.async {
                 if let err { done(.failure(StringError(err.localizedDescription))); return }
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0

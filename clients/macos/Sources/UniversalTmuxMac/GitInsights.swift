@@ -185,7 +185,7 @@ final class GitInsights {
         }
         // combined PR diff
         guard let diffURL = URL(string: "\(httpBase)/git/pr/diff?dir=\(enc)&num=\(num)"),
-              let (dd, _) = try? await URLSession.shared.data(from: diffURL) else {
+              let (dd, _) = try? await brokerSession.data(from: diffURL) else {
             return .fail("could not fetch the PR diff")
         }
         var diffText = String(decoding: dd, as: UTF8.self)
@@ -193,7 +193,7 @@ final class GitInsights {
         // commit list for context (best-effort)
         var meta = ""
         if let vURL = URL(string: "\(httpBase)/git/pr?dir=\(enc)&num=\(num)"),
-           let (vd, _) = try? await URLSession.shared.data(from: vURL),
+           let (vd, _) = try? await brokerSession.data(from: vURL),
            let obj = (try? JSONSerialization.jsonObject(with: vd)) as? [String: Any] {
             if let title = obj["title"] as? String { meta += "TITLE: \(title)\n" }
             if let commits = obj["commits"] as? [[String: Any]] {
@@ -269,7 +269,7 @@ final class GitInsights {
         guard let u = URL(string: url) else { return nil }
         var req = URLRequest(url: u)
         req.timeoutInterval = 60
-        guard let (d, resp) = try? await URLSession.shared.data(for: req),
+        guard let (d, resp) = try? await brokerSession.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return d
     }
