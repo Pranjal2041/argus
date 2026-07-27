@@ -14,13 +14,18 @@ private final class BrokerHTTPSProxy {
     private let routeLock = NSLock()
     private var routes: [String: String] = [:]
     private var listener: NWListener?
-    private var tunnels: [ObjectIdentifier: BrokerProxyTunnel] = [:]
+    private var tunnels: [UUID: BrokerProxyTunnel] = [:]
+    // A healthy app has at most eight warm terminal sockets plus a small HTTP
+    // pool. This is a final containment boundary: even if Network.framework
+    // ever misses every normal close signal, the proxy cannot exhaust the
+    // process's descriptors again.
+    private let maximumActiveTunnels = 128
     private(set) var port: UInt16?
 
     private init() {
         let ready = DispatchSemaphore(value: 0)
         do {
-            let parameters = NWParameters.tcp
+            let parameters = Self.tcpParameters()
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
             let listener = try NWListener(using: parameters)
             self.listener = listener
@@ -71,49 +76,99 @@ private final class BrokerHTTPSProxy {
         name.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
     }
 
+    private static func tcpParameters() -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 30
+        tcp.keepaliveInterval = 10
+        tcp.keepaliveCount = 3
+        return NWParameters(tls: nil, tcp: tcp)
+    }
+
     private func accept(_ connection: NWConnection) {
-        var id: ObjectIdentifier!
+        if tunnels.count >= maximumActiveTunnels {
+            // This should be unreachable after the lifecycle cleanup below. If
+            // it is not, retire the least-recently-active tunnel rather than
+            // allowing one bad transport state to take down every local pane.
+            let overflow = tunnels.count - maximumActiveTunnels + 1
+            let victims = tunnels.values.sorted { $0.lastActivity < $1.lastActivity }.prefix(overflow)
+            victims.forEach { $0.stop() }
+        }
+
+        let id = UUID()
         let tunnel = BrokerProxyTunnel(
             client: connection,
             queue: queue,
+            upstreamParameters: Self.tcpParameters(),
             resolve: { [weak self] host in self?.address(for: host) ?? host },
-            onClose: { [weak self] in
-                guard let self, let id else { return }
-                self.queue.async { self.tunnels.removeValue(forKey: id) }
-            }
+            onClose: { [weak self] in self?.tunnels.removeValue(forKey: id) }
         )
-        id = ObjectIdentifier(tunnel)
         tunnels[id] = tunnel
         tunnel.start()
+    }
+
+    var activeTunnelCount: Int {
+        queue.sync { tunnels.count }
     }
 }
 
 private final class BrokerProxyTunnel {
+    private enum Phase {
+        case awaitingConnect, connecting, relaying, rejecting, closed
+    }
+
     private let client: NWConnection
     private let queue: DispatchQueue
+    private let upstreamParameters: NWParameters
     private let resolve: (String) -> String
     private let onClose: () -> Void
     private var upstream: NWConnection?
     private var request = Data()
-    private var closed = false
+    private var phase = Phase.awaitingConnect
+    private var handshakeTimeout: DispatchWorkItem?
+    private(set) var lastActivity = Date()
 
     init(client: NWConnection, queue: DispatchQueue,
+         upstreamParameters: NWParameters,
          resolve: @escaping (String) -> String, onClose: @escaping () -> Void) {
         self.client = client
         self.queue = queue
+        self.upstreamParameters = upstreamParameters
         self.resolve = resolve
         self.onClose = onClose
     }
 
     func start() {
+        client.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .failed, .cancelled:
+                finish()
+            default:
+                break
+            }
+        }
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, phase != .relaying, phase != .closed else { return }
+            reject()
+        }
+        handshakeTimeout = timeout
+        queue.asyncAfter(deadline: .now() + 15, execute: timeout)
         client.start(queue: queue)
         receiveRequest()
     }
 
+    func stop() {
+        finish()
+    }
+
     private func receiveRequest() {
         client.receive(minimumIncompleteLength: 1, maximumLength: 8 * 1024) { [weak self] data, _, complete, error in
-            guard let self, !closed else { return }
-            if let data { request.append(data) }
+            guard let self, phase != .closed else { return }
+            if let data, !data.isEmpty {
+                request.append(data)
+                lastActivity = Date()
+            }
             guard request.count <= 64 * 1024, error == nil, !complete else {
                 finish()
                 return
@@ -144,17 +199,31 @@ private final class BrokerProxyTunnel {
     }
 
     private func connect(address: String, port: NWEndpoint.Port, remainder: Data) {
-        let upstream = NWConnection(host: NWEndpoint.Host(address), port: port, using: .tcp)
+        guard phase == .awaitingConnect else {
+            finish()
+            return
+        }
+        phase = .connecting
+        let upstream = NWConnection(
+            host: NWEndpoint.Host(address),
+            port: port,
+            using: upstreamParameters
+        )
         self.upstream = upstream
         upstream.stateUpdateHandler = { [weak self, weak upstream] state in
-            guard let self, let upstream, !closed else { return }
+            guard let self, let upstream, phase != .closed else { return }
             switch state {
             case .ready:
-                upstream.stateUpdateHandler = nil
+                guard phase == .connecting else { return }
                 let response = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
                 client.send(content: response, completion: .contentProcessed { [weak self] error in
-                    guard let self, error == nil, !closed else { self?.finish(); return }
+                    guard let self, error == nil, phase != .closed else { self?.finish(); return }
                     let begin = {
+                        guard self.phase != .closed else { return }
+                        self.phase = .relaying
+                        self.lastActivity = Date()
+                        self.handshakeTimeout?.cancel()
+                        self.handshakeTimeout = nil
                         self.pump(from: self.client, to: upstream)
                         self.pump(from: upstream, to: self.client)
                     }
@@ -166,8 +235,10 @@ private final class BrokerProxyTunnel {
                         })
                     }
                 })
-            case .failed, .cancelled:
-                reject()
+            case .failed:
+                phase == .connecting ? reject() : finish()
+            case .cancelled:
+                finish()
             default:
                 break
             }
@@ -177,29 +248,42 @@ private final class BrokerProxyTunnel {
 
     private func pump(from source: NWConnection, to destination: NWConnection) {
         source.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, complete, error in
-            guard let self, !closed else { return }
-            guard error == nil, !complete, let data, !data.isEmpty else {
+            guard let self, phase != .closed else { return }
+            guard error == nil else {
                 finish()
                 return
             }
+            guard let data, !data.isEmpty else {
+                complete ? finish() : pump(from: source, to: destination)
+                return
+            }
+            lastActivity = Date()
             destination.send(content: data, completion: .contentProcessed { [weak self] error in
-                guard let self, error == nil, !closed else { self?.finish(); return }
-                pump(from: source, to: destination)
+                guard let self, error == nil, phase != .closed else { self?.finish(); return }
+                self.lastActivity = Date()
+                complete ? self.finish() : self.pump(from: source, to: destination)
             })
         }
     }
 
     private func reject() {
-        guard !closed else { return }
+        guard phase != .closed, phase != .rejecting else { return }
+        phase = .rejecting
         client.send(content: Data("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8),
                     completion: .contentProcessed { [weak self] _ in self?.finish() })
     }
 
     private func finish() {
-        guard !closed else { return }
-        closed = true
+        guard phase != .closed else { return }
+        phase = .closed
+        handshakeTimeout?.cancel()
+        handshakeTimeout = nil
+        client.stateUpdateHandler = nil
+        upstream?.stateUpdateHandler = nil
         client.cancel()
         upstream?.cancel()
+        upstream = nil
+        request.removeAll(keepingCapacity: false)
         onClose()
     }
 }
@@ -223,4 +307,12 @@ func registerBrokerTLSAddress(_ address: String, dnsName: String) {
 
 func brokerRouteAddress(for dnsName: String) -> String? {
     BrokerHTTPSProxy.shared.address(for: dnsName)
+}
+
+func brokerProxyActiveTunnelCount() -> Int {
+    BrokerHTTPSProxy.shared.activeTunnelCount
+}
+
+func brokerProxyListeningPort() -> UInt16? {
+    BrokerHTTPSProxy.shared.port
 }
