@@ -114,6 +114,11 @@ func oneFlag(args *[]string, name string) string {
 
 // --- login / keys / approve / deny / revoke ---------------------------------
 
+const (
+	labLoginApprovalWait = 30 * time.Second
+	labLoginApprovalPoll = 500 * time.Millisecond
+)
+
 func labLogin(st *labsvc.Store, args []string) int {
 	project := oneFlag(&args, "--project")
 	cwd, _ := os.Getwd()
@@ -130,8 +135,59 @@ func labLogin(st *labsvc.Store, args []string) int {
 	fmt.Printf("your key: %s\n", k.Key)
 	fmt.Printf("export it now so every ut lab command finds it:\n")
 	fmt.Printf("  export UT_LAB_KEY=%s\n", k.Key)
-	fmt.Printf("the key is inert until the human approves it: ut lab approve %s\n", k.Key[:8])
-	return 0
+	fmt.Printf("waiting up to %s for approval...\n", labLoginApprovalWait)
+
+	k, err = waitForLabKeyDecision(st, k.Key, labLoginApprovalWait, labLoginApprovalPoll)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ut lab: waiting for key approval: %v\n", err)
+		return 1
+	}
+	switch k.Status {
+	case "active":
+		if k.Note == labsvc.UnattendedApprovalNote {
+			fmt.Printf("auto-approved by Unattended Mode: key %s is active on set %s.\n", k.Key[:8], k.Set)
+		} else {
+			fmt.Printf("approved: key %s is active on set %s.\n", k.Key[:8], k.Set)
+		}
+		fmt.Println("\nyour Lab brief:")
+		return labBrief(st, []string{"--key", k.Key})
+	case "pending":
+		fmt.Printf("approval has not arrived after %s. Keep the key exported; `ut lab brief` will work as soon as it becomes active.\n",
+			labLoginApprovalWait)
+		return 0
+	default:
+		if k.Note != "" {
+			fmt.Fprintf(os.Stderr, "ut lab: key %s was %s: %s\n", k.Key[:8], k.Status, k.Note)
+		} else {
+			fmt.Fprintf(os.Stderr, "ut lab: key %s was %s\n", k.Key[:8], k.Status)
+		}
+		return 1
+	}
+}
+
+// waitForLabKeyDecision watches the key file written by login rather than
+// consulting the broker-owned Unattended Mode setting. That keeps the CLI
+// store-local and works for manual decisions, remote broker decisions, and
+// shared stores such as Babel alike.
+func waitForLabKeyDecision(st *labsvc.Store, key string, wait, poll time.Duration) (labsvc.Key, error) {
+	if poll <= 0 {
+		poll = labLoginApprovalPoll
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		current, err := st.Lookup(key)
+		if err != nil {
+			return current, err
+		}
+		if current.Status != "pending" || !time.Now().Before(deadline) {
+			return current, nil
+		}
+		delay := poll
+		if remaining := time.Until(deadline); remaining < delay {
+			delay = remaining
+		}
+		time.Sleep(delay)
+	}
 }
 
 func labKeys(st *labsvc.Store) int {
@@ -1048,8 +1104,9 @@ WHAT THIS IS
 GETTING IN (once per project)
   1. ut lab login                requests access and prints your key
   2. export UT_LAB_KEY=<key>     every command below needs it
-  3. wait for the human to approve the key. Until then every command
-     errors. Once approved, "ut lab brief" prints your briefing.
+  3. login waits up to 30 seconds for approval, including automatic approval
+     through Unattended Mode, and prints your briefing when it arrives. If it
+     remains pending, keep the key and run "ut lab brief" after approval.
   A key follows its Lab store, not a hostname. It works from any node
   mounting that store (including every Babel node on the shared home).
 
