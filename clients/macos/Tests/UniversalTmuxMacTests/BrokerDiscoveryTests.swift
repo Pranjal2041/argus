@@ -2,6 +2,14 @@ import Network
 import XCTest
 @testable import UniversalTmuxMac
 
+private final class WeakReference<Object: AnyObject> {
+    weak var value: Object?
+
+    init(_ value: Object) {
+        self.value = value
+    }
+}
+
 final class BrokerDiscoveryTests: XCTestCase {
     func testProbeOrderBypassesStaleDNSWithoutSendingHTTPToDNSName() {
         let attempts = brokerProbeAttempts(
@@ -142,6 +150,35 @@ final class BrokerDiscoveryTests: XCTestCase {
         XCTAssertTrue(waitForTunnelCount(0, timeout: 3))
     }
 
+    func testDisposableWebSocketTransportsReleaseTheirSessionsAndTasks() throws {
+        let url = try XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws"))
+        var sessions: [WeakReference<URLSession>] = []
+        var tasks: [WeakReference<URLSessionWebSocketTask>] = []
+
+        // Exercise more generations than the live pane cache can own. This is
+        // the failure shape that previously left every successful WebSocket in
+        // the app-wide URLSession until Argus quit.
+        for _ in 0..<32 {
+            autoreleasepool {
+                let transport = BrokerWebSocketTransport(url: url)
+                sessions.append(WeakReference(transport.session))
+                tasks.append(WeakReference(transport.task))
+                transport.task.resume()
+                transport.invalidate()
+                transport.invalidate() // retirement must be idempotent
+                XCTAssertTrue(transport.isInvalidated)
+            }
+        }
+
+        XCTAssertTrue(
+            waitUntil(timeout: 5) {
+                sessions.allSatisfy { $0.value == nil } &&
+                    tasks.allSatisfy { $0.value == nil }
+            },
+            "invalidated WebSocket generations retained URLSession or task objects"
+        )
+    }
+
     func testLiveRoutedTLSBrokerSoak() throws {
         let env = ProcessInfo.processInfo.environment
         guard let dns = env["UT_TEST_BROKER_DNS"],
@@ -196,25 +233,38 @@ final class BrokerDiscoveryTests: XCTestCase {
         received.expectedFulfillmentCount = 100
         let lock = NSLock()
         var failures = 0
-        var tasks: [URLSessionWebSocketTask] = []
+        var transports: [BrokerWebSocketTransport] = []
+        var sessions: [WeakReference<URLSession>] = []
+        var tasks: [WeakReference<URLSessionWebSocketTask>] = []
         for _ in 0..<100 {
-            let task = brokerSession.webSocketTask(with: url)
+            let transport = BrokerWebSocketTransport(url: url)
+            let task = transport.task
             task.maximumMessageSize = 64 * 1024 * 1024
-            tasks.append(task)
+            transports.append(transport)
+            sessions.append(WeakReference(transport.session))
+            tasks.append(WeakReference(task))
             task.resume()
-            task.receive { result in
+            task.receive { [weak transport] result in
                 if case .failure = result {
                     lock.lock()
                     failures += 1
                     lock.unlock()
                 }
-                task.cancel(with: .normalClosure, reason: nil)
+                transport?.invalidate()
                 received.fulfill()
             }
         }
         wait(for: [received], timeout: 45)
-        tasks.forEach { $0.cancel(with: .normalClosure, reason: nil) }
+        transports.forEach { $0.invalidate() }
+        transports.removeAll()
         XCTAssertEqual(failures, 0)
+        XCTAssertTrue(
+            waitUntil(timeout: 5) {
+                sessions.allSatisfy { $0.value == nil } &&
+                    tasks.allSatisfy { $0.value == nil }
+            },
+            "live invalidated WebSockets retained URLSession or task objects"
+        )
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline, brokerProxyActiveTunnelCount() > 16 {
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
@@ -233,5 +283,14 @@ final class BrokerDiscoveryTests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         return brokerProxyActiveTunnelCount() == expected
+    }
+
+    private func waitUntil(timeout: TimeInterval, condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
     }
 }

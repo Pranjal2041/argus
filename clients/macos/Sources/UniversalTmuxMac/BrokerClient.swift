@@ -15,6 +15,36 @@ enum ConnState: Equatable {
     case connecting, connected, reconnecting, closed
 }
 
+/// Owns exactly one WebSocket generation and the URLSession that backs it.
+///
+/// URLSession retains task and callback state until the session is invalidated.
+/// Sharing the app-wide HTTP session with every terminal reconnect therefore
+/// lets retired WebSocket transports accumulate for the lifetime of the app.
+/// Keeping the pair together gives every reconnect a hard ownership boundary:
+/// invalidating this object cancels the task and releases its private session.
+final class BrokerWebSocketTransport {
+    let session: URLSession
+    let task: URLSessionWebSocketTask
+    private(set) var isInvalidated = false
+
+    init(url: URL) {
+        let session = makeBrokerSession(configuration: .ephemeral)
+        self.session = session
+        task = session.webSocketTask(with: url)
+    }
+
+    func invalidate() {
+        guard !isInvalidated else { return }
+        isInvalidated = true
+        task.cancel()
+        session.invalidateAndCancel()
+    }
+
+    deinit {
+        invalidate()
+    }
+}
+
 /// One WebSocket connection to a broker session (binary frame protocol).
 /// Auto-reconnects with exponential backoff; fires `onConnect` on every
 /// (re)connect so the owner can re-send the pane geometry.
@@ -22,7 +52,8 @@ final class BrokerClient {
     private let traceID = String(UUID().uuidString.prefix(8))
     private let traceRef: String
     private var url: URL
-    private var task: URLSessionWebSocketTask?
+    private var transport: BrokerWebSocketTransport?
+    private var task: URLSessionWebSocketTask? { transport?.task }
     private var closed = false
     private var live = false          // received at least one frame on the current socket
     private var everConnected = false // distinguishes first connect from a reconnect
@@ -52,8 +83,6 @@ final class BrokerClient {
         url = u
         trace("url_changed", ["oldTarget": oldTarget, "live": live])
         guard !closed, !live else { return }
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
         backoff = 0.5
         start(trigger: "url-change")
     }
@@ -107,8 +136,6 @@ final class BrokerClient {
             return
         }
         trace("nudge", ["trigger": trigger, "hadTask": task != nil, "epoch": epoch])
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
         backoff = 0.5
         start(trigger: "nudge:\(trigger)")
     }
@@ -122,8 +149,7 @@ final class BrokerClient {
         // never cancelled — inflating the very per-pair flow pressure that causes
         // the babel blackhole. Cancel first, always.
         if task != nil { trace("dial_superseded", ["trigger": trigger, "epoch": epoch]) }
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+        retireTransport()
         // Re-entry safety (found by the git-insights review): updateURL — and any
         // future caller — can restart mid-dial while this client still holds a
         // pacing slot; the abandoned dial's callbacks bail on the epoch check and
@@ -153,14 +179,15 @@ final class BrokerClient {
 
         epoch &+= 1
         let myEpoch = epoch
-        let t = brokerSession.webSocketTask(with: url)
+        let transport = BrokerWebSocketTransport(url: url)
+        let t = transport.task
         // A session's scrollback snapshot can exceed URLSession's default 1 MiB
         // message cap — which fails the receive with EMSGSIZE and, since the
         // reconnect re-sends it, loops forever ("reconnecting"). The broker now
         // chunks large frames; this raised cap is belt-and-suspenders (and fixes
         // it immediately against any broker not yet updated).
         t.maximumMessageSize = 64 * 1024 * 1024
-        task = t
+        self.transport = transport
         live = false
         t.resume()
         trace("dial_started", ["trigger": trigger, "epoch": myEpoch, "state": everConnected ? "reconnecting" : "connecting", "relaxed": relaxed])
@@ -172,7 +199,7 @@ final class BrokerClient {
             // Opened but silent for 6s — poisoned flow. Cancel; the receive
             // failure path reconnects with jittered backoff.
             self.trace("first_frame_watchdog", ["epoch": myEpoch, "delay": self.watchdogDelay])
-            self.task?.cancel(with: .goingAway, reason: nil)
+            self.transport?.invalidate()
         }
         firstFrameWork = watchdog
         DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDelay, execute: watchdog)
@@ -185,10 +212,7 @@ final class BrokerClient {
     deinit {
         firstFrameWork?.cancel()
         paceRelease()
-        // URLSession owns the task independently of this object — without an
-        // explicit cancel a dealloc'd client leaves the socket running against
-        // the broker (found by the insights ask-review of this very fix).
-        task?.cancel(with: .goingAway, reason: nil)
+        retireTransport()
     }
 
     func stop() {
@@ -196,8 +220,7 @@ final class BrokerClient {
         closed = true
         firstFrameWork?.cancel()
         paceRelease()
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+        retireTransport()
     }
 
     private func receiveLoop(_ myEpoch: Int) {
@@ -229,6 +252,7 @@ final class BrokerClient {
                 self.paceRelease()
                 self.trace("receive_failed", ["epoch": myEpoch, "error": error.localizedDescription])
                 self.onStatus?(.reconnecting)
+                self.retireTransport()
                 self.scheduleReconnect(myEpoch)
             }
         }
@@ -242,6 +266,11 @@ final class BrokerClient {
             guard let self, !self.closed, myEpoch == self.epoch else { return }
             self.start(trigger: "backoff-retry")
         }
+    }
+
+    private func retireTransport() {
+        transport?.invalidate()
+        transport = nil
     }
 
     private var targetDescription: String {
