@@ -1286,6 +1286,15 @@ struct RootView: View {
                 dashboards.openLocalhost(on: m, port: port, path: path, scheme: scheme)
                 openWindow(id: "dashboards")
             }
+            // An explicit managed hostname (for example babel-p9-16:5800) is just
+            // as local to that remote node as `localhost:5800`. Resolve it against
+            // live Argus discovery, then use the same tunnel + embedded-browser path.
+            terminals.openManagedHostHandler = { host, port, path, scheme in
+                guard let m = state.machine(matchingManagedLinkHost: host) else { return false }
+                dashboards.openLocalhost(on: m, port: port, path: path, scheme: scheme)
+                openWindow(id: "dashboards")
+                return true
+            }
         }
         .overlay(alignment: .leading) {
             Rectangle().fill(Theme.border).frame(width: hairline).ignoresSafeArea()

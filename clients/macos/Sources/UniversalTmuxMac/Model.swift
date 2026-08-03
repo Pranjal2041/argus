@@ -13,6 +13,49 @@ struct Machine: Identifiable, Hashable {
     var wsBase: String   // e.g. ws://127.0.0.1:8722
 }
 
+/// Resolve a hostname printed by an agent to one currently-discovered Argus machine.
+/// Exact aliases include the broker display name, OS hostname, MagicDNS identity, and
+/// the address that actually answered discovery. Short names are accepted only when
+/// the URL itself is short and the match is unique, so `node.example.com` can never be
+/// mistaken for a managed machine merely because its first label happens to match.
+func machineForManagedLinkHost(_ rawHost: String, in machines: [Machine]) -> Machine? {
+    let host = normalizedManagedLinkHost(rawHost)
+    guard !host.isEmpty else { return nil }
+    let shortInput = !host.contains(".") && !host.contains(":")
+
+    let matches = machines.filter { machine in
+        let aliases = managedLinkAliases(for: machine)
+        if aliases.contains(host) { return true }
+        guard shortInput else { return false }
+        return aliases.contains { alias in
+            let first = alias.split(separator: ".", maxSplits: 1).first.map(String.init) ?? alias
+            return first == host || (first.hasPrefix("ut-") && String(first.dropFirst(3)) == host)
+        }
+    }
+    return matches.count == 1 ? matches[0] : nil
+}
+
+private func normalizedManagedLinkHost(_ raw: String) -> String {
+    var host = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if host.hasPrefix("[") && host.hasSuffix("]") {
+        host.removeFirst()
+        host.removeLast()
+    }
+    while host.hasSuffix(".") { host.removeLast() }
+    return host
+}
+
+private func managedLinkAliases(for machine: Machine) -> Set<String> {
+    let discoveredAddress = URLComponents(string: machine.httpBase)?.host ?? ""
+    var aliases = Set([machine.name, machine.host, machine.id, discoveredAddress]
+        .map(normalizedManagedLinkHost)
+        .filter { !$0.isEmpty })
+    for alias in Array(aliases) where alias.hasPrefix("ut-") {
+        aliases.insert(String(alias.dropFirst(3)))
+    }
+    return aliases
+}
+
 /// One tmux session as reported by a broker's /sessions endpoint.
 struct SessionInfo: Identifiable, Hashable, Codable {
     var name: String
@@ -907,6 +950,10 @@ final class AppState: ObservableObject {
     /// The machine that owns a session ref (for routing a terminal path-click to
     /// the right host's Files/broker).
     func machine(for ref: SessionRef) -> Machine? { machines.first { $0.id == ref.machineID } }
+
+    func machine(matchingManagedLinkHost host: String) -> Machine? {
+        machineForManagedLinkHost(host, in: machines)
+    }
 
     /// The session info (incl. its cwd in `.path`) for a ref.
     func session(for ref: SessionRef) -> SessionInfo? {
