@@ -7,6 +7,36 @@ import SwiftUI
 /// scrollback without letting every pane ever opened remain resident forever.
 private struct PasteHome: Decodable { let home: String; let sep: String }
 
+struct TerminalDashboardLink: Equatable {
+    let host: String
+    let port: Int
+    let path: String
+    let scheme: String
+
+    var isLoopback: Bool {
+        ["localhost", "127.0.0.1", "0.0.0.0", "::1"].contains(host)
+    }
+}
+
+/// Parse only links the embedded dashboard can tunnel. Keeping URL decomposition
+/// outside the terminal delegate makes the exact host/port/path handoff testable.
+func terminalDashboardLink(from url: URL) -> TerminalDashboardLink? {
+    guard let scheme = url.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
+          let host = url.host?.lowercased() else { return nil }
+    let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    var path = components?.percentEncodedPath ?? url.path
+    if path.isEmpty { path = "/" }
+    if let query = components?.percentEncodedQuery { path += "?\(query)" }
+    if let fragment = components?.percentEncodedFragment { path += "#\(fragment)" }
+    return TerminalDashboardLink(
+        host: host,
+        port: url.port ?? (scheme == "https" ? 443 : 80),
+        path: path,
+        scheme: scheme
+    )
+}
+
 /// Ordered terminal events waiting to be applied to SwiftTerm.
 ///
 /// A reconnect snapshot can span several 256 KiB WebSocket frames. Feeding one
@@ -236,6 +266,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     /// A clicked `localhost:port` dashboard URL on this pane's host — routed to the
     /// embedded Dashboards window (auto-forwarding the port if the host is remote).
     var onOpenLocalhost: ((_ port: Int, _ path: String, _ scheme: String) -> Void)?
+    /// A clicked HTTP(S) URL whose hostname may identify another discovered Argus
+    /// machine. The app returns true only when it recognized and routed that host;
+    /// ordinary internet links continue to the system browser.
+    var onOpenManagedHost: ((_ host: String, _ port: Int, _ path: String, _ scheme: String) -> Bool)?
     /// W&B runs this session has advertised in its output (latest last). Fires when
     /// the detected set changes — drives the in-place W&B webview.
     var onWandbRuns: (([WandbRun]) -> Void)?
@@ -656,18 +690,21 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // A real network/web URL.
         if let u = URL(string: link), let scheme = u.scheme?.lowercased(),
            PaneConn.networkSchemes.contains(scheme) {
-            // A localhost dashboard URL printed by a session is meaningless on the Mac
-            // (the port is on the session's HOST) → open it in the embedded Dashboards
-            // window, auto-forwarding if the host is remote.
-            if (scheme == "http" || scheme == "https"), let host = u.host?.lowercased(),
-               ["localhost", "127.0.0.1", "0.0.0.0", "::1"].contains(host) {
-                let port = u.port ?? (scheme == "https" ? 443 : 80)
-                var path = u.path.isEmpty ? "/" : u.path
-                if let q = u.query { path += "?\(q)" }
-                onOpenLocalhost?(port, path, scheme)
-                return
+            if let dashboard = terminalDashboardLink(from: u) {
+                // A localhost dashboard URL printed by a session is meaningless on
+                // the Mac (the port is on the session's HOST).
+                if dashboard.isLoopback {
+                    onOpenLocalhost?(dashboard.port, dashboard.path, dashboard.scheme)
+                    return
+                }
+                // A URL naming any discovered Argus host has the same meaning, except
+                // the target machine is explicit in the URL rather than implied by the
+                // current pane. Let the app resolve it and create/reuse the tunnel.
+                if onOpenManagedHost?(
+                    dashboard.host, dashboard.port, dashboard.path, dashboard.scheme
+                ) == true { return }
             }
-            // Any other (external) URL is host-independent → open it on the Mac.
+            // Any other URL is external to Argus → open it on the Mac.
             NSWorkspace.shared.open(u)
             return
         }
@@ -1004,6 +1041,9 @@ final class TerminalController: ObservableObject {
     /// Set by the detail view: routes a terminal-clicked localhost URL to the
     /// Dashboards window for the currently-visible session's host.
     var openLocalhostHandler: ((_ port: Int, _ path: String, _ scheme: String) -> Void)?
+    /// Routes a terminal-clicked URL that explicitly names a discovered Argus host.
+    /// Returning false preserves the normal system-browser behavior for external URLs.
+    var openManagedHostHandler: ((_ host: String, _ port: Int, _ path: String, _ scheme: String) -> Bool)?
 
     private var visible: PaneConn? { lastShownID.flatMap { conns[$0] } }
 
@@ -1269,6 +1309,9 @@ final class TerminalController: ObservableObject {
             conn = PaneConn(url: url, traceRef: ref.id, mouseReporting: mouseRefs.contains(ref.id))
             conn.onOpenPath = { [weak self] path, line in self?.openPathHandler?(path, line) }
             conn.onOpenLocalhost = { [weak self] port, path, scheme in self?.openLocalhostHandler?(port, path, scheme) }
+            conn.onOpenManagedHost = { [weak self] host, port, path, scheme in
+                self?.openManagedHostHandler?(host, port, path, scheme) ?? false
+            }
             conn.onState = { [weak self] st in self?.connState[ref.id] = st }
             conn.onWandbRuns = { [weak self] runs in self?.mergeWandb(runs, for: ref) }
             conn.onScroll = { [weak self] pos in
