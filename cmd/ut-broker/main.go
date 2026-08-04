@@ -80,8 +80,12 @@ func main() {
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
 	fwdMgr := forward.NewManager()                                 // port-hub agent (used when this broker is the local agent)
-	jupyterMgr := jupyter.NewManager()                             // ensures a JupyterLab on this host for the notebook feature
-	mgr.SetHistoryLimit(100000)                                    // large scrollback for new sessions
+	// Initialized once the listener has supplied the local/tsnet transport, before
+	// the HTTP server starts accepting requests. The earlier /forwards handler
+	// closes over it so CLI-created forwards can use the same mesh resolver.
+	var meshRouter *mesh.Mesh
+	jupyterMgr := jupyter.NewManager() // ensures a JupyterLab on this host for the notebook feature
+	mgr.SetHistoryLimit(100000)        // large scrollback for new sessions
 	if *session != "" {
 		if err := mgr.WarmExisting(*session); err != nil {
 			log.Printf("warn: warming session %q: %v", *session, err)
@@ -477,7 +481,52 @@ func main() {
 		case http.MethodPost:
 			remotePort, _ := strconv.Atoi(q.Get("remotePort"))
 			localPort, _ := strconv.Atoi(q.Get("localPort"))
-			f, err := fwdMgr.Start(q.Get("brokerHost"), q.Get("brokerName"), q.Get("scheme"), remotePort, localPort, q.Get("label"))
+			if remotePort < 1 || remotePort > 65535 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "remotePort must be between 1 and 65535"})
+				return
+			}
+			if localPort == 0 {
+				localPort = remotePort
+			}
+			if localPort < 1 || localPort > 65535 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "localPort must be between 1 and 65535"})
+				return
+			}
+
+			var f *forward.Forward
+			var err error
+			if machine := strings.TrimSpace(strings.TrimPrefix(q.Get("machine"), "@")); machine != "" {
+				if meshRouter == nil {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": "mesh router is not ready"})
+					return
+				}
+				peer, ok := meshRouter.Resolve(r.Context(), machine)
+				if !ok {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": "no such machine: " + machine})
+					return
+				}
+				routeMachine := peer.Host
+				if routeMachine == "127.0.0.1" {
+					routeMachine = displayName
+				}
+				if q.Get("reuse") == "1" {
+					f = fwdMgr.Find(peer.Host, remotePort)
+				}
+				if f == nil {
+					f, err = fwdMgr.StartViaMesh(routeMachine, peer.Host, peer.Name, peer.Scheme, remotePort, localPort, q.Get("label"), portOf(*listen))
+				}
+			} else {
+				if q.Get("reuse") == "1" {
+					f = fwdMgr.Find(q.Get("brokerHost"), remotePort)
+				}
+				if f == nil {
+					f, err = fwdMgr.Start(q.Get("brokerHost"), q.Get("brokerName"), q.Get("scheme"), remotePort, localPort, q.Get("label"))
+				}
+			}
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
@@ -485,7 +534,11 @@ func main() {
 			}
 			_ = json.NewEncoder(w).Encode(f)
 		case http.MethodDelete:
-			fwdMgr.Stop(q.Get("id"))
+			if !fwdMgr.Stop(q.Get("id")) {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "no such forward: " + q.Get("id")})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
 			_ = json.NewEncoder(w).Encode(map[string]any{"forwards": fwdMgr.List()})
@@ -1068,7 +1121,7 @@ func main() {
 	// tsnet node, or — local mode — the host's Tailscale), so an agent talks only
 	// to its LOCAL broker and we relay to any machine. /mesh/peers lists the
 	// fabric; /mesh/proxy forwards any request (HTTP + WS) to a named peer.
-	meshRouter := mesh.New(ts, displayName)
+	meshRouter = mesh.New(ts, displayName)
 	mux.HandleFunc("/mesh/peers", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

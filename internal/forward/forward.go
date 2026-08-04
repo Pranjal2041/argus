@@ -13,7 +13,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,11 @@ type Forward struct {
 
 	listener net.Listener
 	cancel   context.CancelFunc
+	// targetURL is set for mesh-routed forwards. It points back at the local
+	// broker's /mesh/proxy WebSocket, which then reaches the requested machine
+	// through that broker's own tsnet transport. Empty retains the original
+	// direct-to-broker behavior used by the native apps.
+	targetURL string
 }
 
 // Manager owns the set of active forwards on this host.
@@ -61,6 +68,32 @@ func newID() string {
 // Start binds a local port (preferred if free, else the next free one) and
 // forwards it to brokerHost:8722/forward?port=remotePort.
 func (m *Manager) Start(brokerHost, brokerName, scheme string, remotePort, preferredLocal int, label string) (*Forward, error) {
+	return m.start(brokerHost, brokerName, scheme, remotePort, preferredLocal, label, "")
+}
+
+// StartViaMesh creates the same local TCP listener as Start, but reaches the
+// remote broker through THIS broker's mesh router. That matters for the ut CLI
+// on cluster nodes: their embedded tsnet broker can reach the tailnet even when
+// the host OS itself has no Tailscale interface or MagicDNS route.
+func (m *Manager) StartViaMesh(machine, brokerHost, brokerName, scheme string, remotePort, preferredLocal int, label, localBrokerPort string) (*Forward, error) {
+	machine = strings.TrimSpace(strings.TrimPrefix(machine, "@"))
+	if machine == "" {
+		return nil, fmt.Errorf("machine is required")
+	}
+	port, err := strconv.Atoi(localBrokerPort)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid local broker port %q", localBrokerPort)
+	}
+	q := url.Values{
+		"_mhost": {machine},
+		"_mpath": {"/forward"},
+		"port":   {strconv.Itoa(remotePort)},
+	}
+	target := "ws://" + net.JoinHostPort("127.0.0.1", localBrokerPort) + "/mesh/proxy?" + q.Encode()
+	return m.start(brokerHost, brokerName, scheme, remotePort, preferredLocal, label, target)
+}
+
+func (m *Manager) start(brokerHost, brokerName, scheme string, remotePort, preferredLocal int, label, targetURL string) (*Forward, error) {
 	ln, localPort, err := listenLocal(preferredLocal)
 	if err != nil {
 		return nil, err
@@ -72,6 +105,7 @@ func (m *Manager) Start(brokerHost, brokerName, scheme string, remotePort, prefe
 	f := &Forward{
 		ID: newID(), BrokerHost: brokerHost, BrokerName: brokerName, Scheme: scheme,
 		RemotePort: remotePort, LocalPort: localPort, Label: label, listener: ln, cancel: cancel,
+		targetURL: targetURL,
 	}
 	m.mu.Lock()
 	m.fwds[f.ID] = f
@@ -111,13 +145,16 @@ func (m *Manager) accept(ctx context.Context, f *Forward) {
 
 func (m *Manager) handle(ctx context.Context, f *Forward, local net.Conn) {
 	defer local.Close()
-	wsScheme := "wss"
-	if f.Scheme == "http" {
-		wsScheme = "ws"
+	targetURL := f.targetURL
+	if targetURL == "" {
+		wsScheme := "wss"
+		if f.Scheme == "http" {
+			wsScheme = "ws"
+		}
+		targetURL = fmt.Sprintf("%s://%s:8722/forward?port=%d", wsScheme, f.BrokerHost, f.RemotePort)
 	}
-	url := fmt.Sprintf("%s://%s:8722/forward?port=%d", wsScheme, f.BrokerHost, f.RemotePort)
 	dctx, dcancel := context.WithTimeout(ctx, 15*time.Second)
-	c, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{HTTPClient: m.httpc})
+	c, _, err := websocket.Dial(dctx, targetURL, &websocket.DialOptions{HTTPClient: m.httpc})
 	dcancel()
 	if err != nil {
 		return
@@ -141,6 +178,20 @@ func (m *Manager) Stop(id string) bool {
 	f.cancel()
 	_ = f.listener.Close()
 	return true
+}
+
+// Find returns the active tunnel for one canonical broker endpoint and remote
+// port. CLI callers use this to make `ut forward` idempotent instead of silently
+// accumulating duplicate listeners for the same service.
+func (m *Manager) Find(brokerHost string, remotePort int) *Forward {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.fwds {
+		if f.BrokerHost == brokerHost && f.RemotePort == remotePort {
+			return f
+		}
+	}
+	return nil
 }
 
 func (m *Manager) List() []*Forward {

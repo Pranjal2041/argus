@@ -46,6 +46,22 @@ the target host's broker.
 | `ut send <@host:shell> <text…>` | type text into a session |
 | `ut tail <@host:session>` | read a session's recent output |
 | `ut cp <src> <dst>` | copy a file (either side may be `host:path`) |
+| `ut forward <@host> <port> [--local <port>] [--label <name>]` | expose one service bound on the remote host's loopback interface locally |
+| `ut forward ls` | list active forwards owned by the local broker |
+| `ut forward stop <id>` | stop an active forward |
+
+For example, if a dashboard listens on `127.0.0.1:5800` on Babel:
+
+```sh
+ut forward @babel-p9-16 5800
+# forwarding 127.0.0.1:5800 -> babel-p9-16:5800  (id …)
+```
+
+The forward belongs to the local broker rather than the short-lived CLI process, so it remains
+active after the command returns and appears in Argus's Ports and Dashboards views. The remote
+port is preferred locally; when it is occupied, Argus walks upward to the next available port.
+Use `--local 15800` to choose a different preferred local port explicitly. Repeating the same
+host and remote port reuses the existing tunnel instead of creating a duplicate.
 
 Sessions created by the mesh are **agent sessions**, so agents can orchestrate freely without filling
 the main sidebar:
