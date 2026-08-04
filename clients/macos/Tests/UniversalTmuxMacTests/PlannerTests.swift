@@ -1,0 +1,123 @@
+import AppKit
+import SwiftUI
+import XCTest
+@testable import UniversalTmuxMac
+
+@MainActor
+final class PlannerTests: XCTestCase {
+    private var calendar: Calendar {
+        var value = Calendar(identifier: .gregorian)
+        value.timeZone = TimeZone(secondsFromGMT: 0)!
+        return value
+    }
+
+    private func date(day: Int = 4, hour: Int = 0, minute: Int = 0) -> Date {
+        calendar.date(from: DateComponents(
+            timeZone: calendar.timeZone,
+            year: 2026,
+            month: 8,
+            day: day,
+            hour: hour,
+            minute: minute
+        ))!
+    }
+
+    func testChronologicalOrderIgnoresStatusAndPutsEndOfDayLast() {
+        var atTwo = PlannerCommitment(title: "two", deadline: date(hour: 14))
+        atTwo.completedAt = date(hour: 14, minute: 5)
+        let atTen = PlannerCommitment(title: "ten", deadline: date(hour: 10))
+        let atFiveThirty = PlannerCommitment(title: "five-thirty", deadline: date(hour: 17, minute: 30))
+        let endOfDay = PlannerCommitment(
+            title: "end-of-day",
+            deadline: date(hour: 0),
+            hasExactTime: false
+        )
+
+        let sorted = [endOfDay, atFiveThirty, atTwo, atTen].sorted {
+            PlannerCommitment.chronologicallyBefore($0, $1, calendar: calendar)
+        }
+
+        XCTAssertEqual(sorted.map(\.title), ["ten", "two", "five-thirty", "end-of-day"])
+    }
+
+    func testPlannerMutationsPreserveARealDeadlineAndCompletionHistory() {
+        let state = AppState(isolatedForTesting: true)
+        state.plannerCommitments = []
+
+        let id = state.addPlannerCommitment(
+            title: "  Finish the report  ",
+            project: "  vlm_gating ",
+            deadline: date(day: 5, hour: 12),
+            hasExactTime: true
+        )
+        XCTAssertNotNil(id)
+        XCTAssertEqual(state.plannerCommitments.first?.title, "Finish the report")
+        XCTAssertEqual(state.plannerCommitments.first?.project, "vlm_gating")
+
+        state.togglePlannerCommitment(id!)
+        XCTAssertNotNil(state.plannerCommitments.first?.completedAt)
+        state.togglePlannerCommitment(id!)
+        XCTAssertNil(state.plannerCommitments.first?.completedAt)
+
+        state.updatePlannerCommitment(
+            id!,
+            title: "Finish the final report",
+            project: "vlm_gating",
+            deadline: date(day: 6, hour: 16),
+            hasExactTime: false
+        )
+        let updated = state.plannerCommitments[0]
+        XCTAssertEqual(updated.title, "Finish the final report")
+        XCTAssertFalse(updated.hasExactTime)
+        XCTAssertTrue(calendar.isDate(updated.deadline, inSameDayAs: date(day: 6)))
+        XCTAssertEqual(Calendar.current.component(.hour, from: updated.deadline), 0)
+
+        state.deletePlannerCommitment(id!)
+        XCTAssertTrue(state.plannerCommitments.isEmpty)
+    }
+
+    func testPresentPlannerMakesItTheOnlyTopLevelPane() {
+        let state = AppState(isolatedForTesting: true)
+        state.showOverview = true
+        state.showTodos = true
+        state.showNotes = true
+        state.showLedger = true
+        state.showLab = true
+        state.showArtifacts = true
+
+        state.presentPlanner()
+
+        XCTAssertTrue(state.showPlanner)
+        XCTAssertFalse(state.showOverview)
+        XCTAssertFalse(state.showTodos)
+        XCTAssertFalse(state.showNotes)
+        XCTAssertFalse(state.showLedger)
+        XCTAssertFalse(state.showLab)
+        XCTAssertFalse(state.showArtifacts)
+    }
+
+    func testPlannerViewCanRenderAtTheMinimumUsefulDetailWidth() {
+        let state = AppState(isolatedForTesting: true)
+        state.plannerCommitments = [
+            PlannerCommitment(
+                title: "Finish the router ablation write-up",
+                project: "vlm_gating",
+                deadline: date(day: 5, hour: 12)
+            )
+        ]
+        let host = NSHostingView(rootView: PlannerView().environmentObject(state))
+        host.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+
+        host.layoutSubtreeIfNeeded()
+
+        if ProcessInfo.processInfo.environment["UT_CAPTURE_PLANNER_TEST"] == "1",
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/argus-planner-native.png"))
+        }
+
+        XCTAssertGreaterThan(host.fittingSize.width, 0)
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+    }
+}

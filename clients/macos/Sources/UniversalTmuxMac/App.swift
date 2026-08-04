@@ -75,17 +75,21 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
-                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Planner…") {
+                    if state.showPlanner { state.showPlanner = false } else { state.presentPlanner() }
+                }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showPlanner = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
-                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
-                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false } }
+                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 Button("Artifacts…") {
                     if state.showArtifacts {
@@ -463,6 +467,7 @@ struct HiddenPanelsView: View {
                                 state.unhide(it.ref)
                                 state.selection = it.ref
                                 state.showOverview = false
+                                state.showPlanner = false
                                 state.showArtifacts = false
                                 state.showHiddenPicker = false
                             }
@@ -748,6 +753,8 @@ struct RootView: View {
             Group {
                 if state.showArtifacts {
                     ArtifactsView()
+                } else if state.showPlanner {
+                    PlannerView()
                 } else if state.showLab {
                     LabCenterView()
                 } else if state.showLedger {
@@ -974,11 +981,11 @@ struct RootView: View {
             IconButton(system: "rectangle.on.rectangle.angled", help: "Dashboards") { openWindow(id: "dashboards") }
             IconButton(system: "book.closed", help: "Activity Ledger (⇧⌘J)") {
                 state.showLedger.toggle()
-                if state.showLedger { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false }
+                if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false }
             }
             IconButton(system: "flask", help: "Lab (⇧⌘L)") {
                 state.showLab.toggle()
-                if state.showLab { state.showOverview = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false }
+                if state.showLab { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false }
             }
         }
         .frame(height: 34)
@@ -1095,7 +1102,7 @@ struct RootView: View {
                         unseen: state.unseen.contains(ref.id),
                         folderText: state.folderDisplay((s.path?.isEmpty == false) ? s.path! : "—", isLocal: m.isLocal),
                         selected: state.selection == ref,
-                        onTap: { state.selection = ref; state.showOverview = false; state.showArtifacts = false },
+                        onTap: { state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false },
                         onRename: { state.renameText = s.name; state.renameTarget = ref },
                         onKill: { state.killTarget = ref },
                         onCopyName: {
@@ -1104,7 +1111,7 @@ struct RootView: View {
                         },
                         onHide: { state.hide(ref) },
                         wandbRuns: terminals.wandbRuns(for: ref),
-                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; state.showArtifacts = false; terminals.showWandb(ref, run: run) },
+                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false; terminals.showWandb(ref, run: run) },
                         onClearWandb: { run in terminals.clearWandb(run, for: ref) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
@@ -1121,7 +1128,7 @@ struct RootView: View {
                             : nil,
                         onGit: !state.resolveBase(for: ref).isEmpty
                             ? {
-                                state.selection = ref; state.showOverview = false; state.showArtifacts = false
+                                state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false
                                 if !terminals.isGitShown(ref) {
                                     terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.resolveBase(for: ref))
                                 }
@@ -1714,6 +1721,7 @@ struct CommandPalette: View {
                 out.append(Item(id: "s:" + ref.id, icon: "terminal", title: ref.session, subtitle: mn) {
                     state.selection = ref
                     state.showOverview = false
+                    state.showPlanner = false
                     state.showArtifacts = false
                 })
             }
@@ -1725,6 +1733,7 @@ struct CommandPalette: View {
             ("sparkles", "Render Output", "⇧⌘M", {
                 RenderLauncher.open(state: state, terminals: terminals)
             }),
+            ("calendar", "Open Planner", "⇧⌘P", { state.presentPlanner() }),
             ("archivebox", "Open Artifacts", "⇧⌘I", {
                 artifacts.openLibrary()
                 state.presentArtifacts()

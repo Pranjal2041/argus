@@ -1,0 +1,46 @@
+---
+title: Planner
+description: A chronological rolling agenda for what you intend to finish, for which project, and by when.
+---
+
+Planner is the small planning layer between an undated todo and a full calendar. Each commitment is
+one sentence: **what you will finish**, an optional **project**, and a **deadline**. It is designed to
+answer one question quickly: *what did I plan to complete next?*
+
+## Add a finish line
+
+Use the composer at the top of Planner:
+
+1. Write the outcome in a short phrase.
+2. Optionally choose or type a project. Running Argus session names are offered as suggestions, but
+   the saved project is not tied to a machine, so moving work between Babel nodes does not break it.
+3. Choose a date. Keep the clock enabled for an exact time, or turn it off for **End of day**.
+4. Press **Plan** or Return.
+
+The seven-day strip shows how many commitments each date contains. Click a date there to use it for
+the next commitment; the arrows move the visible horizon by seven days, and **Today** returns to the
+current one.
+
+## Ordering is the rule
+
+Planner never promotes or rearranges an item based on completion or visual status:
+
+- Earlier dates come first.
+- Exact times are ascending within each date.
+- Date-only commitments appear after every exact time on that date.
+- Overdue commitments retain their original order and deadline.
+- Completed commitments remain in their chronological position, dimmed and struck through.
+
+This means checking something off cannot make the surrounding agenda jump unexpectedly.
+
+## Change or finish a commitment
+
+Click the circle to mark a commitment complete or incomplete. Double-click a row—or use its `…`
+menu—to edit its phrase, project, date, or time. The same menu can delete it or open the associated
+project when a session with that name is currently running.
+
+<Callout type="info">
+Open Planner with `⇧⌘P` on macOS, or search for **Open Planner** in the `⌘P` command palette. Planner
+is stored locally and mirrored through the Mac broker's protected `/userdata` store; deliberate
+deletions use the same destructive-sync guard and daily recovery points as other Argus user data.
+</Callout>

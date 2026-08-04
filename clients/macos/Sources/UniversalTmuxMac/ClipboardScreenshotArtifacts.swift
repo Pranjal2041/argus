@@ -98,6 +98,7 @@ final class ClipboardScreenshotArtifactMonitor: NSObject, ObservableObject {
         let stateChanges: [AnyPublisher<Void, Never>] = [
             state.$selection.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             state.$showOverview.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            state.$showPlanner.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             state.$showTodos.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             state.$showNotes.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             state.$showLedger.dropFirst().map { _ in () }.eraseToAnyPublisher(),
@@ -168,6 +169,7 @@ final class ClipboardScreenshotArtifactMonitor: NSObject, ObservableObject {
               let state,
               notebooks?.activeID == nil,
               !state.showOverview,
+              !state.showPlanner,
               !state.showTodos,
               !state.showNotes,
               !state.showLedger,

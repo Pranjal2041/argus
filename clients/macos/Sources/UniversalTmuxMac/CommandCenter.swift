@@ -770,6 +770,7 @@ struct CommandCenterView: View {
                       onBacklog: { state.toggleBacklog(tile.ref) }) {
             state.selection = tile.ref
             state.showOverview = false
+            state.showPlanner = false
         }
     }
 }

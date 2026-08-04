@@ -547,6 +547,7 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 func openLabAttention(in state: AppState, kind: String, id: String) {
     state.showLab = true
     state.showOverview = false
+    state.showPlanner = false
     state.showTodos = false
     state.showNotes = false
     state.showLedger = false

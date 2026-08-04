@@ -296,6 +296,66 @@ struct Note: Identifiable, Codable, Hashable {
     }
 }
 
+/// A dated finish line in Planner. Planner intentionally stores a project label instead
+/// of binding the commitment to one machine: projects can move between hosts (especially
+/// across Babel nodes) while the plan should remain stable.
+struct PlannerCommitment: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var title: String
+    var project: String = ""
+    var deadline: Date
+    /// False means "by end of day". The stored date is normalized to the local day's
+    /// start; sorting treats it as later than every exact time on that date.
+    var hasExactTime = true
+    var createdAt = Date()
+    var editedAt = Date()
+    var completedAt: Date?
+
+    init(title: String, project: String = "", deadline: Date, hasExactTime: Bool = true) {
+        self.title = title
+        self.project = project
+        self.deadline = deadline
+        self.hasExactTime = hasExactTime
+    }
+
+    var isCompleted: Bool { completedAt != nil }
+
+    /// One canonical ordering rule shared by the view and tests: date-only commitments
+    /// follow every timed commitment on their day, then creation time breaks exact ties.
+    func effectiveDeadline(calendar: Calendar = .current) -> Date {
+        guard !hasExactTime else { return deadline }
+        let start = calendar.startOfDay(for: deadline)
+        return calendar.date(byAdding: .day, value: 1, to: start)?.addingTimeInterval(-1) ?? deadline
+    }
+
+    static func chronologicallyBefore(_ lhs: Self, _ rhs: Self,
+                                      calendar: Calendar = .current) -> Bool {
+        let l = lhs.effectiveDeadline(calendar: calendar)
+        let r = rhs.effectiveDeadline(calendar: calendar)
+        if l != r { return l < r }
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    /// Decode defensively so a future field addition cannot make the entire synced
+    /// planner disappear on an older client.
+    enum CodingKeys: String, CodingKey {
+        case id, title, project, deadline, hasExactTime, createdAt, editedAt, completedAt
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        project = try c.decodeIfPresent(String.self, forKey: .project) ?? ""
+        let created = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        createdAt = created
+        editedAt = try c.decodeIfPresent(Date.self, forKey: .editedAt) ?? created
+        deadline = try c.decodeIfPresent(Date.self, forKey: .deadline) ?? created
+        hasExactTime = try c.decodeIfPresent(Bool.self, forKey: .hasExactTime) ?? true
+        completedAt = try c.decodeIfPresent(Date.self, forKey: .completedAt)
+    }
+}
+
 /// Sessions on one machine grouped by their working directory.
 struct FolderGroup: Identifiable {
     let folder: String
@@ -350,6 +410,7 @@ final class AppState: ObservableObject {
     @Published var showPalette = false
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
     @Published var showOverview = true          // command-center panel is the home view (⇧⌘A); set false when diving into a session
+    @Published var showPlanner = false          // chronological finish-line agenda (⇧⌘P)
     @Published var renderDocument: RenderDocument? // non-nil → styled/static Render overlay is up
     @Published var renderArtifactContext: ArtifactPanelContext? // immutable panel identity captured with Render
     @Published var renderPDFCaptureInProgress = false // freezes semantic/visual changes during WebKit PDF capture
@@ -483,6 +544,7 @@ final class AppState: ObservableObject {
         workflowPick = nil
         showWorkflows = false
         showOverview = false
+        showPlanner = false
         showArtifacts = false
         let ref = SessionRef(machineID: m.id, session: wf.name)
         if (sessionsByMachine[m.id] ?? []).contains(where: { $0.name == wf.name }) {
@@ -677,7 +739,134 @@ final class AppState: ObservableObject {
         notes.removeAll { $0.id == id }
     }
 
-    // MARK: User-data sync (Workflows + Todo Maps) — this Mac IS the sync host.
+    // MARK: Planner — dated finish lines, ordered by their real deadline.
+
+    @Published var plannerCommitments: [PlannerCommitment] = AppState.loadPlannerCommitments() {
+        didSet {
+            guard persistenceEnabled else { return }
+            AppState.savePlannerCommitments(plannerCommitments)
+            if !applyingRemotePlanner {
+                plannerUpdatedAt = nowMs()
+                pushUserData("planner", plannerCommitments, plannerUpdatedAt,
+                             allowDestructive: pendingDestructiveSync.contains("planner"))
+            }
+        }
+    }
+    private var applyingRemotePlanner = false
+    private var plannerUpdatedAt: Int64 {
+        get { Int64(UserDefaults.standard.integer(forKey: "ut.planner.updatedAt")) }
+        set { UserDefaults.standard.set(Int(newValue), forKey: "ut.planner.updatedAt") }
+    }
+
+    private static func loadPlannerCommitments() -> [PlannerCommitment] {
+        guard let data = UserDefaults.standard.data(forKey: "ut.planner.v1") else { return [] }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([PlannerCommitment].self, from: data)) ?? []
+    }
+
+    private static func savePlannerCommitments(_ commitments: [PlannerCommitment]) {
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(commitments) {
+            UserDefaults.standard.set(data, forKey: "ut.planner.v1")
+        }
+    }
+
+    @discardableResult
+    func addPlannerCommitment(title: String, project: String, deadline: Date,
+                              hasExactTime: Bool) -> UUID? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { return nil }
+        let normalized = hasExactTime ? deadline : Calendar.current.startOfDay(for: deadline)
+        let commitment = PlannerCommitment(
+            title: cleanTitle,
+            project: project.trimmingCharacters(in: .whitespacesAndNewlines),
+            deadline: normalized,
+            hasExactTime: hasExactTime
+        )
+        plannerCommitments.append(commitment)
+        if persistenceEnabled {
+            ActivityJournal.shared.log("planner", plannerFields(commitment, action: "add"))
+        }
+        return commitment.id
+    }
+
+    func updatePlannerCommitment(_ id: UUID, title: String, project: String,
+                                 deadline: Date, hasExactTime: Bool) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty,
+              let index = plannerCommitments.firstIndex(where: { $0.id == id }) else { return }
+        plannerCommitments[index].title = cleanTitle
+        plannerCommitments[index].project = project.trimmingCharacters(in: .whitespacesAndNewlines)
+        plannerCommitments[index].deadline = hasExactTime
+            ? deadline : Calendar.current.startOfDay(for: deadline)
+        plannerCommitments[index].hasExactTime = hasExactTime
+        plannerCommitments[index].editedAt = Date()
+        if persistenceEnabled {
+            ActivityJournal.shared.log("planner", plannerFields(plannerCommitments[index], action: "edit"))
+        }
+    }
+
+    func togglePlannerCommitment(_ id: UUID) {
+        guard let index = plannerCommitments.firstIndex(where: { $0.id == id }) else { return }
+        plannerCommitments[index].completedAt = plannerCommitments[index].isCompleted ? nil : Date()
+        plannerCommitments[index].editedAt = Date()
+        if persistenceEnabled {
+            ActivityJournal.shared.log(
+                "planner",
+                plannerFields(plannerCommitments[index],
+                              action: plannerCommitments[index].isCompleted ? "done" : "undone")
+            )
+        }
+    }
+
+    func deletePlannerCommitment(_ id: UUID) {
+        guard let commitment = plannerCommitments.first(where: { $0.id == id }) else { return }
+        if persistenceEnabled {
+            ActivityJournal.shared.log("planner", plannerFields(commitment, action: "delete"))
+        }
+        markDestructiveSync("planner")
+        plannerCommitments.removeAll { $0.id == id }
+    }
+
+    func liveRef(for commitment: PlannerCommitment) -> SessionRef? {
+        let project = commitment.project.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !project.isEmpty else { return nil }
+        // Prefer the selected/local copy when a project name exists on multiple nodes.
+        if let selected = selection,
+           (sessionsByMachine[selected.machineID] ?? []).contains(where: { $0.name == project }) {
+            return SessionRef(machineID: selected.machineID, session: project)
+        }
+        if let local = machines.first(where: { $0.isLocal }),
+           (sessionsByMachine[local.id] ?? []).contains(where: { $0.name == project }) {
+            return SessionRef(machineID: local.id, session: project)
+        }
+        for machine in machines where (sessionsByMachine[machine.id] ?? []).contains(where: { $0.name == project }) {
+            return SessionRef(machineID: machine.id, session: project)
+        }
+        return nil
+    }
+
+    func openPlannerProject(_ commitment: PlannerCommitment) {
+        guard let ref = liveRef(for: commitment) else { return }
+        selection = ref
+        showPlanner = false
+        showOverview = false
+        showArtifacts = false
+    }
+
+    private func plannerFields(_ commitment: PlannerCommitment, action: String) -> [String: Any] {
+        var fields: [String: Any] = [
+            "action": action,
+            "commitmentID": commitment.id.uuidString,
+            "title": commitment.title,
+            "deadline": ISO8601DateFormatter().string(from: commitment.deadline),
+            "hasExactTime": commitment.hasExactTime,
+        ]
+        if !commitment.project.isEmpty { fields["project"] = commitment.project }
+        return fields
+    }
+
+    // MARK: User-data sync (Workflows + Todo Maps + Notes + Planner) — this Mac IS the sync host.
 
     private var applyingRemoteWorkflows = false
     private var applyingRemoteTodos = false
@@ -746,6 +935,7 @@ final class AppState: ObservableObject {
         syncWorkflows()
         syncTodos()
         syncNotes()
+        syncPlanner()
     }
 
     private func syncWorkflows() {
@@ -826,6 +1016,42 @@ final class AppState: ObservableObject {
                                       allowDestructive: self.pendingDestructiveSync.contains("notes"))
                 } else if localTs != 0 {
                     self.clearDestructiveSync("notes")
+                }
+            }
+        }.resume()
+    }
+
+    private func syncPlanner() {
+        guard let base = syncHostBase,
+              let url = URL(string: "\(base)/userdata?key=planner") else { return }
+        brokerSession.dataTask(with: url) { data, _, _ in
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            var remoteTimestamp: Int64 = 0
+            var remoteCommitments: [PlannerCommitment]?
+            if let data,
+               let envelope = try? decoder.decode(SyncEnvelope<[PlannerCommitment]>.self, from: data) {
+                remoteTimestamp = envelope.updatedAt
+                remoteCommitments = envelope.data
+            }
+            DispatchQueue.main.async {
+                var localTimestamp = self.plannerUpdatedAt
+                if localTimestamp == 0, !self.plannerCommitments.isEmpty {
+                    localTimestamp = self.nowMs()
+                    self.plannerUpdatedAt = localTimestamp
+                }
+                if remoteTimestamp > localTimestamp, let remoteCommitments {
+                    self.applyingRemotePlanner = true
+                    self.plannerCommitments = remoteCommitments
+                    self.applyingRemotePlanner = false
+                    self.plannerUpdatedAt = remoteTimestamp
+                    self.clearDestructiveSync("planner")
+                } else if localTimestamp > remoteTimestamp {
+                    self.pushUserData(
+                        "planner", self.plannerCommitments, localTimestamp,
+                        allowDestructive: self.pendingDestructiveSync.contains("planner")
+                    )
+                } else if localTimestamp != 0 {
+                    self.clearDestructiveSync("planner")
                 }
             }
         }.resume()
@@ -990,10 +1216,22 @@ final class AppState: ObservableObject {
         return live.map { SessionRef(machineID: panel.machineID, session: $0.name) }
     }
 
+    /// Present Planner as the one active top-level workspace pane.
+    func presentPlanner() {
+        showPlanner = true
+        showOverview = false
+        showTodos = false
+        showNotes = false
+        showLedger = false
+        showLab = false
+        showArtifacts = false
+    }
+
     /// Present the Artifact library as the one active top-level surface.
     func presentArtifacts() {
         showArtifacts = true
         showOverview = false
+        showPlanner = false
         showTodos = false
         showNotes = false
         showLedger = false
@@ -1108,7 +1346,7 @@ final class AppState: ObservableObject {
                 // Pull durable history in the background while machines are reachable, so
                 // it's captured before a node goes offline. ~2s after launch, then ~30s.
                 if tick == 1 || tick % 15 == 0 { self.refreshHistoryCache() }
-                // Sync Workflows + Todo Maps with this Mac's broker (the sync host) so the
+                // Sync Workflows, Todo Maps, Notes, and Planner with this Mac's broker so the
                 // phone shares them. ~4s after launch, then ~10s.
                 if tick == 2 || tick % 5 == 0 { self.syncUserData(); self.drainJournalInbox() }
             }
@@ -1256,6 +1494,7 @@ final class AppState: ObservableObject {
         }
         showHistory = false
         showOverview = false
+        showPlanner = false
         showArtifacts = false
     }
 
@@ -1410,6 +1649,7 @@ final class AppState: ObservableObject {
             if ok {
                 self.selection = SessionRef(machineID: machineID, session: name)
                 self.showOverview = false
+                self.showPlanner = false
                 self.showArtifacts = false
             }
             self.refreshAll()
