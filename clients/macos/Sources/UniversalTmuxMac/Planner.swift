@@ -32,6 +32,27 @@ enum PlannerProjectSuggestions {
     }
 }
 
+struct PlannerProjectOption: Identifiable, Equatable {
+    var id: String { name.lowercased() }
+    let name: String
+    let count: Int
+}
+
+enum PlannerProjectCatalog {
+    static func options(from commitments: [PlannerCommitment], preserving selection: String) -> [PlannerProjectOption] {
+        let retained = commitments.map(\.project).filter { !$0.isEmpty }
+        let names = PlannerProjectSuggestions.filtered(retained + [selection], query: "", limit: .max)
+        return names.map { name in
+            PlannerProjectOption(
+                name: name,
+                count: commitments.lazy.filter {
+                    $0.project.compare(name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+                }.count
+            )
+        }
+    }
+}
+
 /// Planner is deliberately a rolling list of finish lines, not a general calendar.
 /// The interface keeps one invariant visible everywhere: earlier deadlines come first.
 struct PlannerView: View {
@@ -68,6 +89,13 @@ struct PlannerView: View {
         }
         let retained = state.plannerCommitments.map(\.project).filter { !$0.isEmpty }
         return PlannerProjectSuggestions.filtered(live + retained + [draftProject, projectFilter], query: "", limit: .max)
+    }
+
+    /// Agenda filtering should only offer projects that actually have plans. Session
+    /// names are useful while composing, but showing every live shell in this control
+    /// turns a small filter into an enormous, mostly irrelevant menu.
+    private var plannedProjectOptions: [PlannerProjectOption] {
+        PlannerProjectCatalog.options(from: state.plannerCommitments, preserving: projectFilter)
     }
 
     private var filteredCommitments: [PlannerCommitment] {
@@ -151,69 +179,32 @@ struct PlannerView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(Theme.border, lineWidth: 1)
-                Image(systemName: "calendar")
-                    .font(cf(12, .semibold))
-                    .foregroundStyle(Theme.accent)
-            }
-            .frame(width: 27, height: 27)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Planner")
-                    .font(cf(21, .bold))
-                    .foregroundStyle(Theme.textPrimary)
-                Text(headerSubtitle)
-                    .font(cf(11))
-                    .foregroundStyle(Theme.textTertiary)
-            }
-            Spacer()
-
-            Menu {
-                Button {
-                    projectFilter = ""
-                } label: {
-                    if projectFilter.isEmpty { Label("All projects", systemImage: "checkmark") }
-                    else { Text("All projects") }
+        PlannerHeaderLayout(spacing: 10) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(Theme.border, lineWidth: 1)
+                    Image(systemName: "calendar")
+                        .font(cf(12, .semibold))
+                        .foregroundStyle(Theme.accent)
                 }
-                if !knownProjects.isEmpty { Divider() }
-                ForEach(knownProjects, id: \.self) { project in
-                    Button {
-                        projectFilter = project
-                        draftProject = project
-                    } label: {
-                        if projectFilter.caseInsensitiveCompare(project) == .orderedSame {
-                            Label(project, systemImage: "checkmark")
-                        } else {
-                            Text(project)
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(cf(9.5, .semibold))
-                    Text(projectFilter.isEmpty ? "All projects" : projectFilter)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(cf(8, .bold))
+                .frame(width: 27, height: 27)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Planner")
+                        .font(cf(21, .bold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(headerSubtitle)
+                        .font(cf(11))
                         .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
                 }
-                .font(cf(10.5, .medium))
-                .foregroundStyle(projectFilter.isEmpty ? Theme.textSecondary : Theme.accent)
-                .padding(.horizontal, 10)
-                .frame(minWidth: 112, maxWidth: 170, minHeight: 29, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface.opacity(0.45)))
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
-                    projectFilter.isEmpty ? Theme.border : Theme.accent.opacity(0.42), lineWidth: 1
-                ))
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize(horizontal: true, vertical: false)
-            .help("Filter the agenda by project")
+            .frame(minWidth: 220, alignment: .leading)
+
+            PlannerProjectFilterControl(selection: $projectFilter, options: plannedProjectOptions) { project in
+                if !project.isEmpty { draftProject = project }
+            }
 
             HStack(spacing: 7) {
                 plannerHeaderButton("chevron.left", help: "Previous 7 days") { moveWeek(-7) }
@@ -258,7 +249,12 @@ struct PlannerView: View {
     private var composer: some View {
         PlannerComposerLayout(spacing: 9) {
             composerTitleField
-            composerControls
+            PlannerProjectAutocomplete(text: $draftProject, projects: knownProjects)
+                .frame(minWidth: 166, maxWidth: .infinity)
+                .zIndex(30)
+            PlannerDateControl(deadline: $draftDeadline)
+            PlannerTimeControl(deadline: $draftDeadline, hasExactTime: $draftHasExactTime)
+            planButton
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
@@ -286,34 +282,24 @@ struct PlannerView: View {
         .frame(minWidth: 190)
     }
 
-    private var composerControls: some View {
-        HStack(spacing: 9) {
-            PlannerProjectAutocomplete(text: $draftProject, projects: knownProjects)
-                .frame(width: 166)
-                .zIndex(30)
-
-            PlannerDateControl(deadline: $draftDeadline)
-            PlannerTimeControl(deadline: $draftDeadline, hasExactTime: $draftHasExactTime)
-
-            Button { addCommitment() } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.right")
-                        .font(cf(9.5, .bold))
-                    Text("Plan")
-                }
-                .font(cf(11.5, .semibold))
-                .padding(.horizontal, 14)
-                .frame(minWidth: 70, minHeight: 34)
-                .contentShape(Rectangle())
+    private var planButton: some View {
+        Button { addCommitment() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.right")
+                    .font(cf(9.5, .bold))
+                Text("Plan")
             }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.current.isLight ? SwiftUI.Color.white : Theme.appBackground)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accent))
-                .shadow(color: Theme.accent.opacity(canAdd ? 0.18 : 0), radius: 8, y: 3)
-                .opacity(canAdd ? 1 : 0.42)
-                .disabled(!canAdd)
+            .font(cf(11.5, .semibold))
+            .padding(.horizontal, 14)
+            .frame(minWidth: 70, minHeight: 34)
+            .contentShape(Rectangle())
         }
-        .fixedSize(horizontal: true, vertical: false)
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.current.isLight ? SwiftUI.Color.white : Theme.appBackground)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accent))
+        .shadow(color: Theme.accent.opacity(canAdd ? 0.18 : 0), radius: 8, y: 3)
+        .opacity(canAdd ? 1 : 0.42)
+        .disabled(!canAdd)
     }
 
     private var canAdd: Bool {
@@ -340,25 +326,42 @@ struct PlannerView: View {
         let isToday = calendar.isDateInToday(day)
         let isDraftDay = calendar.isDate(day, inSameDayAs: draftDeadline)
         return Button { selectDraftDay(day) } label: {
-            HStack(spacing: 7) {
-                Text(dayNumber(day))
-                    .font(cf(14, .semibold))
-                    .foregroundStyle(isToday ? Theme.appBackground : Theme.textSecondary)
-                    .frame(width: 29, height: 29)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(isToday ? Theme.accent : .clear))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(shortWeekday(day).uppercased())
-                        .font(cf(9, .bold))
-                        .tracking(0.7)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 7) {
+                    Text(dayNumber(day))
+                        .font(cf(14, .semibold))
+                        .foregroundStyle(isToday ? Theme.appBackground : Theme.textSecondary)
+                        .frame(width: 29, height: 29)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(isToday ? Theme.accent : .clear))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(shortWeekday(day).uppercased())
+                            .font(cf(9, .bold))
+                            .tracking(0.7)
+                            .foregroundStyle(Theme.textTertiary)
+                        Text(countLabel(open: counts.open, done: counts.done))
+                            .font(cf(9.5))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+
+                VStack(spacing: 2) {
+                    Text(shortWeekday(day).prefix(1).uppercased())
+                        .font(cf(7.5, .bold))
+                        .tracking(0.5)
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(dayNumber(day))
+                        .font(cf(12.5, .semibold))
+                        .foregroundStyle(isToday ? Theme.appBackground : Theme.textSecondary)
+                        .frame(width: 25, height: 25)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(isToday ? Theme.accent : .clear))
+                    Text(compactCountLabel(open: counts.open, done: counts.done))
+                        .font(cf(7.5, .medium))
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                    Text(countLabel(open: counts.open, done: counts.done))
-                        .font(cf(9.5))
-                        .foregroundStyle(Theme.textSecondary)
-                        .lineLimit(1)
                 }
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity)
             }
             .padding(.horizontal, 7)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -474,6 +477,12 @@ struct PlannerView: View {
         return "\(open) open · \(done) done"
     }
 
+    private func compactCountLabel(open: Int, done: Int) -> String {
+        let total = open + done
+        if total == 0 { return "—" }
+        return "\(total)"
+    }
+
     private func relativeDayTitle(_ day: Date) -> String {
         if calendar.isDateInToday(day) { return "Today" }
         if calendar.isDateInTomorrow(day) { return "Tomorrow" }
@@ -499,6 +508,185 @@ struct PlannerView: View {
     private func dayIdentifier(_ day: Date) -> String {
         let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: day)
+    }
+}
+
+/// A bounded, searchable filter surface. Unlike a native Menu, it cannot grow to the
+/// height of the window, and it only contains projects represented in Planner—not every
+/// shell Argus happens to know about.
+private struct PlannerProjectFilterControl: View {
+    @Binding var selection: String
+    let options: [PlannerProjectOption]
+    let onSelect: (String) -> Void
+
+    @AppStorage("ut.uiScale") private var uiScale = 1.0
+    @State private var presented = false
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+
+    private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * uiScale, weight: weight)
+    }
+
+    private var filteredOptions: [PlannerProjectOption] {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return options }
+        return options.filter { $0.name.localizedCaseInsensitiveContains(clean) }
+    }
+
+    var body: some View {
+        Button { presented.toggle() } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(cf(9.5, .semibold))
+                Text(selection.isEmpty ? "All projects" : selection)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(cf(8, .bold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .font(cf(10.5, .medium))
+            .foregroundStyle(selection.isEmpty ? Theme.textSecondary : Theme.accent)
+            .padding(.horizontal, 10)
+            .frame(minWidth: 112, maxWidth: 170, minHeight: 29, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface.opacity(0.45)))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                selection.isEmpty ? Theme.border : Theme.accent.opacity(0.42), lineWidth: 1
+            ))
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("Filter the agenda by project")
+        .popover(isPresented: $presented, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Filter Planner")
+                            .font(cf(13.5, .semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                        Text("Only projects with planned finish lines")
+                            .font(cf(9.5))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    Spacer()
+                    if !selection.isEmpty {
+                        Button("Clear") { choose("") }
+                            .font(cf(10.5, .medium))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.accent)
+                    }
+                }
+                .padding(.horizontal, 13)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
+
+                if options.count > 6 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(cf(10))
+                            .foregroundStyle(Theme.textTertiary)
+                        TextField("Find project", text: $query)
+                            .textFieldStyle(.plain)
+                            .font(cf(11.5))
+                            .foregroundStyle(Theme.textPrimary)
+                            .focused($searchFocused)
+                            .onSubmit {
+                                if let first = filteredOptions.first { choose(first.name) }
+                            }
+                            .onExitCommand { presented = false }
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(cf(10))
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 33)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.55)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border, lineWidth: 1))
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 9)
+                }
+
+                Divider().opacity(0.75)
+
+                ScrollView {
+                    LazyVStack(spacing: 3) {
+                        filterRow(name: "All projects", count: nil, selected: selection.isEmpty) {
+                            choose("")
+                        }
+
+                        if filteredOptions.isEmpty {
+                            Text(options.isEmpty ? "Add a plan with a project to filter it here."
+                                 : "No matching projects")
+                                .font(cf(10.5))
+                                .foregroundStyle(Theme.textTertiary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 20)
+                        } else {
+                            ForEach(filteredOptions) { option in
+                                filterRow(
+                                    name: option.name,
+                                    count: option.count,
+                                    selected: selection.caseInsensitiveCompare(option.name) == .orderedSame
+                                ) { choose(option.name) }
+                            }
+                        }
+                    }
+                    .padding(6)
+                }
+                .frame(maxHeight: 248)
+            }
+            .frame(width: 292)
+            .background(Theme.appBackground)
+            .onAppear {
+                query = ""
+                if options.count > 6 {
+                    DispatchQueue.main.async { searchFocused = true }
+                }
+            }
+        }
+    }
+
+    private func filterRow(name: String, count: Int?, selected: Bool,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(cf(11))
+                    .foregroundStyle(selected ? Theme.accent : Theme.textTertiary.opacity(0.65))
+                Text(name)
+                    .font(cf(11.5, selected ? .semibold : .regular))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if let count {
+                    Text("\(count)")
+                        .font(cf(9.5, .medium))
+                        .foregroundStyle(Theme.textTertiary)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 31)
+            .background(RoundedRectangle(cornerRadius: 7).fill(
+                selected ? Theme.accent.opacity(0.09) : .clear
+            ))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func choose(_ project: String) {
+        selection = project
+        onSelect(project)
+        query = ""
+        presented = false
     }
 }
 
@@ -574,9 +762,11 @@ private struct PlannerProjectAutocomplete: View {
         ))
         .overlay(alignment: .topLeading) {
             if showSuggestions && focused {
-                suggestionDropdown
-                    .offset(y: 39)
-                    .zIndex(100)
+                GeometryReader { geometry in
+                    suggestionDropdown(width: max(dropdownWidth, geometry.size.width))
+                        .offset(y: 39)
+                        .zIndex(100)
+                }
             }
         }
         .onChange(of: focused) { isFocused in
@@ -589,7 +779,7 @@ private struct PlannerProjectAutocomplete: View {
         }
     }
 
-    private var suggestionDropdown: some View {
+    private func suggestionDropdown(width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                  ? "RECENT PROJECTS" : "MATCHING PROJECTS")
@@ -636,7 +826,7 @@ private struct PlannerProjectAutocomplete: View {
             }
         }
         .padding(5)
-        .frame(width: dropdownWidth)
+        .frame(width: width)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Theme.sidebarBackground)
@@ -949,7 +1139,7 @@ private struct PlannerDaySectionView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
+        PlannerSectionLayout(sidebarWidth: 128, verticalSpacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(section.title)
                     .font(cf(12.5, .semibold))
@@ -962,7 +1152,6 @@ private struct PlannerDaySectionView: View {
                     .foregroundStyle(Theme.textTertiary)
                     .padding(.top, 7)
             }
-            .frame(width: 128, alignment: .leading)
             .padding(.top, 3)
 
             VStack(spacing: 8) {
@@ -1292,72 +1481,285 @@ private struct PlannerEditorView: View {
     }
 }
 
-/// Keeps the composer compact at normal Argus widths without allowing controls to
-/// collapse when the sidebar leaves a narrow detail pane. The same subviews are laid out
-/// once—horizontal when they fit, title above controls when they do not—so focus and
-/// DatePicker state remain stable during window resizing.
+/// Preserves the mockup's date rail at comfortable widths and moves that metadata above
+/// the cards when the detail pane is narrow. The commitment rows themselves are never
+/// squeezed behind a permanently reserved 128-point column.
+private struct PlannerSectionLayout: Layout {
+    var sidebarWidth: CGFloat
+    var verticalSpacing: CGFloat
+
+    private func horizontal(_ width: CGFloat) -> Bool { width >= 600 }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
+                     cache: inout ()) -> CGSize {
+        guard subviews.count >= 2 else { return .zero }
+        let width = proposal.width ?? 700
+        if horizontal(width) {
+            let sidebar = subviews[0].sizeThatFits(ProposedViewSize(width: sidebarWidth, height: nil))
+            let content = subviews[1].sizeThatFits(ProposedViewSize(width: width - sidebarWidth, height: nil))
+            return CGSize(width: width, height: max(sidebar.height, content.height))
+        }
+        let sidebar = subviews[0].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        let content = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(width: width, height: sidebar.height + verticalSpacing + content.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout ()) {
+        guard subviews.count >= 2 else { return }
+        if horizontal(bounds.width) {
+            subviews[0].place(
+                at: bounds.origin, anchor: .topLeading,
+                proposal: ProposedViewSize(width: sidebarWidth, height: bounds.height)
+            )
+            subviews[1].place(
+                at: CGPoint(x: bounds.minX + sidebarWidth, y: bounds.minY), anchor: .topLeading,
+                proposal: ProposedViewSize(width: bounds.width - sidebarWidth, height: bounds.height)
+            )
+            return
+        }
+        let sidebar = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        subviews[0].place(
+            at: bounds.origin, anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: sidebar.height)
+        )
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX, y: bounds.minY + sidebar.height + verticalSpacing),
+            anchor: .topLeading,
+            proposal: ProposedViewSize(
+                width: bounds.width,
+                height: max(0, bounds.height - sidebar.height - verticalSpacing)
+            )
+        )
+    }
+}
+
+/// Keeps the title and navigation on one row when possible, then intentionally wraps
+/// them into a balanced two-row header. This avoids the clipped next-arrow/close button
+/// that a shrinking HStack produced beside the sidebar.
+private struct PlannerHeaderLayout: Layout {
+    var spacing: CGFloat
+
+    private func controlSizes(_ subviews: Subviews) -> (filter: CGSize, actions: CGSize) {
+        guard subviews.count >= 3 else { return (.zero, .zero) }
+        return (subviews[1].sizeThatFits(.unspecified), subviews[2].sizeThatFits(.unspecified))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
+                     cache: inout ()) -> CGSize {
+        guard subviews.count >= 3 else { return .zero }
+        let width = proposal.width ?? 720
+        let controls = controlSizes(subviews)
+        let oneRow = width >= 230 + controls.filter.width + controls.actions.width + spacing * 2
+        let identityWidth = oneRow
+            ? max(220, width - controls.filter.width - controls.actions.width - spacing * 2)
+            : width
+        let identity = subviews[0].sizeThatFits(ProposedViewSize(width: identityWidth, height: nil))
+        if oneRow {
+            return CGSize(width: width, height: max(identity.height, controls.filter.height, controls.actions.height))
+        }
+        return CGSize(
+            width: width,
+            height: identity.height + spacing + max(controls.filter.height, controls.actions.height)
+        )
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout ()) {
+        guard subviews.count >= 3 else { return }
+        let controls = controlSizes(subviews)
+        let oneRow = bounds.width >= 230 + controls.filter.width + controls.actions.width + spacing * 2
+        if oneRow {
+            let identityWidth = max(
+                220,
+                bounds.width - controls.filter.width - controls.actions.width - spacing * 2
+            )
+            subviews[0].place(
+                at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading,
+                proposal: ProposedViewSize(width: identityWidth, height: bounds.height)
+            )
+            subviews[1].place(
+                at: CGPoint(x: bounds.maxX - controls.actions.width - spacing, y: bounds.midY),
+                anchor: .trailing,
+                proposal: ProposedViewSize(width: controls.filter.width, height: controls.filter.height)
+            )
+            subviews[2].place(
+                at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing,
+                proposal: ProposedViewSize(width: controls.actions.width, height: controls.actions.height)
+            )
+            return
+        }
+
+        let identity = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        subviews[0].place(
+            at: bounds.origin, anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: identity.height)
+        )
+        let controlsY = bounds.minY + identity.height + spacing
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX, y: controlsY), anchor: .topLeading,
+            proposal: ProposedViewSize(width: controls.filter.width, height: controls.filter.height)
+        )
+        subviews[2].place(
+            at: CGPoint(x: bounds.maxX, y: controlsY), anchor: .topTrailing,
+            proposal: ProposedViewSize(width: controls.actions.width, height: controls.actions.height)
+        )
+    }
+}
+
+/// Responsive composer with one instance of every stateful field. It has four deliberate
+/// modes: one row, title plus controls, a narrow three-row form, and an emergency layout
+/// for very small panes. No row is ever placed wider than its available bounds.
 private struct PlannerComposerLayout: Layout {
     var spacing: CGFloat
 
-    private func measurements(_ proposal: ProposedViewSize,
-                              _ subviews: Subviews) -> (width: CGFloat, controls: CGSize, horizontal: Bool) {
-        let controls = subviews.count > 1 ? subviews[1].sizeThatFits(.unspecified) : .zero
-        let naturalTitle = subviews.first?.sizeThatFits(.unspecified) ?? .zero
-        let naturalWidth = naturalTitle.width + spacing + controls.width
+    private enum Mode { case oneRow, twoRows, threeRows, fourRows }
+
+    private struct Metrics {
+        let width: CGFloat
+        let sizes: [CGSize]
+        let controlsWidth: CGFloat
+        let trailingWidth: CGFloat
+        let dateTimeWidth: CGFloat
+        let mode: Mode
+    }
+
+    private func measurements(_ proposal: ProposedViewSize, _ subviews: Subviews) -> Metrics {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let naturalWidth = sizes.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, sizes.count - 1))
         let width = proposal.width ?? naturalWidth
-        let horizontal = width >= controls.width + spacing + 230
-        return (width, controls, horizontal)
+        guard sizes.count >= 5 else {
+            return Metrics(
+                width: width, sizes: sizes, controlsWidth: 0,
+                trailingWidth: 0, dateTimeWidth: 0, mode: .oneRow
+            )
+        }
+        let controlsWidth = sizes[1...4].map(\.width).reduce(0, +) + spacing * 3
+        let trailingWidth = sizes[2...4].map(\.width).reduce(0, +) + spacing * 2
+        let dateTimeWidth = sizes[2].width + spacing + sizes[3].width
+        let mode: Mode
+        if width >= controlsWidth + spacing + 220 { mode = .oneRow }
+        else if width >= controlsWidth { mode = .twoRows }
+        else if width >= trailingWidth { mode = .threeRows }
+        else { mode = .fourRows }
+        return Metrics(
+            width: width, sizes: sizes, controlsWidth: controlsWidth,
+            trailingWidth: trailingWidth, dateTimeWidth: dateTimeWidth, mode: mode
+        )
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
                      cache: inout ()) -> CGSize {
         guard !subviews.isEmpty else { return .zero }
         let m = measurements(proposal, subviews)
-        if subviews.count == 1 {
-            return subviews[0].sizeThatFits(ProposedViewSize(width: m.width, height: proposal.height))
+        guard subviews.count >= 5 else {
+            let height = m.sizes.map(\.height).max() ?? 0
+            return CGSize(width: m.width, height: height)
         }
-        if m.horizontal {
-            let titleWidth = max(190, m.width - m.controls.width - spacing)
-            let title = subviews[0].sizeThatFits(ProposedViewSize(width: titleWidth, height: nil))
-            return CGSize(width: m.width, height: max(title.height, m.controls.height))
+        let titleWidth = m.mode == .oneRow
+            ? max(190, m.width - m.controlsWidth - spacing)
+            : m.width
+        let title = subviews[0].sizeThatFits(ProposedViewSize(width: titleWidth, height: nil))
+        let controlsHeight = m.sizes[1...4].map(\.height).max() ?? 0
+        switch m.mode {
+        case .oneRow:
+            return CGSize(width: m.width, height: max(title.height, controlsHeight))
+        case .twoRows:
+            return CGSize(width: m.width, height: title.height + spacing + controlsHeight)
+        case .threeRows:
+            return CGSize(
+                width: m.width,
+                height: title.height + spacing + m.sizes[1].height + spacing
+                    + m.sizes[2...4].map(\.height).max()!
+            )
+        case .fourRows:
+            return CGSize(
+                width: m.width,
+                height: title.height + spacing + m.sizes[1].height + spacing
+                    + max(m.sizes[2].height, m.sizes[3].height) + spacing + m.sizes[4].height
+            )
         }
-        let title = subviews[0].sizeThatFits(ProposedViewSize(width: m.width, height: nil))
-        return CGSize(width: m.width, height: title.height + spacing + m.controls.height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
                        subviews: Subviews, cache: inout ()) {
         guard !subviews.isEmpty else { return }
         let m = measurements(ProposedViewSize(width: bounds.width, height: bounds.height), subviews)
-        if subviews.count == 1 {
-            subviews[0].place(at: bounds.origin, anchor: .topLeading,
-                              proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+        guard subviews.count >= 5 else {
+            var x = bounds.minX
+            for (index, subview) in subviews.enumerated() {
+                subview.place(
+                    at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
+                    proposal: ProposedViewSize(width: m.sizes[index].width, height: bounds.height)
+                )
+                x += m.sizes[index].width + spacing
+            }
             return
         }
-        if m.horizontal {
-            let titleWidth = max(190, bounds.width - m.controls.width - spacing)
+
+        let titleWidth = m.mode == .oneRow
+            ? max(190, bounds.width - m.controlsWidth - spacing)
+            : bounds.width
+        let title = subviews[0].sizeThatFits(ProposedViewSize(width: titleWidth, height: nil))
+        if m.mode == .oneRow {
             subviews[0].place(
                 at: CGPoint(x: bounds.minX, y: bounds.midY),
                 anchor: .leading,
                 proposal: ProposedViewSize(width: titleWidth, height: bounds.height)
             )
-            subviews[1].place(
-                at: CGPoint(x: bounds.maxX, y: bounds.midY),
-                anchor: .trailing,
-                proposal: ProposedViewSize(width: m.controls.width, height: bounds.height)
-            )
-        } else {
-            let title = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
-            subviews[0].place(
-                at: bounds.origin,
-                anchor: .topLeading,
-                proposal: ProposedViewSize(width: bounds.width, height: title.height)
-            )
-            subviews[1].place(
-                at: CGPoint(x: bounds.maxX, y: bounds.minY + title.height + spacing),
-                anchor: .topTrailing,
-                proposal: ProposedViewSize(width: m.controls.width, height: m.controls.height)
-            )
+            placeRow(indices: Array(1...4), from: bounds.maxX - m.controlsWidth,
+                     centerY: bounds.midY, metrics: m, subviews: subviews)
+            return
+        }
+
+        subviews[0].place(
+            at: bounds.origin, anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: title.height)
+        )
+        let secondY = bounds.minY + title.height + spacing
+        if m.mode == .twoRows {
+            placeRow(indices: Array(1...4), from: bounds.maxX - m.controlsWidth,
+                     topY: secondY, metrics: m, subviews: subviews)
+            return
+        }
+
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX, y: secondY), anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: m.sizes[1].height)
+        )
+        let thirdY = secondY + m.sizes[1].height + spacing
+        if m.mode == .threeRows {
+            placeRow(indices: Array(2...4), from: bounds.maxX - m.trailingWidth,
+                     topY: thirdY, metrics: m, subviews: subviews)
+            return
+        }
+
+        placeRow(indices: [2, 3], from: bounds.minX, topY: thirdY,
+                 metrics: m, subviews: subviews)
+        let fourthY = thirdY + max(m.sizes[2].height, m.sizes[3].height) + spacing
+        subviews[4].place(
+            at: CGPoint(x: bounds.maxX, y: fourthY), anchor: .topTrailing,
+            proposal: ProposedViewSize(width: m.sizes[4].width, height: m.sizes[4].height)
+        )
+    }
+
+    private func placeRow(indices: [Int], from startX: CGFloat, topY: CGFloat? = nil,
+                          centerY: CGFloat? = nil, metrics: Metrics, subviews: Subviews) {
+        var x = startX
+        for index in indices {
+            let size = metrics.sizes[index]
+            if let centerY {
+                subviews[index].place(
+                    at: CGPoint(x: x, y: centerY), anchor: .leading,
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+            } else {
+                subviews[index].place(
+                    at: CGPoint(x: x, y: topY ?? 0), anchor: .topLeading,
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+            }
+            x += size.width + spacing
         }
     }
 }

@@ -65,6 +65,21 @@ final class PlannerTests: XCTestCase {
         )
     }
 
+    func testPlannerFilterCatalogContainsOnlyProjectsWithPlansAndCollapsesCaseVariants() {
+        let commitments = [
+            PlannerCommitment(title: "One", project: "vlm_gating", deadline: date(hour: 10)),
+            PlannerCommitment(title: "Two", project: "VLM_GATING", deadline: date(hour: 11)),
+            PlannerCommitment(title: "Three", project: "spatial_fable", deadline: date(hour: 12)),
+            PlannerCommitment(title: "Unscoped", deadline: date(hour: 13)),
+        ]
+
+        let options = PlannerProjectCatalog.options(from: commitments, preserving: "")
+
+        XCTAssertEqual(options.map(\.name), ["spatial_fable", "vlm_gating"])
+        XCTAssertEqual(options.map(\.count), [1, 2])
+        XCTAssertFalse(options.contains { $0.name == "unrelated_live_shell" })
+    }
+
     func testPlannerMutationsPreserveARealDeadlineAndCompletionHistory() {
         let state = AppState(isolatedForTesting: true)
         state.plannerCommitments = []
@@ -144,5 +159,66 @@ final class PlannerTests: XCTestCase {
 
         XCTAssertGreaterThan(host.fittingSize.width, 0)
         XCTAssertGreaterThan(host.fittingSize.height, 0)
+    }
+
+    func testPlannerViewCanRenderAtAWideDetailWidth() {
+        let state = AppState(isolatedForTesting: true)
+        state.plannerCommitments = [
+            PlannerCommitment(
+                title: "Finish the router ablation write-up",
+                project: "vlm_gating",
+                deadline: date(day: 5, hour: 12)
+            ),
+            PlannerCommitment(
+                title: "Choose the final benchmark shortlist",
+                project: "spatial_fable",
+                deadline: date(day: 5, hour: 18)
+            ),
+        ]
+        let host = NSHostingView(rootView: PlannerView().environmentObject(state))
+        host.frame = NSRect(x: 0, y: 0, width: 1120, height: 760)
+
+        host.layoutSubtreeIfNeeded()
+
+        if ProcessInfo.processInfo.environment["UT_CAPTURE_PLANNER_TEST"] == "1",
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/argus-planner-wide.png"))
+        }
+
+        XCTAssertGreaterThan(host.fittingSize.width, 0)
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+    }
+
+    func testPlannerViewCanRenderWithoutOverflowAtANarrowSidebarDetailWidth() {
+        let state = AppState(isolatedForTesting: true)
+        state.plannerCommitments = [
+            PlannerCommitment(
+                title: "Finish the router ablation write-up",
+                project: "vlm_gating",
+                deadline: date(day: 5, hour: 12)
+            ),
+            PlannerCommitment(
+                title: "Review the environment specification",
+                project: "gym-anything",
+                deadline: date(day: 5, hour: 17, minute: 30)
+            ),
+        ]
+        let host = NSHostingView(rootView: PlannerView().environmentObject(state))
+        host.frame = NSRect(x: 0, y: 0, width: 470, height: 900)
+
+        host.layoutSubtreeIfNeeded()
+
+        if ProcessInfo.processInfo.environment["UT_CAPTURE_PLANNER_TEST"] == "1",
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/argus-planner-narrow.png"))
+        }
+
+        XCTAssertGreaterThan(host.fittingSize.width, 0)
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+        XCTAssertEqual(host.frame.width, 470)
     }
 }
