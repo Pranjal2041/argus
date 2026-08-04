@@ -40,6 +40,31 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(sorted.map(\.title), ["ten", "two", "five-thirty", "end-of-day"])
     }
 
+    func testNewCommitmentsDefaultToTodayAtElevenFiftyNinePM() {
+        let now = date(day: 4, hour: 8, minute: 17)
+        let deadline = PlannerDefaults.deadline(now: now, calendar: calendar)
+
+        XCTAssertTrue(calendar.isDate(deadline, inSameDayAs: now))
+        XCTAssertEqual(calendar.component(.hour, from: deadline), 23)
+        XCTAssertEqual(calendar.component(.minute, from: deadline), 59)
+        XCTAssertEqual(calendar.component(.second, from: deadline), 0)
+    }
+
+    func testProjectSuggestionsFilterAsYouTypeAndRankPrefixesFirst() {
+        let projects = [
+            "spatial_fable", "VLM_gating", "fable_archive", "SPATIAL_FABLE", "spatial_sol",
+        ]
+
+        XCTAssertEqual(
+            PlannerProjectSuggestions.filtered(projects, query: "spa"),
+            ["spatial_fable", "spatial_sol"]
+        )
+        XCTAssertEqual(
+            PlannerProjectSuggestions.filtered(projects, query: "fable"),
+            ["fable_archive", "spatial_fable"]
+        )
+    }
+
     func testPlannerMutationsPreserveARealDeadlineAndCompletionHistory() {
         let state = AppState(isolatedForTesting: true)
         state.plannerCommitments = []

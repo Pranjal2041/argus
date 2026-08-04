@@ -1,15 +1,48 @@
 import SwiftUI
 
+enum PlannerDefaults {
+    /// A newly written plan is normally a promise for today, not an invitation to
+    /// configure a calendar. Keep the final minute explicit so it sorts naturally
+    /// with timed commitments while still reading as "by the end of today".
+    static func deadline(now: Date = Date(), calendar: Calendar = .current) -> Date {
+        calendar.date(bySettingHour: 23, minute: 59, second: 0, of: now) ?? now
+    }
+}
+
+enum PlannerProjectSuggestions {
+    static func filtered(_ projects: [String], query: String, limit: Int = 7) -> [String] {
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var seen: Set<String> = []
+        let unique = projects.compactMap { raw -> String? in
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return nil }
+            let key = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard seen.insert(key).inserted else { return nil }
+            return value
+        }
+        let matches = cleanQuery.isEmpty ? unique : unique.filter {
+            $0.localizedCaseInsensitiveContains(cleanQuery)
+        }
+        return Array(matches.sorted { lhs, rhs in
+            let lhsPrefix = lhs.lowercased().hasPrefix(cleanQuery.lowercased())
+            let rhsPrefix = rhs.lowercased().hasPrefix(cleanQuery.lowercased())
+            if lhsPrefix != rhsPrefix { return lhsPrefix }
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }.prefix(max(0, limit)))
+    }
+}
+
 /// Planner is deliberately a rolling list of finish lines, not a general calendar.
 /// The interface keeps one invariant visible everywhere: earlier deadlines come first.
 struct PlannerView: View {
     @EnvironmentObject private var state: AppState
     @AppStorage("ut.uiScale") private var uiScale = 1.0
+    @AppStorage("ut.planner.lastProject") private var draftProject = ""
+    @AppStorage("ut.planner.projectFilter") private var projectFilter = ""
 
     @State private var anchorDay = Calendar.current.startOfDay(for: Date())
     @State private var draftTitle = ""
-    @State private var draftProject = ""
-    @State private var draftDeadline = PlannerView.defaultDeadline()
+    @State private var draftDeadline = PlannerDefaults.deadline()
     @State private var draftHasExactTime = true
     @State private var editingCommitment: PlannerCommitment?
     @State private var highlightedID: UUID?
@@ -19,12 +52,6 @@ struct PlannerView: View {
 
     private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size * uiScale, weight: weight)
-    }
-
-    private static func defaultDeadline() -> Date {
-        let calendar = Calendar.current
-        let tomorrow = calendar.date(byAdding: .day, value: 1, to: Date()) ?? Date()
-        return calendar.date(bySettingHour: 12, minute: 0, second: 0, of: tomorrow) ?? tomorrow
     }
 
     private var weekDays: [Date] {
@@ -40,11 +67,19 @@ struct PlannerView: View {
             sessions.filter { !$0.agent }.map(\.name)
         }
         let retained = state.plannerCommitments.map(\.project).filter { !$0.isEmpty }
-        return Array(Set(live + retained)).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return PlannerProjectSuggestions.filtered(live + retained + [draftProject, projectFilter], query: "", limit: .max)
+    }
+
+    private var filteredCommitments: [PlannerCommitment] {
+        let selection = projectFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selection.isEmpty else { return state.plannerCommitments }
+        return state.plannerCommitments.filter {
+            $0.project.compare(selection, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
     }
 
     private var visibleOpenCount: Int {
-        state.plannerCommitments.lazy.filter { commitment in
+        filteredCommitments.lazy.filter { commitment in
             guard !commitment.isCompleted else { return false }
             let day = calendar.startOfDay(for: commitment.deadline)
             if day >= anchorDay && day < weekEnd { return true }
@@ -59,7 +94,7 @@ struct PlannerView: View {
         // horizon. They are still sorted by their original deadlines; nothing is promoted
         // or rearranged based on status.
         if calendar.isDate(anchorDay, inSameDayAs: Date()) {
-            let overdue = state.plannerCommitments.filter {
+            let overdue = filteredCommitments.filter {
                 !$0.isCompleted && calendar.startOfDay(for: $0.deadline) < anchorDay
             }.sorted { PlannerCommitment.chronologicallyBefore($0, $1, calendar: calendar) }
             if !overdue.isEmpty {
@@ -77,7 +112,7 @@ struct PlannerView: View {
 
         for day in weekDays {
             let next = calendar.date(byAdding: .day, value: 1, to: day) ?? day
-            let commitments = state.plannerCommitments.filter {
+            let commitments = filteredCommitments.filter {
                 $0.deadline >= day && $0.deadline < next
             }.sorted { PlannerCommitment.chronologicallyBefore($0, $1, calendar: calendar) }
             guard !commitments.isEmpty else { continue }
@@ -135,6 +170,51 @@ struct PlannerView: View {
                     .foregroundStyle(Theme.textTertiary)
             }
             Spacer()
+
+            Menu {
+                Button {
+                    projectFilter = ""
+                } label: {
+                    if projectFilter.isEmpty { Label("All projects", systemImage: "checkmark") }
+                    else { Text("All projects") }
+                }
+                if !knownProjects.isEmpty { Divider() }
+                ForEach(knownProjects, id: \.self) { project in
+                    Button {
+                        projectFilter = project
+                        draftProject = project
+                    } label: {
+                        if projectFilter.caseInsensitiveCompare(project) == .orderedSame {
+                            Label(project, systemImage: "checkmark")
+                        } else {
+                            Text(project)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(cf(9.5, .semibold))
+                    Text(projectFilter.isEmpty ? "All projects" : projectFilter)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(cf(8, .bold))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .font(cf(10.5, .medium))
+                .foregroundStyle(projectFilter.isEmpty ? Theme.textSecondary : Theme.accent)
+                .padding(.horizontal, 10)
+                .frame(minWidth: 112, maxWidth: 170, minHeight: 29, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface.opacity(0.45)))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                    projectFilter.isEmpty ? Theme.border : Theme.accent.opacity(0.42), lineWidth: 1
+                ))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Filter the agenda by project")
+
             HStack(spacing: 7) {
                 plannerHeaderButton("chevron.left", help: "Previous 7 days") { moveWeek(-7) }
                 Button("Today") { goToToday() }
@@ -159,8 +239,9 @@ struct PlannerView: View {
     }
 
     private var headerSubtitle: String {
-        if visibleOpenCount == 0 { return "No open commitments in this 7-day horizon" }
-        return "\(visibleOpenCount) open commitment\(visibleOpenCount == 1 ? "" : "s") · ordered by deadline"
+        let scope = projectFilter.isEmpty ? "" : " in \(projectFilter)"
+        if visibleOpenCount == 0 { return "No open commitments\(scope) in this 7-day horizon" }
+        return "\(visibleOpenCount) open commitment\(visibleOpenCount == 1 ? "" : "s")\(scope) · ordered by deadline"
     }
 
     private func plannerHeaderButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
@@ -187,6 +268,7 @@ struct PlannerView: View {
                 .shadow(color: .black.opacity(0.10), radius: 18, y: 8)
         )
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border, lineWidth: 1))
+        .zIndex(20)
     }
 
     private var composerTitleField: some View {
@@ -206,82 +288,32 @@ struct PlannerView: View {
 
     private var composerControls: some View {
         HStack(spacing: 9) {
-            projectField
-                .frame(width: 154)
+            PlannerProjectAutocomplete(text: $draftProject, projects: knownProjects)
+                .frame(width: 166)
+                .zIndex(30)
 
-            DatePicker("", selection: $draftDeadline, displayedComponents: .date)
-                .labelsHidden()
-                .datePickerStyle(.field)
-                .font(cf(11))
-                .fixedSize()
+            PlannerDateControl(deadline: $draftDeadline)
+            PlannerTimeControl(deadline: $draftDeadline, hasExactTime: $draftHasExactTime)
 
-            Button { draftHasExactTime.toggle() } label: {
-                Image(systemName: draftHasExactTime ? "clock.fill" : "sunset")
-                    .font(cf(11, .medium))
-                    .foregroundStyle(draftHasExactTime ? Theme.accent : Theme.textSecondary)
-                    .frame(width: 28, height: 28)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.surface.opacity(0.55)))
-            }
-            .buttonStyle(.plain)
-            .help(draftHasExactTime ? "Use an end-of-day deadline" : "Use an exact time")
-
-            Group {
-                if draftHasExactTime {
-                    DatePicker("", selection: $draftDeadline, displayedComponents: .hourAndMinute)
-                        .labelsHidden()
-                        .datePickerStyle(.field)
-                        .font(cf(11))
-                } else {
-                    Text("End of day")
-                        .font(cf(11, .medium))
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(minWidth: 76)
+            Button { addCommitment() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.right")
+                        .font(cf(9.5, .bold))
+                    Text("Plan")
                 }
+                .font(cf(11.5, .semibold))
+                .padding(.horizontal, 14)
+                .frame(minWidth: 70, minHeight: 34)
+                .contentShape(Rectangle())
             }
-            .fixedSize()
-
-            Button("Plan") { addCommitment() }
-                .font(cf(12, .semibold))
                 .buttonStyle(.plain)
                 .foregroundStyle(Theme.current.isLight ? SwiftUI.Color.white : Theme.appBackground)
-                .padding(.horizontal, 14)
-                .frame(minWidth: 58, minHeight: 32)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accent))
+                .shadow(color: Theme.accent.opacity(canAdd ? 0.18 : 0), radius: 8, y: 3)
                 .opacity(canAdd ? 1 : 0.42)
                 .disabled(!canAdd)
         }
         .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private var projectField: some View {
-        HStack(spacing: 4) {
-            TextField("Project", text: $draftProject)
-                .textFieldStyle(.plain)
-                .font(cf(11))
-                .foregroundStyle(draftProject.isEmpty ? Theme.textTertiary : Theme.accent)
-                .lineLimit(1)
-            if !knownProjects.isEmpty {
-                Menu {
-                    Button("No project") { draftProject = "" }
-                    Divider()
-                    ForEach(knownProjects, id: \.self) { project in
-                        Button(project) { draftProject = project }
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(cf(9, .semibold))
-                        .foregroundStyle(Theme.textTertiary)
-                        .frame(width: 18, height: 24)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-            }
-        }
-        .padding(.horizontal, 9)
-        .frame(height: 31)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.appBackground.opacity(0.34)))
-        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border, lineWidth: 1))
     }
 
     private var canAdd: Bool {
@@ -410,8 +442,8 @@ struct PlannerView: View {
     private func selectDraftDay(_ day: Date) {
         let components = calendar.dateComponents([.hour, .minute], from: draftDeadline)
         draftDeadline = calendar.date(
-            bySettingHour: components.hour ?? 12,
-            minute: components.minute ?? 0,
+            bySettingHour: components.hour ?? 23,
+            minute: components.minute ?? 59,
             second: 0,
             of: day
         ) ?? day
@@ -420,7 +452,7 @@ struct PlannerView: View {
 
     private func counts(on day: Date) -> (open: Int, done: Int, hasOverdue: Bool) {
         let next = calendar.date(byAdding: .day, value: 1, to: day) ?? day
-        let commitments = state.plannerCommitments.filter { $0.deadline >= day && $0.deadline < next }
+        let commitments = filteredCommitments.filter { $0.deadline >= day && $0.deadline < next }
         let open = commitments.lazy.filter { !$0.isCompleted }.count
         let done = commitments.count - open
         let hasOverdue = commitments.contains { !$0.isCompleted && $0.effectiveDeadline() < Date() }
@@ -467,6 +499,428 @@ struct PlannerView: View {
     private func dayIdentifier(_ day: Date) -> String {
         let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: day)
+    }
+}
+
+/// A real typeahead instead of a TextField bolted to an unrelated menu. It keeps
+/// arbitrary project labels valid while making existing sessions/projects one click
+/// away, and it never rewrites the user's text behind their back.
+private struct PlannerProjectAutocomplete: View {
+    @Binding var text: String
+    let projects: [String]
+    var dropdownWidth: CGFloat = 230
+
+    @AppStorage("ut.uiScale") private var uiScale = 1.0
+    @FocusState private var focused: Bool
+    @State private var showSuggestions = false
+    @State private var selectedIndex = 0
+
+    private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * uiScale, weight: weight)
+    }
+
+    private var suggestions: [String] {
+        PlannerProjectSuggestions.filtered(projects, query: text)
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "folder")
+                .font(cf(10, .medium))
+                .foregroundStyle(text.isEmpty ? Theme.textTertiary : Theme.accent)
+            TextField("Project", text: $text)
+                .textFieldStyle(.plain)
+                .font(cf(11))
+                .foregroundStyle(text.isEmpty ? Theme.textTertiary : Theme.textPrimary)
+                .lineLimit(1)
+                .focused($focused)
+                .onSubmit(acceptHighlightedSuggestion)
+                .onMoveCommand(perform: moveHighlight)
+                .onExitCommand {
+                    showSuggestions = false
+                    focused = false
+                }
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                    selectedIndex = 0
+                    focused = true
+                    showSuggestions = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(cf(10))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear project")
+            }
+            Button {
+                focused = true
+                showSuggestions = true
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(cf(8, .bold))
+                    .foregroundStyle(Theme.textTertiary)
+                    .frame(width: 12, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help("Show projects")
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 34)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.appBackground.opacity(0.42)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(
+            focused ? Theme.accent.opacity(0.55) : Theme.border, lineWidth: 1
+        ))
+        .overlay(alignment: .topLeading) {
+            if showSuggestions && focused {
+                suggestionDropdown
+                    .offset(y: 39)
+                    .zIndex(100)
+            }
+        }
+        .onChange(of: focused) { isFocused in
+            showSuggestions = isFocused
+            if isFocused { selectedIndex = 0 }
+        }
+        .onChange(of: text) { _ in
+            selectedIndex = 0
+            if focused { showSuggestions = true }
+        }
+    }
+
+    private var suggestionDropdown: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                 ? "RECENT PROJECTS" : "MATCHING PROJECTS")
+                .font(cf(8, .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.top, 7)
+
+            if suggestions.isEmpty {
+                Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                     ? "No projects yet" : "Press Return to use this project")
+                    .font(cf(10.5))
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(Array(suggestions.enumerated()), id: \.element) { index, project in
+                    Button { choose(project) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder")
+                                .font(cf(9))
+                                .foregroundStyle(Theme.accent)
+                            Text(project)
+                                .font(cf(11, index == selectedIndex ? .semibold : .regular))
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            if project.caseInsensitiveCompare(text) == .orderedSame {
+                                Image(systemName: "checkmark")
+                                    .font(cf(8, .bold))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                        }
+                        .padding(.horizontal, 9)
+                        .frame(height: 29)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(
+                            index == selectedIndex ? Theme.selection.opacity(0.85) : .clear
+                        ))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(5)
+        .frame(width: dropdownWidth)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Theme.sidebarBackground)
+                .shadow(color: .black.opacity(0.30), radius: 16, y: 7)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.border, lineWidth: 1))
+    }
+
+    private func choose(_ project: String) {
+        focused = false
+        showSuggestions = false
+        text = project
+    }
+
+    private func acceptHighlightedSuggestion() {
+        guard showSuggestions, suggestions.indices.contains(selectedIndex) else {
+            showSuggestions = false
+            focused = false
+            return
+        }
+        choose(suggestions[selectedIndex])
+    }
+
+    private func moveHighlight(_ direction: MoveCommandDirection) {
+        guard !suggestions.isEmpty else { return }
+        showSuggestions = true
+        switch direction {
+        case .down: selectedIndex = min(suggestions.count - 1, selectedIndex + 1)
+        case .up: selectedIndex = max(0, selectedIndex - 1)
+        default: break
+        }
+    }
+}
+
+private struct PlannerDateControl: View {
+    @Binding var deadline: Date
+    @AppStorage("ut.uiScale") private var uiScale = 1.0
+    @State private var showPicker = false
+    private let calendar = Calendar.current
+
+    private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * uiScale, weight: weight)
+    }
+
+    var body: some View {
+        Button { showPicker.toggle() } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "calendar")
+                    .font(cf(10, .semibold))
+                    .foregroundStyle(Theme.accent)
+                Text(dateLabel)
+                    .font(cf(11, .medium))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(cf(8, .bold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(minWidth: 106, minHeight: 34)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.appBackground.opacity(0.42)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(
+                showPicker ? Theme.accent.opacity(0.55) : Theme.border, lineWidth: 1
+            ))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .popover(isPresented: $showPicker, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("DEADLINE DATE")
+                    .font(cf(9, .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.textTertiary)
+                HStack(spacing: 7) {
+                    quickDay("Today", date: Date())
+                    quickDay("Tomorrow", date: calendar.date(byAdding: .day, value: 1, to: Date()) ?? Date())
+                }
+                DatePicker("", selection: dayBinding, displayedComponents: .date)
+                    .labelsHidden()
+                    .datePickerStyle(.graphical)
+                    .tint(Theme.accent)
+                HStack {
+                    Spacer()
+                    Button("Done") { showPicker = false }
+                        .font(cf(11, .semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.current.isLight ? Color.white : Theme.appBackground)
+                        .padding(.horizontal, 13)
+                        .frame(height: 29)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.accent))
+                }
+            }
+            .padding(14)
+            .frame(width: 280)
+            .background(Theme.appBackground)
+        }
+    }
+
+    private var dateLabel: String {
+        if calendar.isDateInToday(deadline) { return "Today" }
+        if calendar.isDateInTomorrow(deadline) { return "Tomorrow" }
+        let formatter = DateFormatter(); formatter.dateFormat = "MMM d"
+        return formatter.string(from: deadline)
+    }
+
+    private var dayBinding: Binding<Date> {
+        Binding(get: { deadline }, set: { setDay($0) })
+    }
+
+    private func quickDay(_ title: String, date: Date) -> some View {
+        let selected = calendar.isDate(deadline, inSameDayAs: date)
+        return Button {
+            setDay(date)
+            showPicker = false
+        } label: {
+            Text(title)
+                .font(cf(10.5, .medium))
+                .foregroundStyle(selected ? Theme.accent : Theme.textSecondary)
+                .padding(.horizontal, 11)
+                .frame(height: 29)
+                .background(RoundedRectangle(cornerRadius: 7).fill(
+                    selected ? Theme.accent.opacity(0.10) : Theme.surface.opacity(0.45)
+                ))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                    selected ? Theme.accent.opacity(0.42) : Theme.border, lineWidth: 1
+                ))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func setDay(_ day: Date) {
+        let components = calendar.dateComponents([.hour, .minute, .second], from: deadline)
+        deadline = calendar.date(
+            bySettingHour: components.hour ?? 23,
+            minute: components.minute ?? 59,
+            second: components.second ?? 0,
+            of: day
+        ) ?? day
+    }
+}
+
+private struct PlannerTimeControl: View {
+    @Binding var deadline: Date
+    @Binding var hasExactTime: Bool
+    @AppStorage("ut.uiScale") private var uiScale = 1.0
+    @State private var showPicker = false
+    private let calendar = Calendar.current
+
+    private let presets: [(String, Int, Int)] = [
+        ("9:00 AM", 9, 0), ("12:00 PM", 12, 0),
+        ("5:00 PM", 17, 0), ("11:59 PM", 23, 59),
+    ]
+
+    private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * uiScale, weight: weight)
+    }
+
+    var body: some View {
+        Button { showPicker.toggle() } label: {
+            HStack(spacing: 7) {
+                Image(systemName: hasExactTime ? "clock" : "sunset")
+                    .font(cf(10, .semibold))
+                    .foregroundStyle(Theme.accent)
+                Text(timeLabel)
+                    .font(cf(11, .medium))
+                    .foregroundStyle(Theme.textPrimary)
+                    .monospacedDigit()
+                Image(systemName: "chevron.down")
+                    .font(cf(8, .bold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(minWidth: 105, minHeight: 34)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.appBackground.opacity(0.42)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(
+                showPicker ? Theme.accent.opacity(0.55) : Theme.border, lineWidth: 1
+            ))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .popover(isPresented: $showPicker, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("DEADLINE TIME")
+                    .font(cf(9, .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.textTertiary)
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 7) {
+                    ForEach(presets, id: \.0) { preset in
+                        presetButton(preset.0, hour: preset.1, minute: preset.2)
+                    }
+                }
+
+                Button {
+                    hasExactTime = false
+                    showPicker = false
+                } label: {
+                    HStack {
+                        Image(systemName: "sunset")
+                        Text("End of day — no exact time")
+                        Spacer()
+                        if !hasExactTime { Image(systemName: "checkmark") }
+                    }
+                    .font(cf(10.5, .medium))
+                    .foregroundStyle(!hasExactTime ? Theme.accent : Theme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 31)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(
+                        !hasExactTime ? Theme.accent.opacity(0.10) : Theme.surface.opacity(0.45)
+                    ))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                        !hasExactTime ? Theme.accent.opacity(0.42) : Theme.border, lineWidth: 1
+                    ))
+                }
+                .buttonStyle(.plain)
+
+                Divider()
+                HStack {
+                    Text("Custom")
+                        .font(cf(10.5, .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                    Spacer()
+                    DatePicker("", selection: exactTimeBinding, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .datePickerStyle(.field)
+                        .font(cf(11))
+                }
+                HStack {
+                    Spacer()
+                    Button("Done") { showPicker = false }
+                        .font(cf(11, .semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.current.isLight ? Color.white : Theme.appBackground)
+                        .padding(.horizontal, 13)
+                        .frame(height: 29)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.accent))
+                }
+            }
+            .padding(14)
+            .frame(width: 260)
+            .background(Theme.appBackground)
+        }
+    }
+
+    private var timeLabel: String {
+        guard hasExactTime else { return "End of day" }
+        let formatter = DateFormatter(); formatter.dateFormat = "h:mm a"
+        return formatter.string(from: deadline)
+    }
+
+    private var exactTimeBinding: Binding<Date> {
+        Binding(get: { deadline }, set: {
+            deadline = $0
+            hasExactTime = true
+        })
+    }
+
+    private func presetButton(_ title: String, hour: Int, minute: Int) -> some View {
+        let selected = hasExactTime
+            && calendar.component(.hour, from: deadline) == hour
+            && calendar.component(.minute, from: deadline) == minute
+        return Button {
+            deadline = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: deadline) ?? deadline
+            hasExactTime = true
+            showPicker = false
+        } label: {
+            HStack {
+                Text(title)
+                    .monospacedDigit()
+                Spacer(minLength: 4)
+                if selected { Image(systemName: "checkmark") }
+            }
+            .font(cf(10.5, .medium))
+            .foregroundStyle(selected ? Theme.accent : Theme.textSecondary)
+            .padding(.horizontal, 9)
+            .frame(height: 31)
+            .background(RoundedRectangle(cornerRadius: 7).fill(
+                selected ? Theme.accent.opacity(0.10) : Theme.surface.opacity(0.45)
+            ))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                selected ? Theme.accent.opacity(0.42) : Theme.border, lineWidth: 1
+            ))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -732,62 +1186,74 @@ private struct PlannerEditorView: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 plannerEditorField("Finish line") {
-                    TextField("What will you finish?", text: $title)
-                        .textFieldStyle(.roundedBorder)
-                        .font(cf(14))
+                    HStack(spacing: 9) {
+                        Image(systemName: "checkmark.circle")
+                            .font(cf(12))
+                            .foregroundStyle(Theme.accent)
+                        TextField("What will you finish?", text: $title)
+                            .textFieldStyle(.plain)
+                            .font(cf(14))
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .padding(.horizontal, 11)
+                    .frame(height: 38)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface.opacity(0.45)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border, lineWidth: 1))
                 }
                 plannerEditorField("Project (optional)") {
-                    HStack(spacing: 7) {
-                        TextField("Project", text: $project)
-                            .textFieldStyle(.roundedBorder)
-                            .font(cf(14))
-                        if !knownProjects.isEmpty {
-                            Menu {
-                                Button("No project") { project = "" }
-                                Divider()
-                                ForEach(knownProjects, id: \.self) { value in
-                                    Button(value) { project = value }
-                                }
-                            } label: {
-                                Image(systemName: "chevron.down").font(cf(11, .semibold))
-                            }
-                            .menuStyle(.borderlessButton)
-                            .menuIndicator(.hidden)
-                            .fixedSize()
-                        }
-                    }
+                    PlannerProjectAutocomplete(
+                        text: $project,
+                        projects: knownProjects,
+                        dropdownWidth: 360
+                    )
+                    .frame(maxWidth: .infinity)
+                    .zIndex(30)
                 }
                 plannerEditorField("Deadline") {
-                    HStack(spacing: 12) {
-                        DatePicker("Date", selection: $deadline, displayedComponents: .date)
-                            .datePickerStyle(.field)
-                        Toggle("Exact time", isOn: $hasExactTime)
-                            .toggleStyle(.switch)
-                            .font(cf(12))
-                        if hasExactTime {
-                            DatePicker("Time", selection: $deadline, displayedComponents: .hourAndMinute)
-                                .datePickerStyle(.field)
-                        } else {
-                            Text("By end of day")
-                                .font(cf(12, .medium))
-                                .foregroundStyle(Theme.textSecondary)
-                        }
+                    HStack(spacing: 9) {
+                        PlannerDateControl(deadline: $deadline)
+                        PlannerTimeControl(deadline: $deadline, hasExactTime: $hasExactTime)
+                        Spacer()
+                        Text(hasExactTime ? "Exact deadline" : "Due by the end of the selected day")
+                            .font(cf(10.5))
+                            .foregroundStyle(Theme.textTertiary)
                     }
                 }
             }
             .padding(18)
+            .zIndex(10)
 
             Spacer()
             Divider()
             HStack {
-                Button("Delete", role: .destructive) {
+                Button(role: .destructive) {
                     state.deletePlannerCommitment(commitment.id)
                     dismiss()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(cf(11, .medium))
+                        .foregroundStyle(Theme.waiting)
+                        .padding(.horizontal, 11)
+                        .frame(height: 31)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.waiting.opacity(0.07)))
+                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                            Theme.waiting.opacity(0.28), lineWidth: 1
+                        ))
                 }
+                .buttonStyle(.plain)
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button { dismiss() } label: {
+                    Text("Cancel")
+                        .font(cf(11, .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 13)
+                        .frame(height: 31)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface.opacity(0.45)))
+                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border, lineWidth: 1))
+                }
+                    .buttonStyle(.plain)
                     .keyboardShortcut(.cancelAction)
-                Button("Save") {
+                Button {
                     state.updatePlannerCommitment(
                         commitment.id,
                         title: title,
@@ -796,15 +1262,22 @@ private struct PlannerEditorView: View {
                         hasExactTime: hasExactTime
                     )
                     dismiss()
+                } label: {
+                    Text("Save changes")
+                        .font(cf(11, .semibold))
+                        .foregroundStyle(Theme.current.isLight ? Color.white : Theme.appBackground)
+                        .padding(.horizontal, 14)
+                        .frame(height: 31)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.accent))
                 }
+                .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .opacity(canSave ? 1 : 0.42)
                 .disabled(!canSave)
             }
             .padding(16)
         }
-        .frame(width: 540, height: 365)
+        .frame(width: 560, height: 390)
         .background(Theme.appBackground)
     }
 
