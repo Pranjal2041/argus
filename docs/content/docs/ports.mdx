@@ -16,6 +16,19 @@ to the target on its own host.
   so only ports that actually answer as web services become first-class browser cards.
 - **Manage forwards** — see active tunnels and tear them down.
 
+The same hub is available from the terminal:
+
+```sh
+ut forward @babel-p9-16 5800              # prefer local port 5800
+ut forward @babel-p9-16 5800 --local 15800
+ut forward ls
+ut forward stop <id>
+```
+
+CLI-created forwards and app-created forwards share the local broker's active-forward list. A CLI
+forward is mesh-routed by machine name, so it also works when the local host reaches the tailnet
+through the broker's embedded `tsnet` transport rather than a system Tailscale interface.
+
 ## How it works
 
 A `forward.Manager` binds the local port and tunnels each connection over the WebSocket to the

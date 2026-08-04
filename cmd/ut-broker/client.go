@@ -20,7 +20,7 @@ import (
 
 var meshVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
-	"tail": true, "send": true, "cp": true, "lab": true,
+	"tail": true, "send": true, "cp": true, "forward": true, "lab": true,
 	"help": true, "--help": true, "-h": true,
 }
 
@@ -56,6 +56,8 @@ func runClient(args []string) int {
 		return cmdTail(rest)
 	case "cp":
 		return cmdCp(rest)
+	case "forward":
+		return cmdForward(rest)
 	case "lab":
 		return cmdLab(rest)
 	default:
@@ -127,6 +129,20 @@ func httpGet(u string, timeout time.Duration) ([]byte, int, error) {
 func httpPost(u string, body []byte, timeout time.Duration) ([]byte, int, error) {
 	c := &http.Client{Timeout: timeout}
 	resp, err := c.Post(u, "application/octet-stream", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return b, resp.StatusCode, nil
+}
+
+func httpDelete(u string, timeout time.Duration) ([]byte, int, error) {
+	req, err := http.NewRequest(http.MethodDelete, u, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -497,6 +513,188 @@ func splitFileArg(a string) (host, path string) {
 	return "", a
 }
 
+// --- forward: expose one remote loopback service locally -------------------
+
+type cliForward struct {
+	ID         string `json:"id"`
+	BrokerHost string `json:"brokerHost"`
+	BrokerName string `json:"brokerName"`
+	RemotePort int    `json:"remotePort"`
+	LocalPort  int    `json:"localPort"`
+	Label      string `json:"label"`
+}
+
+func cmdForward(args []string) int {
+	if len(args) == 0 || args[0] == "ls" || args[0] == "list" {
+		if len(args) > 1 {
+			fmt.Fprintln(os.Stderr, "usage: ut forward ls")
+			return 2
+		}
+		return cmdForwardList()
+	}
+	if args[0] == "stop" {
+		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+			fmt.Fprintln(os.Stderr, "usage: ut forward stop <id>")
+			return 2
+		}
+		q := url.Values{"id": {args[1]}}
+		b, code, err := httpDelete(localBase()+"/forwards?"+q.Encode(), 15*time.Second)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ut forward stop:", err)
+			return 1
+		}
+		if code != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "ut forward stop: %s\n", brokerResponseError(b, code))
+			return 1
+		}
+		fmt.Printf("stopped forward %s\n", args[1])
+		return 0
+	}
+
+	machine, remotePort, localPort, label, err := parseForwardStart(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ut forward:", err)
+		fmt.Fprintln(os.Stderr, "usage: ut forward <@machine> <remote-port> [--local <port>] [--label <name>]")
+		return 2
+	}
+	q := url.Values{
+		"machine":    {machine},
+		"remotePort": {strconv.Itoa(remotePort)},
+		"localPort":  {strconv.Itoa(localPort)},
+		"label":      {label},
+		"reuse":      {"1"},
+	}
+	b, code, err := httpPost(localBase()+"/forwards?"+q.Encode(), nil, 45*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ut forward:", err)
+		return 1
+	}
+	if code != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "ut forward: %s\n", brokerResponseError(b, code))
+		return 1
+	}
+	var f cliForward
+	if err := json.Unmarshal(b, &f); err != nil || f.ID == "" || f.LocalPort == 0 {
+		fmt.Fprintln(os.Stderr, "ut forward: bad broker response")
+		return 1
+	}
+	name := f.BrokerName
+	if name == "" {
+		name = machine
+	}
+	fmt.Printf("forwarding 127.0.0.1:%d -> %s:%d  (id %s)\n", f.LocalPort, name, f.RemotePort, f.ID)
+	return 0
+}
+
+func cmdForwardList() int {
+	b, code, err := httpGet(localBase()+"/forwards", 15*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ut forward ls:", err)
+		return 1
+	}
+	if code != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "ut forward ls: %s\n", brokerResponseError(b, code))
+		return 1
+	}
+	var response struct {
+		Forwards []cliForward `json:"forwards"`
+	}
+	if err := json.Unmarshal(b, &response); err != nil {
+		fmt.Fprintln(os.Stderr, "ut forward ls: bad broker response")
+		return 1
+	}
+	if len(response.Forwards) == 0 {
+		fmt.Println("no active forwards")
+		return 0
+	}
+	sort.Slice(response.Forwards, func(i, j int) bool {
+		if response.Forwards[i].LocalPort != response.Forwards[j].LocalPort {
+			return response.Forwards[i].LocalPort < response.Forwards[j].LocalPort
+		}
+		return response.Forwards[i].ID < response.Forwards[j].ID
+	})
+	fmt.Printf("%-10s %-22s %-28s %s\n", "ID", "LOCAL", "REMOTE", "LABEL")
+	for _, f := range response.Forwards {
+		name := f.BrokerName
+		if name == "" {
+			name = f.BrokerHost
+		}
+		fmt.Printf("%-10s %-22s %-28s %s\n",
+			f.ID, fmt.Sprintf("127.0.0.1:%d", f.LocalPort), fmt.Sprintf("%s:%d", name, f.RemotePort), f.Label)
+	}
+	return 0
+}
+
+func parseForwardStart(args []string) (machine string, remotePort, localPort int, label string, err error) {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--local" || a == "--label":
+			if i+1 >= len(args) {
+				return "", 0, 0, "", fmt.Errorf("%s needs a value", a)
+			}
+			value := args[i+1]
+			i++
+			if a == "--local" {
+				localPort, err = parseTCPPort(value)
+				if err != nil {
+					return "", 0, 0, "", fmt.Errorf("bad --local value: %w", err)
+				}
+			} else {
+				label = value
+			}
+		case strings.HasPrefix(a, "--local="):
+			localPort, err = parseTCPPort(strings.TrimPrefix(a, "--local="))
+			if err != nil {
+				return "", 0, 0, "", fmt.Errorf("bad --local value: %w", err)
+			}
+		case strings.HasPrefix(a, "--label="):
+			label = strings.TrimPrefix(a, "--label=")
+		case strings.HasPrefix(a, "--"):
+			return "", 0, 0, "", fmt.Errorf("unknown option %q", a)
+		default:
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) != 2 {
+		return "", 0, 0, "", fmt.Errorf("expected a machine and remote port")
+	}
+	machine = strings.TrimSpace(strings.TrimPrefix(positional[0], "@"))
+	if machine == "" {
+		return "", 0, 0, "", fmt.Errorf("machine is empty")
+	}
+	remotePort, err = parseTCPPort(positional[1])
+	if err != nil {
+		return "", 0, 0, "", fmt.Errorf("bad remote port: %w", err)
+	}
+	if localPort == 0 {
+		localPort = remotePort
+	}
+	return machine, remotePort, localPort, strings.TrimSpace(label), nil
+}
+
+func parseTCPPort(value string) (int, error) {
+	port, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("port must be between 1 and 65535")
+	}
+	return port, nil
+}
+
+func brokerResponseError(body []byte, code int) string {
+	var response struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &response) == nil && strings.TrimSpace(response.Error) != "" {
+		return response.Error
+	}
+	if text := strings.TrimSpace(string(body)); text != "" {
+		return text
+	}
+	return http.StatusText(code)
+}
+
 const helpText = `ut — one fabric across all your machines (Mac, cluster, Windows) over Tailscale.
 
 An agent on any machine reaches every other machine BY NAME, with no SSH setup.
@@ -514,6 +712,10 @@ USAGE
   ut tail  @<machine>:<session>         stream a session's live output (Ctrl-C to stop)
   ut send  @<machine>:<shell> <text...> type text into a shell (no output captured)
   ut cp    <src> <dst>                  copy a file; either side may be <machine>:<path>
+  ut forward @<machine> <port>          expose one remote localhost service locally
+       [--local <port>] [--label <name>]
+  ut forward ls                         list active local forwards
+  ut forward stop <id>                  stop one forward
   ut lab   <subcommand>                 run experiments through the recorded, human-
                                         approved lab protocol (see ` + "`ut lab help`" + `)
 
@@ -530,6 +732,7 @@ EXAMPLES
   ut run  @babel-p9-16:train 'python eval.py --ckpt last'   # venv still active
   ut spawn @babel-p9-16:sweep 'python sweep.py'   ;   ut tail @babel-p9-16:sweep
   ut cp   ./config.yaml babel-p9-16:/home/me/proj/config.yaml
+  ut forward @babel-p9-16 5800          # then open 127.0.0.1:5800 locally
 
 NOTES
   • exec/run return the command's real exit code, stdout on stdout, stderr on stderr —
@@ -547,4 +750,7 @@ NOTES
     skips the shorter idle cleanup, but a finished session is still removed after at most 7 days.
     Prefer spawn for jobs you'll come back to; it keeps the UI clean.
   • Run 'ut ls' first to see the exact machine names.
+  • Port forwards live in the local broker, so they remain active after this command exits
+    and are shared with Argus's Ports and Dashboards views. The preferred local port is
+    bumped upward automatically when it is already occupied.
 `
