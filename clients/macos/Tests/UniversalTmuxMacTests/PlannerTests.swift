@@ -80,6 +80,36 @@ final class PlannerTests: XCTestCase {
         XCTAssertFalse(options.contains { $0.name == "unrelated_live_shell" })
     }
 
+    func testHideDoneComposesWithProjectFilteringWithoutDeletingAnything() {
+        var completed = PlannerCommitment(
+            title: "Completed VLM plan",
+            project: "vlm_gating",
+            deadline: date(hour: 10)
+        )
+        completed.completedAt = date(hour: 9)
+        let openVLM = PlannerCommitment(
+            title: "Open VLM plan",
+            project: "VLM_GATING",
+            deadline: date(hour: 11)
+        )
+        let other = PlannerCommitment(
+            title: "Other project",
+            project: "spatial_fable",
+            deadline: date(hour: 12)
+        )
+        let source = [completed, openVLM, other]
+
+        XCTAssertEqual(
+            PlannerVisibility.apply(to: source, project: "vlm_gating", hideCompleted: true).map(\.title),
+            ["Open VLM plan"]
+        )
+        XCTAssertEqual(
+            PlannerVisibility.apply(to: source, project: "", hideCompleted: true).map(\.title),
+            ["Open VLM plan", "Other project"]
+        )
+        XCTAssertEqual(source.count, 3)
+    }
+
     func testPlannerMutationsPreserveARealDeadlineAndCompletionHistory() {
         let state = AppState(isolatedForTesting: true)
         state.plannerCommitments = []

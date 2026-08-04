@@ -53,6 +53,21 @@ enum PlannerProjectCatalog {
     }
 }
 
+enum PlannerVisibility {
+    static func apply(to commitments: [PlannerCommitment], project: String,
+                      hideCompleted: Bool) -> [PlannerCommitment] {
+        let selection = project.trimmingCharacters(in: .whitespacesAndNewlines)
+        return commitments.filter { commitment in
+            if hideCompleted && commitment.isCompleted { return false }
+            guard !selection.isEmpty else { return true }
+            return commitment.project.compare(
+                selection,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == .orderedSame
+        }
+    }
+}
+
 /// Planner is deliberately a rolling list of finish lines, not a general calendar.
 /// The interface keeps one invariant visible everywhere: earlier deadlines come first.
 struct PlannerView: View {
@@ -60,6 +75,7 @@ struct PlannerView: View {
     @AppStorage("ut.uiScale") private var uiScale = 1.0
     @AppStorage("ut.planner.lastProject") private var draftProject = ""
     @AppStorage("ut.planner.projectFilter") private var projectFilter = ""
+    @AppStorage("ut.planner.hideCompleted") private var hideCompleted = false
 
     @State private var anchorDay = Calendar.current.startOfDay(for: Date())
     @State private var draftTitle = ""
@@ -99,11 +115,11 @@ struct PlannerView: View {
     }
 
     private var filteredCommitments: [PlannerCommitment] {
-        let selection = projectFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !selection.isEmpty else { return state.plannerCommitments }
-        return state.plannerCommitments.filter {
-            $0.project.compare(selection, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
-        }
+        PlannerVisibility.apply(
+            to: state.plannerCommitments,
+            project: projectFilter,
+            hideCompleted: hideCompleted
+        )
     }
 
     private var visibleOpenCount: Int {
@@ -202,9 +218,34 @@ struct PlannerView: View {
             }
             .frame(minWidth: 220, alignment: .leading)
 
-            PlannerProjectFilterControl(selection: $projectFilter, options: plannedProjectOptions) { project in
-                if !project.isEmpty { draftProject = project }
+            HStack(spacing: 7) {
+                PlannerProjectFilterControl(selection: $projectFilter, options: plannedProjectOptions) { project in
+                    if !project.isEmpty { draftProject = project }
+                }
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { hideCompleted.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: hideCompleted ? "eye" : "eye.slash")
+                            .font(cf(9.5, .semibold))
+                        Text(hideCompleted ? "Show done" : "Hide done")
+                            .lineLimit(1)
+                    }
+                    .font(cf(10.5, .medium))
+                    .foregroundStyle(hideCompleted ? Theme.accent : Theme.textSecondary)
+                    .padding(.horizontal, 9)
+                    .frame(height: 29)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(
+                        hideCompleted ? Theme.accent.opacity(0.09) : Theme.surface.opacity(0.45)
+                    ))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                        hideCompleted ? Theme.accent.opacity(0.42) : Theme.border, lineWidth: 1
+                    ))
+                }
+                .buttonStyle(.plain)
+                .help(hideCompleted ? "Show completed plans" : "Hide completed plans")
             }
+            .fixedSize(horizontal: true, vertical: false)
 
             HStack(spacing: 7) {
                 plannerHeaderButton("chevron.left", help: "Previous 7 days") { moveWeek(-7) }
