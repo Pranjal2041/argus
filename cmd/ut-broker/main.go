@@ -196,7 +196,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.History()})
 	})
-	// /userdata — sync store for user-global app data (Workflows, Todo Maps). The user's
+	// /userdata — sync store for user-global app data (Workflows, Todo Maps, Notes, Planner). The user's
 	// Mac broker is the designated sync host; the macOS app and the phone both keep a local
 	// copy and sync here with last-write-wins (the blob carries its own `updatedAt`).
 	// GET ?key=K returns the stored blob; POST ?key=K body=<blob> stores it (keeping the

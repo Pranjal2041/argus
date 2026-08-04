@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// User-global data (Workflows, Todo Maps) is synced through ONE designated host (the
+// User-global data (Workflows, Todo Maps, Notes, Planner) is synced through ONE designated host (the
 // user's Mac) so the macOS app and the phone share it without a central server. The
 // broker stores one envelope per key and serves it; the clients keep a local copy and
 // sync with last-write-wins. Destructive replacements must additionally declare intent,
