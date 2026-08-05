@@ -64,14 +64,16 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   time-grouped notes. They use your Mac's broker as the durable sync host (no central server).
   Planner is currently a macOS surface; Workflows, Todo Maps, and Notes also have Android views.
   Destructive syncs require explicit user intent, and Argus keeps seven daily recovery points for
-  synced data, app preferences, and Lab metadata.
+  synced data, app preferences, the local panel Artifacts library, and Lab metadata.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session
   (read passively from the screen, so it works with nothing attached). Render PDFs, foreground
   clipboard screenshots, and files explicitly saved from Files can live in a local, searchable
-  per-panel Artifacts library and be reopened after the session ends. On macOS, an opt-in toggle keeps the Mac awake and reachable
-  while the screen is locked.
+  per-panel Artifacts library and be reopened after the session ends. After a Mac restart, Argus can
+  reconstruct the previous local workspace—panel names, folders, exact Claude/Codex conversations,
+  and their safety modes—from a crash-safe recovery snapshot. On macOS, an opt-in toggle keeps the
+  Mac awake and reachable while the screen is locked.
 - **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
   per-file tabs, `⌘P` quick-open, `⇧⌘G` Go to Folder, content search, Git-aware tree coloring,
   live Markdown preview, syntax highlighting, image / PDF / media preview, upload & download, and
@@ -201,6 +203,7 @@ architecture, the `ut` CLI, and the security model—live at
 | `internal/fsvc/`      | the `/fs/*` file service (browse / search / read / write / upload) |
 | `internal/labsvc/`    | append-only Lab records, approvals, snapshots, mirrors, and guidance |
 | `internal/forward/`   | the port-forward agent |
+| `internal/recovery/`  | crash-safe local workspace snapshots and verified agent resume adapters |
 | `internal/conpty/`    | Windows ConPTY `SessionProvider` |
 | `clients/macos/`      | native macOS app (AppKit + SwiftTerm + CodeMirror) |
 | `clients/android/`    | native Android app (Kotlin/Compose + embedded `tsnet`) |

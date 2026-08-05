@@ -22,8 +22,8 @@ struct ArtifactsView: View {
             if let artifact = artifacts.selectedArtifact {
                 ArtifactDocumentView(record: artifact)
                     .id(artifact.id)
-            } else if let panelKey = artifacts.selectedPanelKey {
-                panelView(panelKey)
+            } else if let panel = artifacts.selectedPanelContext {
+                panelView(panel)
             } else {
                 libraryView
             }
@@ -67,6 +67,16 @@ struct ArtifactsView: View {
                     .font(cf(11.5)).foregroundStyle(Theme.textTertiary)
             }
             Spacer(minLength: 12)
+            if !artifacts.loadIssues.isEmpty {
+                Button {
+                    artifacts.errorMessage = "\(artifacts.loadIssues.count) saved artifact\(artifacts.loadIssues.count == 1 ? "" : "s") could not be loaded. The affected files remain untouched on disk."
+                } label: {
+                    Label("\(artifacts.loadIssues.count) unavailable", systemImage: "exclamationmark.triangle.fill")
+                        .font(cf(11.5, .medium))
+                        .foregroundStyle(Theme.waiting)
+                }
+                .buttonStyle(.plain)
+            }
             searchField("Search filenames")
             sortMenu
             Button { state.showArtifacts = false } label: {
@@ -134,12 +144,10 @@ struct ArtifactsView: View {
         }
     }
 
-    private func panelView(_ panelKey: String) -> some View {
-        let context = artifacts.selectedPanelContext
-            ?? artifacts.records.first(where: { $0.panel.key == panelKey })?.panel
+    private func panelView(_ context: ArtifactPanelContext) -> some View {
         let records = ArtifactLibraryQuery.records(
             artifacts.records,
-            panelKey: panelKey,
+            panel: context,
             filenameQuery: artifacts.query,
             sort: artifacts.sortOrder
         )
@@ -152,9 +160,9 @@ struct ArtifactsView: View {
                 .foregroundStyle(Theme.textSecondary)
                 .help("All panels")
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(context?.sessionName ?? "Panel")
+                    Text(context.sessionName)
                         .font(cf(20, .bold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                    Text(panelSubtitle(context, count: artifacts.count(for: panelKey)))
+                    Text(panelSubtitle(context, count: artifacts.count(for: context)))
                         .font(cf(11.5)).foregroundStyle(Theme.textTertiary).lineLimit(1)
                 }
                 .frame(maxWidth: 230, alignment: .leading)
@@ -204,7 +212,7 @@ struct ArtifactsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(panel.context.sessionName)
                     .font(cf(14.5, .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Text(panel.context.machineName)
+                Text(panelLocation(panel.context))
                     .font(cf(11.5)).foregroundStyle(Theme.textTertiary).lineLimit(1)
             }
             Spacer()
@@ -315,7 +323,13 @@ struct ArtifactsView: View {
 
     private func panelSubtitle(_ panel: ArtifactPanelContext?, count: Int) -> String {
         guard let panel else { return "\(count) saved artifact\(count == 1 ? "" : "s")" }
-        return panel.machineName + " · \(count) saved artifact\(count == 1 ? "" : "s")"
+        return panelLocation(panel) + " · \(count) saved artifact\(count == 1 ? "" : "s")"
+    }
+
+    private func panelLocation(_ panel: ArtifactPanelContext) -> String {
+        let folder = panel.folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folder.isEmpty else { return panel.machineName }
+        return panel.machineName + " · " + folder
     }
 
     private func artifactIcon(_ record: ArtifactRecord) -> String {

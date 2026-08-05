@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -151,6 +152,78 @@ func copyBackupSource(root, relative, source string, now time.Time, requireJSON 
 	return writeBackupOnce(root, relative, body, 0o600, now)
 }
 
+// linkBackupSourceOnce snapshots an immutable file without multiplying its disk
+// usage for every retained day. Argus artifact payloads and manifests are written
+// atomically and never changed in place, so a hard link is an independent recovery
+// point if the live path is later removed or replaced. A streaming copy is the
+// portable fallback when the backup root is on another volume or disallows links.
+func linkBackupSourceOnce(root, relative, source string, now time.Time) error {
+	dst := filepath.Join(root, backupDay(now), relative)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if err := os.Link(source, dst); err == nil || errors.Is(err, os.ErrExist) {
+		return nil
+	}
+
+	in, err := os.Open(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // an artifact deleted during the walk will be reconsidered next pass
+	}
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(dst)
+	}
+	return err
+}
+
+func backupArtifactLibrary(root string, now time.Time) error {
+	artifactRoot := filepath.Join(homeDir(), "Library", "Application Support", "Argus", "artifacts")
+	return filepath.WalkDir(artifactRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(artifactRoot, path)
+		if err != nil {
+			return err
+		}
+		return linkBackupSourceOnce(root, filepath.Join("artifacts", rel), path, now)
+	})
+}
+
 func backupDurableStateAt(now time.Time) error {
 	backupMu.Lock()
 	defer backupMu.Unlock()
@@ -183,6 +256,13 @@ func backupDurableStateAt(now time.Time) error {
 		// state (dashboards, notebooks, detected W&B runs, settings) beyond /userdata.
 		prefs := filepath.Join(homeDir(), "Library", "Preferences", "dev.universaltmux.mac.plist")
 		if err := copyBackupSource(root, filepath.Join("macos", "dev.universaltmux.mac.plist"), prefs, now, false); err != nil {
+			return err
+		}
+
+		// Panel artifacts are the user's explicit reading/review archive. They are
+		// immutable, so hard-linked daily recovery points cost almost no additional
+		// space while preventing an indexing or deletion bug from erasing history.
+		if err := backupArtifactLibrary(root, now); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 
@@ -227,7 +307,7 @@ func backupDurableStateAt(now time.Time) error {
 	}{
 		CreatedAt:     now.UTC().Format(time.RFC3339),
 		RetentionDays: backupRetentionDays,
-		Includes:      []string{"broker JSON state", "macOS preferences on the hub", "Lab control-plane metadata on the hub"},
+		Includes:      []string{"broker JSON state", "macOS preferences on the hub", "panel artifact library on the hub", "Lab control-plane metadata on the hub"},
 		Excludes:      []string{"executables", "caches", "sockets", "logs", "large immutable Lab artifacts"},
 	}, "", "  ")
 	if err := writeBackupOnce(root, "manifest.json", manifest, 0o600, now); err != nil {

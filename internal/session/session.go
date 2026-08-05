@@ -22,15 +22,16 @@ type Output struct {
 // Info describes one session for the client's sidebar (JSON shape is the wire
 // contract — do not change tags without updating the clients).
 type Info struct {
-	Name     string `json:"name"`
-	Windows  int    `json:"windows"`
-	Attached bool   `json:"attached"`
-	Activity int64  `json:"activity"` // unix seconds of last activity
-	Path     string `json:"path"`     // active pane cwd (folder grouping)
-	State    string `json:"state"`    // attention: working | waiting | idle
-	Agent    bool   `json:"agent"`    // created by the mesh (ut spawn / default ut sh): hidden by default and automatically reaped
-	Hidden   bool   `json:"hidden"`   // user-hidden in a client UI; broker-owned so the hide syncs across devices
-	ID       string `json:"id"`       // backend's STABLE session handle (tmux $N): unchanged across rename, so clients connect by it to survive a rename across any reconnect
+	Name      string `json:"name"`
+	Windows   int    `json:"windows"`
+	Attached  bool   `json:"attached"`
+	Activity  int64  `json:"activity"`            // unix seconds of last activity
+	Path      string `json:"path"`                // active pane cwd (folder grouping)
+	State     string `json:"state"`               // attention: working | waiting | idle
+	Agent     bool   `json:"agent"`               // created by the mesh (ut spawn / default ut sh): hidden by default and automatically reaped
+	Hidden    bool   `json:"hidden"`              // user-hidden in a client UI; broker-owned so the hide syncs across devices
+	ID        string `json:"id"`                  // backend transport handle (tmux $N): stable across rename, but reusable after a server restart
+	LineageID string `json:"lineageID,omitempty"` // one session lifetime, never a reusable transport handle; survives rename and disambiguates restarted tmux servers
 }
 
 // Session is one live session the broker streams to/from clients.

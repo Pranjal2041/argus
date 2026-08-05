@@ -4,7 +4,9 @@
 package conpty
 
 import (
+	"bytes"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
 )
@@ -15,16 +17,10 @@ const (
 	defRows = 30
 )
 
-// renderRing reconstructs a ConPTY session's CURRENT SCREEN as plain text, for the
-// command-center status updater (GET /recent). ConPTY is itself a terminal emulator
-// that repaints its viewport with cursor addressing — it is NOT an append-only log,
-// so simply stripping escapes from the raw ring loses any line that was cursor-
-// overwritten or scrolled (verified: a burst of flowing output came back empty).
-// The only correct way to read it back is to emulate it the way the client's
-// terminal does: feed the raw ring through a vt10x virtual terminal sized to the
-// session and dump the resulting grid. That deterministically yields what the
-// session actually shows (the recent conversation plus the agent's input/footer) —
-// which is exactly what the status model needs.
+// renderRing reconstructs a complete VT stream's current screen as plain text. It
+// remains the small pure helper used by tests and one-shot callers; live ConPTY
+// sessions use captureScreen incrementally because their bounded raw ring is only a
+// suffix and therefore is not a valid stream once its beginning has been evicted.
 //
 // Faint (SGR 2) text — Claude Code's dim autosuggestion — is blanked out first (see
 // blankFaint) so the summarizer doesn't read the placeholder as the user's intent
@@ -38,16 +34,95 @@ func renderRing(b []byte, cols, rows int) string {
 	if len(b) == 0 {
 		return ""
 	}
+	screen := newCaptureScreen(cols, rows)
+	screen.write(b)
+	return screen.text()
+}
+
+// captureScreen is the broker's authoritative, incrementally-maintained view of a
+// ConPTY screen. Keeping the emulator alive matters: a TUI paints most of its screen
+// once, then may emit megabytes of cursor-addressed spinner updates. Re-emulating an
+// arbitrary suffix of that stream loses the original paint (and a suffix can begin
+// midway through an escape sequence), which made /recent intermittently blank.
+//
+// Resize is applied at the same moment as the real ConPTY resize, so bytes produced
+// at different terminal widths are never replayed as though they all had the latest
+// width. The bounded raw ring remains useful for reconnect/state detection, but it is
+// no longer treated as a terminal checkpoint.
+type captureScreen struct {
+	vt       vt10x.Terminal
+	cols     int
+	rows     int
+	faint    faintFilter
+	utf8Tail []byte
+}
+
+func newCaptureScreen(cols, rows int) *captureScreen {
 	if cols <= 0 || cols > 1000 {
 		cols = defCols
 	}
 	if rows <= 0 || rows > 1000 {
 		rows = defRows
 	}
-	vt := vt10x.New(vt10x.WithSize(cols, rows))
-	_, _ = vt.Write(blankFaint(b))
-	screen := vt.String()
+	return &captureScreen{
+		vt:   vt10x.New(vt10x.WithSize(cols, rows)),
+		cols: cols,
+		rows: rows,
+	}
+}
 
+func (s *captureScreen) resize(cols, rows int) {
+	if cols <= 0 || rows <= 0 || cols > 1000 || rows > 1000 || (cols == s.cols && rows == s.rows) {
+		return
+	}
+	s.vt.Resize(cols, rows)
+	s.cols, s.rows = cols, rows
+}
+
+func (s *captureScreen) write(b []byte) {
+	filtered := s.faint.filter(b)
+	if len(s.utf8Tail) > 0 {
+		joined := make([]byte, 0, len(s.utf8Tail)+len(filtered))
+		joined = append(joined, s.utf8Tail...)
+		joined = append(joined, filtered...)
+		filtered = joined
+		s.utf8Tail = s.utf8Tail[:0]
+	}
+
+	// vt10x keeps escape-parser state across Write calls, but an incomplete UTF-8
+	// rune at the end of a pipe read must be carried into the next call explicitly.
+	end := completeUTF8Prefix(filtered)
+	if end > 0 {
+		_, _ = s.vt.Write(filtered[:end])
+	}
+	if end < len(filtered) {
+		s.utf8Tail = append(s.utf8Tail, filtered[end:]...)
+	}
+}
+
+func completeUTF8Prefix(b []byte) int {
+	for i := 0; i < len(b); {
+		if b[i] < utf8.RuneSelf {
+			i++
+			continue
+		}
+		if !utf8.FullRune(b[i:]) {
+			return i
+		}
+		_, n := utf8.DecodeRune(b[i:])
+		if n == 0 {
+			return i
+		}
+		i += n
+	}
+	return len(b)
+}
+
+func (s *captureScreen) text() string {
+	return trimScreen(s.vt.String())
+}
+
+func trimScreen(screen string) string {
 	lines := strings.Split(screen, "\n")
 	for i := range lines {
 		lines[i] = strings.TrimRight(lines[i], " \t")
@@ -63,6 +138,66 @@ func renderRing(b []byte, cols, rows int) string {
 	return strings.Join(lines[start:end], "\n")
 }
 
+// faintFilter is blankFaint made streaming: ConPTY may split an SGR sequence
+// across pipe reads, so both the pending escape and faint state must survive calls.
+// It deliberately blanks rather than removes text to preserve terminal columns.
+type faintFilter struct {
+	faint   bool
+	pending []byte
+}
+
+func (f *faintFilter) filter(b []byte) []byte {
+	if len(f.pending) > 0 {
+		joined := make([]byte, 0, len(f.pending)+len(b))
+		joined = append(joined, f.pending...)
+		joined = append(joined, b...)
+		b = joined
+		f.pending = f.pending[:0]
+	}
+
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		c := b[i]
+		if c == 0x1b {
+			if i+1 >= len(b) {
+				f.pending = append(f.pending, b[i:]...)
+				break
+			}
+			if b[i+1] == '[' {
+				j := i + 2
+				for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
+					j++
+				}
+				if j >= len(b) {
+					f.pending = append(f.pending, b[i:]...)
+					break
+				}
+				if b[j] == 'm' {
+					for _, par := range strings.Split(string(b[i+2:j]), ";") {
+						switch par {
+						case "2":
+							f.faint = true
+						case "0", "22", "":
+							f.faint = false
+						}
+					}
+				}
+				out = append(out, b[i:j+1]...)
+				i = j + 1
+				continue
+			}
+		}
+
+		if f.faint && c >= 0x20 && c < 0x7f {
+			out = append(out, ' ')
+		} else {
+			out = append(out, c)
+		}
+		i++
+	}
+	return out
+}
+
 // blankFaint overwrites faint (SGR 2) ASCII characters with spaces, copying every
 // escape sequence and every other byte through verbatim. Blanking (rather than
 // deleting) keeps each character's column so the virtual terminal lays out the rest
@@ -70,42 +205,9 @@ func renderRing(b []byte, cols, rows int) string {
 // faint state is tracked across the stream: 2 turns it on; 0/22 (and a bare ESC[m)
 // turn it off; parameters within one SGR are applied left-to-right.
 func blankFaint(b []byte) []byte {
-	out := make([]byte, 0, len(b))
-	faint := false
-	for i := 0; i < len(b); {
-		c := b[i]
-		if c == 0x1b && i+1 < len(b) && b[i+1] == '[' { // CSI: copy verbatim, track faint on SGR
-			j := i + 2
-			for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
-				j++
-			}
-			if j < len(b) && b[j] == 'm' { // SGR
-				for _, par := range strings.Split(string(b[i+2:j]), ";") {
-					switch par {
-					case "2":
-						faint = true
-					case "0", "22", "":
-						faint = false
-					}
-				}
-			}
-			seqEnd := j + 1
-			if j >= len(b) {
-				seqEnd = len(b)
-			}
-			out = append(out, b[i:seqEnd]...)
-			i = seqEnd
-			continue
-		}
-		// Blank only printable ASCII faint chars (the autosuggestion is ASCII); leaving
-		// multibyte bytes untouched avoids miscounting a rune's display width.
-		if faint && c >= 0x20 && c < 0x7f {
-			out = append(out, ' ')
-			i++
-			continue
-		}
-		out = append(out, c)
-		i++
-	}
-	return out
+	var f faintFilter
+	out := f.filter(b)
+	// Preserve the historical helper's behavior for a truncated final escape: it
+	// copied those bytes through rather than dropping them.
+	return append(out, bytes.Clone(f.pending)...)
 }

@@ -19,6 +19,30 @@ struct PortInfo: Codable, Identifiable {
     let pid: Int
     var web: Bool = false   // set by /ports?probe=1 — the port answered an HTTP request
     var id: Int { port }
+
+    private enum CodingKeys: String, CodingKey {
+        case port, address, process, pid, web
+    }
+
+    init(port: Int, address: String, process: String, pid: Int, web: Bool = false) {
+        self.port = port
+        self.address = address
+        self.process = process
+        self.pid = pid
+        self.web = web
+    }
+
+    // Go omits `web` when it is false. Swift's synthesized decoder does not
+    // apply the property default for a missing key; it rejects the entire
+    // response instead. That made every normal `/ports` response look empty.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        port = try values.decode(Int.self, forKey: .port)
+        address = try values.decode(String.self, forKey: .address)
+        process = try values.decode(String.self, forKey: .process)
+        pid = try values.decode(Int.self, forKey: .pid)
+        web = try values.decodeIfPresent(Bool.self, forKey: .web) ?? false
+    }
 }
 
 /// A remembered forward config, persisted for one-click re-run.
@@ -37,6 +61,7 @@ final class PortsModel: ObservableObject {
     @Published var active: [PortForward] = []
     @Published var saved: [SavedForward] = []
     @Published var portsByHost: [String: [PortInfo]] = [:]   // brokerHost -> listening ports
+    @Published var portErrorsByHost: [String: String] = [:]
     @Published var loadingPortsFor: String? = nil
 
     /// The local Mac broker is the forward agent.
@@ -60,13 +85,38 @@ final class PortsModel: ObservableObject {
 
     /// Fetch a host's listening ports (uses that broker's own base URL/scheme).
     func fetchPorts(host: String, base: String) {
-        guard let url = URL(string: base + "/ports") else { return }
-        DispatchQueue.main.async { self.loadingPortsFor = host }
-        brokerSession.dataTask(with: url) { data, _, _ in
-            let ports = (data.flatMap { try? JSONDecoder().decode(PortsResp.self, from: $0) }?.ports ?? [])
-                .sorted { $0.port < $1.port }
+        guard let url = URL(string: base + "/ports") else {
+            portErrorsByHost[host] = "This broker has an invalid address."
+            return
+        }
+        loadingPortsFor = host
+        portErrorsByHost[host] = nil
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        brokerSession.dataTask(with: request) { data, response, error in
+            let result: Result<[PortInfo], Error>
+            do {
+                if let error { throw error }
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    throw PortDiscoveryError.badResponse
+                }
+                guard let data else { throw PortDiscoveryError.badResponse }
+                result = .success(try PortListDecoder.decode(data))
+            } catch {
+                result = .failure(error)
+            }
             DispatchQueue.main.async {
-                self.portsByHost[host] = ports
+                switch result {
+                case .success(let ports):
+                    self.portsByHost[host] = ports
+                    self.portErrorsByHost[host] = nil
+                case .failure(let error):
+                    // Keep the last good list on a transient failure. An empty
+                    // state must mean the broker returned zero listeners, not
+                    // that networking or decoding failed.
+                    self.portErrorsByHost[host] = (error as? PortDiscoveryError)?.errorDescription
+                        ?? "Could not reach this broker. Refresh to retry."
+                }
                 if self.loadingPortsFor == host { self.loadingPortsFor = nil }
             }
         }.resume()
@@ -114,4 +164,18 @@ final class PortsModel: ObservableObject {
 }
 
 private struct ForwardsResp: Codable { let forwards: [PortForward]? }
-private struct PortsResp: Codable { let ports: [PortInfo]? }
+struct PortsResp: Codable { let ports: [PortInfo]? }
+
+enum PortListDecoder {
+    static func decode(_ data: Data) throws -> [PortInfo] {
+        try JSONDecoder().decode(PortsResp.self, from: data).ports?.sorted { $0.port < $1.port } ?? []
+    }
+}
+
+private enum PortDiscoveryError: LocalizedError {
+    case badResponse
+
+    var errorDescription: String? {
+        "The broker returned an invalid port list."
+    }
+}

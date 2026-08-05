@@ -313,12 +313,13 @@ func isInternalSession(name string) bool { return strings.HasPrefix(name, intern
 // ListSessionInventory returns session metadata without capturing every pane.
 // A missing server / no sessions yields an empty list, not an error.
 func ListSessionInventory(socket string) []SessionInfo {
-	// session_id ($N) is the STABLE handle clients connect by (survives rename).
-	// It and @ut_agent are placed AFTER pane_current_path so a tab inside the path
-	// can't shift the fixed trailing fields — both id and the agent flag are
-	// tab-free, so reading from the end is safe (SplitN keeps the path in f[4]).
+	// session_id ($N) is only a transport handle: it survives a rename, but tmux
+	// reuses it after the server restarts. lineageID includes the tmux server PID
+	// and session creation time, so archival clients can bridge a rename without
+	// ever confusing a later `$N` reuse for the same panel. All fixed fields are
+	// placed AFTER pane_current_path (SplitN keeps a tab in the path inside f[4]).
 	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\t#{@ut_agent}")...).Output()
+		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}")...).Output()
 	if err != nil {
 		return []SessionInfo{}
 	}
@@ -327,7 +328,7 @@ func ListSessionInventory(socket string) []SessionInfo {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 7)
+		f := strings.SplitN(line, "\t", 8)
 		if len(f) < 4 {
 			continue
 		}
@@ -345,10 +346,14 @@ func ListSessionInventory(socket string) []SessionInfo {
 		if len(f) >= 6 {
 			id = f[5]
 		}
-		agent := len(f) >= 7 && f[6] == "1"
+		lineageID := ""
+		if len(f) >= 7 {
+			lineageID = f[6]
+		}
+		agent := len(f) >= 8 && f[7] == "1"
 		sessions = append(sessions, SessionInfo{
 			Name: f[0], Windows: windows, Attached: attached > 0, Activity: act, Path: path,
-			Agent: agent, ID: id,
+			Agent: agent, ID: id, LineageID: lineageID,
 		})
 	}
 	return sessions

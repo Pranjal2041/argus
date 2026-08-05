@@ -278,6 +278,51 @@ func ccLog(_ s: String) {
     else { try? data.write(to: url) }
 }
 
+/// A working TUI can briefly expose only its prompt/footer while it is between
+/// synchronized repaints. Windows ConPTY captures used to make this much worse by
+/// rebuilding the screen from a truncated VT suffix. Never let such a low-signal
+/// frame replace a useful status with "idle at prompt"; retry it, then keep the
+/// deterministic working state until a substantive frame arrives.
+func ccCaptureLooksTransient(_ output: String, state: String) -> Bool {
+    guard state == "working" else { return false }
+    let lower = output.lowercased()
+    // Short failures and explicit attention requests are substantive even when the
+    // rest of the screen is empty.
+    let urgent = ["error", "failed", "failure", "exception", "traceback", "rate limit",
+                  "permission denied", "needs you", "waiting for approval"]
+    if urgent.contains(where: lower.contains) { return false }
+
+    var signal = 0
+    for raw in output.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let low = line.lowercased()
+        if line == "›" || line == ">" { continue }
+        // Agent footer/status bar: useful for the deterministic dot, not as a
+        // description of the work. It is often the only thing left in a bad frame.
+        if low.contains("goal achieved") || low.contains("goal paused") ||
+            low.contains("esc to interrupt") || low.contains("stop to interrupt") {
+            continue
+        }
+        signal += line.unicodeScalars.reduce(0) {
+            $0 + (CharacterSet.alphanumerics.contains($1) ? 1 : 0)
+        }
+    }
+    return signal < 32
+}
+
+/// The broker's working state is a direct terminal signal (on Windows, the latest
+/// OSC-title spinner), while idle/look/milestone are model interpretations of a
+/// sampled screen. They must never contradict that live signal. Attention labels
+/// remain untouched: a running turn can still be stuck, drifting, or need a decision.
+func ccReconcileLiveState(_ status: AgentStatus, state: String) -> AgentStatus {
+    guard state == "working", ["idle", "look", "milestone"].contains(status.label) else {
+        return status
+    }
+    var reconciled = status
+    reconciled.label = "working"
+    return reconciled
+}
+
 /// Durable, append-only audit log of MANUAL status changes (the user overriding an
 /// auto-status). Unlike ccLog this lives in Application Support (NOT /tmp, which is
 /// cleared), so the record accumulates across launches and reboots — it's the ground
@@ -434,7 +479,7 @@ final class CommandCenterModel: ObservableObject {
             ccLog("pulse n=\(pulseN) machines=\(app.machines.count) sessions=\(nonAgent)")
         }
         var liveKeys = Set<String>()
-        var candidates: [(ref: SessionRef, machine: Machine, name: String, force: Bool)] = []
+        var candidates: [(ref: SessionRef, machine: Machine, name: String, state: String, force: Bool)] = []
         for m in app.machines {
             // Skip hidden sessions entirely: no model call is spent on them (the
             // status agent is inactive for hidden panels) and they never reach the
@@ -449,7 +494,7 @@ final class CommandCenterModel: ObservableObject {
                 // 30s window). Otherwise the 30s sweep re-checks content and refreshes only
                 // if the output actually changed.
                 if dotChanged || fullSweep {
-                    candidates.append((ref, m, s.name, dotChanged))
+                    candidates.append((ref, m, s.name, s.state, dotChanged))
                 }
             }
         }
@@ -457,7 +502,7 @@ final class CommandCenterModel: ObservableObject {
         // LEAST-RECENTLY-SUMMARIZED first. Machine order put local sessions first, so they
         // grabbed every slot and remote (babel) sessions were perpetually `gated`/starved.
         candidates.sort { (lastOKAt[$0.ref.id] ?? 0) < (lastOKAt[$1.ref.id] ?? 0) }
-        for c in candidates { update(ref: c.ref, machine: c.machine, name: c.name, force: c.force) }
+        for c in candidates { update(ref: c.ref, machine: c.machine, name: c.name, state: c.state, force: c.force) }
         refreshAttention()
         guard fullSweep else { return }
         // Drop status + continuity for sessions that vanished.
@@ -494,7 +539,7 @@ final class CommandCenterModel: ObservableObject {
         }
     }
 
-    private func update(ref: SessionRef, machine: Machine, name: String, force: Bool = false) {
+    private func update(ref: SessionRef, machine: Machine, name: String, state: String, force: Bool = false) {
         guard !busy.contains(ref.id) else { return }   // one op per session; NO global cap on the cheap fetch
         busy.insert(ref.id)
         let key = ref.id, httpBase = machine.httpBase
@@ -502,10 +547,42 @@ final class CommandCenterModel: ObservableObject {
             guard let self else { return }
             defer { self.busy.remove(key) }
             ccLog("sweep \(key) base=\(httpBase) force=\(force)")
-            guard let output = await Self.fetchRecent(httpBase: httpBase, session: name),
+            guard var output = await Self.fetchRecent(httpBase: httpBase, session: name),
                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 ccLog("FETCH-FAIL \(key) base=\(httpBase)")
                 NSLog("[cc] %@ recent empty/failed", key); return
+            }
+            if ccCaptureLooksTransient(output, state: state) {
+                // A repaint normally settles in milliseconds. Retry once instead of
+                // paying for a model call on a frame we already know is incomplete.
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                if let retry = await Self.fetchRecent(httpBase: httpBase, session: name),
+                   !retry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    output = retry
+                }
+            }
+            if ccCaptureLooksTransient(output, state: state) {
+                ccLog("hold-transient \(key) len=\(output.count)")
+                // The blue deterministic dot is authoritative here. Correct a stale
+                // idle card immediately, but retain any useful prior description.
+                let previous = self.statuses[key]
+                if previous?.label != "working" {
+                    let oldSummary = previous?.oneLiner ?? ""
+                    let oldLower = oldSummary.lowercased()
+                    let contradictsWorking = oldSummary.isEmpty || oldLower.contains("at prompt") ||
+                        oldLower.contains("no work") || oldLower.contains("nothing running")
+                    self.statuses[key] = AgentStatus(
+                        label: "working",
+                        oneLiner: contradictsWorking
+                            ? "Work is in progress; waiting for the terminal view to settle."
+                            : oldSummary,
+                        lookAtThis: contradictsWorking ? nil : previous?.lookAtThis,
+                        updatedAt: Date()
+                    )
+                    self.persist()
+                    self.publish()
+                }
+                return // do not set lastHash: the next sweep retries this panel
             }
             ccLog("fetch-ok \(key) len=\(output.count)")
             // Skip the (paid) model call when the output is unchanged since the last
@@ -519,10 +596,18 @@ final class CommandCenterModel: ObservableObject {
             guard self.claudeInflight < self.maxClaude else { ccLog("gated \(key)"); return }
             self.claudeInflight += 1
             self.inflight.insert(key)
-            let status = await self.provider.status(forKey: key, output: output, note: self.correction[key])
+            let generated = await self.provider.status(forKey: key, output: output, note: self.correction[key])
             self.claudeInflight -= 1
             self.inflight.remove(key)
-            guard let status else { ccLog("claude-nil \(key)"); NSLog("[cc] %@ claude returned nil", key); return }
+            guard let generated else { ccLog("claude-nil \(key)"); NSLog("[cc] %@ claude returned nil", key); return }
+            // A model call can take several seconds, so reconcile against the CURRENT
+            // broker state rather than the state captured when this sweep began.
+            let liveState = self.app?.sessionsByMachine[ref.machineID]?
+                .first(where: { $0.name == name })?.state ?? state
+            let status = ccReconcileLiveState(generated, state: liveState)
+            if status.label != generated.label {
+                ccLog("reconcile-live \(key) \(generated.label)->\(status.label)")
+            }
             self.correction[key] = nil   // delivered once; it now lives in the resumed conversation as a turn, so the model keeps it in context going forward
             ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
             self.lastHash[key] = h

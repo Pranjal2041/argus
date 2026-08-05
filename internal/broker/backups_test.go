@@ -61,6 +61,8 @@ func TestDurableStateBackupCoversBrokerMacAndLabMetadata(t *testing.T) {
 	mustWrite(filepath.Join(brokerStateDir(), "hidden-test.json"), `["panel"]`)
 	mustWrite(filepath.Join(brokerStateDir(), "ignored.log"), `not durable state`)
 	mustWrite(filepath.Join(home, "Library", "Preferences", "dev.universaltmux.mac.plist"), `plist-bytes`)
+	mustWrite(filepath.Join(home, "Library", "Application Support", "Argus", "artifacts", "records", "artifact.json"), `{"id":"artifact"}`)
+	mustWrite(filepath.Join(home, "Library", "Application Support", "Argus", "artifacts", "pdf", "artifact.pdf"), `important-pdf`)
 	mustWrite(filepath.Join(labRoot, "store-id"), `store-1`)
 	mustWrite(filepath.Join(labRoot, "sets", "s-one", "set.json"), `{"name":"one"}`)
 	mustWrite(filepath.Join(labRoot, "sets", "s-one", "runs", "R1", "log.txt"), `large artifact`)
@@ -75,6 +77,8 @@ func TestDurableStateBackupCoversBrokerMacAndLabMetadata(t *testing.T) {
 		filepath.Join("broker", "history-test.json"),
 		filepath.Join("broker", "hidden-test.json"),
 		filepath.Join("macos", "dev.universaltmux.mac.plist"),
+		filepath.Join("artifacts", "records", "artifact.json"),
+		filepath.Join("artifacts", "pdf", "artifact.pdf"),
 		filepath.Join("lab", "store-id"),
 		filepath.Join("lab", "sets", "s-one", "set.json"),
 	} {
@@ -89,5 +93,14 @@ func TestDurableStateBackupCoversBrokerMacAndLabMetadata(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, relative)); !os.IsNotExist(err) {
 			t.Errorf("transient/large file was backed up: %s", relative)
 		}
+	}
+
+	// A live-store deletion must not remove the immutable recovery point.
+	if err := os.Remove(filepath.Join(home, "Library", "Application Support", "Argus", "artifacts", "pdf", "artifact.pdf")); err != nil {
+		t.Fatal(err)
+	}
+	artifactBackup := filepath.Join(root, "artifacts", "pdf", "artifact.pdf")
+	if got, err := os.ReadFile(artifactBackup); err != nil || string(got) != "important-pdf" {
+		t.Fatalf("artifact recovery copy = %q, %v", got, err)
 	}
 }
