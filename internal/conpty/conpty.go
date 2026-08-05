@@ -13,6 +13,8 @@ package conpty
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,11 +39,12 @@ const (
 
 // winSession is one ConPTY-backed session, owned by the Provider.
 type winSession struct {
-	name  string
-	dir   string
-	cpty  *conpty.ConPty
-	outCh chan session.Output
-	once  sync.Once
+	name      string
+	dir       string
+	lineageID string
+	cpty      *conpty.ConPty
+	outCh     chan session.Output
+	once      sync.Once
 
 	agent      bool // created by the mesh (ut spawn / default ut sh): hidden from the UI
 	agentShell bool // persistent `ut sh`: seven-day inactivity cleanup instead of completion-based cleanup
@@ -51,7 +54,8 @@ type winSession struct {
 
 	mu      sync.Mutex
 	ring    []byte
-	modes   modeTracker // DEC private modes, re-emitted in Snapshot so bracketed paste etc. survive attach
+	capture *captureScreen // authoritative rendered screen for /recent; never reconstructed from a truncated ring
+	modes   modeTracker    // DEC private modes, re-emitted in Snapshot so bracketed paste etc. survive attach
 	lastOut int64
 	cols    int // current ConPTY size (the width all output is formatted for)
 	rows    int
@@ -74,12 +78,16 @@ func (s *winSession) Resize(cols, rows int) error {
 	if cols <= 0 || rows <= 0 || cols > 1000 || rows > 1000 {
 		return nil
 	}
+	s.mu.Lock()
 	if err := s.cpty.Resize(cols, rows); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	s.mu.Lock()
 	changed := cols != s.cols || rows != s.rows
 	s.cols, s.rows = cols, rows
+	if s.capture != nil {
+		s.capture.resize(cols, rows)
+	}
 	s.mu.Unlock()
 	if changed {
 		// In-band size event so EVERY viewer (not just the one that asked) re-pins
@@ -144,6 +152,9 @@ func (s *winSession) readLoop() {
 			data := make([]byte, n)
 			copy(data, buf[:n])
 			s.mu.Lock()
+			if s.capture != nil {
+				s.capture.write(data)
+			}
 			s.ring = append(s.ring, data...)
 			if len(s.ring) > ringMax {
 				s.ring = s.ring[len(s.ring)-ringMax:]
@@ -189,7 +200,7 @@ func (p *Provider) ListInventory() []session.Info {
 		info := session.Info{
 			Name: s.name, Windows: 1, Attached: false,
 			Activity: s.lastOut, Path: s.dir,
-			Agent: s.agent,
+			Agent: s.agent, LineageID: s.lineageID,
 		}
 		s.mu.Unlock()
 		out = append(out, info)
@@ -230,10 +241,11 @@ func (p *Provider) Has(name string) bool {
 // capability so the macOS client can summarize Windows sessions too — without it,
 // /recent returns "capture not supported" and Windows sessions never get a status.
 //
-// tmux gets this free from capture-pane over its rendered grid; ConPTY has only the
-// raw VT ring, which is a stream of cursor-addressed repaints (not an append log),
-// so we emulate it through a vt10x virtual terminal sized to the session and dump
-// the screen (see renderRing). `lines` is unused — the visible screen is the bound.
+// tmux gets this free from capture-pane over its rendered grid. ConPTY's raw output
+// is a cursor-addressed stream rather than an append log, so each session maintains
+// an incremental virtual screen as bytes arrive. Replaying the bounded raw ring here
+// is incorrect once its beginning has been evicted or the ConPTY has been resized.
+// `lines` is unused — the visible screen is the natural bound.
 func (p *Provider) Capture(name string, lines int) (string, error) {
 	p.mu.Lock()
 	s := p.sessions[name]
@@ -242,10 +254,13 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 		return "", fmt.Errorf("no such session: %q", name)
 	}
 	s.mu.Lock()
-	ring := append([]byte(nil), s.ring...) // copy so rendering runs off the session lock
-	cols, rows := s.cols, s.rows
+	if s.capture == nil {
+		s.mu.Unlock()
+		return "", nil
+	}
+	text := s.capture.text()
 	s.mu.Unlock()
-	return renderRing(ring, cols, rows), nil
+	return text, nil
 }
 
 func (p *Provider) Create(name, dir string) error {
@@ -274,10 +289,11 @@ func (p *Provider) create(name, dir string, agent, agentShell bool, reapIdle int
 		return nil, false, fmt.Errorf("start ConPTY for %q: %w", name, err)
 	}
 	s := &winSession{
-		name: name, dir: dir, cpty: cpty,
+		name: name, dir: dir, lineageID: newSessionLineageID(), cpty: cpty,
 		outCh: make(chan session.Output, 256), lastOut: time.Now().Unix(),
 		cols: defCols, rows: defRows,
-		agent: agent, agentShell: agentShell, reapIdle: reapIdle, doneFile: doneFile,
+		capture: newCaptureScreen(defCols, defRows),
+		agent:   agent, agentShell: agentShell, reapIdle: reapIdle, doneFile: doneFile,
 	}
 	p.sessions[name] = s
 	p.mu.Unlock()
@@ -288,6 +304,16 @@ func (p *Provider) create(name, dir string, agent, agentShell bool, reapIdle int
 		p.remove(name)
 	}()
 	return s, true, nil
+}
+
+func newSessionLineageID() string {
+	var raw [16]byte
+	if _, err := cryptorand.Read(raw[:]); err == nil {
+		return "conpty:" + hex.EncodeToString(raw[:])
+	}
+	// crypto/rand failing is extraordinarily unusual. Keep the wire field useful
+	// without making session creation fail for an unrelated entropy outage.
+	return fmt.Sprintf("conpty:%d", time.Now().UnixNano())
 }
 
 // CreateAgentShell creates the persistent stateful shell used by `ut sh` and

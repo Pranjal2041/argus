@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"tailscale.com/tsnet"
@@ -34,11 +35,18 @@ import (
 	"universal-tmux/internal/labsvc"
 	"universal-tmux/internal/mesh"
 	"universal-tmux/internal/portfwd"
+	"universal-tmux/internal/recovery"
 	sess "universal-tmux/internal/session" // aliased: the `session` flag var below shadows the package name
 	webassets "universal-tmux/web"
 )
 
 func main() {
+	// Recovery must work before the HTTP broker exists: immediately after a Mac
+	// restart the desktop app invokes this local CLI to inspect/restore the prior
+	// tmux server, then bootstraps the normal supervisor.
+	if len(os.Args) > 1 && os.Args[1] == "recovery" {
+		os.Exit(recovery.RunCLIForProcess(os.Args[2:]))
+	}
 	// Mesh CLIENT mode: `ut-broker <verb> ...` (wrapped by the `ut` script) is a
 	// fabric command, not the server. Dispatch before any server setup.
 	if len(os.Args) > 1 && isMeshVerb(os.Args[1]) {
@@ -79,7 +87,15 @@ func main() {
 	go broker.RunDailyBackupLoop(ctx)
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
-	fwdMgr := forward.NewManager()                                 // port-hub agent (used when this broker is the local agent)
+	// Automatic reboot recovery is a Mac workspace feature. Cluster brokers do
+	// not spend cycles walking agent process state unless explicitly opted in.
+	if runtime.GOOS == "darwin" || os.Getenv("UT_RECOVERY_ENABLE") == "1" {
+		recoveryStore := recovery.NewStore(*tmuxSock)
+		go recoveryStore.RunCaptureLoop(ctx, 30*time.Second, func(err error) {
+			log.Printf("warn: workspace recovery snapshot: %v", err)
+		})
+	}
+	fwdMgr := forward.NewManager() // port-hub agent (used when this broker is the local agent)
 	// Initialized once the listener has supplied the local/tsnet transport, before
 	// the HTTP server starts accepting requests. The earlier /forwards handler
 	// closes over it so CLI-created forwards can use the same mesh resolver.

@@ -31,6 +31,45 @@ func TestHasSessionDoesNotTreatStableIDAsExactName(t *testing.T) {
 	}
 }
 
+func TestSessionLineageSurvivesRename(t *testing.T) {
+	provider, _ := tmuxIdentityTestProvider(t)
+	if err := provider.Create("alpha", ""); err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	before := provider.ListInventory()[0]
+	if before.LineageID == "" {
+		t.Fatal("alpha has no lineage id")
+	}
+	if err := provider.Rename("alpha", "beta"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	after := provider.ListInventory()[0]
+	if after.ID != before.ID || after.LineageID != before.LineageID {
+		t.Fatalf("rename changed identity: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestSessionLineageDistinguishesTmuxIDReuseAfterServerRestart(t *testing.T) {
+	provider, socket := tmuxIdentityTestProvider(t)
+	if err := provider.Create("before", ""); err != nil {
+		t.Fatalf("create before: %v", err)
+	}
+	before := provider.ListInventory()[0]
+	if err := exec.Command("tmux", "-L", socket, "kill-server").Run(); err != nil {
+		t.Fatalf("kill first server: %v", err)
+	}
+	if err := provider.Create("after", ""); err != nil {
+		t.Fatalf("create after: %v", err)
+	}
+	after := provider.ListInventory()[0]
+	if before.ID != after.ID {
+		t.Fatalf("fixture did not reuse a transport id: before=%q after=%q", before.ID, after.ID)
+	}
+	if before.LineageID == after.LineageID {
+		t.Fatalf("reused transport id also reused lineage: %q", before.LineageID)
+	}
+}
+
 func TestSessionForIDRejectsLiteralNameAfterIDDies(t *testing.T) {
 	provider, _ := tmuxIdentityTestProvider(t)
 	if err := provider.Create("alpha", ""); err != nil {

@@ -17,6 +17,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var artifacts = ArtifactStore()           // explicit panel artifact library
     @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
+    @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
     @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
     private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
 
@@ -35,6 +36,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(lab)
                 .environmentObject(artifacts)
                 .environmentObject(themeStore)
+                .environmentObject(recovery)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
@@ -75,6 +77,7 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
+                Button("Restore Previous Workspace…") { recovery.open() }
                 Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
@@ -707,6 +710,7 @@ struct RootView: View {
     @EnvironmentObject var commandCenter: CommandCenterModel
     @EnvironmentObject var lab: LabModel
     @EnvironmentObject var artifacts: ArtifactStore
+    @EnvironmentObject var recovery: WorkspaceRecoveryController
     @ViewBuilder private var ledgerPane: some View {
         LedgerView(panel: ledgerHost.panel).onAppear { ledgerHost.panel.refresh() }
     }
@@ -799,6 +803,8 @@ struct RootView: View {
             // hardware alert needs its status model running in the background.
             if CapsLockAttentionPrefs.enabled { commandCenter.start() }
             lab.bind(state)   // app-wide: approval notifications fire with the pane closed
+            recovery.bind(state)
+            recovery.checkForRecovery(offerAutomatically: true)
             AttentionNotifier.shared.requestAuthorizationIfNeeded()
             state.refreshAll(); state.startAutoRefresh()
         }
@@ -846,6 +852,7 @@ struct RootView: View {
         .sheet(isPresented: $state.showHiddenPicker) { HiddenPanelsView().environmentObject(state) }
         .sheet(isPresented: $state.showHistory) { SessionHistoryView().environmentObject(state) }
         .sheet(isPresented: $state.showWorkflows) { WorkflowsView().environmentObject(state) }
+        .sheet(isPresented: $recovery.showSheet) { WorkspaceRecoveryView(recovery: recovery) }
         .alert("Rename session", isPresented: Binding(get: { state.renameTarget != nil }, set: { if !$0 { state.renameTarget = nil } })) {
             TextField("name", text: $state.renameText)
             Button("Rename") {
@@ -974,6 +981,27 @@ struct RootView: View {
                 ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 24, height: 22)
             } else {
                 IconButton(system: "arrow.clockwise", help: "Refresh (⌘R)") { state.refreshAll() }
+            }
+            if recovery.hasOffer {
+                Button { recovery.open() } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(cf(11.5, .semibold))
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 26, height: 22)
+                        Text("\(recovery.readyPanels.count)")
+                            .font(cf(7.5, .bold))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.appBackground)
+                            .frame(minWidth: 12, minHeight: 12)
+                            .background(Circle().fill(Theme.accent))
+                            .offset(x: 2, y: -2)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Restore \(recovery.readyPanels.count) panels from the previous workspace")
+                .transition(.scale.combined(with: .opacity))
             }
             IconButton(system: "plus", help: "New session (⌘N)") { openNew() }
             IconButton(system: "cable.connector", help: "Port forwards") { openWindow(id: "ports") }
@@ -1427,7 +1455,7 @@ struct RootView: View {
             } else {
                 if let ref = state.selection {
                     if let context = state.artifactContext(for: ref) {
-                        let artifactCount = artifacts.count(for: context.key)
+                        let artifactCount = artifacts.count(for: context)
                         IconButton(
                             system: artifactCount > 0 ? "archivebox.fill" : "archivebox",
                             help: artifactCount == 0

@@ -204,6 +204,16 @@ struct PortsView: View {
                     ProgressView().controlSize(.small).scaleEffect(0.8)
                     Text("scanning ports…").font(.system(size: S(12))).foregroundStyle(Glass.textSecondary)
                 }.padding(.vertical, 2)
+            } else if let error = model.portErrorsByHost[h.fwHost], ports.isEmpty {
+                HStack(spacing: S(7)) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(error)
+                    Button("Retry") { model.fetchPorts(host: h.fwHost, base: h.httpBase) }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Glass.accent)
+                }
+                .font(.system(size: S(12)))
+                .foregroundStyle(Glass.warn)
             } else if ports.isEmpty {
                 Text("No listening ports found — type one below.").font(.system(size: S(12))).foregroundStyle(Glass.textTertiary)
             } else {

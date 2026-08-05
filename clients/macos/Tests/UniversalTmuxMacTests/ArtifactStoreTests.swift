@@ -231,10 +231,16 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertTrue(ArtifactLibraryQuery.records([earlier], filenameQuery: "vlm_gating").isEmpty)
     }
 
-    func testStableSessionIdentityGroupsArtifactsAcrossRename() {
-        let before = panel(name: "old_name", stableID: "$12")
-        let after = panel(name: "new_name", stableID: "$12")
-        XCTAssertEqual(before.key, after.key)
+    func testSessionLineageGroupsArtifactsAcrossRenameAndFolderChange() {
+        let before = panel(
+            name: "old_name", stableID: "$12", lineageID: "tmux:101:200:$12",
+            folder: "/tmp/old"
+        )
+        let after = panel(
+            name: "new_name", stableID: "$12", lineageID: "tmux:101:200:$12",
+            folder: "/tmp/new"
+        )
+        XCTAssertNotEqual(before.key, after.key)
 
         let records = [
             record(filename: "Before.pdf", seconds: 100, panel: before),
@@ -244,6 +250,102 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups[0].count, 2)
         XCTAssertEqual(groups[0].context.sessionName, "new_name")
+        XCTAssertEqual(ArtifactLibraryQuery.records(records, panel: before).count, 2)
+        XCTAssertEqual(ArtifactLibraryQuery.records(records, panel: after).count, 2)
+    }
+
+    func testReusedTmuxTransportHandleNeverMixesUnrelatedPanels() {
+        let original = panel(
+            name: "open_conjecture", stableID: "$11",
+            folder: "/Users/me/open_conjectures"
+        )
+        let reused = panel(
+            name: "osworld_pareto2", stableID: "$11",
+            folder: "/Users/me/find_osworld2_pareto"
+        )
+        let records = [
+            record(filename: "Conjecture.pdf", seconds: 100, panel: original),
+            record(filename: "Pareto.pdf", seconds: 200, panel: reused),
+        ]
+
+        XCTAssertNotEqual(original.key, reused.key)
+        XCTAssertEqual(ArtifactLibraryQuery.panels(records).count, 2)
+        XCTAssertEqual(ArtifactLibraryQuery.records(records, panel: original).map(\.filename), ["Conjecture.pdf"])
+        XCTAssertEqual(ArtifactLibraryQuery.records(records, panel: reused).map(\.filename), ["Pareto.pdf"])
+    }
+
+    func testRecreatedPanelRejoinsOlderArtifactsDespiteNewTmuxHandle() {
+        let beforeRestart = panel(name: "captcha_related_work", stableID: "$5")
+        let afterRestart = panel(name: "captcha_related_work", stableID: "$3")
+        let records = [
+            record(filename: "Before.pdf", seconds: 100, panel: beforeRestart),
+            record(filename: "After.pdf", seconds: 200, panel: afterRestart),
+        ]
+
+        let groups = ArtifactLibraryQuery.panels(records)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].count, 2)
+        XCTAssertEqual(ArtifactLibraryQuery.records(records, panel: afterRestart).count, 2)
+    }
+
+    func testPanelCanChangeFoldersWithoutLosingOlderArtifacts() {
+        let projectA = panel(name: "zsh2", stableID: "$14", folder: "/Users/me/project-a")
+        let projectB = panel(name: "zsh2", stableID: "$14", folder: "/Users/me/project-b")
+        let records = [
+            record(filename: "A.pdf", seconds: 100, panel: projectA),
+            record(filename: "B.pdf", seconds: 200, panel: projectB),
+        ]
+
+        let groups = ArtifactLibraryQuery.panels(records)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].count, 2)
+    }
+
+    func testBabelWorkerMoveAndWindowsPathSpellingPreserveLogicalPanel() {
+        let babelOld = panel(
+            name: "vlm_gating", stableID: "$0",
+            machineID: "ut-babel-n5-24.tail.example", machineName: "babel-n5-24",
+            machineHost: "babel-n5-24", folder: "/data/user_data/me/vlm_gating"
+        )
+        let babelNew = panel(
+            name: "vlm_gating", stableID: "$22",
+            machineID: "ut-babel-p9-16.tail.example", machineName: "babel-p9-16",
+            machineHost: "babel-p9-16", folder: "/data/user_data/me/vlm_gating/"
+        )
+        let windowsOld = panel(
+            name: "gar_codex", stableID: nil,
+            machineID: "win.tail.example", machineName: "windows",
+            machineHost: "DESKTOP-ONE", folder: #"D:\Gym_Anything"#
+        )
+        let windowsNew = panel(
+            name: "gar_codex", stableID: nil,
+            machineID: "win.tail.example", machineName: "windows",
+            machineHost: "desktop-one", folder: "d:/gym_anything/"
+        )
+
+        XCTAssertEqual(babelOld.key, babelNew.key)
+        XCTAssertEqual(windowsOld.key, windowsNew.key)
+    }
+
+    func testIdenticalBrokerLineageOnTwoBabelWorkersCannotMixDifferentPanels() {
+        let first = panel(
+            name: "first_experiment", stableID: "$0", lineageID: "tmux:101:200:$0",
+            machineID: "babel-n5-id", machineName: "babel-n5-24",
+            machineHost: "babel-n5-24", folder: "/shared/first"
+        )
+        let second = panel(
+            name: "second_experiment", stableID: "$0", lineageID: "tmux:101:200:$0",
+            machineID: "babel-p9-id", machineName: "babel-p9-16",
+            machineHost: "babel-p9-16", folder: "/shared/second"
+        )
+        let records = [
+            record(filename: "First.pdf", seconds: 100, panel: first),
+            record(filename: "Second.pdf", seconds: 200, panel: second),
+        ]
+
+        XCTAssertEqual(first.machineScope, second.machineScope)
+        XCTAssertNotEqual(first.lineageKey, second.lineageKey)
+        XCTAssertEqual(ArtifactLibraryQuery.panels(records).count, 2)
     }
 
     func testPanelIndexHonorsTheSameTimeAndNameSortControl() {
@@ -263,6 +365,87 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(
             ArtifactLibraryQuery.panels([alpha, zeta], sort: .nameDescending).map(\.context.sessionName),
             ["zeta", "alpha"]
+        )
+    }
+
+    func testLoaderReportsBrokenRecordsWithoutHidingHealthyArtifacts() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let healthy = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered")
+        let recordsDir = root.appendingPathComponent("records", isDirectory: true)
+        try Data("not-json".utf8).write(to: recordsDir.appendingPathComponent("broken.json"))
+
+        let missing = ArtifactRecord(
+            id: UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000001")!,
+            filename: "Missing.pdf",
+            panel: panel(name: "missing"),
+            presentation: "rendered",
+            relativePath: "pdf/bbbbbbbb-0000-0000-0000-000000000001.pdf",
+            byteCount: 3
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(missing).write(
+            to: recordsDir.appendingPathComponent("bbbbbbbb-0000-0000-0000-000000000001.json")
+        )
+
+        let report = try await disk.loadReport()
+
+        XCTAssertEqual(report.records, [healthy])
+        XCTAssertEqual(report.issues.count, 2)
+        XCTAssertTrue(report.issues.contains { $0.manifest == "broken.json" && $0.reason.contains("Invalid manifest") })
+        XCTAssertTrue(report.issues.contains { $0.reason.contains("Saved content is missing") })
+    }
+
+    func testBrokenDuplicateCannotClaimHealthyArtifactID() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let id = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000001")!
+        let healthy = try await disk.savePDF(
+            Data("pdf".utf8), panel: panel(), presentation: "rendered", id: id
+        )
+        let brokenCopy = ArtifactRecord(
+            id: id,
+            filename: "Broken copy.pdf",
+            panel: panel(name: "wrong"),
+            presentation: "rendered",
+            relativePath: "pdf/does-not-exist.pdf",
+            byteCount: 3
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(brokenCopy).write(
+            to: root.appendingPathComponent("records/0000-broken-copy.json")
+        )
+
+        let report = try await disk.loadReport()
+
+        XCTAssertEqual(report.records, [healthy])
+        XCTAssertEqual(report.issues.count, 1)
+        XCTAssertTrue(report.issues[0].reason.contains("Saved content is missing"))
+    }
+
+    @MainActor
+    func testArchivedPanelNavigationNeverFollowsAReusedTmuxHandle() {
+        let state = AppState(isolatedForTesting: true)
+        state.sessionsByMachine["local"] = [
+            SessionInfo(
+                name: "osworld_pareto2", path: "/Users/me/find_osworld2_pareto",
+                tmuxID: "$11", lineageID: "tmux:new"
+            ),
+        ]
+        let archived = panel(
+            name: "open_conjecture", stableID: "$11", lineageID: "tmux:old",
+            folder: "/Users/me/open_conjectures"
+        )
+
+        XCTAssertNil(state.liveRef(for: archived))
+
+        state.sessionsByMachine["local"]?.append(SessionInfo(
+            name: "open_conjecture", path: "/Users/me/open_conjectures",
+            tmuxID: "$42", lineageID: "tmux:newer"
+        ))
+        XCTAssertEqual(
+            state.liveRef(for: archived),
+            SessionRef(machineID: "local", session: "open_conjecture")
         )
     }
 
@@ -329,14 +512,23 @@ final class ArtifactStoreTests: XCTestCase {
         }
     }
 
-    private func panel(name: String = "spatial_sol", stableID: String? = "$4") -> ArtifactPanelContext {
+    private func panel(
+        name: String = "spatial_sol",
+        stableID: String? = "$4",
+        lineageID: String? = nil,
+        machineID: String = "local",
+        machineName: String = "this mac",
+        machineHost: String = "mac.local",
+        folder: String = "/tmp/work"
+    ) -> ArtifactPanelContext {
         ArtifactPanelContext(
-            machineID: "local",
-            machineName: "this mac",
-            machineHost: "mac.local",
+            machineID: machineID,
+            machineName: machineName,
+            machineHost: machineHost,
             sessionName: name,
             stableSessionID: stableID,
-            folder: "/tmp/work"
+            sessionLineageID: lineageID,
+            folder: folder
         )
     }
 

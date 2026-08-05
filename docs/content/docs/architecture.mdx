@@ -104,10 +104,13 @@ replace populated data with an empty snapshot.
 The broker also makes an immutable recovery point every local calendar day and retains the latest
 seven days under `~/.argus/backups/YYYY-MM-DD/`. It covers all broker-owned JSON state, the complete
 macOS Argus preferences domain (including dashboards, notebooks, W&B links, and settings), and the
-compact Argus Lab control-plane record (keys, manifests, policies, notes, approvals, proposals, and
-result events). Large Lab artifacts and logs are excluded because they are immutable and addressed
-by the Lab store's own retention policy; experiment provenance remains in the backed-up
-event metadata and offline mirror. The Activity Journal already uses append-only files split by day.
+local panel Artifacts library. Artifact recovery points use hard links on the normal same-volume
+layout, so retaining an unchanged PDF or screenshot for seven days does not multiply its disk usage.
+The backup also includes the compact Argus Lab control-plane record (keys, manifests, policies,
+notes, approvals, proposals, and result events). Large Lab artifacts and logs are excluded because
+they are immutable and addressed by the Lab store's own retention policy; experiment provenance
+remains in the backed-up event metadata and offline mirror. The Activity Journal already uses
+append-only files split by day.
 
 <Callout type="info">
 The broker, the file service, and the port-forward agent all ride the **same** per-host broker

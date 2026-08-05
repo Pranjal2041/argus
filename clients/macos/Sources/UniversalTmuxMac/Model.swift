@@ -66,14 +66,15 @@ struct SessionInfo: Identifiable, Hashable, Codable {
     var state: String = "idle"  // broker agent-state: "working" | "waiting" | "idle"
     var agent: Bool = false      // created by the mesh (ut spawn): hidden unless "Show agent sessions"
     var hidden: Bool = false     // user-hidden; broker-owned so the hide syncs across devices
-    var tmuxID: String?          // broker's STABLE session handle ($N): unchanged across rename — we connect by it so a renamed pane never sticks on "reconnecting"
+    var tmuxID: String?          // broker transport handle ($N): unchanged across rename but reusable after a tmux server restart
+    var lineageID: String?       // non-reusable session lifetime id for archival aliases; never used as the transport target
     var id: String { name }
 
     /// True when the broker reports the agent as blocked on the user.
     var isWaiting: Bool { state == "waiting" }
 
     enum CodingKeys: String, CodingKey {
-        case name, windows, attached, activity, path, state, agent, hidden
+        case name, windows, attached, activity, path, state, agent, hidden, lineageID
         case tmuxID = "id"
     }
 
@@ -86,7 +87,8 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         state: String = "idle",
         agent: Bool = false,
         hidden: Bool = false,
-        tmuxID: String? = nil
+        tmuxID: String? = nil,
+        lineageID: String? = nil
     ) {
         self.name = name
         self.windows = windows
@@ -97,6 +99,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         self.agent = agent
         self.hidden = hidden
         self.tmuxID = tmuxID
+        self.lineageID = lineageID
     }
 
     // Custom decoder: Swift's synthesized `Decodable` does NOT apply the
@@ -119,6 +122,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         // string and the client would connect to /ws?session= (nothing), so every Windows
         // session stuck on "connecting" after a reconnect. Empty id → fall back to the name.
         tmuxID = (try c.decodeIfPresent(String.self, forKey: .tmuxID)).flatMap { $0.isEmpty ? nil : $0 }
+        lineageID = (try c.decodeIfPresent(String.self, forKey: .lineageID)).flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 
@@ -176,6 +180,7 @@ private func sessionMetadataMatchesIgnoringActivity(_ lhs: SessionInfo, _ rhs: S
         && lhs.agent == rhs.agent
         && lhs.hidden == rhs.hidden
         && lhs.tmuxID == rhs.tmuxID
+        && lhs.lineageID == rhs.lineageID
 }
 
 /// Identifies the selected (machine, session) pair.
@@ -1198,22 +1203,66 @@ final class AppState: ObservableObject {
             machineHost: machine.host,
             sessionName: ref.session,
             stableSessionID: info?.tmuxID,
+            sessionLineageID: info?.lineageID,
             folder: resolveBase(for: ref)
         )
     }
 
-    /// Resolve an archived panel identity back to the current live name. tmux's
-    /// stable id makes this continue to work after a rename.
+    /// Resolve an archived panel identity back to a live panel without trusting
+    /// tmux's reusable `$N` handle. A lineage match is exact; semantic identity
+    /// also lets a recreated panel rejoin its archive after a restart.
     func liveRef(for panel: ArtifactPanelContext) -> SessionRef? {
-        guard machines.contains(where: { $0.id == panel.machineID }) else { return nil }
-        let sessions = sessionsByMachine[panel.machineID] ?? []
-        let live: SessionInfo?
-        if let stable = panel.stableSessionID, !stable.isEmpty {
-            live = sessions.first { $0.tmuxID == stable }
-        } else {
-            live = sessions.first { $0.name == panel.sessionName }
+        let exactMachine = machines.first { $0.id == panel.machineID }
+        let scopedMachines = machines.filter { machine in
+            ArtifactPanelContext(
+                machineID: machine.id,
+                machineName: machine.name,
+                machineHost: machine.host,
+                sessionName: panel.sessionName,
+                stableSessionID: nil,
+                folder: panel.folder
+            ).machineScope == panel.machineScope
         }
-        return live.map { SessionRef(machineID: panel.machineID, session: $0.name) }
+        let candidates = ([exactMachine].compactMap { $0 } + scopedMachines)
+            .reduce(into: [Machine]()) { result, machine in
+                if !result.contains(where: { $0.id == machine.id }) { result.append(machine) }
+            }
+
+        if panel.lineageKey != nil {
+            for machine in candidates {
+                for session in sessionsByMachine[machine.id] ?? [] {
+                    let liveContext = ArtifactPanelContext(
+                        machineID: machine.id,
+                        machineName: machine.name,
+                        machineHost: machine.host,
+                        sessionName: session.name,
+                        stableSessionID: session.tmuxID,
+                        sessionLineageID: session.lineageID,
+                        folder: session.path ?? ""
+                    )
+                    if liveContext.lineageKey == panel.lineageKey {
+                        return SessionRef(machineID: machine.id, session: session.name)
+                    }
+                }
+            }
+        }
+        for machine in candidates {
+            for session in sessionsByMachine[machine.id] ?? [] {
+                let liveContext = ArtifactPanelContext(
+                    machineID: machine.id,
+                    machineName: machine.name,
+                    machineHost: machine.host,
+                    sessionName: session.name,
+                    stableSessionID: session.tmuxID,
+                    sessionLineageID: session.lineageID,
+                    folder: session.path ?? ""
+                )
+                if liveContext.semanticKey == panel.semanticKey {
+                    return SessionRef(machineID: machine.id, session: session.name)
+                }
+            }
+        }
+        return nil
     }
 
     /// Present Planner as the one active top-level workspace pane.

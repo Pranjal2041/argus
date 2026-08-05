@@ -1,6 +1,7 @@
 package conpty
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -84,5 +85,66 @@ func TestRenderRingDefaultsSize(t *testing.T) {
 	got := renderRing([]byte("hello\r\n"), 0, 0)
 	if !strings.Contains(got, "hello") {
 		t.Errorf("expected 'hello' with default size, got %q", got)
+	}
+}
+
+// A long-running TUI paints useful content once, then updates a spinner at a fixed
+// cursor position. The useful paint eventually falls out of the bounded raw ring,
+// but an incrementally maintained screen must retain it.
+func TestCaptureScreenSurvivesRawRingEviction(t *testing.T) {
+	screen := newCaptureScreen(80, 8)
+	screen.write([]byte("\x1b[2J\x1b[HIMPORTANT: training is at checkpoint 42"))
+
+	for i := 0; i < 20_000; i++ {
+		if i%2 == 0 {
+			screen.write([]byte("\x1b[8;1H◦"))
+		} else {
+			screen.write([]byte("\x1b[8;1H•"))
+		}
+	}
+
+	got := screen.text()
+	if !strings.Contains(got, "IMPORTANT: training is at checkpoint 42") {
+		t.Fatalf("static screen content was lost after many repaint-only updates:\n%s", got)
+	}
+}
+
+func TestCaptureScreenTracksResizeWithoutReplayingOldBytes(t *testing.T) {
+	screen := newCaptureScreen(20, 4)
+	screen.write([]byte("persistent status"))
+	screen.resize(40, 8)
+	screen.write([]byte("\x1b[8;1Hspinner"))
+
+	got := screen.text()
+	if !strings.Contains(got, "persistent status") || !strings.Contains(got, "spinner") {
+		t.Fatalf("resize lost screen state:\n%s", got)
+	}
+}
+
+func TestCaptureScreenFaintStateSurvivesSplitReads(t *testing.T) {
+	screen := newCaptureScreen(80, 4)
+	screen.write([]byte("REAL \x1b[2"))
+	screen.write([]byte("mGHOST"))
+	screen.write([]byte(" TEXT\x1b[2"))
+	screen.write([]byte("2m END"))
+
+	got := screen.text()
+	if !strings.Contains(got, "REAL") || !strings.Contains(got, "END") {
+		t.Fatalf("normal text missing:\n%s", got)
+	}
+	if strings.Contains(got, "GHOST") || strings.Contains(got, "TEXT") {
+		t.Fatalf("split faint text leaked into capture:\n%s", got)
+	}
+}
+
+func TestCaptureScreenCarriesSplitUTF8Rune(t *testing.T) {
+	screen := newCaptureScreen(80, 4)
+	b := []byte("before • after")
+	bullet := bytes.Index(b, []byte("•"))
+	screen.write(b[:bullet+1])
+	screen.write(b[bullet+1 : bullet+2])
+	screen.write(b[bullet+2:])
+	if got := screen.text(); !strings.Contains(got, "before • after") {
+		t.Fatalf("split UTF-8 rune was lost: %q", got)
 	}
 }
