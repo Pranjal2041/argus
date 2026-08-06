@@ -77,7 +77,70 @@ final class FileNode: ObservableObject, Identifiable {
     init(_ e: FileEntry) { entry = e }
 }
 
-enum FileKind { case text, image, pdf, media, binary }
+enum FileKind: Equatable { case text, image, pdf, media, quickLook, binary }
+
+/// A locally-cached copy of a remote document handed to macOS Quick Look.
+///
+/// URLSession's download URL is ephemeral and disappears when its completion
+/// handler returns, while Quick Look renders asynchronously. Move the download
+/// into a private, per-document temporary directory and keep that directory alive
+/// exactly as long as the open Files tab. Large presentations are never copied
+/// into a second in-memory Data value.
+final class QuickLookPreviewFile {
+    let url: URL
+    private let directory: URL
+
+    private static let root: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ArgusFilePreviews", isDirectory: true)
+
+    /// Normal tab closure removes previews immediately. This one-time, lazy sweep
+    /// also contains leftovers from a force-quit or crash without adding any work
+    /// to normal app startup.
+    private static let prepareRoot: Void = {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let oldDirectories = (try? fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for candidate in oldDirectories {
+            let modified = try? candidate.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+            if let modified, modified < cutoff { try? fm.removeItem(at: candidate) }
+        }
+    }()
+
+    init(adopting downloadedURL: URL, filename: String) throws {
+        let fm = FileManager.default
+        _ = Self.prepareRoot
+        directory = Self.root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+
+        let safeName = (filename as NSString).lastPathComponent
+        url = directory.appendingPathComponent(safeName.isEmpty ? "presentation.pptx" : safeName)
+        do {
+            do {
+                try fm.moveItem(at: downloadedURL, to: url)
+            } catch {
+                // The URLSession temporary directory and our cache normally share
+                // a volume, so move is constant-time. Keep a cross-volume fallback
+                // without loading the file into memory.
+                try fm.copyItem(at: downloadedURL, to: url)
+            }
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            try? fm.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    deinit { try? FileManager.default.removeItem(at: directory) }
+}
 
 enum FileContent {
     case empty
@@ -86,8 +149,26 @@ enum FileContent {
     case image(NSImage)
     case pdf(Data)
     case media(URL)          // streamed by AVPlayer (Range), never fully downloaded
+    case quickLook(QuickLookPreviewFile) // read-only system preview (PowerPoint, etc.)
     case binary(FileEntry)
     case error(String)
+}
+
+/// Pure file classification shared by the Files model and regression tests.
+/// PowerPoint decks use the system Quick Look renderer, which adds no bundled
+/// conversion engine and is evaluated only when the user opens that file.
+func fileKindForPreview(_ name: String, size: Int64, textCap: Int64 = 5_000_000) -> FileKind {
+    let ext = (name as NSString).pathExtension.lowercased()
+    let images: Set<String> = ["png","jpg","jpeg","gif","bmp","tiff","tif","webp","heic","heif","ico","icns"]
+    let video: Set<String> = ["mp4","mov","m4v","avi","mkv","webm"]
+    let audio: Set<String> = ["mp3","wav","aac","m4a","flac","ogg","oga","aiff","aif"]
+    let powerPoint: Set<String> = ["pptx","ppt","ppsx","pps","potx","pot"]
+    if images.contains(ext) { return .image }
+    if video.contains(ext) || audio.contains(ext) { return .media }
+    if ext == "pdf" { return .pdf }
+    if powerPoint.contains(ext) { return .quickLook }
+    if size > textCap { return .binary }
+    return .text // fetchContent downgrades to .binary if the bytes are not UTF-8
 }
 
 /// How a previewable document is shown: just the editor, editor+preview side by
@@ -473,6 +554,14 @@ final class FileTab: ObservableObject, Identifiable {
         }
     }
 
+    /// Reuse the already-downloaded presentation for an explicit Artifact save;
+    /// this avoids both a second network transfer and a large in-memory Data copy.
+    private func quickLookArtifactURL(for entry: FileEntry) -> URL? {
+        guard let doc = openDocs.first(where: { $0.path == entry.path }),
+              case .quickLook(let file) = doc.content else { return nil }
+        return file.url
+    }
+
     func artifactSize(for entry: FileEntry) -> Int64 {
         artifactMaterial(for: entry).map { Int64($0.data.count) } ?? max(0, entry.size)
     }
@@ -486,7 +575,16 @@ final class FileTab: ObservableObject, Identifiable {
         artifactNotice = saving
         Task {
             do {
-                if let material = artifactMaterial(for: entry) {
+                if let cachedURL = quickLookArtifactURL(for: entry) {
+                    _ = try await artifacts.saveFile(
+                        at: cachedURL,
+                        filename: entry.name,
+                        panel: panel,
+                        sourcePath: entry.path,
+                        contentType: contentType(for: entry.name),
+                        presentation: "file-snapshot"
+                    )
+                } else if let material = artifactMaterial(for: entry) {
                     _ = try await artifacts.saveFile(
                         material.data,
                         filename: entry.name,
@@ -795,6 +893,19 @@ final class FileTab: ObservableObject, Identifiable {
     private func fetchContent(_ e: FileEntry, into doc: OpenDoc, kind: FileKind) async {
         guard let url = readURL(e.path) else { doc.content = .error("bad path"); return }
         do {
+            if kind == .quickLook {
+                let (temporaryURL, resp) = try await fsSession.download(from: url)
+                guard openDocs.contains(where: { $0.id == doc.id }) else { return }
+                if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+                    doc.content = .error("HTTP \(http.statusCode)"); return
+                }
+                let preview = try QuickLookPreviewFile(adopting: temporaryURL, filename: e.name)
+                // The user may have closed the tab while the downloaded file was
+                // being adopted. In that case ARC immediately removes the cache.
+                guard openDocs.contains(where: { $0.id == doc.id }) else { return }
+                doc.content = .quickLook(preview)
+                return
+            }
             let (data, resp) = try await fsSession.data(from: url)
             guard openDocs.contains(where: { $0.id == doc.id }) else { return }   // tab closed mid-fetch
             if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
@@ -858,15 +969,7 @@ final class FileTab: ObservableObject, Identifiable {
     }
 
     private func kindFor(_ name: String, size: Int64) -> FileKind {
-        let ext = (name as NSString).pathExtension.lowercased()
-        let images: Set<String> = ["png","jpg","jpeg","gif","bmp","tiff","tif","webp","heic","heif","ico","icns"]
-        let video: Set<String> = ["mp4","mov","m4v","avi","mkv","webm"]
-        let audio: Set<String> = ["mp3","wav","aac","m4a","flac","ogg","oga","aiff","aif"]
-        if images.contains(ext) { return .image }
-        if video.contains(ext) || audio.contains(ext) { return .media }
-        if ext == "pdf" { return .pdf }
-        if size > textCap { return .binary }
-        return .text   // fetchContent downgrades to .binary if not valid UTF-8
+        fileKindForPreview(name, size: size, textCap: textCap)
     }
 
     private func displayName(_ path: String) -> String {

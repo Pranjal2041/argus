@@ -1062,6 +1062,7 @@ func iconForFile(_ name: String) -> String {
     case "mp4","mov","m4v","avi","mkv","webm": return "film"
     case "mp3","wav","m4a","flac","aac","ogg","aiff": return "music.note"
     case "pdf": return "doc.richtext"
+    case "pptx","ppt","ppsx","pps","potx","pot": return "rectangle.on.rectangle"
     case "zip","tar","gz","tgz","bz2","xz","7z","rar","dmg": return "doc.zipper"
     case "json","yaml","yml","toml","xml","ini","cfg","conf","plist": return "curlybraces"
     case "md","markdown","txt","rtf","log": return "doc.text"

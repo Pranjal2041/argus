@@ -76,7 +76,8 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   Mac awake and reachable while the screen is locked.
 - **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
   per-file tabs, `⌘P` quick-open, `⇧⌘G` Go to Folder, content search, Git-aware tree coloring,
-  live Markdown preview, syntax highlighting, image / PDF / media preview, upload & download, and
+  live Markdown preview, syntax highlighting, image / PDF / media preview, read-only PowerPoint
+  viewing through macOS Quick Look, upload & download, and
   *reveal-from-session* to jump to a session's working directory. Right-click any file to save an
   explicit point-in-time copy to that panel's Artifacts; unsaved editor drafts are preserved as seen.
 - **Git & pull-request review** — inspect working trees, commit graphs, blame, branches, and GitHub

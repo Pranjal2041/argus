@@ -1,6 +1,7 @@
 import AVKit
 import AppKit
 import PDFKit
+import QuickLookUI
 import SwiftUI
 import WebKit
 
@@ -157,6 +158,31 @@ struct PDFKitView: NSViewRepresentable {
     final class Coordinator { var fit: CGFloat = 0 }
 }
 
+// MARK: - system document preview (PowerPoint)
+
+/// Embedded, read-only Quick Look. The operating system supplies the PowerPoint
+/// renderer, so Argus adds no conversion engine or presentation assets to its app
+/// bundle. `QuickLookPreviewFile` guarantees this URL remains valid while the view
+/// renders and removes it when the document tab closes.
+struct QuickLookFileView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> QLPreviewView {
+        let view = QLPreviewView(frame: .zero, style: .normal)!
+        view.autostarts = true
+        view.previewItem = url as NSURL
+        return view
+    }
+
+    func updateNSView(_ view: QLPreviewView, context: Context) {
+        if (view.previewItem as? URL) != url { view.previewItem = url as NSURL }
+    }
+
+    static func dismantleNSView(_ view: QLPreviewView, coordinator: ()) {
+        view.previewItem = nil
+    }
+}
+
 // MARK: - image (zoomable)
 
 struct ImageViewer: View {
@@ -305,6 +331,8 @@ private struct DocPane: View {
             PDFKitView(data: data, zoom: doc.zoom)
         case .media(let url):
             MediaPlayer(url: url).id(url)
+        case .quickLook(let file):
+            QuickLookFileView(url: file.url).id(file.url)
         case .binary(let e):
             fileHint("doc.zipper", "\(e.name)\n\(byteSize(e.size)) · not a previewable text file")
         case .error(let m):
