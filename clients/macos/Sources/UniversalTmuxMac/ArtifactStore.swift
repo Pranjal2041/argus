@@ -149,6 +149,10 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
     /// existing V1 render/screenshot manifests fully backwards compatible.
     let sourcePath: String?
     let contentType: String?
+    /// `nil` is a legacy manifest. New records distinguish untouched fallback
+    /// names, Codex-generated titles, and user-authored names so asynchronous
+    /// naming can never overwrite a manual rename.
+    var titleSource: String?
 
     init(
         id: UUID = UUID(),
@@ -160,7 +164,8 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         relativePath: String,
         byteCount: Int64,
         sourcePath: String? = nil,
-        contentType: String? = nil
+        contentType: String? = nil,
+        titleSource: String? = nil
     ) {
         schemaVersion = 1
         self.id = id
@@ -173,6 +178,7 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         self.byteCount = byteCount
         self.sourcePath = sourcePath
         self.contentType = contentType
+        self.titleSource = titleSource
     }
 
     var isImage: Bool {
@@ -360,9 +366,10 @@ enum ArtifactFilename {
         // Generated capture names end in a timestamp (`12.00.02`) before their
         // real extension is appended. Do not mistake the final seconds for an
         // extension; do replace actual extensions supplied during Rename.
-        let suppliedLooksLikeType = suppliedExtension.unicodeScalars.contains {
-            CharacterSet.letters.contains($0)
-        }
+        let suppliedLooksLikeType = suppliedExtension.count <= 24
+            && suppliedExtension.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+            && suppliedExtension.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) }
+            && suppliedExtension.unicodeScalars.contains { CharacterSet.letters.contains($0) }
         if !suppliedExtension.isEmpty,
            suppliedExtension.caseInsensitiveCompare(ext) == .orderedSame || suppliedLooksLikeType {
             name = (name as NSString).deletingPathExtension
@@ -510,7 +517,8 @@ actor ArtifactDiskStore {
             panel: panel,
             presentation: presentation,
             relativePath: relativePath,
-            byteCount: Int64(data.count)
+            byteCount: Int64(data.count),
+            titleSource: ArtifactTitleSource.fallback
         )
         let pdfURL = try contentURL(for: record)
         do {
@@ -544,7 +552,8 @@ actor ArtifactDiskStore {
             panel: panel,
             presentation: "clipboard-screenshot",
             relativePath: relativePath,
-            byteCount: Int64(data.count)
+            byteCount: Int64(data.count),
+            titleSource: ArtifactTitleSource.fallback
         )
         let imageURL = try contentURL(for: record)
         do {
@@ -627,11 +636,26 @@ actor ArtifactDiskStore {
     }
 
     func rename(_ record: ArtifactRecord, to requestedName: String) throws -> ArtifactRecord {
-        var updated = record
+        var updated = (try loadRecord(id: record.id)) ?? record
         updated.filename = ArtifactFilename.normalized(
             requestedName,
             fileExtension: record.fileExtension
         )
+        updated.titleSource = ArtifactTitleSource.manual
+        try writeManifest(updated)
+        return updated
+    }
+
+    func applyAutomaticTitle(
+        id: UUID,
+        expectedFilename: String,
+        title: String
+    ) throws -> ArtifactRecord? {
+        guard var updated = try loadRecord(id: id),
+              updated.filename == expectedFilename,
+              ArtifactAutomaticTitleEligibility.isEligible(updated) else { return nil }
+        updated.filename = ArtifactFilename.normalized(title, fileExtension: updated.fileExtension)
+        updated.titleSource = ArtifactTitleSource.codex
         try writeManifest(updated)
         return updated
     }
@@ -682,8 +706,17 @@ actor ArtifactDiskStore {
             relativePath: "files/" + id.uuidString.lowercased() + suffix,
             byteCount: byteCount,
             sourcePath: sourcePath,
-            contentType: contentType
+            contentType: contentType,
+            titleSource: ArtifactTitleSource.sourceFilename
         )
+    }
+
+    private func loadRecord(id: UUID) throws -> ArtifactRecord? {
+        let url = manifestURL(for: id)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ArtifactRecord.self, from: Data(contentsOf: url))
     }
 
     private func manifestURL(for id: UUID) -> URL {
@@ -727,15 +760,22 @@ final class ArtifactStore: ObservableObject {
     let rootURL: URL
     private let disk: ArtifactDiskStore
     private let logEvents: Bool
+    private let titleProvider: (any ArtifactTitleProviding)?
+    private var automaticTitleQueue: [UUID] = []
+    private var automaticTitleIDs = Set<UUID>()
+    private var automaticTitleWorker: Task<Void, Never>?
+    private var automaticTitleRetryTask: Task<Void, Never>?
 
     init(
         rootURL: URL = ArtifactStore.defaultRootURL,
         loadImmediately: Bool = true,
-        logEvents: Bool = true
+        logEvents: Bool = true,
+        titleProvider: (any ArtifactTitleProviding)? = nil
     ) {
         self.rootURL = rootURL
         disk = ArtifactDiskStore(rootURL: rootURL)
         self.logEvents = logEvents && !AppState.isRunningTests
+        self.titleProvider = titleProvider ?? (AppState.isRunningTests ? nil : CodexArtifactTitleProvider())
         if loadImmediately {
             Task { await reload() }
         } else {
@@ -780,6 +820,7 @@ final class ArtifactStore: ObservableObject {
             let report = try await disk.loadReport()
             records = report.records
             loadIssues = report.issues
+            enqueueAutomaticTitles(report.records)
             if report.issues.isEmpty {
                 errorMessage = nil
             } else {
@@ -862,6 +903,12 @@ final class ArtifactStore: ObservableObject {
     func delete(_ record: ArtifactRecord) async throws {
         try await disk.delete(record)
         records.removeAll { $0.id == record.id }
+        automaticTitleQueue.removeAll { $0 == record.id }
+        automaticTitleIDs.remove(record.id)
+        if automaticTitleQueue.isEmpty {
+            automaticTitleRetryTask?.cancel()
+            automaticTitleRetryTask = nil
+        }
         if selectedArtifactID == record.id { selectedArtifactID = nil }
         errorMessage = nil
         guard logEvents else { return }
@@ -879,6 +926,7 @@ final class ArtifactStore: ObservableObject {
         records.removeAll { $0.id == record.id }
         records.insert(record, at: 0)
         errorMessage = nil
+        enqueueAutomaticTitles([record])
         guard logEvents else { return }
         var fields: [String: Any] = [
             "artifactID": record.id.uuidString.lowercased(),
@@ -897,5 +945,103 @@ final class ArtifactStore: ObservableObject {
         if let sourcePath = record.sourcePath { fields["sourcePath"] = sourcePath }
         if let contentType = record.contentType { fields["contentType"] = contentType }
         ActivityJournal.shared.log("artifactSaved", fields)
+    }
+
+    private func enqueueAutomaticTitles(_ candidates: [ArtifactRecord]) {
+        guard titleProvider != nil else { return }
+        for record in candidates where ArtifactAutomaticTitleEligibility.isEligible(record) {
+            if automaticTitleIDs.insert(record.id).inserted {
+                automaticTitleQueue.append(record.id)
+            }
+        }
+        guard automaticTitleWorker == nil,
+              automaticTitleRetryTask == nil,
+              !automaticTitleQueue.isEmpty else { return }
+        startAutomaticTitleWorker()
+    }
+
+    private func startAutomaticTitleWorker() {
+        guard automaticTitleWorker == nil, !automaticTitleQueue.isEmpty else { return }
+        automaticTitleWorker = Task { [weak self] in
+            await self?.drainAutomaticTitleQueue()
+        }
+    }
+
+    private func drainAutomaticTitleQueue() async {
+        while !Task.isCancelled, !automaticTitleQueue.isEmpty {
+            let id = automaticTitleQueue.removeFirst()
+            if await generateAutomaticTitle(for: id) {
+                automaticTitleIDs.remove(id)
+            } else {
+                // Keep the failed artifact and everything behind it queued. A
+                // temporary login/network outage must not silently discard the
+                // entire legacy backfill after the first failed invocation.
+                automaticTitleQueue.insert(id, at: 0)
+                automaticTitleWorker = nil
+                scheduleAutomaticTitleRetry()
+                return
+            }
+        }
+        automaticTitleWorker = nil
+    }
+
+    private func scheduleAutomaticTitleRetry() {
+        guard automaticTitleRetryTask == nil else { return }
+        automaticTitleRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15 * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.automaticTitleRetryTask = nil
+            self.startAutomaticTitleWorker()
+        }
+    }
+
+    /// `false` means the model provider was temporarily unavailable and this
+    /// record should remain queued. Every local eligibility/disk outcome is
+    /// terminal for this pass and returns `true`.
+    private func generateAutomaticTitle(for id: UUID) async -> Bool {
+        guard let titleProvider,
+              let record = records.first(where: { $0.id == id }),
+              ArtifactAutomaticTitleEligibility.isEligible(record) else { return true }
+        let expectedFilename = record.filename
+        let request = ArtifactTitleRequest(
+            record: record,
+            fileURL: fileURL(for: record),
+            existingTitles: records
+                .filter { $0.id != id }
+                .map { ($0.filename as NSString).deletingPathExtension }
+        )
+        guard let generated = await titleProvider.title(for: request) else { return false }
+        let unique = uniqueAutomaticTitle(generated, for: record)
+        do {
+            guard let updated = try await disk.applyAutomaticTitle(
+                id: id,
+                expectedFilename: expectedFilename,
+                title: unique
+            ), let index = records.firstIndex(where: { $0.id == id }),
+                  records[index].titleSource != ArtifactTitleSource.manual else { return true }
+            records[index] = updated
+            guard logEvents else { return true }
+            ActivityJournal.shared.log("artifactTitleGenerated", [
+                "artifactID": updated.id.uuidString.lowercased(),
+                "filename": updated.filename,
+                "previousFilename": expectedFilename,
+                "machineID": updated.panel.machineID,
+                "session": updated.panel.sessionName,
+            ])
+        } catch {
+            // Naming is an enhancement, never a reason for saving or opening an
+            // artifact to fail. The durable fallback remains available.
+        }
+        return true
+    }
+
+    private func uniqueAutomaticTitle(_ requested: String, for record: ArtifactRecord) -> String {
+        let existing = Set(records.filter { $0.id != record.id }.map { $0.filename.lowercased() })
+        for suffix in 1...999 {
+            let base = suffix == 1 ? requested : requested + " — \(suffix)"
+            let filename = ArtifactFilename.normalized(base, fileExtension: record.fileExtension)
+            if !existing.contains(filename.lowercased()) { return base }
+        }
+        return requested + " — " + String(record.id.uuidString.lowercased().prefix(8))
     }
 }
