@@ -5,14 +5,19 @@ import XCTest
 
 @MainActor
 final class CommandPaletteHostingTests: XCTestCase {
-    func testDetachedPaletteCanRenderWithExplicitDependencies() {
-        let palette = CommandPalette(
+    private func makePalette() -> CommandPalette {
+        CommandPalette(
             machineName: { $0 },
             state: AppState(isolatedForTesting: true),
             terminals: TerminalController(),
             lab: LabModel(),
-            artifacts: ArtifactStore(loadImmediately: false, logEvents: false)
+            artifacts: ArtifactStore(loadImmediately: false, logEvents: false),
+            recovery: WorkspaceRecoveryController()
         )
+    }
+
+    func testDetachedPaletteCanRenderWithExplicitDependencies() {
+        let palette = makePalette()
         let host = NSHostingView(rootView: palette)
         host.frame = NSRect(x: 0, y: 0, width: 560, height: 407)
 
@@ -23,6 +28,10 @@ final class CommandPaletteHostingTests: XCTestCase {
 
         XCTAssertGreaterThan(host.fittingSize.width, 0)
         XCTAssertGreaterThan(host.fittingSize.height, 0)
+    }
+
+    func testRestoreWorkspaceIsAvailableFromCommandPalette() {
+        XCTAssertTrue(makePalette().items.contains { $0.title == "Restore Previous Workspace…" })
     }
 
     func testAppStateInitializationCannotMutateProductionTodosUnderXCTest() {

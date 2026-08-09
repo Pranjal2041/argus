@@ -56,6 +56,113 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(renamed.relativePath, saved.relativePath)
         XCTAssertEqual(loaded, [renamed])
         XCTAssertEqual(try Data(contentsOf: originalURL), bytes)
+        XCTAssertEqual(renamed.titleSource, ArtifactTitleSource.manual)
+    }
+
+    @MainActor
+    func testAutomaticTitleReplacesFallbackAndPersists() async throws {
+        let provider = FixedArtifactTitleProvider("Router Accuracy Comparison")
+        let store = ArtifactStore(
+            rootURL: root,
+            loadImmediately: false,
+            logEvents: false,
+            titleProvider: provider
+        )
+
+        let saved = try await store.savePDF(
+            Data("pdf".utf8),
+            panel: panel(name: "vlm_gating"),
+            presentation: "rendered"
+        )
+        let updated = await waitForArtifact(in: store, id: saved.id) {
+            $0.titleSource == ArtifactTitleSource.codex
+        }
+
+        XCTAssertEqual(updated?.filename, "Router Accuracy Comparison.pdf")
+        XCTAssertEqual(updated?.titleSource, ArtifactTitleSource.codex)
+        let loaded = try await ArtifactDiskStore(rootURL: root).load()
+        XCTAssertEqual(loaded.first?.filename, "Router Accuracy Comparison.pdf")
+        XCTAssertEqual(loaded.first?.titleSource, ArtifactTitleSource.codex)
+    }
+
+    @MainActor
+    func testManualRenameAlwaysWinsAgainstLateAutomaticTitle() async throws {
+        let provider = DeferredArtifactTitleProvider()
+        let store = ArtifactStore(
+            rootURL: root,
+            loadImmediately: false,
+            logEvents: false,
+            titleProvider: provider
+        )
+        let saved = try await store.savePDF(
+            Data("pdf".utf8),
+            panel: panel(),
+            presentation: "rendered"
+        )
+        for _ in 0..<100 {
+            if await provider.didStart() { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let providerStarted = await provider.didStart()
+        XCTAssertTrue(providerStarted)
+
+        _ = try await store.rename(saved, to: "My Deliberate Name")
+        await provider.finish(with: "Late Model Name")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(store.records.first?.filename, "My Deliberate Name.pdf")
+        XCTAssertEqual(store.records.first?.titleSource, ArtifactTitleSource.manual)
+        let loaded = try await ArtifactDiskStore(rootURL: root).load()
+        XCTAssertEqual(loaded.first?.filename, "My Deliberate Name.pdf")
+        XCTAssertEqual(loaded.first?.titleSource, ArtifactTitleSource.manual)
+    }
+
+    func testCodexTitleCommandPinsLunaAndMediumReasoning() {
+        let arguments = CodexArtifactTitleProvider.commandArguments(
+            outputURL: URL(fileURLWithPath: "/tmp/title.txt"),
+            workingDirectory: URL(fileURLWithPath: "/tmp/title-work"),
+            imageURL: URL(fileURLWithPath: "/tmp/screenshot.png")
+        )
+
+        XCTAssertTrue(arguments.contains("gpt-5.6-luna"))
+        XCTAssertTrue(arguments.contains("model_reasoning_effort=\"medium\""))
+        XCTAssertTrue(arguments.contains("--ephemeral"))
+        XCTAssertTrue(arguments.contains("read-only"))
+        XCTAssertTrue(arguments.contains("/tmp/screenshot.png"))
+    }
+
+    func testAutomaticTitleSanitizingAndVersionNumbersRemainReadable() {
+        XCTAssertEqual(
+            CodexArtifactTitleProvider.sanitized("**Title: Router Accuracy Comparison.pdf.**"),
+            "Router Accuracy Comparison"
+        )
+        XCTAssertEqual(
+            ArtifactFilename.normalized("GPT-5.6 Router Comparison", fileExtension: "pdf"),
+            "GPT-5.6 Router Comparison.pdf"
+        )
+    }
+
+    func testOnlyUntouchedLegacyDefaultsAreEligibleForBackfill() {
+        let context = panel(name: "spatial_fable")
+        let createdAt = Date(timeIntervalSince1970: 1_721_500_000)
+        var legacy = ArtifactRecord(
+            filename: ArtifactFilename.generated(
+                for: context,
+                at: createdAt,
+                fileExtension: "pdf"
+            ),
+            createdAt: createdAt,
+            panel: context,
+            presentation: "rendered",
+            relativePath: "pdf/legacy.pdf",
+            byteCount: 1
+        )
+
+        XCTAssertTrue(ArtifactAutomaticTitleEligibility.isEligible(legacy))
+        legacy.filename = "Hand Picked Result.pdf"
+        XCTAssertFalse(ArtifactAutomaticTitleEligibility.isEligible(legacy))
+        legacy.titleSource = ArtifactTitleSource.manual
+        XCTAssertFalse(ArtifactAutomaticTitleEligibility.isEligible(legacy))
     }
 
     func testScreenshotPNGAndManifestRoundTripAsPanelArtifact() async throws {
@@ -544,6 +651,21 @@ final class ArtifactStoreTests: XCTestCase {
         return bitmap.representation(using: .png, properties: [:])!
     }
 
+    @MainActor
+    private func waitForArtifact(
+        in store: ArtifactStore,
+        id: UUID,
+        predicate: (ArtifactRecord) -> Bool
+    ) async -> ArtifactRecord? {
+        for _ in 0..<200 {
+            if let record = store.records.first(where: { $0.id == id }), predicate(record) {
+                return record
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return store.records.first(where: { $0.id == id })
+    }
+
     private func record(
         filename: String,
         seconds: TimeInterval,
@@ -560,5 +682,30 @@ final class ArtifactStoreTests: XCTestCase {
             relativePath: "pdf/" + uuid.uuidString.lowercased() + ".pdf",
             byteCount: 3
         )
+    }
+}
+
+private actor FixedArtifactTitleProvider: ArtifactTitleProviding {
+    let value: String
+
+    init(_ value: String) { self.value = value }
+
+    func title(for request: ArtifactTitleRequest) async -> String? { value }
+}
+
+private actor DeferredArtifactTitleProvider: ArtifactTitleProviding {
+    private var started = false
+    private var continuation: CheckedContinuation<String?, Never>?
+
+    func title(for request: ArtifactTitleRequest) async -> String? {
+        started = true
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func didStart() -> Bool { started }
+
+    func finish(with value: String?) {
+        continuation?.resume(returning: value)
+        continuation = nil
     }
 }
