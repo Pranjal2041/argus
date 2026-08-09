@@ -77,7 +77,6 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Restore Previous Workspace…") { recovery.open() }
                 Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
@@ -833,7 +832,8 @@ struct RootView: View {
                     // adding a new one now becomes a compile-time requirement instead of
                     // an EnvironmentObject runtime trap when the palette first renders.
                     CommandPalette(machineName: machineName, state: state,
-                                   terminals: terminals, lab: lab, artifacts: artifacts)
+                                   terminals: terminals, lab: lab, artifacts: artifacts,
+                                   recovery: recovery)
                 }
             } else {
                 PaletteWindow.shared.hide()
@@ -981,27 +981,6 @@ struct RootView: View {
                 ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 24, height: 22)
             } else {
                 IconButton(system: "arrow.clockwise", help: "Refresh (⌘R)") { state.refreshAll() }
-            }
-            if recovery.hasOffer {
-                Button { recovery.open() } label: {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(cf(11.5, .semibold))
-                            .foregroundStyle(Theme.accent)
-                            .frame(width: 26, height: 22)
-                        Text("\(recovery.readyPanels.count)")
-                            .font(cf(7.5, .bold))
-                            .monospacedDigit()
-                            .foregroundStyle(Theme.appBackground)
-                            .frame(minWidth: 12, minHeight: 12)
-                            .background(Circle().fill(Theme.accent))
-                            .offset(x: 2, y: -2)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Restore \(recovery.readyPanels.count) panels from the previous workspace")
-                .transition(.scale.combined(with: .opacity))
             }
             IconButton(system: "plus", help: "New session (⌘N)") { openNew() }
             IconButton(system: "cable.connector", help: "Port forwards") { openWindow(id: "ports") }
@@ -1727,6 +1706,7 @@ struct CommandPalette: View {
     @ObservedObject var terminals: TerminalController
     @ObservedObject var lab: LabModel
     @ObservedObject var artifacts: ArtifactStore
+    @ObservedObject var recovery: WorkspaceRecoveryController
     @State private var query = ""
     @State private var sel = 0
     @FocusState private var focused: Bool
@@ -1739,7 +1719,7 @@ struct CommandPalette: View {
         let run: () -> Void
     }
 
-    private var items: [Item] {
+    var items: [Item] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         func match(_ s: String) -> Bool { q.isEmpty || s.lowercased().contains(q) }
         var out: [Item] = []
@@ -1783,6 +1763,11 @@ struct CommandPalette: View {
             (lab.unattendedMode ? "moon.fill" : "moon",
              lab.unattendedMode ? "Turn Off Unattended Mode" : "Turn On Unattended Mode",
              "Auto-approve Lab gates", { lab.setUnattendedMode(!lab.unattendedMode) }),
+            ("arrow.counterclockwise", "Restore Previous Workspace…",
+             recovery.hasOffer
+                ? "\(recovery.readyPanels.count) panel\(recovery.readyPanels.count == 1 ? "" : "s") available"
+                : "",
+             { recovery.open() }),
             // Window opens route through state: SwiftUI's openWindow action is
             // not available inside the AppKit palette panel's hosting view.
             ("folder", "Open Files", "", { state.openWindowRequest = "files" }),
