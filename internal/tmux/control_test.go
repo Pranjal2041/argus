@@ -1,9 +1,64 @@
 package tmux
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestSendKeysChunksLargeInputWithoutChangingBytes(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{ptmx: w}
+	want := make([]byte, 128*1024+137)
+	for i := range want {
+		want[i] = byte(i % 251)
+	}
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		got, _ := io.ReadAll(r)
+		readDone <- got
+	}()
+	if err := client.SendKeys("%7", want); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Split(strings.TrimSpace(string(<-readDone)), "\n")
+	wantCommands := (len(want) + maxSendKeysBytesPerCommand - 1) / maxSendKeysBytesPerCommand
+	if len(commands) != wantCommands {
+		t.Fatalf("commands = %d, want %d", len(commands), wantCommands)
+	}
+
+	got := make([]byte, 0, len(want))
+	for i, command := range commands {
+		fields := strings.Fields(command)
+		if len(fields) < 5 || strings.Join(fields[:4], " ") != "send-keys -t %7 -H" {
+			t.Fatalf("command %d has invalid prefix", i)
+		}
+		encoded := fields[4:]
+		if len(encoded) > maxSendKeysBytesPerCommand {
+			t.Fatalf("command %d carries %d bytes, max %d", i, len(encoded), maxSendKeysBytesPerCommand)
+		}
+		for _, token := range encoded {
+			decoded, err := strconv.ParseUint(token, 16, 8)
+			if err != nil || len(token) != 2 {
+				t.Fatalf("command %d contains invalid byte %q", i, token)
+			}
+			got = append(got, byte(decoded))
+		}
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("chunked send-keys commands did not preserve the input bytes")
+	}
+}
 
 // The "working" signal is any known agent footer hint in the last few
 // non-blank screen lines — "esc to interrupt" (Claude/Codex) OR

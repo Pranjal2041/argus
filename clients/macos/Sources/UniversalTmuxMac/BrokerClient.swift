@@ -15,6 +15,139 @@ enum ConnState: Equatable {
     case connecting, connected, reconnecting, closed
 }
 
+/// Client-to-broker input framing. The broker protocol has no logical-message
+/// size field, so a large terminal paste is represented by several ordinary
+/// input frames. Four KiB is intentionally below both coder/websocket's legacy
+/// 32 KiB read limit and tmux's roughly 10,000-argument `send-keys -H` parser
+/// ceiling, which also makes a new app safe against brokers not yet upgraded.
+enum BrokerWireFrames {
+    static let maxInputPayloadBytes = 4 * 1024
+
+    static func encode(op: UInt8, pane: String, payload: [UInt8]) -> [Data] {
+        let paneBytes = Array(pane.utf8)
+        guard paneBytes.count <= Int(UInt8.max) else { return [] }
+
+        let chunkSize = op == Op.input ? maxInputPayloadBytes : max(1, payload.count)
+        if payload.isEmpty {
+            return [frame(op: op, pane: paneBytes, payload: payload[...])]
+        }
+
+        var frames: [Data] = []
+        frames.reserveCapacity((payload.count + chunkSize - 1) / chunkSize)
+        var offset = 0
+        while offset < payload.count {
+            let end = min(offset + chunkSize, payload.count)
+            frames.append(frame(op: op, pane: paneBytes, payload: payload[offset..<end]))
+            offset = end
+        }
+        return frames
+    }
+
+    private static func frame(
+        op: UInt8,
+        pane: [UInt8],
+        payload: ArraySlice<UInt8>
+    ) -> Data {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(2 + pane.count + payload.count)
+        bytes.append(op)
+        bytes.append(UInt8(pane.count))
+        bytes.append(contentsOf: pane)
+        bytes.append(contentsOf: payload)
+        return Data(bytes)
+    }
+}
+
+/// Serializes asynchronous WebSocket writes explicitly. SwiftTerm emits a
+/// bracketed paste as start marker, content, end marker; allowing multiple
+/// URLSession sends to race can reorder those pieces. This queue sends exactly
+/// one frame at a time and drops stale work when a socket generation retires —
+/// input is never replayed into a new connection after a disconnect.
+final class BrokerOutboundQueue {
+    typealias Sender = (Data, @escaping (Error?) -> Void) -> Void
+
+    private struct Item {
+        let generation: Int
+        let data: Data
+        let sender: Sender
+        let onFailure: (Error) -> Void
+    }
+
+    private let state = DispatchQueue(label: "dev.universaltmux.websocket-send")
+    private var generation: Int?
+    private var pending: [Item] = []
+    private var nextPending = 0
+    private var sending = false
+
+    func activate(generation: Int) {
+        state.async {
+            self.generation = generation
+            self.pending.removeAll(keepingCapacity: true)
+            self.nextPending = 0
+            self.sending = false
+        }
+    }
+
+    func deactivate() {
+        state.async {
+            self.generation = nil
+            self.pending.removeAll(keepingCapacity: true)
+            self.nextPending = 0
+            self.sending = false
+        }
+    }
+
+    func enqueue(
+        _ frames: [Data],
+        generation: Int,
+        sender: @escaping Sender,
+        onFailure: @escaping (Error) -> Void
+    ) {
+        guard !frames.isEmpty else { return }
+        state.async {
+            guard self.generation == generation else { return }
+            self.pending.append(contentsOf: frames.map {
+                Item(generation: generation, data: $0, sender: sender, onFailure: onFailure)
+            })
+            self.pump()
+        }
+    }
+
+    private func pump() {
+        guard !sending, let generation else { return }
+        while nextPending < pending.count, pending[nextPending].generation != generation {
+            nextPending += 1
+        }
+        guard nextPending < pending.count else {
+            pending.removeAll(keepingCapacity: true)
+            nextPending = 0
+            return
+        }
+
+        let item = pending[nextPending]
+        nextPending += 1
+        if nextPending >= 256, nextPending * 2 >= pending.count {
+            pending.removeFirst(nextPending)
+            nextPending = 0
+        }
+        sending = true
+        item.sender(item.data) { [weak self] error in
+            self?.state.async {
+                guard let self, self.generation == item.generation else { return }
+                self.sending = false
+                if let error {
+                    self.pending.removeAll(keepingCapacity: true)
+                    self.nextPending = 0
+                    self.generation = nil
+                    item.onFailure(error)
+                    return
+                }
+                self.pump()
+            }
+        }
+    }
+}
+
 /// Owns exactly one WebSocket generation and the URLSession that backs it.
 ///
 /// URLSession retains task and callback state until the session is invalidated.
@@ -59,6 +192,7 @@ final class BrokerClient {
     private var everConnected = false // distinguishes first connect from a reconnect
     private var backoff: TimeInterval = 0.5
     private var epoch = 0             // bumped on each start(); a stale receive/reconnect callback bails on mismatch (no double socket)
+    private let outbound = BrokerOutboundQueue()
 
     var onOutput: (([UInt8]) -> Void)?
     var onPaneSize: ((_ cols: Int, _ rows: Int) -> Void)?  // authoritative pane size (op 5)
@@ -188,6 +322,7 @@ final class BrokerClient {
         // it immediately against any broker not yet updated).
         t.maximumMessageSize = 64 * 1024 * 1024
         self.transport = transport
+        outbound.activate(generation: myEpoch)
         live = false
         t.resume()
         trace("dial_started", ["trigger": trigger, "epoch": myEpoch, "state": everConnected ? "reconnecting" : "connecting", "relaxed": relaxed])
@@ -269,6 +404,7 @@ final class BrokerClient {
     }
 
     private func retireTransport() {
+        outbound.deactivate()
         transport?.invalidate()
         transport = nil
     }
@@ -309,12 +445,32 @@ final class BrokerClient {
     }
 
     func send(op: UInt8, pane: String, payload: [UInt8]) {
-        var frame = [UInt8]()
-        let p = Array(pane.utf8)
-        frame.append(op)
-        frame.append(UInt8(p.count & 0xff))
-        frame.append(contentsOf: p)
-        frame.append(contentsOf: payload)
-        task?.send(.data(Data(frame))) { _ in }
+        guard let task else {
+            trace("send_dropped", ["op": op, "bytes": payload.count, "reason": "no-task"])
+            return
+        }
+        let frames = BrokerWireFrames.encode(op: op, pane: pane, payload: payload)
+        guard !frames.isEmpty else {
+            trace("send_dropped", ["op": op, "bytes": payload.count, "reason": "invalid-pane"])
+            return
+        }
+        let myEpoch = epoch
+        if frames.count > 1 {
+            trace("input_chunked", ["bytes": payload.count, "frames": frames.count, "epoch": myEpoch])
+        }
+        outbound.enqueue(
+            frames,
+            generation: myEpoch,
+            sender: { data, completion in
+                task.send(.data(data), completionHandler: completion)
+            },
+            onFailure: { [weak self, weak task] error in
+                DispatchQueue.main.async {
+                    guard let self, self.epoch == myEpoch else { return }
+                    self.trace("send_failed", ["epoch": myEpoch, "error": error.localizedDescription])
+                    task?.cancel()
+                }
+            }
+        )
     }
 }
