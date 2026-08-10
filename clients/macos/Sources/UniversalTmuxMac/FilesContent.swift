@@ -160,26 +160,138 @@ struct PDFKitView: NSViewRepresentable {
 
 // MARK: - system document preview (PowerPoint)
 
-/// Embedded, read-only Quick Look. The operating system supplies the PowerPoint
-/// renderer, so Argus adds no conversion engine or presentation assets to its app
-/// bundle. `QuickLookPreviewFile` guarantees this URL remains valid while the view
-/// renders and removes it when the document tab closes.
+/// `QLPreviewView` becomes permanently deactivated when its containing NSWindow
+/// closes. Assigning a non-nil item to that same instance after the window reopens
+/// is not a recoverable API error: Quick Look calls `abort()`. SwiftUI can retain an
+/// NSViewRepresentable across a Window close/reopen, so returning QLPreviewView
+/// directly lets `updateNSView` reactivate a dead instance.
+///
+/// Keep the reusable SwiftUI identity on this plain container instead. It disposes
+/// the Quick Look child *before* its window closes and creates a fresh child when
+/// the window is shown again or the item changes. A preview item is therefore set
+/// exactly once on a newly-created QLPreviewView.
+@MainActor
+final class QuickLookPreviewHostView: NSView {
+    private var itemURL: URL?
+    private weak var observedWindow: NSWindow?
+    private(set) var activePreviewView: QLPreviewView?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if observedWindow !== window {
+            stopObservingWindow()
+            discardPreview()
+            if let window { startObserving(window) }
+        }
+        installPreviewIfPossible()
+    }
+
+    func show(_ url: URL) {
+        if itemURL != url {
+            itemURL = url
+            discardPreview()
+        }
+        installPreviewIfPossible()
+    }
+
+    func invalidate() {
+        stopObservingWindow()
+        discardPreview()
+        itemURL = nil
+    }
+
+    private func startObserving(_ window: NSWindow) {
+        observedWindow = window
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: window
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidBecomeKey(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: window
+        )
+    }
+
+    private func stopObservingWindow() {
+        if let observedWindow {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSWindow.willCloseNotification,
+                object: observedWindow
+            )
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSWindow.didBecomeKeyNotification,
+                object: observedWindow
+            )
+        }
+        observedWindow = nil
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === observedWindow else { return }
+        // This notification arrives before AppKit deactivates the QLPreviewView.
+        // Discarding it here is what makes the next window opening safe.
+        discardPreview()
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        guard notification.object as? NSWindow === observedWindow else { return }
+        installPreviewIfPossible()
+    }
+
+    private func installPreviewIfPossible() {
+        guard activePreviewView == nil,
+              let itemURL,
+              let window,
+              window.isVisible else { return }
+
+        let preview = QLPreviewView(frame: bounds, style: .normal)!
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.autostarts = true
+        addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.leadingAnchor.constraint(equalTo: leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: trailingAnchor),
+            preview.topAnchor.constraint(equalTo: topAnchor),
+            preview.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        activePreviewView = preview
+        preview.previewItem = itemURL as NSURL
+    }
+
+    private func discardPreview() {
+        guard let preview = activePreviewView else { return }
+        preview.previewItem = nil
+        preview.removeFromSuperview()
+        activePreviewView = nil
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+}
+
+/// Embedded, read-only Quick Look shared by Files and Artifacts. The operating
+/// system supplies the renderer, while `QuickLookPreviewHostView` owns the unsafe
+/// NSWindow lifecycle described above.
 struct QuickLookFileView: NSViewRepresentable {
     let url: URL
 
-    func makeNSView(context: Context) -> QLPreviewView {
-        let view = QLPreviewView(frame: .zero, style: .normal)!
-        view.autostarts = true
-        view.previewItem = url as NSURL
+    func makeNSView(context: Context) -> QuickLookPreviewHostView {
+        let view = QuickLookPreviewHostView(frame: .zero)
+        view.show(url)
         return view
     }
 
-    func updateNSView(_ view: QLPreviewView, context: Context) {
-        if (view.previewItem as? URL) != url { view.previewItem = url as NSURL }
+    func updateNSView(_ view: QuickLookPreviewHostView, context: Context) {
+        view.show(url)
     }
 
-    static func dismantleNSView(_ view: QLPreviewView, coordinator: ()) {
-        view.previewItem = nil
+    static func dismantleNSView(_ view: QuickLookPreviewHostView, coordinator: ()) {
+        view.invalidate()
     }
 }
 

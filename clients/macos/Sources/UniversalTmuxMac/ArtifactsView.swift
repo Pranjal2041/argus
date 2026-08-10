@@ -1,6 +1,5 @@
 import AppKit
 import PDFKit
-import QuickLookUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -398,7 +397,7 @@ private struct ArtifactDocumentView: View {
                 case .text:
                     ArtifactTextView(record: record, url: artifacts.fileURL(for: record), zoom: zoom)
                 case .quickLook:
-                    ArtifactQuickLookView(url: artifacts.fileURL(for: record))
+                    QuickLookFileView(url: artifacts.fileURL(for: record))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -873,21 +872,6 @@ private struct ArtifactTextView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-    }
-}
-
-private struct ArtifactQuickLookView: NSViewRepresentable {
-    let url: URL
-
-    func makeNSView(context: Context) -> QLPreviewView {
-        let view = QLPreviewView(frame: .zero, style: .normal)!
-        view.autostarts = true
-        view.previewItem = url as NSURL
-        return view
-    }
-
-    func updateNSView(_ view: QLPreviewView, context: Context) {
-        if (view.previewItem as? URL) != url { view.previewItem = url as NSURL }
     }
 }
 

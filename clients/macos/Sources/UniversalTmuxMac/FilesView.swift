@@ -14,6 +14,24 @@ enum Flat {
     static var faint: Color    { Theme.textTertiary }
 }
 
+/// Exposes Finder-style file copying to the app's existing global Copy command
+/// only while a file-tree row owns keyboard focus. Editors, web views, terminals,
+/// and text fields therefore continue receiving their native `copy:` action.
+struct FileCopyCommand {
+    let perform: () -> Void
+}
+
+private struct FileCopyCommandKey: FocusedValueKey {
+    typealias Value = FileCopyCommand
+}
+
+extension FocusedValues {
+    var fileCopyCommand: FileCopyCommand? {
+        get { self[FileCopyCommandKey.self] }
+        set { self[FileCopyCommandKey.self] = newValue }
+    }
+}
+
 struct FilesView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var model: FilesModel
@@ -167,6 +185,7 @@ private struct TabPane: View {
     @State private var renameText = ""
     @State private var newName = ""
     @State private var search = ""
+    @FocusState private var focusedFilePath: String?
     private func s(_ v: CGFloat) -> CGFloat { v * uiScale }
 
     private var filteredRoots: [FileNode] {
@@ -222,6 +241,7 @@ private struct TabPane: View {
             if let up = tab.uploading { transferBanner("Uploading", up) }
             if let down = tab.downloading { transferBanner("Downloading", down) }
             if let notice = tab.artifactNotice { artifactBanner(notice) }
+            if let notice = tab.copyNotice { copyBanner(notice) }
             HSplitView {
                 sidebar
                 FileContentView(tab: tab)
@@ -245,7 +265,12 @@ private struct TabPane: View {
                         if row.isLoading {
                             loadingRow(depth: row.depth)
                         } else {
-                            FileRow(node: row.node, tab: tab, depth: row.depth)
+                            FileRow(
+                                node: row.node,
+                                tab: tab,
+                                depth: row.depth,
+                                focusedFilePath: $focusedFilePath
+                            )
                         }
                     }
                 }
@@ -330,6 +355,40 @@ private struct TabPane: View {
                 Spacer()
                 if !notice.isSaving {
                     Button { tab.artifactNotice = nil } label: {
+                        Image(systemName: "xmark").font(.system(size: s(9), weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Flat.faint)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            Divider().overlay(Flat.hairline)
+        }
+    }
+
+    private func copyBanner(_ notice: FileCopyNotice) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                if notice.isCopying {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: notice.isError ? "exclamationmark.triangle.fill" : "doc.on.doc.fill")
+                        .foregroundStyle(notice.isError ? Theme.waiting : Flat.accent)
+                }
+                Text(notice.message)
+                    .font(.system(size: s(11), weight: .medium))
+                    .foregroundStyle(notice.isError ? Theme.waiting : Flat.dim)
+                    .lineLimit(1)
+                if let progress = notice.progress {
+                    ProgressView(value: progress).frame(width: 90)
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: s(10), design: .monospaced))
+                        .foregroundStyle(Flat.faint)
+                }
+                Spacer()
+                if !notice.isCopying {
+                    Button { tab.copyNotice = nil } label: {
                         Image(systemName: "xmark").font(.system(size: s(9), weight: .bold))
                     }
                     .buttonStyle(.plain)
@@ -452,6 +511,7 @@ private struct FileRow: View {
     @ObservedObject var node: FileNode
     @ObservedObject var tab: FileTab
     let depth: Int
+    let focusedFilePath: FocusState<String?>.Binding
     @EnvironmentObject private var model: FilesModel
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var artifacts: ArtifactStore
@@ -464,6 +524,12 @@ private struct FileRow: View {
         // (TabPane.visibleRows), so the tree never nests eager subviews.
         rowLabel(sel: sel)
             .contentShape(Rectangle())
+            .focusable()
+            .focused(focusedFilePath, equals: node.entry.path)
+            .focusedValue(
+                \.fileCopyCommand,
+                node.entry.isDir ? nil : FileCopyCommand { tab.copyFileToPasteboard(node.entry) }
+            )
             .onTapGesture(count: 2) {
                 if node.entry.isDir { tab.setRootPath(node.entry.path) } else { tab.open(node) }
             }
@@ -520,6 +586,7 @@ private struct FileRow: View {
             Divider()
         } else {
             Button("Open") { tab.open(node) }
+            Button("Copy") { tab.copyFileToPasteboard(node.entry) }
             Button("Download…") { download() }
             Button {
                 model.requestArtifact(node.entry, from: tab, artifacts: artifacts)
@@ -541,6 +608,7 @@ private struct FileRow: View {
     }
 
     private func tapped() {
+        focusedFilePath.wrappedValue = node.entry.path
         if node.entry.isDir { tab.toggleExpand(node) } else { tab.open(node) }
     }
 

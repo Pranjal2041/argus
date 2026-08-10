@@ -255,6 +255,133 @@ struct FileArtifactNotice: Identifiable {
     let isSaving: Bool
 }
 
+struct FileCopyNotice: Identifiable {
+    let id: UUID
+    let message: String
+    let isError: Bool
+    let isCopying: Bool
+    var progress: Double?
+}
+
+enum FileClipboardError: LocalizedError {
+    case missingLocalFile
+    case invalidPath
+    case http(Int)
+    case pasteboardWrite
+
+    var errorDescription: String? {
+        switch self {
+        case .missingLocalFile: return "The file no longer exists."
+        case .invalidPath: return "The file path could not be opened."
+        case .http(let status): return "The file server returned HTTP \(status)."
+        case .pasteboardWrite: return "macOS could not place the file on the clipboard."
+        }
+    }
+}
+
+/// A durable local URL for a remotely copied file. Pasteboards keep a reference
+/// to a file rather than its bytes, so URLSession's ephemeral download location
+/// cannot be handed to another app directly. Each copy gets its own directory to
+/// preserve the original filename and avoid collisions; stale copies are swept
+/// lazily rather than adding work to app startup.
+struct FileClipboardCache: Sendable {
+    static let defaultRootURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Argus", isDirectory: true)
+        .appendingPathComponent("FileClipboard", isDirectory: true)
+
+    let rootURL: URL
+    let retention: TimeInterval
+
+    init(rootURL: URL = Self.defaultRootURL, retention: TimeInterval = 24 * 60 * 60) {
+        self.rootURL = rootURL
+        self.retention = retention
+    }
+
+    func adopt(_ sourceURL: URL, filename: String, now: Date = Date()) throws -> URL {
+        let fm = FileManager.default
+        try prepareRoot(fileManager: fm, now: now)
+        let directory = rootURL.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+
+        let basename = (filename as NSString).lastPathComponent
+        let destination = directory.appendingPathComponent(basename.isEmpty ? "file" : basename)
+        do {
+            do {
+                try fm.moveItem(at: sourceURL, to: destination)
+            } catch {
+                // URLSession and ~/Library/Caches normally share a volume, making
+                // the move constant-time. Keep a streaming filesystem fallback
+                // for unusual volume layouts without loading the file into RAM.
+                try fm.copyItem(at: sourceURL, to: destination)
+            }
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            return destination
+        } catch {
+            try? fm.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    private func prepareRoot(fileManager fm: FileManager, now: Date) throws {
+        try fm.createDirectory(at: rootURL, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: rootURL.path)
+        let cutoff = now.addingTimeInterval(-retention)
+        let candidates = (try? fm.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for candidate in candidates {
+            let modified = try? candidate.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+            if let modified, modified < cutoff { try? fm.removeItem(at: candidate) }
+        }
+    }
+}
+
+struct FileClipboardReservation: Sendable {
+    fileprivate let id: UUID
+    fileprivate let changeCount: Int
+}
+
+enum FileClipboardWriteResult: Equatable {
+    case written
+    case superseded
+    case failed
+}
+
+enum FinderFileClipboard {
+    @MainActor private static var latestReservationID: UUID?
+
+    @MainActor
+    static func reserve(on pasteboard: NSPasteboard = .general) -> FileClipboardReservation {
+        let reservation = FileClipboardReservation(id: UUID(), changeCount: pasteboard.changeCount)
+        latestReservationID = reservation.id
+        return reservation
+    }
+
+    @MainActor
+    static func isCurrent(
+        _ reservation: FileClipboardReservation,
+        on pasteboard: NSPasteboard = .general
+    ) -> Bool {
+        latestReservationID == reservation.id && pasteboard.changeCount == reservation.changeCount
+    }
+
+    @MainActor
+    static func write(
+        _ fileURL: URL,
+        reservation: FileClipboardReservation,
+        to pasteboard: NSPasteboard = .general
+    ) -> FileClipboardWriteResult {
+        guard isCurrent(reservation, on: pasteboard) else { return .superseded }
+        pasteboard.clearContents()
+        return pasteboard.writeObjects([fileURL as NSURL]) ? .written : .failed
+    }
+}
+
 struct FileArtifactMaterial {
     let data: Data
     let contentType: String?
@@ -422,6 +549,7 @@ final class FileTab: ObservableObject, Identifiable {
     @Published var uploading: UploadState? = nil
     @Published var downloading: UploadState? = nil
     @Published var artifactNotice: FileArtifactNotice? = nil
+    @Published var copyNotice: FileCopyNotice? = nil
 
     private let textCap: Int64 = 5_000_000   // above this, don't auto-load as text
 
@@ -696,6 +824,83 @@ final class FileTab: ObservableObject, Identifiable {
         }
     }
     func refreshDir(_ path: String) { Task { await refresh(path) } }
+
+    /// Finder-style copy for a file row. Local files can be placed on the
+    /// pasteboard immediately. A remote file is first streamed into a durable,
+    /// short-lived cache because pasteboards contain file URLs, not an owned copy
+    /// of the bytes at URLSession's ephemeral download path.
+    func copyFileToPasteboard(_ entry: FileEntry) {
+        guard !entry.isDir else { return }
+        selection = entry.path
+        let noticeID = UUID()
+        let reservation = FinderFileClipboard.reserve()
+        copyNotice = FileCopyNotice(
+            id: noticeID,
+            message: isLocal ? "Copying \(entry.name)…" : "Downloading \(entry.name) to copy…",
+            isError: false,
+            isCopying: true,
+            progress: isLocal ? nil : 0
+        )
+
+        Task {
+            do {
+                let clipboardURL: URL
+                if isLocal {
+                    let localURL = URL(fileURLWithPath: entry.path)
+                    guard FileManager.default.fileExists(atPath: localURL.path) else {
+                        throw FileClipboardError.missingLocalFile
+                    }
+                    clipboardURL = localURL
+                } else {
+                    guard let url = readURL(entry.path) else { throw FileClipboardError.invalidPath }
+                    let delegate = DownloadProgress { [weak self] progress in
+                        guard self?.copyNotice?.id == noticeID else { return }
+                        self?.copyNotice?.progress = progress
+                    }
+                    let (temporaryURL, response) = try await brokerSession.download(from: url, delegate: delegate)
+                    if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                        throw FileClipboardError.http(http.statusCode)
+                    }
+                    clipboardURL = try await Task.detached(priority: .userInitiated) {
+                        try FileClipboardCache().adopt(temporaryURL, filename: entry.name)
+                    }.value
+                }
+
+                switch FinderFileClipboard.write(clipboardURL, reservation: reservation) {
+                case .written:
+                    showCopyNotice("Copied \(entry.name)", isError: false)
+                case .superseded:
+                    if copyNotice?.id == noticeID { copyNotice = nil }
+                case .failed:
+                    showCopyNotice(
+                        "Couldn’t copy \(entry.name): \(FileClipboardError.pasteboardWrite.localizedDescription)",
+                        isError: true
+                    )
+                }
+            } catch {
+                if FinderFileClipboard.isCurrent(reservation) {
+                    showCopyNotice("Couldn’t copy \(entry.name): \(error.localizedDescription)", isError: true)
+                } else if copyNotice?.id == noticeID {
+                    copyNotice = nil
+                }
+            }
+        }
+    }
+
+    private func showCopyNotice(_ message: String, isError: Bool) {
+        let notice = FileCopyNotice(
+            id: UUID(),
+            message: message,
+            isError: isError,
+            isCopying: false,
+            progress: nil
+        )
+        copyNotice = notice
+        Task {
+            try? await Task.sleep(nanoseconds: isError ? 6_000_000_000 : 2_000_000_000)
+            if copyNotice?.id == notice.id { copyNotice = nil }
+        }
+    }
 
     /// Download `entry` to a local destination, with progress.
     func download(_ entry: FileEntry, to dest: URL) {

@@ -18,6 +18,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
     @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
+    @FocusedValue(\.fileCopyCommand) private var fileCopyCommand
     @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
     private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
 
@@ -61,7 +62,13 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("n", modifiers: .command)
             }
             CommandGroup(replacing: .pasteboard) {
-                Button("Copy") { NSApplication.shared.sendAction(Selector(("copy:")), to: nil, from: nil) }
+                Button("Copy") {
+                    if let fileCopyCommand {
+                        fileCopyCommand.perform()
+                    } else {
+                        NSApplication.shared.sendAction(Selector(("copy:")), to: nil, from: nil)
+                    }
+                }
                     .keyboardShortcut("c", modifiers: .command)
                 Button("Paste") { terminals.pasteFromClipboard() }
                     .keyboardShortcut("v", modifiers: .command)
