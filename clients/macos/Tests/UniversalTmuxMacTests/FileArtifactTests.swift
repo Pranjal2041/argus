@@ -1,8 +1,70 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import UniversalTmuxMac
 
 final class FileArtifactTests: XCTestCase {
+    func testClipboardCachePreservesFilenameAndBytes() throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArgusFileClipboardTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+        let source = temporaryRoot.appendingPathComponent("download.tmp")
+        let expected = Data("<svg><circle /></svg>".utf8)
+        try expected.write(to: source)
+
+        let destination = try FileClipboardCache(
+            rootURL: temporaryRoot.appendingPathComponent("cache", isDirectory: true)
+        ).adopt(source, filename: "diagram.svg")
+
+        XCTAssertEqual(destination.lastPathComponent, "diagram.svg")
+        XCTAssertEqual(try Data(contentsOf: destination), expected)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    @MainActor
+    func testFinderClipboardContainsRealFileURL() throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArgusPasteboardTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+        let fileURL = temporaryRoot.appendingPathComponent("evidence.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: fileURL)
+        let pasteboard = NSPasteboard(name: .init("ArgusFileClipboardTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+
+        let reservation = FinderFileClipboard.reserve(on: pasteboard)
+        XCTAssertEqual(
+            FinderFileClipboard.write(fileURL, reservation: reservation, to: pasteboard),
+            .written
+        )
+        let copiedURLs = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [NSURL]
+
+        XCTAssertEqual(copiedURLs?.first?.filePathURL, fileURL)
+        XCTAssertEqual(copiedURLs?.first?.lastPathComponent, "evidence.png")
+    }
+
+    @MainActor
+    func testSlowFileCopyDoesNotOverwriteNewerClipboardContent() {
+        let pasteboard = NSPasteboard(name: .init("ArgusFileClipboardTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let reservation = FinderFileClipboard.reserve(on: pasteboard)
+        pasteboard.clearContents()
+        pasteboard.setString("newer clipboard value", forType: .string)
+
+        let result = FinderFileClipboard.write(
+            URL(fileURLWithPath: "/tmp/old-remote-copy.png"),
+            reservation: reservation,
+            to: pasteboard
+        )
+
+        XCTAssertEqual(result, .superseded)
+        XCTAssertEqual(pasteboard.string(forType: .string), "newer clipboard value")
+    }
+
     @MainActor
     func testDirtyEditorSnapshotUsesVisibleDraft() {
         let tab = FileTab(machine: machine(), sourcePanel: panel())
