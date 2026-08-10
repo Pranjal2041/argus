@@ -69,6 +69,13 @@ func newSessionHub(tm session.Session) *sessionHub {
 // so splitting at an arbitrary byte boundary is transparent (TCP already does).
 const maxFramePayload = 256 * 1024
 
+// Older clients can send a complete paste in one input frame. coder/websocket's
+// default incoming-message limit is only 32 KiB, which turns a larger paste into
+// a disconnect before the broker can route it. Current clients chunk input, but
+// retain a bounded compatibility allowance so an older app can still paste a
+// large document after only its broker has been upgraded.
+const maxClientMessageBytes = 64 * 1024 * 1024
+
 // outputFrames encodes data as one or more opOutput frames, each within
 // maxFramePayload, preserving byte order.
 func outputFrames(pane string, data []byte) [][]byte {
@@ -128,6 +135,7 @@ func (h *sessionHub) pump() {
 }
 
 func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
+	c.SetReadLimit(maxClientMessageBytes)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -199,7 +207,9 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 		}
 		switch op {
 		case opInput:
-			_ = h.tm.SendKeys(pane, payload)
+			if err := h.tm.SendKeys(pane, payload); err != nil {
+				return fmt.Errorf("send input to pane %q: %w", pane, err)
+			}
 		case opResize:
 			if len(payload) < 4 {
 				continue

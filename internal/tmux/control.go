@@ -701,9 +701,24 @@ func (c *Client) Output() <-chan Output { return c.outCh }
 func (c *Client) send(line string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err := io.WriteString(c.ptmx, line+"\n")
+	return c.sendLocked(line)
+}
+
+func (c *Client) sendLocked(line string) error {
+	want := len(line) + 1
+	n, err := io.WriteString(c.ptmx, line+"\n")
+	if err == nil && n != want {
+		return io.ErrShortWrite
+	}
 	return err
 }
+
+// tmux parses every byte passed to `send-keys -H` as a separate grammar
+// argument. Around ten thousand arguments its yacc stack overflows, causing the
+// whole paste to disappear. Keep each command comfortably below that parser
+// ceiling. SendKeys holds writeMu across the complete batch, so chunks from one
+// paste cannot be interleaved with another client's input or a resize command.
+const maxSendKeysBytesPerCommand = 4 * 1024
 
 // SendKeys forwards raw input bytes to a pane via `send-keys -H` (hex
 // keycodes), which transparently handles control chars, escape sequences and
@@ -712,8 +727,28 @@ func (c *Client) SendKeys(pane string, data []byte) error {
 	if pane == "" || len(data) == 0 {
 		return nil
 	}
+	c.writeMu.Lock()
+	chunks := (len(data) + maxSendKeysBytesPerCommand - 1) / maxSendKeysBytesPerCommand
+	for chunk, off := 0, 0; off < len(data); chunk++ {
+		end := off + maxSendKeysBytesPerCommand
+		if end > len(data) {
+			end = len(data)
+		}
+		if err := c.sendKeysChunkLocked(pane, data[off:end]); err != nil {
+			c.writeMu.Unlock()
+			return fmt.Errorf("send input chunk %d/%d: %w", chunk+1, chunks, err)
+		}
+		off = end
+	}
+	c.writeMu.Unlock()
+	c.touchAgentSession()
+	return nil
+}
+
+func (c *Client) sendKeysChunkLocked(pane string, data []byte) error {
 	const hexdigits = "0123456789abcdef"
 	var b strings.Builder
+	b.Grow(len("send-keys -t ") + len(pane) + len(" -H") + 3*len(data))
 	b.WriteString("send-keys -t ")
 	b.WriteString(pane)
 	b.WriteString(" -H")
@@ -722,11 +757,7 @@ func (c *Client) SendKeys(pane string, data []byte) error {
 		b.WriteByte(hexdigits[by>>4])
 		b.WriteByte(hexdigits[by&0x0f])
 	}
-	if err := c.send(b.String()); err != nil {
-		return err
-	}
-	c.touchAgentSession()
-	return nil
+	return c.sendLocked(b.String())
 }
 
 // touchAgentSession cheaply records interactive use without forking a process per
