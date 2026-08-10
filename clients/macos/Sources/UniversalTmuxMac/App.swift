@@ -80,6 +80,8 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("s", modifiers: [.control, .command]) // ⌘\ collides with 1Password's global hotkey
                 Button("Command Palette…") { state.showPalette = true }
                     .keyboardShortcut("p", modifiers: .command)
+                Button("Files…") { state.openWindowRequest = "files" }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
