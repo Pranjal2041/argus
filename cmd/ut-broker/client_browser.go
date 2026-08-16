@@ -37,6 +37,13 @@ type browserRPCResponse struct {
 	Error  string          `json:"error"`
 }
 
+// A local-mode Windows broker may need one discovery pass before it can relay
+// to the Mac's native HTTP broker. That path is consistently a little over
+// eight seconds on the live tailnet, so an eight-second client deadline races
+// a healthy provider. Keep the probe bounded while leaving enough headroom for
+// the broker's own peer-resolution pass.
+const browserProviderProbeTimeout = 15 * time.Second
+
 func cmdBrowser(args []string) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Print(browserHelpText)
@@ -172,7 +179,7 @@ func fetchBrowserStatus(host string) (browserStatus, error) {
 }
 
 func fetchBrowserStatusURL(url string) (browserStatus, error) {
-	body, code, err := httpGet(url, 8*time.Second)
+	body, code, err := httpGet(url, browserProviderProbeTimeout)
 	if err != nil {
 		return browserStatus{}, err
 	}
