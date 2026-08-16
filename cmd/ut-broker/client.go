@@ -21,7 +21,8 @@ import (
 var meshVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
 	"tail": true, "send": true, "cp": true, "forward": true, "lab": true,
-	"help": true, "--help": true, "-h": true,
+	"browser": true,
+	"help":    true, "--help": true, "-h": true,
 }
 
 func isMeshVerb(s string) bool { return meshVerbs[s] }
@@ -60,6 +61,8 @@ func runClient(args []string) int {
 		return cmdForward(rest)
 	case "lab":
 		return cmdLab(rest)
+	case "browser":
+		return cmdBrowser(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ut: unknown command %q (try `ut help`)\n", verb)
 		return 2
@@ -716,6 +719,7 @@ USAGE
        [--local <port>] [--label <name>]
   ut forward ls                         list active local forwards
   ut forward stop <id>                  stop one forward
+  ut browser <subcommand>               control Argus's Mac-hosted browser from any machine
   ut lab   <subcommand>                 run experiments through the recorded, human-
                                         approved lab protocol (see ` + "`ut lab help`" + `)
 

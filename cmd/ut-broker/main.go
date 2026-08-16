@@ -27,6 +27,7 @@ import (
 	"tailscale.com/tsnet"
 
 	"universal-tmux/internal/broker"
+	"universal-tmux/internal/browserbridge"
 	"universal-tmux/internal/forward"
 	"universal-tmux/internal/fsvc"
 	"universal-tmux/internal/gitsvc"
@@ -116,6 +117,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	browserbridge.New(displayName).RegisterRoutes(mux)
 	mux.Handle("/", http.FileServer(assets))
 	// Identity handshake: the client probes this on every online tailnet peer and
 	// treats a device as a broker ONLY if it returns this exact marker — so an

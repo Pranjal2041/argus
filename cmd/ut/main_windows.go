@@ -58,8 +58,9 @@ func brokerLog(name string) string { return filepath.Join(os.TempDir(), name) }
 // dispatch list at the top of the unix `ut` script.
 var clientVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
-	"tail": true, "send": true, "cp": true, "lab": true,
-	"help": true, "--help": true, "-h": true,
+	"tail": true, "send": true, "cp": true, "lab": true, "forward": true,
+	"browser": true,
+	"help":    true, "--help": true, "-h": true,
 }
 
 func main() {

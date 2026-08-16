@@ -7,6 +7,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var terminals = TerminalController()
     @StateObject private var files = FilesModel()   // shared so "Reveal in Files" + the window use one instance
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
+    @StateObject private var browserControl = BrowserControlService() // optional ut browser provider hosted by Argus
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
     @StateObject private var gitPanels = GitPanels()          // read-only git viewer webviews (kept alive per session)
@@ -43,6 +44,7 @@ struct UniversalTmuxApp: App {
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
+                    browserControl.start(dashboards: dashboards, state: state)
                     screenshotArtifacts.bind(
                         state: state,
                         notebooks: notebooks,

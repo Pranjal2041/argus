@@ -383,6 +383,18 @@ final class DashboardsModel: ObservableObject {
         saveTabs()
     }
 
+    /// Promote the exact WKWebView created by the agent browser into the normal
+    /// dashboard UI. The tab is adopted rather than recreated, preserving cookies,
+    /// JavaScript state, scroll position, and the page the agent actually observed.
+    func adoptBrowserTab(_ tab: DashboardTab, select shouldSelect: Bool) {
+        if !tabs.contains(where: { $0.id == tab.id }) { tabs.append(tab) }
+        if shouldSelect {
+            activeID = tab.id
+            tab.lastViewedAt = Date()
+        }
+        saveTabs()
+    }
+
     // MARK: forwards (talk to the local broker's forward agent)
 
     /// Reuse an existing tunnel for (brokerHost, remotePort) or create one, then poll

@@ -22,6 +22,34 @@ port name. Desktop-app noise is hidden by default and available behind **Show al
 For dashboards that should stay current without interaction, each tab can auto-refresh every 5,
 15, 30, or 60 seconds. Open tabs and their host/port identity persist across app launches.
 
+## Agent-controlled browser
+
+When Argus is open on the Mac, an agent on **any** `ut` machine can drive the same WebKit browser
+through `ut browser`. New agent tabs are hidden by default; `show` promotes the exact live tab into
+Dashboards without reloading it or losing its cookies, JavaScript state, or scroll position.
+
+```bash
+ut browser status
+ut browser open https://example.com
+ut browser tabs
+ut browser snapshot <tab-id>
+ut browser screenshot <tab-id> -o page.png
+ut browser click <tab-id> 420 260
+ut browser type <tab-id> --ref e7 "search text"
+ut browser scroll <tab-id> 0 700
+ut browser show <tab-id>
+```
+
+Screenshots are first-class observations: an explicit `screenshot` writes the PNG where requested,
+and every click, type, or scroll writes its resulting viewport PNG to a temporary observation path
+on the agent's machine. `snapshot` returns readable page text plus interactive elements and stable
+references such as `e7`; coordinate actions use top-left screenshot coordinates.
+
+The browser process, WebKit profile, cookies, and network connection all remain on the **Mac running
+Argus**. A command issued on Babel is relayed Babel broker → Mac broker → Argus, so opening Gmail
+uses the Mac's network and login session—not Babel's. `ut browser status` states both the browser
+host and network origin explicitly.
+
 ## JupyterLab
 
 **New → JupyterLab** asks for a machine and a folder, and opens the host's **full JupyterLab rooted
