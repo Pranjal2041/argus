@@ -807,6 +807,20 @@ struct CommandCenterView: View {
                     .font(cf(11)).foregroundStyle(Theme.textTertiary)
                     .help("Cumulative claude -p spend (status updates) since first run")
             }
+            Button { state.presentWeeklyProgress() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chart.bar.doc.horizontal")
+                    Text("WEEKLY REVIEW")
+                }
+                .font(cf(10, .semibold))
+                .foregroundStyle(Theme.textTertiary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Theme.surface))
+                .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Open Weekly Progress (⇧⌘U)")
             Button { lab.setUnattendedMode(!lab.unattendedMode) } label: {
                 HStack(spacing: 5) {
                     if lab.unattendedModeUpdating {

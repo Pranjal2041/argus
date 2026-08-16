@@ -224,6 +224,70 @@ func backupArtifactLibrary(root string, now time.Time) error {
 	})
 }
 
+// Weekly progress generations become immutable once their audit passes. Back up
+// only those complete generation trees: an in-flight Codex run may still replace
+// its report, deck, renders, or audit, and hard-linking such a file would not form
+// a trustworthy point-in-time recovery copy. Project definitions are small,
+// mutable JSON and are copied separately each day.
+func backupWeeklyProgressLibrary(root string, now time.Time) error {
+	progressRoot := filepath.Join(homeDir(), "Library", "Application Support", "Argus", "weekly-progress")
+	return filepath.WalkDir(progressRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Name() == "project.json" {
+			rel, err := filepath.Rel(progressRoot, path)
+			if err != nil {
+				return err
+			}
+			return copyBackupSource(root, filepath.Join("weekly-progress", rel), path, now, true)
+		}
+		if entry.Name() != "state.json" {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var state struct {
+			Stage string `json:"stage"`
+		}
+		if json.Unmarshal(body, &state) != nil || state.Stage != "complete" {
+			return nil
+		}
+		generationRoot := filepath.Dir(path)
+		return filepath.WalkDir(generationRoot, func(generationPath string, generationEntry fs.DirEntry, generationErr error) error {
+			if errors.Is(generationErr, os.ErrNotExist) {
+				return nil
+			}
+			if generationErr != nil {
+				return generationErr
+			}
+			if generationEntry.IsDir() {
+				return nil
+			}
+			info, err := generationEntry.Info()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(progressRoot, generationPath)
+			if err != nil {
+				return err
+			}
+			return linkBackupSourceOnce(root, filepath.Join("weekly-progress", rel), generationPath, now)
+		})
+	})
+}
+
 func backupDurableStateAt(now time.Time) error {
 	backupMu.Lock()
 	defer backupMu.Unlock()
@@ -263,6 +327,13 @@ func backupDurableStateAt(now time.Time) error {
 		// immutable, so hard-linked daily recovery points cost almost no additional
 		// space while preventing an indexing or deletion bug from erasing history.
 		if err := backupArtifactLibrary(root, now); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+
+		// Audited weekly research reports and decks are durable user-authored research
+		// records. Complete generations are immutable and therefore share the artifact
+		// library's cheap hard-linked seven-day recovery semantics.
+		if err := backupWeeklyProgressLibrary(root, now); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 
@@ -307,7 +378,7 @@ func backupDurableStateAt(now time.Time) error {
 	}{
 		CreatedAt:     now.UTC().Format(time.RFC3339),
 		RetentionDays: backupRetentionDays,
-		Includes:      []string{"broker JSON state", "macOS preferences on the hub", "panel artifact library on the hub", "Lab control-plane metadata on the hub"},
+		Includes:      []string{"broker JSON state", "macOS preferences on the hub", "panel artifact library on the hub", "completed weekly progress generations on the hub", "Lab control-plane metadata on the hub"},
 		Excludes:      []string{"executables", "caches", "sockets", "logs", "large immutable Lab artifacts"},
 	}, "", "  ")
 	if err := writeBackupOnce(root, "manifest.json", manifest, 0o600, now); err != nil {

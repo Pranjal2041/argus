@@ -390,6 +390,10 @@ final class AppState: ObservableObject {
             // Activity journal dwell: attention moved (nil selection closes it too).
             ActivityJournal.shared.selectionChanged(to: selection)
             guard let ref = selection else { return }
+            // A direct panel selection always means “open this terminal,” including
+            // selections made from the command palette while Weekly Progress owns the
+            // full window.
+            showWeeklyProgress = false
             // Visiting a panel clears its orange "done, unseen" flag → back to green.
             if unseen.contains(ref.id) { unseen.remove(ref.id) }
             // Viewing a waiting session acknowledges it → clears it from the inbox AND
@@ -416,6 +420,7 @@ final class AppState: ObservableObject {
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
     @Published var showOverview = true          // command-center panel is the home view (⇧⌘A); set false when diving into a session
     @Published var showPlanner = false          // chronological finish-line agenda (⇧⌘P)
+    @Published var showWeeklyProgress = false   // manual project/week research review
     @Published var renderDocument: RenderDocument? // non-nil → styled/static Render overlay is up
     @Published var renderArtifactContext: ArtifactPanelContext? // immutable panel identity captured with Render
     @Published var renderPDFCaptureInProgress = false // freezes semantic/visual changes during WebKit PDF capture
@@ -1268,6 +1273,7 @@ final class AppState: ObservableObject {
     /// Present Planner as the one active top-level workspace pane.
     func presentPlanner() {
         showPlanner = true
+        showWeeklyProgress = false
         showOverview = false
         showTodos = false
         showNotes = false
@@ -1279,6 +1285,20 @@ final class AppState: ObservableObject {
     /// Present the Artifact library as the one active top-level surface.
     func presentArtifacts() {
         showArtifacts = true
+        showWeeklyProgress = false
+        showOverview = false
+        showPlanner = false
+        showTodos = false
+        showNotes = false
+        showLedger = false
+        showLab = false
+    }
+
+    /// Present Weekly Progress as the one active top-level workspace. Like Artifacts,
+    /// it owns the full window because its project rail replaces the session sidebar.
+    func presentWeeklyProgress() {
+        showWeeklyProgress = true
+        showArtifacts = false
         showOverview = false
         showPlanner = false
         showTodos = false

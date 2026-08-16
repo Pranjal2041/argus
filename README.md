@@ -65,6 +65,14 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   Planner is currently a macOS surface; Workflows, Todo Maps, and Notes also have Android views.
   Destructive syncs require explicit user intent, and Argus keeps seven daily recovery points for
   synced data, app preferences, the local panel Artifacts library, and Lab metadata.
+- **Weekly Progress** — group a research project across panels, machines, and workspace roots;
+  choose any Monday-to-Sunday period; then explicitly generate an evidence-backed research report
+  and slide deck with GPT-5.6 Sol at xhigh reasoning. The staged run reconciles journal evidence
+  before drafting, audits the actual PowerPoint and every rendered slide, preserves same-week
+  versions, resumes interrupted generations, and includes a full-window slide/report reader. The
+  virtual **All** collection shows every project's slides for a chosen week, while **Calendar list**
+  browses the recorded deck history for one project or the whole library. Generation is
+  manual—nothing runs on a weekly schedule.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session
