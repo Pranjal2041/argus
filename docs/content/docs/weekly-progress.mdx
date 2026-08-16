@@ -1,0 +1,80 @@
+---
+title: Weekly Progress
+description: Generate an evidence-backed research deck for one project and one chosen week.
+---
+
+Weekly Progress turns the local [Activity Journal](/docs/journal) and available project evidence
+into a self-readable research deck. It is designed for reviewing your own work or walking a PI
+through a project—not for producing an engineering changelog.
+
+Nothing runs on a schedule. You choose a project, choose a Monday-through-Sunday period, and click
+**Generate review**.
+
+## Define a project
+
+A project is a stable research identity that can span several panels, machines, and working copies.
+Create one from the project rail, then add:
+
+- **Panels.** The editor separates **Running** panels from **Past** panels retained in Argus's
+  durable 90-day session history. Past panels are ordered by when they were last used and restore
+  their recorded folders when selected. Adding either kind defaults to **Across machines**, so the
+  project continues to match when the same work moves between Babel nodes; pin it to one machine
+  only when that distinction matters.
+- **Workspace folders.** Argus fills these from the panels you select, and you can add or remove
+  paths manually. The generation agent may read a locally available workspace to verify journal
+  claims; it cannot modify that workspace.
+
+The project rail shows panel and folder counts separately. Use the adjacent info button to inspect
+the exact panel scopes and paths without opening the editor.
+
+The first rail item, **All**, is a virtual collection rather than another saved project. Choose a
+week there to see every project's latest readable deck for that period. Slides remain grouped by
+their real project and are loaded only as their row becomes visible, so this view does not copy,
+merge, or regenerate anything.
+
+The Activity Journal remains an incomplete interaction record: terminal captures can be partial or
+duplicated, later work can correct an earlier conclusion, and some agent output may be absent. The
+pipeline therefore reconstructs a research report and evidence ledger before it creates slides.
+
+## Generate a chosen week
+
+Use the arrows to move one week at a time, or click the date range to choose any date in an older
+week. Then click **Generate review**. The page shows four durable stages:
+
+1. Collecting evidence
+2. Reconstructing research
+3. Building slides
+4. Checking slides
+
+The run uses `gpt-5.6-sol` with `xhigh` reasoning. It continues if you leave Weekly Progress while
+Argus stays open. If Argus or the model run is interrupted, **Resume** continues from the files and
+Codex conversation already recorded for that generation.
+
+Each click creates a new immutable version; it never replaces an earlier deck for the same week.
+The final verification requires a valid PowerPoint, one complete rendered image per slide, and an
+independent parse of the actual visible PowerPoint text. Argus rejects objective language violations
+such as prohibited punctuation, rhetorical contrast formulas, and the unexplained terms called out
+in the successful reference session even when the agent says that its own audit passed. Generation
+replays the five actual user instructions from that session in order. Tests pin a SHA256 hash for
+each instruction so they cannot be paraphrased or silently compressed again.
+
+## Read the result
+
+Click **Read slides** for the full-window reader. Its filmstrip moves through the rendered deck
+without requiring PowerPoint; switch to **Research report** to read the Markdown source in Argus.
+The `…` menu can open the original `.pptx` or reveal the complete generation in Finder.
+
+Use **Selected week** for a slide gallery of the current Monday-through-Sunday period. Use
+**Calendar list** on either **All** or one project to browse recorded weeks newest first. Each week
+keeps its project identity, full slide strip, version count, and generation status. If a replacement
+run is still underway, the calendar continues to expose the most recent completed deck instead of
+hiding it.
+
+Completed generations join Argus's automatic seven-day recovery points. In-flight generations are
+not backed up mid-write; their durable working directory remains available for Resume.
+
+<Callout type="info">
+Open Weekly Progress from the **Weekly review** button in Command Center, with `⇧⌘U`, or by searching
+for **Open Weekly Progress** in the `⌘P` command palette. Weekly Progress is currently a macOS
+surface because generation and its local evidence library live on the Mac.
+</Callout>

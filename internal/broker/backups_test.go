@@ -63,6 +63,14 @@ func TestDurableStateBackupCoversBrokerMacAndLabMetadata(t *testing.T) {
 	mustWrite(filepath.Join(home, "Library", "Preferences", "dev.universaltmux.mac.plist"), `plist-bytes`)
 	mustWrite(filepath.Join(home, "Library", "Application Support", "Argus", "artifacts", "records", "artifact.json"), `{"id":"artifact"}`)
 	mustWrite(filepath.Join(home, "Library", "Application Support", "Argus", "artifacts", "pdf", "artifact.pdf"), `important-pdf`)
+	progressRoot := filepath.Join(home, "Library", "Application Support", "Argus", "weekly-progress", "projects", "project-one")
+	mustWrite(filepath.Join(progressRoot, "project.json"), `{"id":"project-one","name":"LSD"}`)
+	completeGeneration := filepath.Join(progressRoot, "weeks", "2026-07-06", "generations", "complete-one")
+	mustWrite(filepath.Join(completeGeneration, "state.json"), `{"stage":"complete"}`)
+	mustWrite(filepath.Join(completeGeneration, "weekly-progress.pptx"), `audited-deck`)
+	activeGeneration := filepath.Join(progressRoot, "weeks", "2026-07-13", "generations", "active-one")
+	mustWrite(filepath.Join(activeGeneration, "state.json"), `{"stage":"draftingSlides"}`)
+	mustWrite(filepath.Join(activeGeneration, "draft.pptx"), `unfinished-deck`)
 	mustWrite(filepath.Join(labRoot, "store-id"), `store-1`)
 	mustWrite(filepath.Join(labRoot, "sets", "s-one", "set.json"), `{"name":"one"}`)
 	mustWrite(filepath.Join(labRoot, "sets", "s-one", "runs", "R1", "log.txt"), `large artifact`)
@@ -79,6 +87,9 @@ func TestDurableStateBackupCoversBrokerMacAndLabMetadata(t *testing.T) {
 		filepath.Join("macos", "dev.universaltmux.mac.plist"),
 		filepath.Join("artifacts", "records", "artifact.json"),
 		filepath.Join("artifacts", "pdf", "artifact.pdf"),
+		filepath.Join("weekly-progress", "projects", "project-one", "project.json"),
+		filepath.Join("weekly-progress", "projects", "project-one", "weeks", "2026-07-06", "generations", "complete-one", "state.json"),
+		filepath.Join("weekly-progress", "projects", "project-one", "weeks", "2026-07-06", "generations", "complete-one", "weekly-progress.pptx"),
 		filepath.Join("lab", "store-id"),
 		filepath.Join("lab", "sets", "s-one", "set.json"),
 	} {
@@ -88,6 +99,8 @@ func TestDurableStateBackupCoversBrokerMacAndLabMetadata(t *testing.T) {
 	}
 	for _, relative := range []string{
 		filepath.Join("broker", "ignored.log"),
+		filepath.Join("weekly-progress", "projects", "project-one", "weeks", "2026-07-13", "generations", "active-one", "state.json"),
+		filepath.Join("weekly-progress", "projects", "project-one", "weeks", "2026-07-13", "generations", "active-one", "draft.pptx"),
 		filepath.Join("lab", "sets", "s-one", "runs", "R1", "log.txt"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, relative)); !os.IsNotExist(err) {

@@ -18,6 +18,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
     @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
+    @StateObject private var weeklyProgress = WeeklyProgressController() // manual research-review generations
     @FocusedValue(\.fileCopyCommand) private var fileCopyCommand
     @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
     private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
@@ -38,6 +39,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(artifacts)
                 .environmentObject(themeStore)
                 .environmentObject(recovery)
+                .environmentObject(weeklyProgress)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
@@ -86,7 +88,7 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
@@ -94,13 +96,18 @@ struct UniversalTmuxApp: App {
                     if state.showPlanner { state.showPlanner = false } else { state.presentPlanner() }
                 }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
-                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showPlanner = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Weekly Progress…") {
+                    if state.showWeeklyProgress { state.showWeeklyProgress = false }
+                    else { state.presentWeeklyProgress() }
+                }
+                    .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
-                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false } }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
-                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false } }
+                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 Button("Artifacts…") {
                     if state.showArtifacts {
@@ -719,6 +726,7 @@ struct RootView: View {
     @EnvironmentObject var lab: LabModel
     @EnvironmentObject var artifacts: ArtifactStore
     @EnvironmentObject var recovery: WorkspaceRecoveryController
+    @EnvironmentObject var weeklyProgress: WeeklyProgressController
     @ViewBuilder private var ledgerPane: some View {
         LedgerView(panel: ledgerHost.panel).onAppear { ledgerHost.panel.refresh() }
     }
@@ -756,7 +764,7 @@ struct RootView: View {
             // Artifacts is a library destination, not a panel detail. Give it the
             // entire window while preserving the user's normal sidebar setting
             // so closing the library restores the workspace exactly as it was.
-            if state.columns != .detailOnly && !state.showArtifacts {
+            if state.columns != .detailOnly && !state.showArtifacts && !state.showWeeklyProgress {
                 sidebar
                     .frame(width: 272)
                     .frame(maxHeight: .infinity)
@@ -765,6 +773,8 @@ struct RootView: View {
             Group {
                 if state.showArtifacts {
                     ArtifactsView()
+                } else if state.showWeeklyProgress {
+                    WeeklyProgressView()
                 } else if state.showPlanner {
                     PlannerView()
                 } else if state.showLab {
@@ -1751,6 +1761,9 @@ struct CommandPalette: View {
                 RenderLauncher.open(state: state, terminals: terminals)
             }),
             ("calendar", "Open Planner", "⇧⌘P", { state.presentPlanner() }),
+            ("chart.bar.doc.horizontal", "Open Weekly Progress", "⇧⌘U", {
+                state.presentWeeklyProgress()
+            }),
             ("archivebox", "Open Artifacts", "⇧⌘I", {
                 artifacts.openLibrary()
                 state.presentArtifacts()
