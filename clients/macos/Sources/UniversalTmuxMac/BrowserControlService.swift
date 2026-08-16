@@ -1,7 +1,22 @@
 import AppKit
 import Foundation
+import ImageIO
 import Network
+import UniformTypeIdentifiers
 import WebKit
+
+/// Process-wide AppKit events cannot be addressed to a hidden WKWebView without
+/// also entering Argus's normal event stream. Native dispatch is therefore only
+/// safe when the user is already looking at the exact browser tab in the active,
+/// key dashboard window. Every other case uses WebKit's tab-local DOM path.
+enum BrowserNativeInputPolicy {
+    static func allowsNativeInput(enabled: Bool, tabIsHidden: Bool,
+                                  applicationIsActive: Bool, tabIsSelected: Bool,
+                                  windowIsKey: Bool, windowIsVisible: Bool) -> Bool {
+        enabled && !tabIsHidden && applicationIsActive && tabIsSelected
+            && windowIsKey && windowIsVisible
+    }
+}
 
 // MARK: - Agent browser provider
 
@@ -271,7 +286,9 @@ final class BrowserControlService: ObservableObject {
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.transient, .ignoresCycle]
         window.alphaValue = 0.01
-        window.ignoresMouseEvents = false
+        // Hidden browser rendering must never intercept the user's pointer, even
+        // if macOS temporarily repositions windows while spaces/apps reactivate.
+        window.ignoresMouseEvents = true
         window.contentView = webView
         // WebKit paints while attached to an ordered window. Keeping the borderless
         // host far offscreen makes it genuinely hidden without using a special DOM
@@ -376,11 +393,13 @@ final class BrowserControlService: ObservableObject {
             configuration.snapshotWidth = NSNumber(value: width / backingScale)
         }
         let image = try await managed.webView.snapshot(configuration: configuration)
-        guard let tiff = image.tiffRepresentation,
-              let representation = NSBitmapImageRep(data: tiff),
-              let png = representation.representation(using: .png, properties: [:]) else {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw BrowserControlFailure.failed("could not encode the WebKit screenshot")
         }
+        // WKWebView itself is main-thread-bound, but PNG compression and base64 are
+        // pure CPU/copy work. Keeping them off MainActor prevents a large or busy
+        // page observation from freezing terminal scrolling and clicks in Argus.
+        let encoded = try await BrowserScreenshotEncoder.encode(cgImage)
         let scroll = (try? await managed.webView.evaluate(
             script: "({x: window.scrollX || 0, y: window.scrollY || 0})"
         )) as? [String: Any]
@@ -389,12 +408,12 @@ final class BrowserControlService: ObservableObject {
             "tab_id": managed.tab.id.uuidString.lowercased(),
             "generation": managed.generation,
             "mime_type": "image/png",
-            "width": representation.pixelsWide,
-            "height": representation.pixelsHigh,
+            "width": encoded.width,
+            "height": encoded.height,
             "scroll_x": scroll?.double("x") ?? 0,
             "scroll_y": scroll?.double("y") ?? 0,
             "url": managed.webView.url?.absoluteString ?? "",
-            "image_base64": png.base64EncodedString()
+            "image_base64": encoded.base64
         ]
         if let mode = managed.lastInteractionMode { result["interaction_mode"] = mode }
         return result
@@ -450,8 +469,15 @@ final class BrowserControlService: ObservableObject {
             return
         }
         let before = try await trustedEventCount(webView, key: "pointer")
-        let stage = try stageNativeInput(webView)
-        defer { stage.restore() }
+        // The user may switch windows while WebKit answers the query above. Check
+        // again immediately before posting anything into Argus's global event queue.
+        guard shouldUseNativeInput(managed) else {
+            guard (try await webView.evaluate(script: BrowserScripts.coordinateClick(x: x, y: y)) as? Bool) == true else {
+                throw BrowserControlFailure.notFound("no page element exists at the requested coordinates")
+            }
+            managed.lastInteractionMode = "dom-coordinate-fallback"
+            return
+        }
         try postNativeClick(webView, x: x, y: y)
         try await Task.sleep(nanoseconds: 80_000_000)
         let after = try await trustedEventCount(webView, key: "pointer")
@@ -467,7 +493,10 @@ final class BrowserControlService: ObservableObject {
 
     private func nativeType(_ managed: BrowserManagedTab, x: Double?, y: Double?, text: String) async throws {
         let webView = managed.webView
-        if !shouldUseNativeInput(managed) {
+        // Typing without a coordinate/ref relies on an existing page focus. Never
+        // post those keys process-wide: the current first responder may be Argus's
+        // command palette, terminal, or address field rather than browser content.
+        if !shouldUseNativeInput(managed) || x == nil || y == nil {
             if let x, let y {
                 guard (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y)) as? Bool) == true else {
                     throw BrowserControlFailure.notFound("no editable page element exists at the requested coordinates")
@@ -481,8 +510,16 @@ final class BrowserControlService: ObservableObject {
             return
         }
         let beforePointer = try await trustedEventCount(webView, key: "pointer")
-        let stage = try stageNativeInput(webView)
-        defer { stage.restore() }
+        guard shouldUseNativeInput(managed) else {
+            guard let x, let y,
+                  (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y))) as? Bool == true,
+                  (try await webView.evaluate(script: BrowserScripts.prepareType(text: text))) as? Bool == true,
+                  (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
+                throw BrowserControlFailure.failed("the page has no focused editable element")
+            }
+            managed.lastInteractionMode = "dom-coordinate-fallback"
+            return
+        }
         if let x, let y {
             try postNativeClick(webView, x: x, y: y)
             try await Task.sleep(nanoseconds: 60_000_000)
@@ -497,6 +534,13 @@ final class BrowserControlService: ObservableObject {
             throw BrowserControlFailure.failed("the page has no focused editable element")
         }
         let beforeKeyboard = try await trustedEventCount(webView, key: "keyboard")
+        guard shouldUseNativeInput(managed) else {
+            guard (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
+                throw BrowserControlFailure.failed("the page has no focused editable element")
+            }
+            managed.lastInteractionMode = "dom-coordinate-fallback"
+            return
+        }
         guard let window = webView.window else {
             throw BrowserControlFailure.failed("the WebKit tab is not attached to a renderable window")
         }
@@ -565,8 +609,11 @@ final class BrowserControlService: ObservableObject {
             return
         }
         let before = try await trustedEventCount(webView, key: "wheel")
-        let stage = try stageNativeInput(webView)
-        defer { stage.restore() }
+        guard shouldUseNativeInput(managed) else {
+            _ = try await webView.evaluate(script: BrowserScripts.scroll(dx: dx, dy: dy))
+            managed.lastInteractionMode = "dom-coordinate-fallback"
+            return
+        }
         let local = CGPoint(x: webView.bounds.midX, y: webView.bounds.midY)
         let windowPoint = webView.convert(local, to: nil)
         guard let window = webView.window else {
@@ -589,28 +636,18 @@ final class BrowserControlService: ObservableObject {
         }
     }
 
-    private func stageNativeInput(_ webView: WKWebView) throws -> BrowserNativeInputStage {
-        guard let window = webView.window else {
-            throw BrowserControlFailure.failed("the WebKit tab is not attached to a renderable window")
-        }
-        let stage = BrowserNativeInputStage(window: window)
-        if window is BrowserOffscreenWindow {
-            let origin = NSScreen.main?.visibleFrame.origin ?? .zero
-            window.setFrameOrigin(origin)
-            window.alphaValue = 0.002
-            window.orderFront(nil)
-        }
-        window.makeKey()
-        return stage
-    }
-
     private func shouldUseNativeInput(_ managed: BrowserManagedTab) -> Bool {
-        guard nativeInputEnabled else { return false }
-        // A hidden WebKit window must briefly become key for trusted AppKit events.
-        // Never steal focus while the user is actively working inside Argus; the
-        // WebKit coordinate/ref path is deterministic and non-invasive. When Argus
-        // is in the background, or the tab is already visible, native dispatch is safe.
-        return !(managed.window is BrowserOffscreenWindow) || !NSApp.isActive
+        let webView = managed.webView
+        guard let window = webView.window else { return false }
+        let isHidden = hiddenTabs[managed.tab.id] != nil || window is BrowserOffscreenWindow
+        return BrowserNativeInputPolicy.allowsNativeInput(
+            enabled: nativeInputEnabled,
+            tabIsHidden: isHidden,
+            applicationIsActive: NSApp.isActive,
+            tabIsSelected: dashboards?.activeID == managed.tab.id,
+            windowIsKey: window.isKeyWindow,
+            windowIsVisible: window.isVisible && window.occlusionState.contains(.visible)
+        )
     }
 
     private func trustedEventCount(_ webView: WKWebView, key: String) async throws -> Int {
@@ -688,38 +725,35 @@ private final class BrowserManagedTab: NSObject, WKNavigationDelegate {
     }
 }
 
-/// A borderless offscreen host normally cannot become key, so WebKit discards
-/// native responder events. This window becomes key only for the duration of an
-/// explicit agent input and the service immediately restores the user's window.
+/// Offscreen hosts are render surfaces only. They deliberately cannot become key
+/// or receive pointer input; hidden automation is isolated inside its WKWebView.
 private final class BrowserOffscreenWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
-@MainActor
-private final class BrowserNativeInputStage {
-    private weak var window: NSWindow?
-    private weak var previousKeyWindow: NSWindow?
-    private let originalFrame: CGRect
-    private let originalAlpha: CGFloat
-    private let wasVisible: Bool
+private struct BrowserEncodedScreenshot: Sendable {
+    let base64: String
+    let width: Int
+    let height: Int
+}
 
-    init(window: NSWindow) {
-        self.window = window
-        previousKeyWindow = NSApp.keyWindow
-        originalFrame = window.frame
-        originalAlpha = window.alphaValue
-        wasVisible = window.isVisible
-    }
-
-    func restore() {
-        guard let window else { return }
-        if window is BrowserOffscreenWindow {
-            window.setFrame(originalFrame, display: false)
-            window.alphaValue = originalAlpha
-            if wasVisible { window.orderBack(nil) } else { window.orderOut(nil) }
-        }
-        (previousKeyWindow ?? NSApp.mainWindow)?.makeKey()
+private enum BrowserScreenshotEncoder {
+    static func encode(_ image: CGImage) async throws -> BrowserEncodedScreenshot {
+        try await Task.detached(priority: .utility) {
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                data, UTType.png.identifier as CFString, 1, nil
+            ) else {
+                throw BrowserControlFailure.failed("could not create the PNG encoder")
+            }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else {
+                throw BrowserControlFailure.failed("could not encode the WebKit screenshot")
+            }
+            return BrowserEncodedScreenshot(base64: (data as Data).base64EncodedString(),
+                                            width: image.width, height: image.height)
+        }.value
     }
 }
 

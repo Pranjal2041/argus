@@ -4,13 +4,12 @@ import XCTest
 
 @MainActor
 final class BrowserControlServiceTests: XCTestCase {
-    func testHiddenWebKitTabSupportsScreenshotNativeInputAndPromotion() async throws {
+    func testHiddenWebKitTabSupportsScreenshotIsolatedInputAndPromotion() async throws {
         let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
                                          persistTabState: false)
-        // XCTest itself cannot safely enqueue process-native NSEvents into its
-        // WebKit subprocess. Exercise the identical coordinate fallback here;
-        // production keeps the trusted-event-first path enabled.
-        let service = BrowserControlService(nativeInputEnabled: false)
+        // Native input remains enabled globally, but hidden tabs must always use
+        // their isolated DOM-coordinate path and never enter Argus's event queue.
+        let service = BrowserControlService(nativeInputEnabled: true)
         service.bindForTesting(dashboards: dashboards)
         let html = """
         <!doctype html><meta charset="utf-8">
@@ -69,6 +68,29 @@ final class BrowserControlServiceTests: XCTestCase {
         XCTAssertEqual(dashboards.tabs.count, 1)
         XCTAssertEqual(dashboards.tabs.first?.id.uuidString.lowercased(), tabID)
         XCTAssertNotNil(dashboards.tabs.first?.heldWebView)
+    }
+
+    func testNativeInputPolicyRequiresExactForegroundBrowserTab() {
+        XCTAssertTrue(BrowserNativeInputPolicy.allowsNativeInput(
+            enabled: true, tabIsHidden: false, applicationIsActive: true,
+            tabIsSelected: true, windowIsKey: true, windowIsVisible: true
+        ))
+
+        let unsafeCases: [(Bool, Bool, Bool, Bool, Bool, Bool)] = [
+            (false, false, true, true, true, true),  // feature disabled
+            (true, true, true, true, true, true),    // hidden agent tab
+            (true, false, false, true, true, true),  // Argus is backgrounded
+            (true, false, true, false, true, true),  // another browser tab selected
+            (true, false, true, true, false, true),  // another window is key
+            (true, false, true, true, true, false),  // dashboard window is not visible
+        ]
+        for values in unsafeCases {
+            XCTAssertFalse(BrowserNativeInputPolicy.allowsNativeInput(
+                enabled: values.0, tabIsHidden: values.1,
+                applicationIsActive: values.2, tabIsSelected: values.3,
+                windowIsKey: values.4, windowIsVisible: values.5
+            ))
+        }
     }
 
     private func rpc(_ service: BrowserControlService, method: String,
