@@ -114,6 +114,19 @@ they are immutable and addressed by the Lab store's own retention policy; experi
 remains in the backed-up event metadata and offline mirror. The Activity Journal already uses
 append-only files split by day.
 
+## The optional Argus browser provider
+
+Browser automation is the deliberate exception to the usual `ut`/Argus independence. The CLI and
+brokers still work without a desktop app, but `ut browser` is available only while Argus is open on
+a Mac. Argus owns the WebKit views and registers a short-lived, loopback-only `browser.v1` provider
+with its local broker. Five-second heartbeats make a crashed or closed app disappear from discovery
+without leaving a stale endpoint.
+
+A remote CLI discovers a peer advertising that provider, then sends an opaque versioned RPC through
+the existing mesh proxy. The Mac broker relays it to Argus over loopback; it does not interpret DOM,
+input, screenshots, cookies, or tabs. Consequently the browser and its network origin are always the
+provider Mac even when the requesting agent runs on Linux or Windows.
+
 <Callout type="info">
 The broker, the file service, and the port-forward agent all ride the **same** per-host broker
 over the tailnet — so adding Files or Ports needs zero extra deployment.

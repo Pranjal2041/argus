@@ -105,9 +105,11 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   survives a machine going offline; click a row to open the session, or re-create a finished one in
   its last folder. Plus themes that recolor the whole app: chrome, terminals, and editor.
 - **`ut` CLI + mesh** — a drop-in for `tmux` that publishes a host to your tailnet, plus a small
-  cross-host fabric (`ut exec` / `ut sh` / `ut spawn` / `ut tail` / `ut cp` / `ut forward`) to orchestrate work by
+  cross-host fabric (`ut exec` / `ut sh` / `ut spawn` / `ut tail` / `ut cp` / `ut forward` / `ut browser`) to orchestrate work by
   host name. Mesh-created shells and jobs are agent sessions hidden from the main UI; use
-  `ut sh --visible` only for a deliberate user-facing panel.
+  `ut sh --visible` only for a deliberate user-facing panel. While Argus is open on the Mac,
+  `ut browser` gives an agent on any machine hidden/visible WebKit tabs, DOM snapshots, screenshots,
+  and coordinate or element-ref input; browser traffic and authenticated state remain on that Mac.
 
 ## How it works
 
