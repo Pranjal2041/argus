@@ -308,6 +308,9 @@ struct WeeklyProgressGenerationManifest: Codable, Hashable {
     var evidence: WeeklyProgressEvidenceSummary?
     var outputs: [String: String]
     var error: String?
+    /// Idempotency key supplied by a remote client. Older manifests decode with
+    /// nil, so this remains backwards-compatible with every existing review.
+    var remoteRequestID: String?
 }
 
 struct WeeklyProgressGeneration {
@@ -374,6 +377,24 @@ struct WeeklyProgressDiskStore {
         return result.sorted { $0.manifest.createdAt > $1.manifest.createdAt }
     }
 
+    /// The most recent finished review from a strictly earlier week. Same-week
+    /// retries must not become their own historical context, and unfinished
+    /// generations are never suitable as a terminology reference.
+    func latestCompletedGeneration(
+        projectID: UUID,
+        before week: WeeklyProgressWeek
+    ) -> WeeklyProgressGeneration? {
+        generations(projectID: projectID)
+            .filter {
+                $0.manifest.stage == .complete
+                    && $0.manifest.week.start < week.start
+            }
+            .max {
+                ($0.manifest.week.start, $0.manifest.createdAt)
+                    < ($1.manifest.week.start, $1.manifest.createdAt)
+            }
+    }
+
     /// The lightweight catalog for the virtual "All projects" view. This only
     /// reads each generation's fixed-depth state file; deck contents, renders,
     /// and evidence are left untouched until a visible row asks for them.
@@ -387,7 +408,8 @@ struct WeeklyProgressDiskStore {
         project: WeeklyProgressProject,
         week: WeeklyProgressWeek,
         now: Date = Date(),
-        id: UUID = UUID()
+        id: UUID = UUID(),
+        remoteRequestID: String? = nil
     ) throws -> WeeklyProgressGeneration {
         let projectDirectory = projectDirectory(project.id)
         let generationID = Self.generationFormatter.string(from: now)
@@ -419,7 +441,8 @@ struct WeeklyProgressDiskStore {
             auditPasses: 0,
             evidence: nil,
             outputs: [:],
-            error: nil
+            error: nil,
+            remoteRequestID: remoteRequestID
         )
         try write(manifest, in: directory)
         try WeeklyProgressJSON.write(manifest, to: directory.appendingPathComponent("request.json"))
@@ -489,7 +512,7 @@ enum WeeklyProgressPrompts {
     /// conversation. Do not paraphrase them. Generality belongs only in the
     /// operational context that maps LSD and its date range onto the selected run.
     static let referenceSessionID = "019f630d-5663-7722-bc65-5fd298a497ec"
-    static let revision = "reference-session-019f630d-v1"
+    static let revision = "reference-session-019f630d-v2"
     static let requiredReferenceCorrectionCount = 3
 
     static let researchInstruction = """
@@ -540,14 +563,33 @@ enum WeeklyProgressPrompts {
 
     static func reconstructResearch(
         project: WeeklyProgressProject,
-        week: WeeklyProgressWeek
+        week: WeeklyProgressWeek,
+        artifactReferences: [String] = [],
+        priorReview: WeeklyProgressGeneration? = nil
     ) -> String {
-        """
+        let workspaces = project.workspaceRoots.isEmpty ? "none" : project.workspaceRoots.joined(separator: ", ")
+        let panels = project.panels.isEmpty ? "none" : project.panels.map {
+            "\($0.session) @ \($0.machineID ?? "machine from matching journal entries")"
+        }.joined(separator: ", ")
+        let artifacts = artifactReferences.isEmpty
+            ? "No matching saved artifacts."
+            : "Matching saved artifacts:\n" + artifactReferences.joined(separator: "\n")
+        let prior = priorReview.map {
+            "Previous report: \($0.directory.appendingPathComponent("research-report.md").path)\nPrevious slides: \($0.directory.appendingPathComponent("weekly-progress.pptx").path)\nUse them for terminology and brief context, never as new results."
+        } ?? "No earlier completed review."
+
+        return """
         This run is for the Argus project named \(project.name) and the reporting period
-        \(periodDescription(week)). request.json identifies its panels, machines, and workspace
-        roots. evidence/journal.jsonl contains the matching captured history. In the original
-        instruction below, "LSD" means this selected project, and every relative date reference
-        means the reporting period above.
+        \(periodDescription(week)). evidence/journal.jsonl contains its matching captured history.
+        Workspace roots: \(workspaces). Selected panels: \(panels). Inspect local paths directly.
+        Use `ut ls` to resolve a remote machine name when needed, then only read through
+        `ut exec @<machine>`. Do not modify files, run project code, create sessions, or start jobs.
+        Babel machines share one filesystem, so repeated data is one source, not separate experiments.
+        \(artifacts)
+        Saved artifacts indicate what the user considered important. \(prior)
+
+        In the original instruction below, "LSD" means this selected project, and every relative
+        date reference means the reporting period above.
 
         The following is the original user instruction from Codex session \(referenceSessionID).
         It is copied without rewriting.
@@ -561,11 +603,13 @@ enum WeeklyProgressPrompts {
 
     static func draftSlides(
         project: WeeklyProgressProject,
-        week: WeeklyProgressWeek
+        week: WeeklyProgressWeek,
+        priorReview: WeeklyProgressGeneration? = nil
     ) -> String {
         """
         The completed research-report.md and evidence-ledger.json describe the \(project.name)
         project for \(periodDescription(week)). Use them and their underlying evidence.
+        \(priorReview.map { "Use the earlier slides at \($0.directory.appendingPathComponent("weekly-progress.pptx").path) as the visual and terminology base. Add only a brief recap where useful, and never present old results as new." } ?? "")
 
         The following is the original user instruction from Codex session \(referenceSessionID).
         It is copied without rewriting.
@@ -575,6 +619,25 @@ enum WeeklyProgressPrompts {
         Use the installed presentation tooling. Save the editable first version as draft.pptx.
         Do not create weekly-progress.pptx yet because the original correction turns follow.
         """
+    }
+
+    static func artifactReferences(
+        _ records: [ArtifactRecord],
+        rootURL: URL,
+        project: WeeklyProgressProject,
+        week: WeeklyProgressWeek
+    ) -> [String] {
+        records.filter {
+            $0.createdAt >= week.start && $0.createdAt < week.endExclusive
+                && WeeklyProgressEvidenceFilter.includes([
+                    "session": $0.panel.sessionName,
+                    "machineID": $0.panel.machineID,
+                    "folder": $0.panel.folder,
+                ], project: project)
+        }.sorted { $0.createdAt < $1.createdAt }.map {
+            let path = rootURL.appendingPathComponent($0.relativePath).standardizedFileURL.path
+            return "- \($0.filename) | \($0.createdAt.ISO8601Format()) | \($0.kind) | \($0.panel.sessionName) on \($0.panel.machineName) | \(path)"
+        }
     }
 
     static func referenceCorrection(pass: Int) -> String {

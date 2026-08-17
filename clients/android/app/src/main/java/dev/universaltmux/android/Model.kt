@@ -212,10 +212,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var labGeneration = 0
     private val labNotified = (prefs.getStringSet("ut.lab.notified.v1", emptySet()) ?: emptySet()).toMutableSet()
 
+    // --- Weekly Progress ---------------------------------------------------
+    // The Mac owns projects, generations, files, and Codex. Android keeps only
+    // an observable catalog plus disposable reading caches.
+    var weeklyProgressCatalog by mutableStateOf(WeeklyProgressCatalog())
+        private set
+    var weeklyProgressRefreshing by mutableStateOf(false)
+        private set
+    var weeklyProgressProviderAvailable by mutableStateOf(false)
+        private set
+    var weeklyProgressActionBusy by mutableStateOf(false)
+        private set
+    var weeklyProgressError by mutableStateOf<String?>(null)
+        private set
+    private var weeklyProgressRefreshInFlight = false
+    private var weeklyProgressLastRefreshAt = 0L
+    private var weeklyProgressHostId = prefs.getString("ut.weeklyProgress.host", null)
+
     init {
         loadBrokers()
         loadWandb()
         loadUserData()
+        weeklyProgressCatalog = WeeklyProgressNet.loadCachedCatalog(app) ?: WeeklyProgressCatalog()
         refreshAll()
         refreshLab()
         if (authKey.isNotEmpty()) joinTailnet(authKey) // auto-join + auto-discover on startup
@@ -527,6 +545,140 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumeScreenRequest() { requestedScreen = null }
     fun clearLabError() { labError = null }
+
+    fun requestWeeklyProgress() {
+        requestedScreen = SCREEN_WEEKLY_PROGRESS
+        refreshWeeklyProgress(force = true)
+    }
+
+    fun weeklyProgressHost(): Broker? =
+        brokers.firstOrNull { it.id == weeklyProgressHostId }
+            ?: brokers.firstOrNull { it.isMac }
+
+    fun refreshWeeklyProgress(force: Boolean = false) {
+        if (weeklyProgressRefreshInFlight) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val minimumInterval = if (weeklyProgressCatalog.activeOperation == null) 15_000L else 2_000L
+        if (!force && now - weeklyProgressLastRefreshAt < minimumInterval) return
+        val preferred = weeklyProgressHost()
+        // Broker metadata is enriched asynchronously during startup. Keep the
+        // last proven provider eligible even before its OS field arrives.
+        val candidates = brokers
+            .filter { it.isMac || it.id == weeklyProgressHostId }
+            .sortedBy { if (it.id == preferred?.id) 0 else 1 }
+        if (candidates.isEmpty()) {
+            weeklyProgressProviderAvailable = false
+            if (weeklyProgressCatalog.projects.isEmpty()) {
+                weeklyProgressError = "Your Mac broker is not available."
+            }
+            return
+        }
+        weeklyProgressRefreshInFlight = true
+        weeklyProgressLastRefreshAt = now
+        weeklyProgressRefreshing = true
+        viewModelScope.launch {
+            try {
+                val answer = withContext(Dispatchers.IO) {
+                    candidates.firstNotNullOfOrNull { broker ->
+                        WeeklyProgressNet.catalog(broker)?.let { broker to it }
+                    }
+                }
+                if (answer != null) {
+                    weeklyProgressHostId = answer.first.id
+                    prefs.edit().putString("ut.weeklyProgress.host", answer.first.id).apply()
+                    weeklyProgressCatalog = answer.second.first
+                    weeklyProgressProviderAvailable = true
+                    weeklyProgressError = null
+                    withContext(Dispatchers.IO) {
+                        WeeklyProgressNet.saveCatalog(getApplication(), answer.second.second)
+                    }
+                } else {
+                    weeklyProgressProviderAvailable = false
+                    weeklyProgressError = if (weeklyProgressCatalog.projects.isEmpty())
+                        "Open the updated Argus app on your Mac to use Weekly Progress."
+                    else "The Mac is unavailable. Showing the last saved catalog."
+                }
+            } finally {
+                weeklyProgressRefreshInFlight = false
+                weeklyProgressRefreshing = false
+            }
+        }
+    }
+
+    fun generateWeeklyProgress(projectId: String, weekStart: String) {
+        if (weeklyProgressActionBusy) return
+        val host = weeklyProgressHost()
+        if (host == null) {
+            weeklyProgressError = "Your Mac broker is not available."
+            return
+        }
+        val actionKey = "generate:$projectId:$weekStart"
+        val preferenceKey = "ut.weeklyProgress.request.$actionKey"
+        val requestId = prefs.getString(preferenceKey, null)
+            ?: "android-${java.util.UUID.randomUUID()}".also {
+                prefs.edit().putString(preferenceKey, it).apply()
+            }
+        weeklyProgressActionBusy = true
+        weeklyProgressError = null
+        viewModelScope.launch {
+            val reply = withContext(Dispatchers.IO) {
+                WeeklyProgressNet.generate(host, projectId, weekStart, requestId)
+            }
+            weeklyProgressActionBusy = false
+            if (reply.successful) {
+                prefs.edit().remove(preferenceKey).apply()
+                delay(250)
+                refreshWeeklyProgress(force = true)
+            } else {
+                // A transport failure may have happened after the Mac accepted
+                // the command. Keep the id so an explicit retry is idempotent.
+                if (reply.status in 400..499 && reply.status != 409) {
+                    prefs.edit().remove(preferenceKey).apply()
+                }
+                weeklyProgressError = reply.error ?: when (reply.status) {
+                    409 -> "Another Weekly Progress review is already running on the Mac."
+                    503 -> "Open Argus on your Mac before starting a review."
+                    else -> "The Mac could not start this review."
+                }
+                refreshWeeklyProgress(force = true)
+            }
+        }
+    }
+
+    fun resumeWeeklyProgress(generationId: String) {
+        if (weeklyProgressActionBusy) return
+        val host = weeklyProgressHost()
+        if (host == null) {
+            weeklyProgressError = "Your Mac broker is not available."
+            return
+        }
+        val preferenceKey = "ut.weeklyProgress.resume.$generationId"
+        val requestId = prefs.getString(preferenceKey, null)
+            ?: "android-resume-${java.util.UUID.randomUUID()}".also {
+                prefs.edit().putString(preferenceKey, it).apply()
+            }
+        weeklyProgressActionBusy = true
+        weeklyProgressError = null
+        viewModelScope.launch {
+            val reply = withContext(Dispatchers.IO) {
+                WeeklyProgressNet.resume(host, generationId, requestId)
+            }
+            weeklyProgressActionBusy = false
+            if (reply.successful) {
+                prefs.edit().remove(preferenceKey).apply()
+                delay(250)
+                refreshWeeklyProgress(force = true)
+            } else {
+                if (reply.status in 400..499 && reply.status != 409) {
+                    prefs.edit().remove(preferenceKey).apply()
+                }
+                weeklyProgressError = reply.error ?: "The Mac could not resume this review."
+                refreshWeeklyProgress(force = true)
+            }
+        }
+    }
+
+    fun clearWeeklyProgressError() { weeklyProgressError = null }
 
     fun changeUnattendedMode(enabled: Boolean) {
         if (unattendedModeUpdating) return

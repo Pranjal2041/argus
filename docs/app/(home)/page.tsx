@@ -389,10 +389,11 @@ export default function HomePage() {
           <div className="al-feat-copy">
             <span className="al-eyebrow">Android</span>
             <h3>Run it all from your pocket.</h3>
-            <p>The Command Center, live terminals, Files, ports, and full Lab hub — on your phone, over the same tailnet. Jump into a stuck session or decide a gated experiment from anywhere.</p>
+            <p>The Command Center, live terminals, Files, ports, Lab, and Weekly Progress — on your phone, over the same tailnet. Jump into a stuck session, decide a gated experiment, or review a research deck from anywhere.</p>
             <ul>
               <li><Check size={16} /> The same peer-to-peer reach — no servers, just your tailnet.</li>
               <li><Check size={16} /> Lab approvals, evidence, comparison, guidance, curation, Unattended Mode, and deep-linked notifications.</li>
+              <li><Check size={16} /> Weekly research decks with swipe-and-zoom reading, reports, downloads, and Mac-hosted generation.</li>
               <li><Check size={16} /> Workflows, todos, notes, and sent journal messages synced with your Mac.</li>
               <li><Check size={16} /> Dead cluster nodes age out automatically instead of filling the machine list.</li>
               <li><Check size={16} /> Foreground forwarding keeps tunnels alive in your pocket.</li>

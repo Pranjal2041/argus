@@ -178,16 +178,17 @@ final class WeeklyProgressController: ObservableObject {
     private static let selectedProjectDefaultsKey = "ut.weeklyProgress.selectedProject"
     private static let allProjectsSelection = "all"
     private let store: WeeklyProgressDiskStore
-    private let pipeline: WeeklyProgressPipeline
-    private var operation: Task<Void, Never>?
+    private let coordinator: WeeklyProgressCoordinator
+    private var coordinatorObserver: Task<Void, Never>?
+    private var coordinatorRevision: UInt64 = 0
 
     init(
         store: WeeklyProgressDiskStore = WeeklyProgressDiskStore(),
-        pipeline: WeeklyProgressPipeline? = nil,
+        coordinator: WeeklyProgressCoordinator? = nil,
         now: Date = Date()
     ) {
         self.store = store
-        self.pipeline = pipeline ?? WeeklyProgressPipeline(store: store)
+        self.coordinator = coordinator ?? WeeklyProgressCoordinator(store: store)
         selectedWeek = WeeklyProgressWeekNavigation.current(now: now)
         projects = store.loadProjects()
         let storedSelection = AppState.isRunningTests ? nil
@@ -201,6 +202,9 @@ final class WeeklyProgressController: ObservableObject {
                 : projects.first?.id
         }
         reloadGenerations()
+        if !AppState.isRunningTests {
+            startCoordinatorObserver()
+        }
     }
 
     var selectedProject: WeeklyProgressProject? {
@@ -263,80 +267,56 @@ final class WeeklyProgressController: ObservableObject {
     }
 
     func generateSelectedWeek() {
-        guard operation == nil, let project = selectedProject else { return }
+        guard !isGenerating, let project = selectedProject else { return }
         let week = selectedWeek
-        beginOperation(projectID: project.id, week: week, generationID: nil)
-        ActivityJournal.shared.log("weeklyProgress", journalFields(
-            project: project,
-            week: week,
-            action: "generate"
-        ))
-        operation = Task { [weak self] in
+        errorMessage = nil
+        operationProjectID = project.id
+        operationWeekStart = week.start
+        operationGenerationID = nil
+        isGenerating = true
+        Task { [weak self] in
             guard let self else { return }
-            let poller = self.makePoller(projectID: project.id, week: week)
             do {
-                let generation = try await self.pipeline.generate(project: project, week: week)
-                poller.cancel()
-                self.finishOperation(generation: generation, error: nil)
-                ActivityJournal.shared.log("weeklyProgress", self.journalFields(
-                    project: project,
+                let generation = try await self.coordinator.start(
+                    projectID: project.id,
                     week: week,
-                    action: "complete",
-                    generationID: generation.manifest.id
-                ))
+                    requestID: "mac-" + UUID().uuidString.lowercased()
+                )
+                self.operationGenerationID = generation.manifest.id
+                await self.syncCoordinator()
             } catch {
-                poller.cancel()
-                self.finishOperation(generation: nil, error: error.localizedDescription)
-                ActivityJournal.shared.log("weeklyProgress", self.journalFields(
-                    project: project,
-                    week: week,
-                    action: "failed",
-                    error: error.localizedDescription
-                ))
+                self.errorMessage = error.localizedDescription
+                self.isGenerating = false
+                self.operationProjectID = nil
+                self.operationWeekStart = nil
+                self.operationGenerationID = nil
             }
         }
     }
 
     func resume(_ generation: WeeklyProgressGeneration) {
-        guard operation == nil else { return }
+        guard !isGenerating else { return }
         let project = generation.manifest.project
         let week = generation.manifest.week
-        beginOperation(
-            projectID: project.id,
-            week: week,
-            generationID: generation.manifest.id
-        )
-        ActivityJournal.shared.log("weeklyProgress", journalFields(
-            project: project,
-            week: week,
-            action: "resume",
-            generationID: generation.manifest.id
-        ))
-        operation = Task { [weak self] in
+        errorMessage = nil
+        operationProjectID = project.id
+        operationWeekStart = week.start
+        operationGenerationID = generation.manifest.id
+        isGenerating = true
+        Task { [weak self] in
             guard let self else { return }
-            let poller = self.makePoller(projectID: project.id, week: week)
             do {
-                let completed = try await self.pipeline.resume(
-                    generationDirectory: generation.directory
-                )
-                poller.cancel()
-                self.finishOperation(generation: completed, error: nil)
-                ActivityJournal.shared.log("weeklyProgress", self.journalFields(
-                    project: project,
-                    week: week,
-                    action: "complete",
-                    generationID: completed.manifest.id
-                ))
-            } catch {
-                poller.cancel()
-                self.finishOperation(generation: nil, error: error.localizedDescription)
-                ActivityJournal.shared.log("weeklyProgress", self.journalFields(
-                    project: project,
-                    week: week,
-                    action: "failed",
+                _ = try await self.coordinator.resume(
                     generationID: generation.manifest.id,
-                    error: error.localizedDescription
-                ))
+                    requestID: "mac-resume-" + UUID().uuidString.lowercased()
+                )
+                await self.syncCoordinator()
+            } catch {
+                self.errorMessage = error.localizedDescription
+                self.isGenerating = false
+                self.operationProjectID = nil
+                self.operationWeekStart = nil
+                self.operationGenerationID = nil
             }
         }
     }
@@ -366,63 +346,32 @@ final class WeeklyProgressController: ObservableObject {
         }
     }
 
-    private func beginOperation(projectID: UUID, week: WeeklyProgressWeek, generationID: UUID?) {
-        errorMessage = nil
-        operationProjectID = projectID
-        operationWeekStart = week.start
-        operationGenerationID = generationID
-        isGenerating = true
-        reloadGenerations()
-    }
-
-    private func finishOperation(generation: WeeklyProgressGeneration?, error: String?) {
-        if let generation { operationGenerationID = generation.manifest.id }
-        errorMessage = error
-        reloadGenerations()
-        isGenerating = false
-        operationProjectID = nil
-        operationWeekStart = nil
-        operationGenerationID = nil
-        operation = nil
-    }
-
-    private func makePoller(projectID: UUID, week: WeeklyProgressWeek) -> Task<Void, Never> {
-        Task { [weak self] in
+    private func startCoordinatorObserver() {
+        coordinatorObserver?.cancel()
+        coordinatorObserver = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 700_000_000)
                 guard !Task.isCancelled, let self else { return }
-                if self.selectedProjectID == nil || self.selectedProjectID == projectID {
-                    self.reloadGenerations()
-                    if self.operationGenerationID == nil {
-                        self.operationGenerationID = self.generations.first(where: {
-                            $0.manifest.week.start == week.start
-                                && $0.manifest.stage != .complete
-                                && $0.manifest.stage != .failed
-                        })?.manifest.id
-                    }
-                }
+                await self.syncCoordinator()
+                let delay: UInt64 = self.isGenerating ? 700_000_000 : 5_000_000_000
+                try? await Task.sleep(nanoseconds: delay)
             }
         }
     }
 
-    private func journalFields(
-        project: WeeklyProgressProject,
-        week: WeeklyProgressWeek,
-        action: String,
-        generationID: UUID? = nil,
-        error: String? = nil
-    ) -> [String: Any] {
-        var fields: [String: Any] = [
-            "action": action,
-            "project": project.name,
-            "projectID": project.id.uuidString,
-            "week": week.storageKey,
-            "model": CodexWeeklyProgressCommand.model,
-            "reasoningEffort": CodexWeeklyProgressCommand.reasoningEffort,
-            "promptRevision": WeeklyProgressPrompts.revision,
-        ]
-        if let generationID { fields["generationID"] = generationID.uuidString }
-        if let error { fields["error"] = error }
-        return fields
+    private func syncCoordinator() async {
+        let snapshot = await coordinator.snapshot()
+        let changed = snapshot.revision != coordinatorRevision
+            || snapshot.operation?.generationID != operationGenerationID
+        coordinatorRevision = snapshot.revision
+        isGenerating = snapshot.operation != nil
+        operationProjectID = snapshot.operation?.projectID
+        operationWeekStart = snapshot.operation?.weekStart
+        operationGenerationID = snapshot.operation?.generationID
+        if let lastError = snapshot.lastError {
+            errorMessage = lastError
+        }
+        if changed || isGenerating {
+            reloadGenerations()
+        }
     }
 }

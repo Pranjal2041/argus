@@ -30,6 +30,72 @@ final class WeeklyProgressTests: XCTestCase {
         XCTAssertEqual(calendar.component(.day, from: week.endExclusive), 10)
     }
 
+    func testRemoteGenerationRequestIsDurablyIdempotent() async throws {
+        let store = WeeklyProgressDiskStore(rootURL: root.appendingPathComponent("remote-store"))
+        let project = WeeklyProgressProject(
+            name: "Remote review",
+            panels: [WeeklyProgressPanelSelector(session: "remote-review")]
+        )
+        try store.saveProject(project)
+        let coordinator = WeeklyProgressCoordinator(store: store)
+        let week = WeeklyProgressWeek(start: date(day: 3), calendar: calendar)
+
+        let first = try await coordinator.start(
+            projectID: project.id,
+            week: week,
+            requestID: "android-request-1"
+        )
+        let retry = try await coordinator.start(
+            projectID: project.id,
+            week: week,
+            requestID: "android-request-1"
+        )
+
+        XCTAssertEqual(first.manifest.id, retry.manifest.id)
+        XCTAssertEqual(first.manifest.remoteRequestID, "android-request-1")
+        XCTAssertEqual(store.generations(projectID: project.id).count, 1)
+    }
+
+    @MainActor
+    func testRemoteCatalogAndSlideRangeExposeIDsWithoutFilesystemPaths() async throws {
+        let store = WeeklyProgressDiskStore(rootURL: root.appendingPathComponent("provider-store"))
+        let project = WeeklyProgressProject(
+            name: "Provider project",
+            panels: [WeeklyProgressPanelSelector(session: "provider-panel")]
+        )
+        var generation = try store.createGeneration(
+            project: project,
+            week: WeeklyProgressWeek(start: date(day: 3), calendar: calendar)
+        )
+        generation.manifest.stage = .complete
+        try store.write(generation.manifest, in: generation.directory)
+        let render = generation.directory.appendingPathComponent("render/final", isDirectory: true)
+        try FileManager.default.createDirectory(at: render, withIntermediateDirectories: true)
+        try Data([0, 1, 2, 3, 4, 5, 6, 7]).write(
+            to: render.appendingPathComponent("slide-1.png")
+        )
+        let coordinator = WeeklyProgressCoordinator(store: store)
+        let service = WeeklyProgressRemoteService(coordinator: coordinator, store: store)
+
+        let catalogResponse = await service.processForTesting(method: "GET", path: "/catalog")
+        XCTAssertEqual(catalogResponse.status, 200)
+        let catalog = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: catalogResponse.body) as? [String: Any]
+        )
+        let generations = try XCTUnwrap(catalog["generations"] as? [[String: Any]])
+        XCTAssertEqual(generations.first?["slideCount"] as? Int, 1)
+        XCTAssertFalse(String(data: catalogResponse.body, encoding: .utf8)?.contains(root.path) == true)
+
+        let rangeResponse = await service.processForTesting(
+            method: "GET",
+            path: "/asset/\(generation.manifest.id.uuidString)/slide/1",
+            headers: ["Range": "bytes=2-5"]
+        )
+        XCTAssertEqual(rangeResponse.status, 206)
+        XCTAssertEqual(rangeResponse.headers["Content-Range"], "bytes 2-5/8")
+        XCTAssertEqual(rangeResponse.body, Data([2, 3, 4, 5]))
+    }
+
     func testManualWeekNavigationMovesExactlySevenDays() {
         let week = WeeklyProgressWeek(containing: date(day: 9), calendar: calendar)
         let earlier = WeeklyProgressWeekNavigation.shifted(week, byWeeks: -3, calendar: calendar)
@@ -413,6 +479,27 @@ final class WeeklyProgressTests: XCTestCase {
             ["project": "vlm GATING"],
             project: project
         ))
+
+        let artifactRoot = root.appendingPathComponent("artifacts")
+        let artifact = ArtifactRecord(
+            filename: "router-result.pdf",
+            createdAt: date(day: 4),
+            panel: ArtifactPanelContext(
+                machineID: "babel-p9-16", machineName: "babel-p9-16",
+                machineHost: "babel-p9-16", sessionName: "vlm_gating",
+                stableSessionID: "$4", folder: "/work/vlm"
+            ),
+            presentation: "render",
+            relativePath: "pdfs/router-result.pdf",
+            byteCount: 1
+        )
+        let references = WeeklyProgressPrompts.artifactReferences(
+            [artifact], rootURL: artifactRoot, project: project,
+            week: WeeklyProgressWeek(start: date(day: 3), calendar: calendar)
+        )
+        XCTAssertEqual(references.count, 1)
+        XCTAssertTrue(references[0].contains("router-result.pdf"))
+        XCTAssertTrue(references[0].contains(artifactRoot.path))
     }
 
     func testEvidenceCollectorWritesOnlyTheRequestedProjectAndWeek() throws {
@@ -668,6 +755,10 @@ final class WeeklyProgressTests: XCTestCase {
 
         XCTAssertTrue(research.contains(WeeklyProgressPrompts.researchInstruction))
         XCTAssertTrue(slides.contains(WeeklyProgressPrompts.slideInstruction))
+        XCTAssertTrue(research.contains("ut exec @<machine>"))
+        XCTAssertTrue(research.contains("No matching saved artifacts"))
+        XCTAssertTrue(research.contains("Do not modify files"))
+        XCTAssertTrue(research.contains("Babel machines share one filesystem"))
         XCTAssertTrue(slides.contains("draft.pptx"))
         XCTAssertFalse(research.contains("Failed gates"))
         XCTAssertFalse(research.contains("objective failures"))
@@ -682,7 +773,7 @@ final class WeeklyProgressTests: XCTestCase {
         XCTAssertTrue(thirdCorrection.contains("weekly-progress.pptx"))
         XCTAssertTrue(thirdCorrection.contains("audit.json"))
         XCTAssertEqual(WeeklyProgressPrompts.requiredReferenceCorrectionCount, 3)
-        XCTAssertEqual(WeeklyProgressPrompts.revision, "reference-session-019f630d-v1")
+        XCTAssertEqual(WeeklyProgressPrompts.revision, "reference-session-019f630d-v2")
     }
 
     func testPowerPointGateRequiresAValidDeckAndEveryRenderedSlide() throws {
@@ -769,6 +860,7 @@ final class WeeklyProgressTests: XCTestCase {
         let pipeline = WeeklyProgressPipeline(
             store: WeeklyProgressDiskStore(rootURL: root.appendingPathComponent("store")),
             journalDirectory: journal,
+            artifactRootURL: root.appendingPathComponent("pipeline-artifacts"),
             agent: fake,
             maximumAuditPasses: 3
         )
@@ -824,6 +916,7 @@ final class WeeklyProgressTests: XCTestCase {
         let pipeline = WeeklyProgressPipeline(
             store: store,
             journalDirectory: journal,
+            artifactRootURL: root.appendingPathComponent("resume-artifacts"),
             agent: fake,
             maximumAuditPasses: 1
         )
@@ -856,6 +949,36 @@ final class WeeklyProgressTests: XCTestCase {
         XCTAssertEqual(resumeCount, 6)
     }
 
+    func testLatestEarlierReviewIsPassedByPathWithoutCopyingIt() throws {
+        let store = WeeklyProgressDiskStore(rootURL: root.appendingPathComponent("prior-store"))
+        let project = WeeklyProgressProject(
+            name: "LSD",
+            panels: [WeeklyProgressPanelSelector(session: "lsd")]
+        )
+        let targetWeek = WeeklyProgressWeek(start: date(day: 3), calendar: calendar)
+        let previousWeek = WeeklyProgressWeek(
+            start: try XCTUnwrap(calendar.date(byAdding: .day, value: -7, to: targetWeek.start)),
+            calendar: calendar
+        )
+        var previous = try store.createGeneration(project: project, week: previousWeek)
+        previous.manifest.stage = .complete
+        try store.write(previous.manifest, in: previous.directory)
+        var sameWeek = try store.createGeneration(project: project, week: targetWeek)
+        sameWeek.manifest.stage = .complete
+        try store.write(sameWeek.manifest, in: sameWeek.directory)
+
+        let selected = try XCTUnwrap(
+            store.latestCompletedGeneration(projectID: project.id, before: targetWeek)
+        )
+        let prompt = WeeklyProgressPrompts.draftSlides(
+            project: project,
+            week: targetWeek,
+            priorReview: selected
+        )
+        XCTAssertEqual(selected.manifest.id, previous.manifest.id)
+        XCTAssertTrue(prompt.contains(previous.directory.path))
+    }
+
     func testInterruptedLegacyGenerationCannotMixPromptContractsOnResume() async throws {
         let journal = root.appendingPathComponent("legacy-resume-journal", isDirectory: true)
         try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
@@ -875,6 +998,7 @@ final class WeeklyProgressTests: XCTestCase {
         let pipeline = WeeklyProgressPipeline(
             store: store,
             journalDirectory: journal,
+            artifactRootURL: root.appendingPathComponent("legacy-artifacts"),
             agent: fake
         )
 

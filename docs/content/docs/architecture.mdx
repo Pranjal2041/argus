@@ -96,6 +96,13 @@ Planner is a macOS surface. A small
 the Mac broker over the tailnet, which it already does for sessions. So a workflow you add on the Mac
 shows up on the phone within seconds, and a note you jot on the phone lands on the Mac just as fast.
 
+[Weekly Progress](/docs/weekly-progress) uses a different, read-mostly provider because its catalog
+contains immutable slide images, reports, and PowerPoint files rather than a small mutable user-data
+blob. Argus on the Mac publishes that catalog to its loopback broker; the broker streams it over the
+existing tailnet path to Android, including byte-range responses for large assets. Generate and
+Resume commands travel back through the same relay and are idempotent. The Mac remains the only
+execution host, while Android keeps bounded local caches for reading when it is offline.
+
 The sync store has two recovery layers. User-global keys live at a stable path that does not change
 when macOS changes the machine's network hostname, and any update that removes records must carry
 explicit deletion intent from the UI. A newly initialized or unreadable client therefore cannot

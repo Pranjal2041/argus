@@ -71,8 +71,10 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   before drafting, audits the actual PowerPoint and every rendered slide, preserves same-week
   versions, resumes interrupted generations, and includes a full-window slide/report reader. The
   virtual **All** collection shows every project's slides for a chosen week, while **Calendar list**
-  browses the recorded deck history for one project or the whole library. Generation is
-  manual—nothing runs on a weekly schedule.
+  browses the recorded deck history for one project or the whole library. Android provides the same
+  week/project library, a swipe-and-zoom slide reader, reports, deck downloads, and retry-safe
+  Generate/Resume controls; execution and evidence remain on the Mac. Generation is manual—nothing
+  runs on a weekly schedule.
 - **Terminals** — stream any session live (tmux control-mode on Unix, ConPTY on Windows) over a
   binary WebSocket. Full input, resize/reflow, 100k-line scrollback, auto-reconnect, create /
   rename / kill, find-in-terminal, a command palette, and a live running/idle dot per session

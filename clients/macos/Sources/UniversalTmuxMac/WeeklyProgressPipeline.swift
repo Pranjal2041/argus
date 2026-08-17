@@ -598,6 +598,7 @@ private final class WeeklyProgressPowerPointTextParser: NSObject, XMLParserDeleg
 actor WeeklyProgressPipeline {
     let store: WeeklyProgressDiskStore
     let collector: WeeklyProgressEvidenceCollector
+    let artifactRootURL: URL
     let agent: any WeeklyProgressAgentRunning
     /// Additional machine-guided repairs allowed after replaying every original
     /// correction turn from the reference session.
@@ -606,32 +607,44 @@ actor WeeklyProgressPipeline {
     init(
         store: WeeklyProgressDiskStore = WeeklyProgressDiskStore(),
         journalDirectory: URL = ActivityJournal.dirURL,
+        artifactRootURL: URL = ArtifactStore.defaultRootURL,
         agent: any WeeklyProgressAgentRunning = CodexWeeklyProgressAgent(),
         maximumAuditPasses: Int = 3
     ) {
         self.store = store
         self.collector = WeeklyProgressEvidenceCollector(journalDirectory: journalDirectory)
+        self.artifactRootURL = artifactRootURL
         self.agent = agent
         self.maximumAuditPasses = max(1, maximumAuditPasses)
     }
 
-    func generate(project: WeeklyProgressProject, week: WeeklyProgressWeek)
+    func generate(
+        project: WeeklyProgressProject,
+        week: WeeklyProgressWeek,
+        remoteRequestID: String? = nil
+    )
         async throws -> WeeklyProgressGeneration {
-        var generation = try store.createGeneration(project: project, week: week)
-        do {
-            let evidence = try collector.collect(
-                project: project,
-                week: week,
-                into: generation.directory.appendingPathComponent("evidence", isDirectory: true)
-            )
-            generation.manifest.evidence = evidence
-            try persist(&generation, stage: .reconstructingResearch)
-        } catch {
-            generation.manifest.error = error.localizedDescription
-            try? persist(&generation, stage: .failed)
-            throw error
-        }
-        return try await continueGeneration(generation)
+        let generation = try prepare(
+            project: project,
+            week: week,
+            remoteRequestID: remoteRequestID
+        )
+        return try await resume(generationDirectory: generation.directory)
+    }
+
+    /// Creates the durable identity before the long-running Codex work starts.
+    /// Remote callers can therefore receive a generation id immediately and
+    /// safely reconnect while the pipeline continues on this Mac.
+    func prepare(
+        project: WeeklyProgressProject,
+        week: WeeklyProgressWeek,
+        remoteRequestID: String? = nil
+    ) throws -> WeeklyProgressGeneration {
+        try store.createGeneration(
+            project: project,
+            week: week,
+            remoteRequestID: remoteRequestID
+        )
     }
 
     /// Continue an interrupted or explicitly retried generation from its durable
@@ -670,6 +683,17 @@ actor WeeklyProgressPipeline {
         async throws -> WeeklyProgressGeneration {
         var generation = source
         var sessionID = generation.manifest.codexSessionID
+        let priorReview = store.latestCompletedGeneration(
+            projectID: generation.manifest.project.id,
+            before: generation.manifest.week
+        )
+        let artifactReport = try? await ArtifactDiskStore(rootURL: artifactRootURL).loadReport()
+        let artifactReferences = WeeklyProgressPrompts.artifactReferences(
+            artifactReport?.records ?? [],
+            rootURL: artifactRootURL,
+            project: generation.manifest.project,
+            week: generation.manifest.week
+        )
         do {
             if !(exists("research-report.md", in: generation.directory)
                 && exists("evidence-ledger.json", in: generation.directory)) {
@@ -680,7 +704,9 @@ actor WeeklyProgressPipeline {
                         sessionID: sessionID,
                         prompt: WeeklyProgressPrompts.reconstructResearch(
                             project: generation.manifest.project,
-                            week: generation.manifest.week
+                            week: generation.manifest.week,
+                            artifactReferences: artifactReferences,
+                            priorReview: priorReview
                         ),
                         in: generation.directory,
                         stageName: uniqueStageName("01-research-resume", in: generation.directory)
@@ -689,7 +715,9 @@ actor WeeklyProgressPipeline {
                     result = try await agent.start(
                         prompt: WeeklyProgressPrompts.reconstructResearch(
                             project: generation.manifest.project,
-                            week: generation.manifest.week
+                            week: generation.manifest.week,
+                            artifactReferences: artifactReferences,
+                            priorReview: priorReview
                         ),
                         in: generation.directory,
                         stageName: "01-research"
@@ -710,7 +738,8 @@ actor WeeklyProgressPipeline {
                     sessionID: sessionID,
                     prompt: WeeklyProgressPrompts.draftSlides(
                         project: generation.manifest.project,
-                        week: generation.manifest.week
+                        week: generation.manifest.week,
+                        priorReview: priorReview
                     ),
                     directory: generation.directory,
                     stageName: uniqueStageName("02-draft", in: generation.directory)

@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Palette
@@ -113,6 +114,9 @@ fun App(vm: AppViewModel) {
                     if (tick % 2 == 0) {
                         vm.enrichOs(); vm.syncUserData(); vm.flushJournal(); vm.refreshLab()
                     }  // sync user data, journal, and Lab protocol state every ~6s
+                    if (screen == SCREEN_WEEKLY_PROGRESS || vm.weeklyProgressCatalog.activeOperation != null) {
+                        vm.refreshWeeklyProgress()
+                    }
                     tick++
                     delay(3000)
                 }
@@ -151,6 +155,7 @@ fun App(vm: AppViewModel) {
                                     screen == 2 -> "Ports"
                                     screen == 3 -> "Argus"
                                     screen == SCREEN_LAB -> "Lab"
+                                    screen == SCREEN_WEEKLY_PROGRESS -> "Weekly Progress"
                                     sel != null -> "${sel.second}  ·  ${sel.first.name}"
                                     else -> "Argus"
                                 },
@@ -219,6 +224,15 @@ fun App(vm: AppViewModel) {
                                     Icon(Icons.Filled.Science, "Lab", tint = if (screen == SCREEN_LAB) accent else cText)
                                 }
                             }
+                            IconButton(onClick = {
+                                if (screen == SCREEN_WEEKLY_PROGRESS) screen = 0 else vm.requestWeeklyProgress()
+                            }) {
+                                Icon(
+                                    Icons.Filled.DateRange,
+                                    "Weekly Progress",
+                                    tint = if (screen == SCREEN_WEEKLY_PROGRESS) accent else cText,
+                                )
+                            }
                             IconButton(onClick = { screen = if (screen == 1) 0 else 1 }) {
                                 Icon(if (screen == 1) Icons.Filled.Terminal else Icons.Filled.Folder,
                                     "Files", tint = if (screen == 1) accent else cText)
@@ -251,6 +265,8 @@ fun App(vm: AppViewModel) {
                         CommandCenterScreen(vm) { b, s -> vm.selected = b to s; screen = 0 }
                     } else if (screen == SCREEN_LAB) {
                         LabScreen(vm) { b, s -> vm.selected = b to s; screen = 0 }
+                    } else if (screen == SCREEN_WEEKLY_PROGRESS) {
+                        WeeklyProgressScreen(vm)
                     } else if (screen == 4) {
                         WorkflowsScreen(vm) { screen = 0 }
                     } else if (screen == 5) {
