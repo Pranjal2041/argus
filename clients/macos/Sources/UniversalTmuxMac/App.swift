@@ -19,10 +19,17 @@ struct UniversalTmuxApp: App {
     @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
     @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
-    @StateObject private var weeklyProgress = WeeklyProgressController() // manual research-review generations
+    @StateObject private var weeklyProgress: WeeklyProgressController // manual research-review generations
+    @StateObject private var weeklyProgressRemote: WeeklyProgressRemoteService
     @FocusedValue(\.fileCopyCommand) private var fileCopyCommand
     @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
     private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
+
+    init() {
+        let coordinator = WeeklyProgressCoordinator()
+        _weeklyProgress = StateObject(wrappedValue: WeeklyProgressController(coordinator: coordinator))
+        _weeklyProgressRemote = StateObject(wrappedValue: WeeklyProgressRemoteService(coordinator: coordinator))
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -45,6 +52,7 @@ struct UniversalTmuxApp: App {
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
                     browserControl.start(dashboards: dashboards, state: state)
+                    weeklyProgressRemote.start()
                     screenshotArtifacts.bind(
                         state: state,
                         notebooks: notebooks,

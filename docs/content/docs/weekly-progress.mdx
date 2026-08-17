@@ -73,8 +73,22 @@ hiding it.
 Completed generations join Argus's automatic seven-day recovery points. In-flight generations are
 not backed up mid-write; their durable working directory remains available for Resume.
 
+## Review and start runs from Android
+
+Weekly Progress is also available in the Android app. The phone shows the same projects, chosen
+week, immutable versions, progress stages, rendered slides, and research report as the Mac. The
+slide reader supports horizontal paging and zoom; PowerPoint decks can be downloaded through the
+Android document picker. The latest catalog, slide images, and opened reports remain readable from
+the phone's local cache when the Mac is temporarily unreachable.
+
+Generation still executes on the Mac because that is where the Activity Journal, project folders,
+and Codex pipeline live. Tapping **Generate** or **Resume** on Android sends one durable,
+retry-safe command through the Mac broker. Closing the phone, losing connectivity after the tap,
+or tapping retry cannot accidentally create a second generation. Argus on the Mac must be open to
+start or continue a run; completed reviews remain available from Android's cache while it is not.
+
 <Callout type="info">
 Open Weekly Progress from the **Weekly review** button in Command Center, with `⇧⌘U`, or by searching
-for **Open Weekly Progress** in the `⌘P` command palette. Weekly Progress is currently a macOS
-surface because generation and its local evidence library live on the Mac.
+for **Open Weekly Progress** in the `⌘P` command palette. On Android, choose **Weekly Progress** from
+the top app destinations. The Mac remains the source of truth and execution host for both clients.
 </Callout>
