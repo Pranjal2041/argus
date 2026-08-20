@@ -723,6 +723,16 @@ struct ThemedRoot: View {
     }
 }
 
+enum WorkspaceSidebarSizing {
+    static let defaultWidth: CGFloat = 272
+    static let minimumWidth: CGFloat = 210
+    static let maximumWidth: CGFloat = 520
+
+    static func clamped(_ width: CGFloat) -> CGFloat {
+        min(max(width, minimumWidth), maximumWidth)
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var terminals: TerminalController
@@ -754,6 +764,8 @@ struct RootView: View {
     @State private var matchCount = 0   // find-bar match counter
     // UI (chrome) font scale — applies to all sidebar/header text, not the terminal.
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    @AppStorage("ut.sidebarWidth") private var storedSidebarWidth = Double(WorkspaceSidebarSizing.defaultWidth)
+    @GestureState private var sidebarDragOffset: CGFloat = 0
 
     /// Chrome font helper: multiplies the base size by the user's UI text scale.
     private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
@@ -776,9 +788,10 @@ struct RootView: View {
             // so closing the library restores the workspace exactly as it was.
             if state.columns != .detailOnly && !state.showArtifacts && !state.showWeeklyProgress {
                 sidebar
-                    .frame(width: 272)
+                    .frame(width: currentSidebarWidth)
                     .frame(maxHeight: .infinity)
                     .transition(.move(edge: .leading).combined(with: .opacity))
+                sidebarResizeHandle
             }
             Group {
                 if state.showArtifacts {
@@ -927,6 +940,51 @@ struct RootView: View {
 
     // MARK: Sidebar
 
+    private var currentSidebarWidth: CGFloat {
+        WorkspaceSidebarSizing.clamped(CGFloat(storedSidebarWidth) + sidebarDragOffset)
+    }
+
+    private var sidebarResizeHandle: some View {
+        ZStack {
+            Color.clear
+            Rectangle()
+                .fill(Theme.border)
+                .frame(width: hairline)
+        }
+        .frame(width: 9)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            (hovering ? NSCursor.resizeLeftRight : NSCursor.arrow).set()
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .updating($sidebarDragOffset) { value, offset, _ in
+                    offset = value.translation.width
+                }
+                .onEnded { value in
+                    storedSidebarWidth = Double(WorkspaceSidebarSizing.clamped(
+                        CGFloat(storedSidebarWidth) + value.translation.width
+                    ))
+                }
+        )
+        .accessibilityElement()
+        .accessibilityLabel("Sidebar width")
+        .accessibilityValue("\(Int(currentSidebarWidth)) points")
+        .accessibilityAdjustableAction { direction in
+            let step: CGFloat = 24
+            switch direction {
+            case .increment:
+                storedSidebarWidth = Double(WorkspaceSidebarSizing.clamped(CGFloat(storedSidebarWidth) + step))
+            case .decrement:
+                storedSidebarWidth = Double(WorkspaceSidebarSizing.clamped(CGFloat(storedSidebarWidth) - step))
+            @unknown default:
+                break
+            }
+        }
+        .help("Drag to resize the sidebar")
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             sidebarHeader
@@ -959,7 +1017,6 @@ struct RootView: View {
             .ignoresSafeArea()
         )
         .ignoresSafeArea(.container, edges: .top) // column-level: kill the titlebar/notch reserve
-        .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 320)
     }
 
     private var sidebarHeader: some View {
