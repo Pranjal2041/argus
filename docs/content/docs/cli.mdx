@@ -10,13 +10,16 @@ socket so the server is reachable from the Argus app.
 ## Usage
 
 ```sh
-ut [name]               # attach or create a session (default name = current dir)
-ut -L <socket> [name]   # use a separate tmux server + broker, like `tmux -L`
+ut [name]                       # attach or create a hidden CLI session
+ut --visible [name]             # explicitly create/promote a visible panel
+ut -L <socket> [--visible] [name]
 ```
 
-- A **named** argument reconnects (attach-or-create), exactly like `tmux new-session -A`.
+- A **named** argument reconnects or creates a background session. Existing panels retain their visibility.
 - **No** name makes a new session every time, named after the directory with a numeric suffix
   when the name is taken — so you can run several sessions from one directory.
+- Only the Argus UI or an explicit `--visible` creates a main-sidebar panel. Unknown extra
+  arguments are rejected rather than being mistaken for a session name.
 
 ## The model
 
@@ -63,8 +66,9 @@ port is preferred locally; when it is occupied, Argus walks upward to the next a
 Use `--local 15800` to choose a different preferred local port explicitly. Repeating the same
 host and remote port reuses the existing tunnel instead of creating a duplicate.
 
-Sessions created by the mesh are **agent sessions**, so agents can orchestrate freely without filling
-the main sidebar:
+Sessions created outside the Argus UI are **background sessions** by default, so agents can
+orchestrate freely without filling the main sidebar. This includes `ut <name>`, `ut sh`, `ut spawn`,
+and unclassified sessions created directly through tmux:
 
 - `ut sh` creates a stateful agent shell, hidden by default and removed after seven days without
   activity. Its cwd, exports, and activated environment still persist across `ut run` calls.
@@ -73,9 +77,8 @@ the main sidebar:
   After completion, its retained terminal is removed after at most seven days even when `--idle 0`
   disables the shorter cleanup.
 
-Use `ut sh --visible` only when the persistent shell is deliberately part of the user's normal panel
-workspace. Sessions created with the Argus **New Session** control and interactive `ut <name>` remain
-user-visible.
+Use `--visible` only when a CLI session is deliberately part of the user's normal panel workspace.
+Sessions created with the Argus **New Session** control are visible automatically.
 
 ## The Lab research protocol
 

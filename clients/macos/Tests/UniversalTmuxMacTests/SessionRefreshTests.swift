@@ -2,6 +2,12 @@ import XCTest
 @testable import UniversalTmuxMac
 
 final class SessionRefreshTests: XCTestCase {
+    func testMissingAgentMetadataFailsClosed() throws {
+        let data = Data(#"{"name":"legacy","windows":1,"attached":false,"activity":0}"#.utf8)
+        let session = try JSONDecoder().decode(SessionInfo.self, from: data)
+        XCTAssertTrue(session.agent)
+    }
+
     func testForegroundSnapshotReplacesOnlyVisibleSessions() {
         let current = [
             SessionInfo(name: "visible", activity: 100, state: "idle"),

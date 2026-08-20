@@ -40,7 +40,7 @@ data class SessionInfo(
     val attached: Boolean,
     val path: String,
     val state: String,
-    val agent: Boolean = false,   // created by the mesh (ut spawn): hidden unless "Show agent sessions"
+    val agent: Boolean = false,   // background/unclassified: hidden unless "Show agent sessions"
     val hidden: Boolean = false,  // user-hidden; broker-owned so the hide syncs across devices
     val tmuxId: String? = null,   // broker's STABLE session handle ($N): unchanged across rename — connect by it so a renamed pane never sticks on "reconnecting"
 )
@@ -113,7 +113,9 @@ object Net {
                     s.optBoolean("attached"),
                     s.optString("path", ""),
                     s.optString("state", ""),
-                    s.optBoolean("agent", false),
+                    // Fail closed when talking to an older broker: only
+                    // affirmative user-visible provenance belongs in the UI.
+                    s.optBoolean("agent", true),
                     s.optBoolean("hidden", false),
                     s.optString("id", "").ifEmpty { null },
                 )
@@ -178,6 +180,9 @@ object Net {
         try {
             val u = StringBuilder("${b.httpBase}/control?action=$action&session=${enc(session)}")
             if (dir != null) u.append("&dir=${enc(dir)}")
+            // Only an explicit Argus UI creation is foreground. The broker's
+            // unqualified create path intentionally defaults to hidden.
+            if (action == "create") u.append("&kind=visible")
             val req = Request.Builder().url(u.toString())
                 .post(RequestBody.create(null, ByteArray(0))).build()
             client.newCall(req).execute().close()

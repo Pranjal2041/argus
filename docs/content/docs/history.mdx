@@ -21,9 +21,9 @@ has an answer — and lets you jump back into one, or bring it back, with a clic
 - **Click to open — or bring back.** Click any row whose machine is online: a still-running session
   opens, and a session that has *ended* is **re-created** with the same name, in the folder it last ran
   in, and opened. A click revives a finished session. Rows whose machine is offline are inert.
-- **Hide agent sessions.** Background `ut spawn` jobs and persistent `ut sh` agent shells are hidden
-  by default; the eye button in the header toggles them. An explicitly requested
-  `ut sh --visible` shell remains part of the normal session list.
+- **Hide background sessions.** CLI-created work (`ut <name>`, `ut spawn`, and `ut sh`) plus
+  unclassified direct-tmux sessions are hidden by default; the eye button toggles them. The Argus
+  UI and an explicit `--visible` are the only foreground creation paths.
 
 ## How it works
 

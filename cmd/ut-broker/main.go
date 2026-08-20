@@ -361,10 +361,10 @@ func main() {
 		switch q.Get("action") {
 		case "create":
 			switch q.Get("kind") {
-			case "", "visible":
-				err = mgr.Create(q.Get("session"), q.Get("dir"))
-			case "agent-shell":
+			case "", "agent-shell":
 				err = mgr.CreateAgentShell(q.Get("session"), q.Get("dir"))
+			case "visible":
+				err = mgr.CreateVisible(q.Get("session"), q.Get("dir"))
 			default:
 				err = fmt.Errorf("unknown session kind %q", q.Get("kind"))
 			}

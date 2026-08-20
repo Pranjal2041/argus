@@ -28,7 +28,7 @@ type Info struct {
 	Activity  int64  `json:"activity"`            // unix seconds of last activity
 	Path      string `json:"path"`                // active pane cwd (folder grouping)
 	State     string `json:"state"`               // attention: working | waiting | idle
-	Agent     bool   `json:"agent"`               // created by the mesh (ut spawn / default ut sh): hidden by default and automatically reaped
+	Agent     bool   `json:"agent"`               // background/unclassified: hidden by default; lifecycle cleanup still requires backend ownership metadata
 	Hidden    bool   `json:"hidden"`              // user-hidden in a client UI; broker-owned so the hide syncs across devices
 	ID        string `json:"id"`                  // backend transport handle (tmux $N): stable across rename, but reusable after a server restart
 	LineageID string `json:"lineageID,omitempty"` // one session lifetime, never a reusable transport handle; survives rename and disambiguates restarted tmux servers

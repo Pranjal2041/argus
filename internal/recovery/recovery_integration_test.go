@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+func createVisibleTestSession(t *testing.T, socket, name, directory string) {
+	t.Helper()
+	args := []string{"-L", socket, "new-session", "-d", "-s", name}
+	if directory != "" {
+		args = append(args, "-c", directory)
+	}
+	args = append(args, ";", "set-option", "-t", name, "@ut_visible", "1")
+	if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+		t.Fatalf("create visible test session %q: %v: %s", name, err, out)
+	}
+}
+
 func TestFindAgentUsesOnlyThePaneForegroundJob(t *testing.T) {
 	processes := map[int]processInfo{
 		10: {PID: 10, PPID: 1, PGID: 10, TPGID: 10, Command: "zsh"},
@@ -37,9 +49,7 @@ func TestShellWorkspaceSurvivesTmuxServerReplacement(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	workingDirectory := t.TempDir()
-	if out, err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "paper", "-c", workingDirectory).CombinedOutput(); err != nil {
-		t.Fatalf("create original tmux server: %v: %s", err, out)
-	}
+	createVisibleTestSession(t, socket, "paper", workingDirectory)
 	store := NewStore(socket)
 	store.Dir = filepath.Join(t.TempDir(), "snapshots")
 	store.Now = func() time.Time { return time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC) }
@@ -118,9 +128,7 @@ func TestRestoreNeverOverwritesNameConflict(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	originalDirectory := t.TempDir()
-	if err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "same-name", "-c", originalDirectory).Run(); err != nil {
-		t.Fatal(err)
-	}
+	createVisibleTestSession(t, socket, "same-name", originalDirectory)
 	store := NewStore(socket)
 	store.Dir = filepath.Join(t.TempDir(), "snapshots")
 	snapshot, err := store.Capture()
@@ -130,9 +138,7 @@ func TestRestoreNeverOverwritesNameConflict(t *testing.T) {
 	cleanup()
 
 	conflictingDirectory := t.TempDir()
-	if err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "same-name", "-c", conflictingDirectory).Run(); err != nil {
-		t.Fatal(err)
-	}
+	createVisibleTestSession(t, socket, "same-name", conflictingDirectory)
 	status := store.Status(snapshot.ID)
 	if len(status.Panels) != 1 || status.Panels[0].State != PanelConflict {
 		t.Fatalf("shell conflict status = %#v", status)
@@ -161,9 +167,7 @@ func TestTmuxInspectionWorksWithoutParentLocale(t *testing.T) {
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "locale-test", "-c", directory).CombinedOutput(); err != nil {
-		t.Fatalf("create tmux server: %v: %s", err, out)
-	}
+	createVisibleTestSession(t, socket, "locale-test", directory)
 	t.Setenv("LANG", "")
 	t.Setenv("LC_CTYPE", "")
 	t.Setenv("LC_ALL", "C")
@@ -228,9 +232,7 @@ func TestBootstrapCanUseAFailedRestoreShell(t *testing.T) {
 	cleanup := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
 	cleanup()
 	t.Cleanup(cleanup)
-	if err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "diagnostic-shell").Run(); err != nil {
-		t.Fatal(err)
-	}
+	createVisibleTestSession(t, socket, "diagnostic-shell", "")
 
 	directory := t.TempDir()
 	output := filepath.Join(directory, "launcher argv")

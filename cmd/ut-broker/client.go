@@ -283,7 +283,9 @@ func cmdSh(args []string) int {
 	if len(args) >= 2 { // create (attach-or-create) a named shell
 		name := args[1]
 		q := url.Values{"action": {"create"}, "session": {name}}
-		if !visible {
+		if visible {
+			q.Set("kind", "visible")
+		} else {
 			q.Set("kind", "agent-shell")
 		}
 		if _, code, err := httpPost(peerURL(host, "/control", q), nil, 15*time.Second); err != nil || code != 200 {
@@ -704,6 +706,8 @@ An agent on any machine reaches every other machine BY NAME, with no SSH setup.
 Files, shells, and commands work the same everywhere.
 
 USAGE
+  ut [name]                            attach or create a hidden CLI session
+  ut --visible [name]                  deliberately create/promote a visible panel
   ut ls                                 list every machine and its sessions
   ut exec  @<machine> <command...>      run a one-shot command, print its output
   ut sh    @<machine> <name>            create a persistent agent shell (keeps cwd/env/venv)

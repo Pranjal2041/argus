@@ -5,8 +5,9 @@
 // survives disconnects), and pumps your PowerShell console <-> the session in
 // raw VT mode. Detach with Ctrl-] — the session keeps running.
 //
-//	ut [name]              new session (default: a fresh one named after the dir)
-//	ut -L <socket> [name]  reserved for a separate broker (single broker for now)
+//	ut [name]                       hidden CLI session (default: dir-named)
+//	ut --visible [name]             deliberately user-visible panel
+//	ut -L <socket> [--visible] [name]
 package main
 
 import (
@@ -83,9 +84,24 @@ func main() {
 		}
 		return
 	}
+	visible := false
 	explicit := ""
-	if len(args) >= 1 {
-		explicit = args[0]
+	for len(args) > 0 {
+		arg := args[0]
+		args = args[1:]
+		switch {
+		case arg == "--visible":
+			if visible {
+				fatal("--visible may be specified only once")
+			}
+			visible = true
+		case strings.HasPrefix(arg, "-"):
+			fatal("unknown option %q", arg)
+		case explicit != "":
+			fatal("unexpected argument %q (a session command accepts only one name; run 'ut help' for fabric commands)", arg)
+		default:
+			explicit = arg
+		}
 	}
 
 	base := "http://127.0.0.1:" + port
@@ -117,7 +133,7 @@ func main() {
 		}
 	}
 
-	createSession(base, name, cwd) // attach-or-create
+	createSession(base, name, cwd, visible) // attach-or-create
 
 	if os.Getenv("UT_NO_ATTACH") != "" {
 		fmt.Println("session:", name)
@@ -176,9 +192,16 @@ func sessionNames(base string) []string {
 	return out
 }
 
-func createSession(base, name, dir string) {
+func createSession(base, name, dir string, visible bool) {
 	cl := http.Client{Timeout: 8 * time.Second}
 	u := base + "/control?action=create&session=" + url.QueryEscape(name) + "&dir=" + url.QueryEscape(dir)
+	if visible {
+		u += "&kind=visible"
+	} else {
+		// Be safe even against an older broker whose unqualified create path was
+		// historically foreground.
+		u += "&kind=agent-shell"
+	}
 	resp, err := cl.Post(u, "", nil)
 	if err == nil {
 		resp.Body.Close()

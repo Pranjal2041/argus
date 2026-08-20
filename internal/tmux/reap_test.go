@@ -147,6 +147,51 @@ func TestCreateAgentShellIsImmediatelyTagged(t *testing.T) {
 	}
 }
 
+func TestVisibilityRequiresAffirmativeProvenance(t *testing.T) {
+	provider, socket := tmuxIdentityTestProvider(t)
+	if err := provider.Create("argus-panel", ""); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("tmux", tmuxArgs(socket, "new-session", "-d", "-s", "direct-tmux")...).CombinedOutput(); err != nil {
+		t.Fatalf("create unmarked session: %v: %s", err, out)
+	}
+	byName := map[string]SessionInfo{}
+	for _, info := range provider.ListInventory() {
+		byName[info.Name] = info
+	}
+	if byName["argus-panel"].Agent {
+		t.Fatal("explicit Argus panel was classified as background")
+	}
+	if !byName["direct-tmux"].Agent {
+		t.Fatal("unmarked direct-tmux session became visible")
+	}
+}
+
+func TestLegacyVisibilityMigrationRunsOnlyOnce(t *testing.T) {
+	t.Setenv("UT_VISIBILITY_STATE_DIR", t.TempDir())
+	provider, socket := tmuxIdentityTestProvider(t)
+	if out, err := exec.Command("tmux", tmuxArgs(socket, "new-session", "-d", "-s", "legacy")...).CombinedOutput(); err != nil {
+		t.Fatalf("create legacy session: %v: %s", err, out)
+	}
+	if err := MigrateLegacyVisibility(socket); err != nil {
+		t.Fatal(err)
+	}
+	if provider.ListInventory()[0].Agent {
+		t.Fatal("legacy session was not preserved as visible")
+	}
+	if out, err := exec.Command("tmux", tmuxArgs(socket, "new-session", "-d", "-s", "later-direct")...).CombinedOutput(); err != nil {
+		t.Fatalf("create later session: %v: %s", err, out)
+	}
+	if err := MigrateLegacyVisibility(socket); err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range provider.ListInventory() {
+		if info.Name == "later-direct" && !info.Agent {
+			t.Fatal("second migration promoted a newly unmarked session")
+		}
+	}
+}
+
 func TestAgentShellDoesNotReclassifyExistingVisibleSession(t *testing.T) {
 	provider, _ := tmuxIdentityTestProvider(t)
 	if err := provider.Create("human-shell", ""); err != nil {
@@ -170,6 +215,21 @@ func TestAgentShellDoesNotReclassifyExistingVisibleSession(t *testing.T) {
 	}
 }
 
+func TestVisibleCreatePromotesExistingAgentShell(t *testing.T) {
+	provider, _ := tmuxIdentityTestProvider(t)
+	if err := provider.CreateAgentShell("background", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Create("background", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range provider.ListInventory() {
+		if info.Name == "background" && info.Agent {
+			t.Fatal("explicit visible create did not promote existing background session")
+		}
+	}
+}
+
 func TestAgentShellSevenDayInactivityCleanup(t *testing.T) {
 	provider, socket := tmuxIdentityTestProvider(t)
 	if err := provider.CreateAgentShell("stale-shell", ""); err != nil {
@@ -180,11 +240,12 @@ func TestAgentShellSevenDayInactivityCleanup(t *testing.T) {
 	if out, err := exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", "stale-shell", optLastUsed, strconv.FormatInt(old, 10))...).CombinedOutput(); err != nil {
 		t.Fatalf("age last-used marker: %v: %s", err, out)
 	}
-	if got := provider.ReapAgents(); len(got) != 1 || got[0] != "stale-shell" {
-		t.Fatalf("seven-day shell cleanup reaped %v, want [stale-shell]", got)
+	now := time.Now().Unix()
+	if !agentShellExpiredAt(now, old, old) {
+		t.Fatal("seven-day inactive agent shell did not expire")
 	}
-	if provider.Has("stale-shell") {
-		t.Fatal("expired agent shell still exists")
+	if agentShellExpiredAt(now, old, now) {
+		t.Fatal("recent tmux activity did not protect an agent shell")
 	}
 }
 

@@ -108,8 +108,8 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   its last folder. Plus themes that recolor the whole app: chrome, terminals, and editor.
 - **`ut` CLI + mesh** — a drop-in for `tmux` that publishes a host to your tailnet, plus a small
   cross-host fabric (`ut exec` / `ut sh` / `ut spawn` / `ut tail` / `ut cp` / `ut forward` / `ut browser`) to orchestrate work by
-  host name. Mesh-created shells and jobs are agent sessions hidden from the main UI; use
-  `ut sh --visible` only for a deliberate user-facing panel. While Argus is open on the Mac,
+  host name. Every CLI-created, background, or unclassified session is hidden from the main UI;
+  only the Argus UI and an explicit `--visible` create a user-facing panel. While Argus is open on the Mac,
   `ut browser` gives an agent on any machine hidden/visible WebKit tabs, DOM snapshots, screenshots,
   and coordinate or element-ref input; browser traffic and authenticated state remain on that Mac.
 
@@ -154,8 +154,9 @@ go build -o bin/ut-broker ./cmd/ut-broker
 ./bin/ut-broker --listen 127.0.0.1:8722
 
 # Or use the `ut` CLI, a drop-in for tmux that starts the broker for you:
-ut                 # attach/create a session in $PWD and publish this server
-ut my-experiment   # a named session (attach-or-create)
+ut                         # attach/create a hidden CLI session and publish this server
+ut my-experiment           # a named hidden session (attach-or-create)
+ut --visible my-experiment # deliberately create/promote a main-sidebar panel
 ut -L scratch      # a separate tmux server + broker, like `tmux -L`
 ```
 
