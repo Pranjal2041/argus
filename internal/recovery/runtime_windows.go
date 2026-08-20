@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+func InspectCodexSession(socket, name string) (CodexSession, error) {
+	return CodexSession{}, fmt.Errorf("live Codex session inspection is not yet supported on Windows")
+}
+
 // Windows sessions are ConPTY-backed and do not survive a reboot. Conversation
 // identity capture will be added when the Windows agent CLIs expose the same
 // authoritative process-owned session state used on macOS/Linux.

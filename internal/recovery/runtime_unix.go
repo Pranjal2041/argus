@@ -296,20 +296,50 @@ func inspectClaude(pid int, state processState) (string, string, string, error) 
 	return record.SessionID, findClaudeTranscript(config, record.SessionID), registry, nil
 }
 
-func inspectCodex(pid int) (string, string, error) {
-	files, err := platformOpenFiles(pid)
-	if err != nil {
-		return "", "", fmt.Errorf("list Codex open files: %w", err)
+func codexHome(state processState) string {
+	if value := strings.TrimSpace(state.Environment["CODEX_HOME"]); value != "" {
+		return filepath.Clean(value)
 	}
+	if value := strings.TrimSpace(state.Environment["HOME"]); value != "" {
+		return filepath.Join(value, ".codex")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex")
+}
+
+func resolvedPath(path string) string {
+	if value, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(value)
+	}
+	return filepath.Clean(path)
+}
+
+func pathWithin(root, path string) bool {
+	relative, err := filepath.Rel(resolvedPath(root), resolvedPath(path))
+	return err == nil && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)) &&
+		!filepath.IsAbs(relative)
+}
+
+func codexRollouts(files []string, state processState) []string {
+	root := filepath.Join(codexHome(state), "sessions")
 	var rollouts []string
 	for _, path := range files {
 		name := filepath.Base(path)
-		if strings.Contains(filepath.ToSlash(path), "/.codex/sessions/") && strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, ".jsonl") {
+		if pathWithin(root, path) && strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, ".jsonl") {
 			rollouts = append(rollouts, path)
 		}
 	}
 	sort.Strings(rollouts)
-	rollouts = uniqueStrings(rollouts)
+	return uniqueStrings(rollouts)
+}
+
+func inspectCodex(pid int, state processState) (string, string, error) {
+	files, err := platformOpenFiles(pid)
+	if err != nil {
+		return "", "", fmt.Errorf("list Codex open files: %w", err)
+	}
+	rollouts := codexRollouts(files, state)
 	if len(rollouts) != 1 {
 		return "", "", fmt.Errorf("Codex process has %d open rollout files", len(rollouts))
 	}
@@ -340,6 +370,38 @@ func inspectCodex(pid int) (string, string, error) {
 		return "", rollouts[0], fmt.Errorf("Codex rollout has an invalid session ID")
 	}
 	return id, rollouts[0], nil
+}
+
+// InspectCodexSession identifies the foreground Codex conversation in a tmux
+// session from kernel-owned process state and its open rollout file.
+func InspectCodexSession(socket, name string) (CodexSession, error) {
+	panes, err := listPanes(socket)
+	if err != nil {
+		return CodexSession{}, err
+	}
+	for _, pane := range panes {
+		if pane.Name != name {
+			continue
+		}
+		processes, err := readProcessTable()
+		if err != nil {
+			return CodexSession{}, err
+		}
+		agent, process, ok := findAgent(pane.PanePID, processes)
+		if !ok || agent != AgentCodex {
+			return CodexSession{}, fmt.Errorf("session %q has no foreground Codex process", name)
+		}
+		state, err := platformProcessState(process.PID)
+		if err != nil {
+			return CodexSession{}, err
+		}
+		id, path, err := inspectCodex(process.PID, state)
+		if err != nil {
+			return CodexSession{}, err
+		}
+		return CodexSession{ID: id, Path: path}, nil
+	}
+	return CodexSession{}, fmt.Errorf("no such session: %q", name)
 }
 
 func uniqueStrings(values []string) []string {
@@ -377,7 +439,7 @@ func captureEntry(pane paneInfo, processes map[int]processInfo) Entry {
 	case AgentClaude:
 		entry.SessionID, entry.SessionPath, _, err = inspectClaude(process.PID, state)
 	case AgentCodex:
-		entry.SessionID, entry.SessionPath, err = inspectCodex(process.PID)
+		entry.SessionID, entry.SessionPath, err = inspectCodex(process.PID, state)
 	}
 	if err != nil {
 		entry.CaptureError = err.Error()

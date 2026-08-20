@@ -491,6 +491,13 @@ type capturer interface {
 	Capture(name string, lines int) (string, error)
 }
 
+// codexTranscriptProvider identifies the exact rollout opened by the Codex
+// process in a session. Alternate CODEX_HOME handling belongs at the host
+// provider, where live process state is authoritative.
+type codexTranscriptProvider interface {
+	CodexTranscript(name string) (string, error)
+}
+
 // Has reports whether a session with this exact name exists right now.
 func (m *Manager) Has(name string) bool { return m.prov.Has(name) }
 
@@ -532,7 +539,13 @@ func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
 	if home == "" {
 		return rendersource.Result{}, fmt.Errorf("resolve home directory: empty path")
 	}
-	return rendersource.Resolve(home, cwd, text)
+	var codexTranscript string
+	if provider, ok := m.prov.(codexTranscriptProvider); ok {
+		// Non-Codex panes and transient inspection failures retain the existing
+		// standard-store and Claude fallbacks.
+		codexTranscript, _ = provider.CodexTranscript(name)
+	}
+	return rendersource.ResolveWithCodexTranscript(home, cwd, text, codexTranscript)
 }
 
 // Sessions returns the cached session list (refreshed in the background). Always

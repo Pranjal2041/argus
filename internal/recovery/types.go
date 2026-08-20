@@ -17,6 +17,13 @@ const (
 	AgentCodex  = "codex"
 )
 
+// CodexSession is the conversation identity proven from the rollout file held
+// open by a live Codex process.
+type CodexSession struct {
+	ID   string
+	Path string
+}
+
 // Entry is one user-owned tmux session in a recovery snapshot. Argv is the
 // kernel-owned argument vector, not a transcript-derived reconstruction.
 type Entry struct {

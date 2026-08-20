@@ -302,16 +302,28 @@ def process_start(pid: int) -> tuple[datetime.datetime, datetime.datetime]:
     return parsed, utc
 
 
-def codex_session_id(pid: int) -> tuple[str, str]:
+def codex_session_id(
+    pid: int, environment: dict[str, str]
+) -> tuple[str, str]:
+    codex_home = pathlib.Path(
+        environment.get("CODEX_HOME", str(pathlib.Path.home() / ".codex"))
+    ).expanduser().resolve()
+    sessions_root = codex_home / "sessions"
+
+    def is_rollout(path: pathlib.Path) -> bool:
+        try:
+            path.resolve().relative_to(sessions_root)
+        except (OSError, ValueError):
+            return False
+        return path.name.startswith("rollout-") and path.name.endswith(".jsonl")
+
     output = run(["lsof", "-n", "-Fn", "-p", str(pid)])
     rollout_paths = sorted(
         {
-            line[1:]
+            str(pathlib.Path(line[1:]))
             for line in output.splitlines()
             if line.startswith("n")
-            and "/.codex/sessions/" in line
-            and pathlib.Path(line[1:]).name.startswith("rollout-")
-            and line.endswith(".jsonl")
+            and is_rollout(pathlib.Path(line[1:]))
         }
     )
     if not rollout_paths:
@@ -387,7 +399,9 @@ def inspect_pane(pane: Pane, processes: dict[int, Process]) -> Result:
         result.argv = argv
         result.command = shlex.join(argv)
         if kind == "codex":
-            result.session_id, result.evidence = codex_session_id(process.pid)
+            result.session_id, result.evidence = codex_session_id(
+                process.pid, environment
+            )
         else:
             result.session_id, result.evidence = claude_session_id(
                 process.pid, environment

@@ -58,19 +58,36 @@ type message struct {
 // host. It never trusts recency alone: a candidate must strongly overlap the
 // captured screen, preventing two agents in the same folder from crossing.
 func Resolve(home, cwd, screen string) (Result, error) {
+	return ResolveWithCodexTranscript(home, cwd, screen, "")
+}
+
+// ResolveWithCodexTranscript resolves rich source like Resolve, but first
+// considers the exact rollout file opened by the Codex process in this pane.
+// Codex may use any CODEX_HOME; process inspection is authoritative while the
+// standard ~/.codex scan remains a compatibility fallback.
+func ResolveWithCodexTranscript(home, cwd, screen, codexTranscript string) (Result, error) {
 	screenTokens := tokenize(screen)
 	if len(screenTokens) < 8 {
 		return Result{}, ErrNoMatch
 	}
 
 	best := Result{}
+	if codexTranscript != "" {
+		if info, err := os.Stat(codexTranscript); err == nil && !info.IsDir() {
+			best = bestFromFiles([]candidateFile{{
+				path: codexTranscript, provider: "codex", mtime: info.ModTime(),
+			}}, cwd, screenTokens, best)
+		}
+	}
 	// Try Codex first. A strong screen match already identifies the authored
 	// response; walking a second provider's potentially very large history adds
 	// latency without increasing confidence. A miss then searches Claude.
-	best = bestFromFiles(
-		discover(filepath.Join(home, ".codex", "sessions"), "codex", cwd),
-		cwd, screenTokens, best,
-	)
+	if best.Confidence < minimumConfidence {
+		best = bestFromFiles(
+			discover(filepath.Join(home, ".codex", "sessions"), "codex", cwd),
+			cwd, screenTokens, best,
+		)
+	}
 	if best.Confidence < minimumConfidence {
 		best = bestFromFiles(
 			discover(filepath.Join(home, ".claude", "projects"), "claude", cwd),
