@@ -46,6 +46,32 @@ The variance term comes from the log normalizer, not an added regularizer.`
 	}
 }
 
+func TestResolveUsesExactTranscriptFromCustomCodexHome(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	source := `## Custom home result
+
+The exact process-owned transcript preserves this complete response with enough distinctive words to prove the visible overlap.`
+	path := filepath.Join(home, ".codex2", "sessions", "2026", "08", "20", "rollout-custom.jsonl")
+	writeLines(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": source}},
+		}},
+	)
+
+	got, err := ResolveWithCodexTranscript(home, cwd,
+		"Custom home result The exact process-owned transcript preserves this complete response with enough distinctive words to prove the visible overlap.",
+		path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != source || got.Origin != "codex-transcript" {
+		t.Fatalf("unexpected custom-home result: %#v", got)
+	}
+}
+
 func TestResolveClaudeTextBlocks(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")

@@ -28,6 +28,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"universal-tmux/internal/recovery"
 	"universal-tmux/internal/session"
 )
 
@@ -103,6 +104,18 @@ func dropDimAndAnsi(b []byte) string {
 	}
 	return string(out)
 }
+
+// CodexTranscript returns the exact rollout file opened by the foreground
+// Codex process. Unlike a home-directory scan, this follows a session-specific
+// CODEX_HOME and cannot cross two agents running in the same working directory.
+func (p *Provider) CodexTranscript(name string) (string, error) {
+	result, err := recovery.InspectCodexSession(p.socket, name)
+	if err != nil {
+		return "", err
+	}
+	return result.Path, nil
+}
+
 func (p *Provider) Create(name, dir string) error { return CreateSession(p.socket, name, dir) }
 func (p *Provider) CreateAgentShell(name, dir string) error {
 	return CreateAgentShell(p.socket, name, dir)
