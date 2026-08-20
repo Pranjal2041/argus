@@ -332,7 +332,7 @@ func ListSessionInventory(socket string) []SessionInfo {
 	// ever confusing a later `$N` reuse for the same panel. All fixed fields are
 	// placed AFTER pane_current_path (SplitN keeps a tab in the path inside f[4]).
 	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}")...).Output()
+		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}\t#{@ut_visible}")...).Output()
 	if err != nil {
 		return []SessionInfo{}
 	}
@@ -341,7 +341,7 @@ func ListSessionInventory(socket string) []SessionInfo {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 8)
+		f := strings.SplitN(line, "\t", 9)
 		if len(f) < 4 {
 			continue
 		}
@@ -363,7 +363,11 @@ func ListSessionInventory(socket string) []SessionInfo {
 		if len(f) >= 7 {
 			lineageID = f[6]
 		}
-		agent := len(f) >= 8 && f[7] == "1"
+		// Fail closed: only an explicit visible marker makes a panel foreground.
+		// @ut_agent remains the lifecycle marker for cleanup, while unclassified
+		// direct-tmux sessions are hidden just like mesh-owned work.
+		visible := len(f) >= 9 && f[8] == "1"
+		agent := !visible
 		sessions = append(sessions, SessionInfo{
 			Name: f[0], Windows: windows, Attached: attached > 0, Activity: act, Path: path,
 			Agent: agent, ID: id, LineageID: lineageID,
@@ -457,13 +461,44 @@ func SetHistoryLimit(socket string, lines int) {
 	_ = exec.Command("tmux", tmuxArgs(socket, "set", "-g", "history-limit", strconv.Itoa(lines))...).Run()
 }
 
+// literalSessionTarget prevents a session name such as "$0" from being
+// reinterpreted as tmux's reusable numeric session id namespace.
+func literalSessionTarget(name string) string {
+	if strings.HasPrefix(name, "$") {
+		return "\\" + name
+	}
+	return name
+}
+
 // CreateSession creates a new detached session. startDir, if non-empty, sets
 // its working directory (so "new session in this folder" works).
 func CreateSession(socket, name, startDir string) error {
+	target := literalSessionTarget(name)
+	if HasSession(socket, name) {
+		// An affirmative visible request also promotes an existing background
+		// session. Merely attaching through plain `ut` never reaches this path.
+		out, err := exec.Command("tmux", tmuxArgs(socket,
+			"set-option", "-t", target, optVisible, "1",
+			";", "set-option", "-t", target, optOrigin, "explicit-visible",
+			";", "set-option", "-u", "-t", target, optAgent,
+			";", "set-option", "-u", "-t", target, optAgentShell,
+		)...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("promote %q: %v: %s", name, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
 	args := []string{"new-session", "-d", "-s", name}
 	if startDir != "" {
 		args = append(args, "-c", startDir)
 	}
+	// Visibility is affirmative provenance. Sessions created through the Argus
+	// UI are marked visible atomically; a session with no marker is background
+	// work and must never surface merely because it was created directly in tmux.
+	args = append(args,
+		";", "set-option", "-t", target, optVisible, "1",
+		";", "set-option", "-t", target, optOrigin, "argus-ui",
+	)
 	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create %q: %v: %s", name, err, strings.TrimSpace(string(out)))
@@ -489,10 +524,10 @@ func CreateAgentShell(socket, name, startDir string) error {
 	// shell before its agent marker is installed (which would make it flash in
 	// the main sidebar). `;` is a tmux command separator when passed as argv.
 	args = append(args,
-		";", "set-option", "-t", name, optAgent, "1",
-		";", "set-option", "-t", name, optAgentShell, "1",
-		";", "set-option", "-t", name, optOrigin, "cli-sh",
-		";", "set-option", "-t", name, optLastUsed, strconv.FormatInt(time.Now().Unix(), 10),
+		";", "set-option", "-t", literalSessionTarget(name), optAgent, "1",
+		";", "set-option", "-t", literalSessionTarget(name), optAgentShell, "1",
+		";", "set-option", "-t", literalSessionTarget(name), optOrigin, "cli-sh",
+		";", "set-option", "-t", literalSessionTarget(name), optLastUsed, strconv.FormatInt(time.Now().Unix(), 10),
 	)
 	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
@@ -508,6 +543,7 @@ func CreateAgentShell(socket, name, startDir string) error {
 // @ut_reap_idle / @ut_done_at drive completion-based cleanup.
 const (
 	optAgent      = "@ut_agent"
+	optVisible    = "@ut_visible"
 	optAgentShell = "@ut_agent_shell"
 	optOrigin     = "@ut_origin"
 	optLastUsed   = "@ut_last_used"
@@ -541,14 +577,18 @@ func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
 	// still-running `sh -c` wrapper looks like an interactive bash).
 	wrapper := cmd + "\ntmux set-option " + optDoneAt + " \"$(date +%s)\" 2>/dev/null\n" +
 		"tmux set-option " + optDone + " 1 2>/dev/null\nexec \"${SHELL:-sh}\" -i"
-	args = append(args, "sh", "-c", wrapper)
+	// Install ownership in the SAME tmux command sequence as creation. The old
+	// two-command form briefly exposed the new session as ordinary and silently
+	// left it visible if a best-effort set-option failed.
+	args = append(args, "sh", "-c", wrapper,
+		";", "set-option", "-t", literalSessionTarget(name), optAgent, "1",
+		";", "set-option", "-t", literalSessionTarget(name), optOrigin, "cli-spawn",
+		";", "set-option", "-t", literalSessionTarget(name), optReapIdle, strconv.Itoa(idleSec),
+	)
 	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("spawn %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
-	// Tag it (best-effort): the reaper and UI filter key off these options.
-	_ = exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", name, optAgent, "1")...).Run()
-	_ = exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", name, optReapIdle, strconv.Itoa(idleSec))...).Run()
 	return nil
 }
 
@@ -608,7 +648,11 @@ func ReapIdleAgentSessions(socket string) []string {
 		act, _ := strconv.ParseInt(f[7], 10, 64)
 		expired := false
 		if agentShell {
-			expired = session.AgentShellExpired(now, lastUsed)
+			// Direct interactive tmux clients advance session_activity without
+			// passing through the broker's SendKeys path. Either clock counts as
+			// use, otherwise an actively revisited CLI shell could be reaped seven
+			// days after creation.
+			expired = agentShellExpiredAt(now, lastUsed, act)
 		} else if done {
 			if doneAt <= 0 {
 				// Sessions created before @ut_done_at was introduced still carry a
@@ -638,6 +682,13 @@ func ReapIdleAgentSessions(socket string) []string {
 		}
 	}
 	return reaped
+}
+
+func agentShellExpiredAt(now, lastUsed, activity int64) bool {
+	if activity > lastUsed {
+		lastUsed = activity
+	}
+	return session.AgentShellExpired(now, lastUsed)
 }
 
 // KillSession terminates a session and everything running in it.

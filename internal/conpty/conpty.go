@@ -264,7 +264,17 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 }
 
 func (p *Provider) Create(name, dir string) error {
-	_, _, err := p.create(name, dir, false, false, 0, "")
+	s, created, err := p.create(name, dir, false, false, 0, "")
+	if err != nil || created {
+		return err
+	}
+	// Create is the provider's affirmative foreground path. Promote an existing
+	// CLI session too, so --visible behaves the same on Windows and tmux.
+	s.mu.Lock()
+	s.agent = false
+	s.agentShell = false
+	s.reapIdle = 0
+	s.mu.Unlock()
 	return err
 }
 

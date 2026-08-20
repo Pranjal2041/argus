@@ -93,6 +93,47 @@ func TestCreateAgentShellIsAgentInOptimisticCache(t *testing.T) {
 	}
 }
 
+func TestCreateDefaultsHiddenAndVisibleRequiresExplicitMethod(t *testing.T) {
+	p := &warmProvider{}
+	m := &Manager{
+		ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{},
+		hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+	}
+	if err := m.Create("background", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Sessions(); len(got) != 1 || !got[0].Agent {
+		t.Fatalf("default create = %+v, want hidden", got)
+	}
+
+	p = &warmProvider{}
+	m = &Manager{
+		ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{},
+		hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+	}
+	if err := m.CreateVisible("panel", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Sessions(); len(got) != 1 || got[0].Agent {
+		t.Fatalf("visible create = %+v, want foreground", got)
+	}
+}
+
+func TestRenameCarriesManualHiddenState(t *testing.T) {
+	p := &warmProvider{exists: true}
+	m := &Manager{
+		ctx: context.Background(), prov: p, hubs: map[string]*sessionHub{},
+		hidden: map[string]bool{"shell": true}, history: map[string]*SessionHistory{},
+		sessCache: []session.Info{{Name: "shell"}}, hiddenPath: t.TempDir() + "/hidden.json",
+	}
+	if err := m.Rename("shell", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.hidden["renamed"] || m.hidden["shell"] {
+		t.Fatalf("hidden state after rename = %+v", m.hidden)
+	}
+}
+
 func TestCreateAgentShellDoesNotOptimisticallyHideExistingUserSession(t *testing.T) {
 	p := &warmProvider{exists: true, agent: false}
 	m := &Manager{

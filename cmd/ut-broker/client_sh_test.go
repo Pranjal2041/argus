@@ -41,7 +41,7 @@ func TestCmdShCreationKind(t *testing.T) {
 		t.Fatalf("visible ut sh exit = %d", code)
 	}
 	q = <-requests
-	if q.Get("action") != "create" || q.Get("kind") != "" || q.Get("session") != "human-work" {
+	if q.Get("action") != "create" || q.Get("kind") != "visible" || q.Get("session") != "human-work" {
 		t.Fatalf("visible ut sh query = %v", q)
 	}
 }

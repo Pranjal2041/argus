@@ -64,7 +64,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
     var activity: Int64
     var path: String?    // optional: older brokers don't send it
     var state: String = "idle"  // broker agent-state: "working" | "waiting" | "idle"
-    var agent: Bool = false      // created by the mesh (ut spawn): hidden unless "Show agent sessions"
+    var agent: Bool = false      // background/unclassified: hidden unless "Show agent sessions"
     var hidden: Bool = false     // user-hidden; broker-owned so the hide syncs across devices
     var tmuxID: String?          // broker transport handle ($N): unchanged across rename but reusable after a tmux server restart
     var lineageID: String?       // non-reusable session lifetime id for archival aliases; never used as the transport target
@@ -115,7 +115,9 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         activity = try c.decode(Int64.self, forKey: .activity)
         path = try c.decodeIfPresent(String.self, forKey: .path)
         state = try c.decodeIfPresent(String.self, forKey: .state) ?? "idle"
-        agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? false
+        // Visibility is affirmative: an older broker that cannot prove a
+        // session was created for the UI must not leak it into the sidebar.
+        agent = try c.decodeIfPresent(Bool.self, forKey: .agent) ?? true
         hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
         // Normalize an EMPTY id to nil: the ConPTY (Windows) backend has no stable session
         // id and reports "id":"" — without this, `tmuxID ?? name` would pick the empty
@@ -437,8 +439,8 @@ final class AppState: ObservableObject {
     @Published var pathOverrides: [String: String] =
         (UserDefaults.standard.dictionary(forKey: "ut.pathOverrides") as? [String: String]) ?? [:]
 
-    /// Whether agent-spawned (`ut spawn`) sessions appear in the sidebar. They are
-    /// background work — hidden by default, revealed by the Settings toggle.
+    /// Whether CLI/background/unclassified sessions appear in the sidebar. They
+    /// are hidden by default and revealed by the Settings toggle.
     /// Persisted across launches.
     @Published var showAgentSessions: Bool = UserDefaults.standard.bool(forKey: "ut.showAgentSessions") {
         didSet { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") }
@@ -561,7 +563,7 @@ final class AppState: ObservableObject {
             selection = ref                              // already running → just open it
             return
         }
-        control(m.id, action: "create", session: wf.name) { ok in   // `then` runs on main
+        control(m.id, action: "create", session: wf.name, extra: ["kind": "visible"]) { ok in   // `then` runs on main
             guard ok else { self.workflowError = "Could not create session “\(wf.name)” on \(m.name)."; return }
             self.selection = ref
             self.refreshAll()
@@ -1712,7 +1714,7 @@ final class AppState: ObservableObject {
         var jf: [String: Any] = ["machineID": machineID, "session": name]
         if let dir, !dir.isEmpty { jf["folder"] = dir }
         ActivityJournal.shared.log("sessionNew", jf)
-        var extra: [String: String] = [:]
+        var extra: [String: String] = ["kind": "visible"]
         if let dir, !dir.isEmpty { extra["dir"] = dir }
         control(machineID, action: "create", session: name, extra: extra) { ok in
             if ok {

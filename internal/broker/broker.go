@@ -849,8 +849,16 @@ func (m *Manager) Serve(ctx context.Context, c *websocket.Conn, name string) err
 	return h.serve(ctx, c)
 }
 
-// Create makes a new detached session (optionally rooted at startDir).
+// Create makes a CLI/API session. Background is the safe default: only the
+// explicit visible path used by an Argus UI (or --visible) may enter the main
+// workspace.
 func (m *Manager) Create(name, startDir string) error {
+	return m.create(name, startDir, true)
+}
+
+// CreateVisible makes a deliberately user-facing session. Callers must opt in;
+// absence of a kind on the wire is never treated as visible provenance.
+func (m *Manager) CreateVisible(name, startDir string) error {
 	return m.create(name, startDir, false)
 }
 
@@ -922,6 +930,15 @@ func (m *Manager) Rename(from, to string) error {
 	if err := m.prov.Rename(from, to); err != nil {
 		return err
 	}
+	// Manual hiding is keyed by session name. Move it with the rename so an
+	// ordinary hidden panel cannot reappear under its new name.
+	m.hiddenMu.Lock()
+	if m.hidden[from] {
+		delete(m.hidden, from)
+		m.hidden[to] = true
+		m.saveHiddenLocked()
+	}
+	m.hiddenMu.Unlock()
 	m.mu.Lock()
 	if h, ok := m.hubs[from]; ok {
 		delete(m.hubs, from)

@@ -28,6 +28,7 @@ type paneInfo struct {
 	Windows    int
 	Panes      int
 	AgentOwned bool
+	Visible    bool
 	Active     bool
 }
 
@@ -124,7 +125,7 @@ func tmuxServerIdentity(socket string) (boot string, pid int, start int64, id st
 func listPanes(socket string) ([]paneInfo, error) {
 	format := strings.Join([]string{
 		"#{session_name}", "#{pane_pid}", "#{pane_tty}", "#{session_windows}",
-		"#{@ut_agent}", "#{window_active}", "#{pane_active}", "#{pane_current_path}",
+		"#{@ut_agent}", "#{@ut_visible}", "#{window_active}", "#{pane_active}", "#{pane_current_path}",
 	}, "\t")
 	out, err := tmuxCommand(socket, "list-panes", "-a", "-F", format).Output()
 	if err != nil {
@@ -139,8 +140,8 @@ func listPanes(socket string) ([]paneInfo, error) {
 		if line == "" {
 			continue
 		}
-		fields := strings.SplitN(line, "\t", 8)
-		if len(fields) != 8 || strings.HasPrefix(fields[0], "_ut-") {
+		fields := strings.SplitN(line, "\t", 9)
+		if len(fields) != 9 || strings.HasPrefix(fields[0], "_ut-") {
 			continue
 		}
 		pid, pidErr := strconv.Atoi(fields[1])
@@ -150,8 +151,8 @@ func listPanes(socket string) ([]paneInfo, error) {
 		}
 		pane := paneInfo{
 			Name: fields[0], PanePID: pid, TTY: fields[2], Windows: windows,
-			AgentOwned: fields[4] == "1", Active: fields[5] == "1" && fields[6] == "1",
-			Directory: fields[7],
+			AgentOwned: fields[4] == "1", Visible: fields[5] == "1",
+			Active: fields[6] == "1" && fields[7] == "1", Directory: fields[8],
 		}
 		agg := byName[pane.Name]
 		if agg == nil {
@@ -165,7 +166,7 @@ func listPanes(socket string) ([]paneInfo, error) {
 	}
 	panes := make([]paneInfo, 0, len(byName))
 	for _, agg := range byName {
-		if agg.chosen.AgentOwned {
+		if agg.chosen.AgentOwned || !agg.chosen.Visible {
 			continue
 		}
 		agg.chosen.Panes = agg.panes
@@ -662,6 +663,10 @@ func createRestoredSession(socket string, panel PanelStatus) error {
 		args = append(args, "sh", "-c", wrapper, "restore-agent")
 		args = append(args, panel.ResumeArgv...)
 	}
+	args = append(args,
+		";", "set-option", "-t", panel.Name, "@ut_visible", "1",
+		";", "set-option", "-t", panel.Name, "@ut_origin", "workspace-restore",
+	)
 	out, err := tmuxCommand(socket, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create tmux session: %v: %s", err, strings.TrimSpace(string(out)))

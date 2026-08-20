@@ -2,8 +2,9 @@
 # ut — a drop-in for tmux that publishes this tmux server to your tailnet.
 #
 # Usage:
-#   ut [name]               attach or create a session (default name = current dir)
-#   ut -L <socket> [name]   use a separate tmux server + broker, like `tmux -L`
+#   ut [name]                       attach or create a hidden CLI session
+#   ut --visible [name]             explicitly create/promote a visible session
+#   ut -L <socket> [--visible] [name]
 #
 # Model (DESIGN.md "Core principle"): the first `ut` on a tmux socket lazily starts
 # ONE broker for that server; later `ut` reuse it. The broker joins the tailnet via
@@ -33,14 +34,39 @@ case "${1:-}" in
     ;;
 esac
 
-# --- args: optional `-L <socket>`, then optional session name --------------
+# --- args: optional flags, then at most one session name -------------------
 socket="ut"
-if [ "${1:-}" = "-L" ]; then
-  [ $# -ge 2 ] || { echo "ut: -L needs a socket name" >&2; exit 2; }
-  socket="$2"; shift 2
-fi
-explicit="${1:-}"                                       # explicit session name (optional)
+visible=0
+explicit=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L)
+      [ $# -ge 2 ] || { echo "ut: -L needs a socket name" >&2; exit 2; }
+      socket="$2"; shift 2
+      ;;
+    --visible)
+      [ "$visible" -eq 0 ] || { echo "ut: --visible may be specified only once" >&2; exit 2; }
+      visible=1; shift
+      ;;
+    --)
+      shift
+      [ $# -le 1 ] || { echo "ut: expected at most one session name" >&2; exit 2; }
+      explicit="${1:-}"; shift $(( $# > 0 ? 1 : 0 ))
+      ;;
+    -*)
+      echo "ut: unknown option '$1'" >&2; exit 2
+      ;;
+    *)
+      [ -z "$explicit" ] || {
+        echo "ut: unexpected argument '$1' (a session command accepts only one name; run 'ut help' for fabric commands)" >&2
+        exit 2
+      }
+      explicit="$1"; shift
+      ;;
+  esac
+done
 sanitize() { printf '%s' "$1" | tr ':.' '__'; }         # tmux forbids ':' and '.' in names
+tmux_target() { case "$1" in \$*) printf '\\%s' "$1" ;; *) printf '%s' "$1" ;; esac; }
 
 command -v tmux >/dev/null 2>&1 || { echo "ut: tmux not found in PATH" >&2; exit 1; }
 mkdir -p "$LOCAL"
@@ -65,17 +91,46 @@ broker_running() {
   curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/sessions" >/dev/null 2>&1
 }
 
-# --- session: a NAMED arg reconnects (attach-or-create); NO name makes a NEW
-#     session every time, named after the dir with a numeric suffix when taken —
-#     so you CAN run several sessions from one directory, exactly like plain tmux.
+# --- session: CLI-created sessions are background unless --visible ----------
+# Visibility is explicit provenance. Existing sessions retain their creation
+# classification when merely attached; --visible deliberately promotes one.
 if [ -n "$explicit" ]; then
   name="$(sanitize "$explicit")"; [ -n "$name" ] || name="main"
-  tmux -L "$socket" new-session -A -d -s "$name" -c "$PWD" 2>/dev/null || true
+  target="$(tmux_target "$name")"
+  if tmux -L "$socket" has-session -t "=$name" 2>/dev/null; then
+    if [ "$visible" -eq 1 ]; then
+      tmux -L "$socket" set-option -t "$target" @ut_visible 1 \; \
+        set-option -t "$target" @ut_origin cli-visible \; \
+        set-option -u -t "$target" @ut_agent \; \
+        set-option -u -t "$target" @ut_agent_shell 2>/dev/null || true
+    fi
+  elif [ "$visible" -eq 1 ]; then
+    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+      set-option -t "$target" @ut_visible 1 \; \
+      set-option -t "$target" @ut_origin cli-visible
+  else
+    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+      set-option -t "$target" @ut_agent 1 \; \
+      set-option -t "$target" @ut_agent_shell 1 \; \
+      set-option -t "$target" @ut_origin cli-direct \; \
+      set-option -t "$target" @ut_last_used "$(date +%s)"
+  fi
 else
   base="$(sanitize "$(basename "$PWD")")"; [ -n "$base" ] || base="main"
   name="$base"; n=2
   while tmux -L "$socket" has-session -t "=$name" 2>/dev/null; do name="$base-$n"; n=$((n+1)); done
-  tmux -L "$socket" new-session -d -s "$name" -c "$PWD" 2>/dev/null || true
+  target="$(tmux_target "$name")"
+  if [ "$visible" -eq 1 ]; then
+    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+      set-option -t "$target" @ut_visible 1 \; \
+      set-option -t "$target" @ut_origin cli-visible
+  else
+    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+      set-option -t "$target" @ut_agent 1 \; \
+      set-option -t "$target" @ut_agent_shell 1 \; \
+      set-option -t "$target" @ut_origin cli-direct \; \
+      set-option -t "$target" @ut_last_used "$(date +%s)"
+  fi
 fi
 
 # --- ensure exactly one broker is serving this socket ----------------------
