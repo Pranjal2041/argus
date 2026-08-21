@@ -591,9 +591,11 @@ final class ArtifactStoreTests: XCTestCase {
         await store.reload()
         switch ProcessInfo.processInfo.environment["UT_ARTIFACT_SCREENSHOT_MODE"] {
         case "panel":
-            if let context = store.records.first?.panel { store.open(panel: context) }
+            if let context = store.records.first(where: { $0.panel.sessionName == "vlm_gating" })?.panel {
+                store.open(panel: context)
+            }
         case "viewer":
-            if let record = store.records.first { store.open(artifact: record) }
+            if let record = store.records.first(where: \.isImage) { store.open(artifact: record) }
         case "file-viewer":
             if let record = store.records.first(where: { $0.kind == ArtifactKind.fileSnapshot }) {
                 store.open(artifact: record)
@@ -613,6 +615,11 @@ final class ArtifactStoreTests: XCTestCase {
         // Optional local visual QA without making screenshot files a normal
         // test side effect.
         if let path = ProcessInfo.processInfo.environment["UT_ARTIFACT_SCREENSHOT"] {
+            // Thumbnail generation is intentionally asynchronous. Yield only in
+            // opt-in screenshot mode so visual QA captures the settled gallery
+            // without slowing the normal test suite.
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            host.layoutSubtreeIfNeeded()
             let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
             host.cacheDisplay(in: host.bounds, to: rep)
             try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
