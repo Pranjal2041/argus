@@ -38,6 +38,7 @@ import (
 	"universal-tmux/internal/portfwd"
 	"universal-tmux/internal/recovery"
 	sess "universal-tmux/internal/session" // aliased: the `session` flag var below shadows the package name
+	"universal-tmux/internal/webartifact"
 	"universal-tmux/internal/weeklyprogressbridge"
 	webassets "universal-tmux/web"
 )
@@ -120,6 +121,7 @@ func main() {
 	mux := http.NewServeMux()
 	browserbridge.New(displayName).RegisterRoutes(mux)
 	weeklyprogressbridge.New(displayName).RegisterRoutes(mux)
+	webartifact.NewRegistry("", displayName, hostName, mgr).RegisterRoutes(mux)
 	mux.Handle("/", http.FileServer(assets))
 	// Identity handshake: the client probes this on every online tailnet peer and
 	// treats a device as a broker ONLY if it returns this exact marker — so an
