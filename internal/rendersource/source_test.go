@@ -132,6 +132,24 @@ func TestResolveRejectsMatchingTranscriptFromDifferentWorkingDirectory(t *testin
 	}
 }
 
+func TestResolveWithoutReliableCWDUsesScreenMatch(t *testing.T) {
+	home := t.TempDir()
+	actualCWD := filepath.Join(home, "spatial_bench")
+	source := `## Spatial UE review
+
+The warehouse coverage table identifies reading as the only missing capability across all forty evaluated tasks.`
+	writeCodex(t, home, "windows-panel.jsonl", actualCWD, source)
+
+	got, err := Resolve(home, "",
+		"Spatial UE review The warehouse coverage table identifies reading as the only missing capability across all forty evaluated tasks.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != source || got.Origin != "codex-transcript" {
+		t.Fatalf("unexpected unscoped Windows result: %#v", got)
+	}
+}
+
 func TestResolvePrefersFinalAnswerNearestPromptOverPerfectProgressMatch(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -180,6 +198,30 @@ In one sentence: I searched for special polynomials, while the successful object
 	}
 	if got.Source != current {
 		t.Fatalf("wanted full current answer, got %q", got.Source)
+	}
+}
+
+func TestResolvePrefersShortCurrentPrefixOverLongCompletePreviousTurn(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	previous := `No data is missing for running and solving the reconstructed task.
+
+However, some unrecoverable original data was logically generated: the unseen summons content, full backend, hidden payment details, unopened document contents, and unobserved database records. The environment is functionally complete and internally consistent, but not a byte-for-byte copy of the original.`
+	currentPrefix := "Yes. The environment can now be built without adding anything else to the task. Lock the exact task."
+	current := currentPrefix + `
+
+Use the completed filing documents as the immutable observation set, then package the complete implementation and verification workflow described below.`
+	writeCodexMessages(t, home, "session.jsonl", cwd, previous, current)
+
+	// Codex can virtualize the rest of a newly completed response while leaving a
+	// complete previous response in scrollback. Recency among proven matches is
+	// authoritative; response length is not.
+	got, err := Resolve(home, cwd, previous+"\n\n"+currentPrefix+"\n\nGoal achieved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != current {
+		t.Fatalf("wanted current response, got %q", got.Source)
 	}
 }
 

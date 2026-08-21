@@ -335,23 +335,15 @@ func codexRollouts(files []string, state processState) []string {
 	return uniqueStrings(rollouts)
 }
 
-func inspectCodex(pid int, state processState) (string, string, error) {
-	files, err := platformOpenFiles(pid)
+func inspectCodexRollout(path string) (id, sessionID string, err error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return "", "", fmt.Errorf("list Codex open files: %w", err)
-	}
-	rollouts := codexRollouts(files, state)
-	if len(rollouts) != 1 {
-		return "", "", fmt.Errorf("Codex process has %d open rollout files", len(rollouts))
-	}
-	f, err := os.Open(rollouts[0])
-	if err != nil {
-		return "", rollouts[0], err
+		return "", "", err
 	}
 	defer f.Close()
 	line, err := bufio.NewReader(f).ReadBytes('\n')
 	if err != nil && len(line) == 0 {
-		return "", rollouts[0], err
+		return "", "", err
 	}
 	var record struct {
 		Type    string `json:"type"`
@@ -361,16 +353,54 @@ func inspectCodex(pid int, state processState) (string, string, error) {
 		} `json:"payload"`
 	}
 	if json.Unmarshal(line, &record) != nil || record.Type != "session_meta" {
-		return "", rollouts[0], fmt.Errorf("Codex rollout lacks session_meta")
+		return "", "", fmt.Errorf("Codex rollout lacks session_meta")
 	}
-	id := record.Payload.ID
+	id = record.Payload.ID
+	sessionID = record.Payload.SessionID
 	if id == "" {
-		id = record.Payload.SessionID
+		id = sessionID
 	}
 	if !uuidPattern.MatchString(id) {
-		return "", rollouts[0], fmt.Errorf("Codex rollout has an invalid session ID")
+		return "", "", fmt.Errorf("Codex rollout has an invalid session ID")
 	}
-	return id, rollouts[0], nil
+	return id, sessionID, nil
+}
+
+func inspectCodexRollouts(rollouts []string) (string, string, error) {
+	if len(rollouts) == 0 {
+		return "", "", fmt.Errorf("Codex process has no open rollout files")
+	}
+
+	// Current Codex builds keep subagent rollouts open in the root process. The
+	// root rollout identifies itself by using the same conversation and session
+	// ID; subagents have their own ID and point session_id back at the root.
+	// Require one unambiguous root instead of rejecting every multi-agent turn.
+	type rootRollout struct {
+		id   string
+		path string
+	}
+	var roots []rootRollout
+	for _, path := range rollouts {
+		id, sessionID, err := inspectCodexRollout(path)
+		if err != nil {
+			continue
+		}
+		if sessionID == "" || id == sessionID {
+			roots = append(roots, rootRollout{id: id, path: path})
+		}
+	}
+	if len(roots) != 1 {
+		return "", "", fmt.Errorf("Codex process has %d open rollout files and %d unambiguous roots", len(rollouts), len(roots))
+	}
+	return roots[0].id, roots[0].path, nil
+}
+
+func inspectCodex(pid int, state processState) (string, string, error) {
+	files, err := platformOpenFiles(pid)
+	if err != nil {
+		return "", "", fmt.Errorf("list Codex open files: %w", err)
+	}
+	return inspectCodexRollouts(codexRollouts(files, state))
 }
 
 // InspectCodexSession identifies the foreground Codex conversation in a tmux
