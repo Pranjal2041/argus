@@ -5,19 +5,6 @@ import Network
 import UniformTypeIdentifiers
 import WebKit
 
-/// Process-wide AppKit events cannot be addressed to a hidden WKWebView without
-/// also entering Argus's normal event stream. Native dispatch is therefore only
-/// safe when the user is already looking at the exact browser tab in the active,
-/// key dashboard window. Every other case uses WebKit's tab-local DOM path.
-enum BrowserNativeInputPolicy {
-    static func allowsNativeInput(enabled: Bool, tabIsHidden: Bool,
-                                  applicationIsActive: Bool, tabIsSelected: Bool,
-                                  windowIsKey: Bool, windowIsVisible: Bool) -> Bool {
-        enabled && !tabIsHidden && applicationIsActive && tabIsSelected
-            && windowIsKey && windowIsVisible
-    }
-}
-
 // MARK: - Agent browser provider
 
 /// The optional browser.v1 provider hosted by Argus. The Go broker only discovers
@@ -29,6 +16,7 @@ final class BrowserControlService: ObservableObject {
 
     private weak var dashboards: DashboardsModel?
     private weak var appState: AppState?
+    private weak var credentialVault: CredentialVaultStore?
     private var listener: BrowserLoopbackServer?
     private var heartbeat: Timer?
     private var hiddenTabs: [UUID: BrowserManagedTab] = [:]
@@ -36,17 +24,17 @@ final class BrowserControlService: ObservableObject {
     private var ownedTabIDs: Set<UUID> = []
     private var rpcBusy = false
     private var rpcWaiters: [CheckedContinuation<Void, Never>] = []
-    private let nativeInputEnabled: Bool
     private let browserHostName: String
 
-    init(nativeInputEnabled: Bool = true) {
-        self.nativeInputEnabled = nativeInputEnabled
+    init() {
         browserHostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
     }
 
-    func start(dashboards: DashboardsModel, state: AppState) {
+    func start(dashboards: DashboardsModel, state: AppState,
+               credentialVault: CredentialVaultStore) {
         self.dashboards = dashboards
         self.appState = state
+        self.credentialVault = credentialVault
         guard listener == nil else { return }
         let server = BrowserLoopbackServer { [weak self] body in
             guard let self else { return BrowserHTTPResponse.serviceUnavailable }
@@ -66,8 +54,10 @@ final class BrowserControlService: ObservableObject {
 
     /// Direct protocol seam used by the WebKit integration tests. Production
     /// requests enter through the loopback server and execute the same handler.
-    func bindForTesting(dashboards: DashboardsModel) {
+    func bindForTesting(dashboards: DashboardsModel,
+                        credentialVault: CredentialVaultStore? = nil) {
         self.dashboards = dashboards
+        self.credentialVault = credentialVault
     }
 
     func processRPCForTesting(_ body: Data) async -> Data {
@@ -106,11 +96,19 @@ final class BrowserControlService: ObservableObject {
                   let method = request["method"] as? String else {
                 throw BrowserControlFailure.invalid("browser RPC requires version 1 and a method")
             }
-            await acquireRPC()
-            defer { releaseRPC() }
             reconcileManagedTabs()
             let params = request["params"] as? [String: Any] ?? [:]
-            let result = try await dispatch(method: method, params: params)
+            let caller = browserCredentialCaller(request["caller"])
+            let result: Any
+            // An approval may remain pending for minutes. It must not hold the
+            // browser interaction lane and make unrelated tabs appear frozen.
+            if method == "credentials.list" || method == "credentials.request" {
+                result = try await dispatch(method: method, params: params, caller: caller)
+            } else {
+                await acquireRPC()
+                defer { releaseRPC() }
+                result = try await dispatch(method: method, params: params, caller: caller)
+            }
             let response: [String: Any] = [
                 "ok": true,
                 "id": request["id"] as? String ?? "",
@@ -125,7 +123,8 @@ final class BrowserControlService: ObservableObject {
         }
     }
 
-    private func dispatch(method: String, params: [String: Any]) async throws -> Any {
+    private func dispatch(method: String, params: [String: Any],
+                          caller: BrowserCredentialCaller?) async throws -> Any {
         switch method {
         case "tabs.list":
             return ["tabs": allTabs().map(tabDescription)]
@@ -186,14 +185,77 @@ final class BrowserControlService: ObservableObject {
         case "page.scroll":
             let tab = try resolveTab(params)
             let managed = ensureManaged(tab)
-            try await nativeScroll(managed,
-                                   dx: params.double("dx") ?? 0,
-                                   dy: params.double("dy") ?? 0)
+            try await isolatedScroll(managed,
+                                     dx: params.double("dx") ?? 0,
+                                     dy: params.double("dy") ?? 0)
             try await Task.sleep(nanoseconds: 180_000_000)
             return try await screenshot(managed, fullPage: false)
+        case "credentials.list":
+            guard let credentialVault else {
+                throw BrowserControlFailure.failed("Argus Credential Vault is unavailable")
+            }
+            return ["credentials": credentialVault.entries.map { entry in
+                ["name": entry.name, "group": entry.group,
+                 "fields": ["username", "password"]] as [String: Any]
+            }]
+        case "credentials.request":
+            guard let credentialVault else {
+                throw BrowserControlFailure.failed("Argus Credential Vault is unavailable")
+            }
+            guard let caller else {
+                throw BrowserControlFailure.invalid("credential access must originate from a verified ut panel")
+            }
+            guard let name = params["credential"] as? String, !name.isEmpty else {
+                throw BrowserControlFailure.invalid("credential is required")
+            }
+            var domain = ""
+            if params["tab_id"] as? String != nil {
+                let tab = try resolveTab(params)
+                domain = (tab.heldWebView ?? tab.webView)?.url?.host ?? tab.url?.host ?? ""
+            }
+            let grant = try await credentialVault.requestGrant(
+                credentialName: name, caller: caller, domain: domain
+            )
+            return ["grant": grant.token, "duration": grant.duration.rawValue,
+                    "scope": grant.scope.rawValue]
+        case "credentials.fill":
+            guard let credentialVault else {
+                throw BrowserControlFailure.failed("Argus Credential Vault is unavailable")
+            }
+            guard let caller else {
+                throw BrowserControlFailure.invalid("credential access must originate from a verified ut panel")
+            }
+            guard let name = params["credential"] as? String, !name.isEmpty,
+                  let token = params["grant"] as? String, !token.isEmpty,
+                  let targets = params["targets"] as? [String: Any], !targets.isEmpty else {
+                throw BrowserControlFailure.invalid("grant, credential, and at least one field target are required")
+            }
+            let tab = try resolveTab(params)
+            let managed = ensureManaged(tab)
+            let domain = managed.webView.url?.host ?? tab.url?.host ?? ""
+            let (entry, secret) = try credentialVault.resolve(
+                grant: token, credentialName: name, caller: caller, domain: domain
+            )
+            let filled = try await fillCredentialFields(managed, secret: secret, targets: targets)
+            credentialVault.markGrantUsed(token, entry: entry, caller: caller)
+            return ["tab_id": tab.id.uuidString.lowercased(),
+                    "url": managed.webView.url?.absoluteString ?? "",
+                    "filled": filled]
         default:
             throw BrowserControlFailure.invalid("unknown browser method \(method)")
         }
+    }
+
+    private func browserCredentialCaller(_ value: Any?) -> BrowserCredentialCaller? {
+        guard let raw = value as? [String: Any] else { return nil }
+        let caller = BrowserCredentialCaller(
+            machineName: raw["machine_name"] as? String ?? "",
+            machineHost: raw["machine_host"] as? String ?? "",
+            sessionName: raw["session_name"] as? String ?? "",
+            stableSessionID: raw["stable_session_id"] as? String ?? "",
+            sessionLineageID: raw["session_lineage_id"] as? String ?? ""
+        )
+        return caller.isAttributed ? caller : nil
     }
 
     // MARK: tabs
@@ -421,6 +483,42 @@ final class BrowserControlService: ObservableObject {
 
     // MARK: interaction
 
+    private func fillCredentialFields(_ managed: BrowserManagedTab,
+                                      secret: CredentialVaultSecret,
+                                      targets: [String: Any]) async throws -> [String] {
+        var filled: [String] = []
+        for field in ["username", "password"] {
+            guard let target = targets[field] as? [String: Any] else { continue }
+            guard let value = secret.value(for: field) else {
+                throw BrowserControlFailure.invalid("credential has no \(field) field")
+            }
+            var arguments: [String: Any] = [
+                "credentialValue": value,
+                "targetRef": NSNull(), "targetX": NSNull(), "targetY": NSNull()
+            ]
+            if let ref = target["ref"] as? String, !ref.isEmpty {
+                arguments["targetRef"] = ref
+            } else if let x = target.double("x"), let y = target.double("y"), x >= 0, y >= 0 {
+                arguments["targetX"] = x
+                arguments["targetY"] = y
+            } else {
+                throw BrowserControlFailure.invalid("\(field) target requires an element ref or x/y coordinates")
+            }
+            guard let result = try await managed.webView.callAsync(
+                script: BrowserScripts.fillProtectedField,
+                arguments: arguments
+            ) as? [String: Any], result["ok"] as? Bool == true else {
+                throw BrowserControlFailure.notFound("the \(field) target is missing or not editable")
+            }
+            filled.append(field)
+        }
+        guard !filled.isEmpty else {
+            throw BrowserControlFailure.invalid("no supported credential fields were targeted")
+        }
+        managed.lastInteractionMode = "protected-credential-fill"
+        return filled
+    }
+
     private func click(_ managed: BrowserManagedTab, params: [String: Any]) async throws {
         if let ref = params["ref"] as? String {
             guard let rect = try await managed.webView.evaluate(script: BrowserScripts.rect(ref: ref)) as? [String: Any],
@@ -428,13 +526,13 @@ final class BrowserControlService: ObservableObject {
                   let width = rect.double("width"), let height = rect.double("height") else {
                 throw BrowserControlFailure.notFound("element reference \(ref) is missing or no longer current")
             }
-            try await nativeClick(managed, x: x + width / 2, y: y + height / 2)
+            try await isolatedClick(managed, x: x + width / 2, y: y + height / 2)
             return
         }
         guard let x = params.double("x"), let y = params.double("y") else {
             throw BrowserControlFailure.invalid("click requires coordinates or an element reference")
         }
-        try await nativeClick(managed, x: x, y: y)
+        try await isolatedClick(managed, x: x, y: y)
     }
 
     private func typeText(_ managed: BrowserManagedTab, params: [String: Any]) async throws {
@@ -447,213 +545,47 @@ final class BrowserControlService: ObservableObject {
                   let width = rect.double("width"), let height = rect.double("height") else {
                 throw BrowserControlFailure.notFound("element reference \(ref) is missing or cannot be focused")
             }
-            try await nativeType(managed, x: x + width / 2, y: y + height / 2, text: text)
+            try await isolatedType(managed, x: x + width / 2, y: y + height / 2, text: text)
             return
         } else if let x = params.double("x"), let y = params.double("y") {
-            try await nativeType(managed, x: x, y: y, text: text)
+            try await isolatedType(managed, x: x, y: y, text: text)
             return
         }
-        try await nativeType(managed, x: nil, y: nil, text: text)
+        try await isolatedType(managed, x: nil, y: nil, text: text)
     }
 
-    private func nativeClick(_ managed: BrowserManagedTab, x: Double, y: Double) async throws {
+    /// Agent input is always evaluated inside the addressed page. Posting NSEvents
+    /// through NSApplication can change first responder, activate an Argus window,
+    /// or race a user's application switch, so it is deliberately not an automation
+    /// transport even for a currently visible browser tab.
+    private func isolatedClick(_ managed: BrowserManagedTab, x: Double, y: Double) async throws {
         let webView = managed.webView
         guard x >= 0, y >= 0, x <= webView.bounds.width, y <= webView.bounds.height else {
             throw BrowserControlFailure.invalid("coordinates are outside the current viewport")
         }
-        if !shouldUseNativeInput(managed) {
-            guard (try await webView.evaluate(script: BrowserScripts.coordinateClick(x: x, y: y)) as? Bool) == true else {
-                throw BrowserControlFailure.notFound("no page element exists at the requested coordinates")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
+        guard (try await webView.evaluate(script: BrowserScripts.coordinateClick(x: x, y: y)) as? Bool) == true else {
+            throw BrowserControlFailure.notFound("no page element exists at the requested coordinates")
         }
-        let before = try await trustedEventCount(webView, key: "pointer")
-        // The user may switch windows while WebKit answers the query above. Check
-        // again immediately before posting anything into Argus's global event queue.
-        guard shouldUseNativeInput(managed) else {
-            guard (try await webView.evaluate(script: BrowserScripts.coordinateClick(x: x, y: y)) as? Bool) == true else {
-                throw BrowserControlFailure.notFound("no page element exists at the requested coordinates")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
-        }
-        try postNativeClick(webView, x: x, y: y)
-        try await Task.sleep(nanoseconds: 80_000_000)
-        let after = try await trustedEventCount(webView, key: "pointer")
-        if after > before {
-            managed.lastInteractionMode = "native"
-        } else {
-            guard (try await webView.evaluate(script: BrowserScripts.coordinateClick(x: x, y: y)) as? Bool) == true else {
-                throw BrowserControlFailure.notFound("no page element exists at the requested coordinates")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-        }
+        managed.lastInteractionMode = "dom-injected"
     }
 
-    private func nativeType(_ managed: BrowserManagedTab, x: Double?, y: Double?, text: String) async throws {
+    private func isolatedType(_ managed: BrowserManagedTab, x: Double?, y: Double?, text: String) async throws {
         let webView = managed.webView
-        // Typing without a coordinate/ref relies on an existing page focus. Never
-        // post those keys process-wide: the current first responder may be Argus's
-        // command palette, terminal, or address field rather than browser content.
-        if !shouldUseNativeInput(managed) || x == nil || y == nil {
-            if let x, let y {
-                guard (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y)) as? Bool) == true else {
-                    throw BrowserControlFailure.notFound("no editable page element exists at the requested coordinates")
-                }
-            }
-            guard (try await webView.evaluate(script: BrowserScripts.prepareType(text: text)) as? Bool) == true,
-                  (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
-                throw BrowserControlFailure.failed("the page has no focused editable element")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
-        }
-        let beforePointer = try await trustedEventCount(webView, key: "pointer")
-        guard shouldUseNativeInput(managed) else {
-            guard let x, let y,
-                  (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y))) as? Bool == true,
-                  (try await webView.evaluate(script: BrowserScripts.prepareType(text: text))) as? Bool == true,
-                  (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
-                throw BrowserControlFailure.failed("the page has no focused editable element")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
-        }
         if let x, let y {
-            try postNativeClick(webView, x: x, y: y)
-            try await Task.sleep(nanoseconds: 60_000_000)
-            let afterPointer = try await trustedEventCount(webView, key: "pointer")
-            if afterPointer == beforePointer {
-                guard (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y)) as? Bool) == true else {
-                    throw BrowserControlFailure.notFound("no editable page element exists at the requested coordinates")
-                }
+            guard (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y)) as? Bool) == true else {
+                throw BrowserControlFailure.notFound("no editable page element exists at the requested coordinates")
             }
         }
-        guard (try await webView.evaluate(script: BrowserScripts.prepareType(text: text)) as? Bool) == true else {
+        guard (try await webView.evaluate(script: BrowserScripts.prepareType(text: text)) as? Bool) == true,
+              (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
             throw BrowserControlFailure.failed("the page has no focused editable element")
         }
-        let beforeKeyboard = try await trustedEventCount(webView, key: "keyboard")
-        guard shouldUseNativeInput(managed) else {
-            guard (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
-                throw BrowserControlFailure.failed("the page has no focused editable element")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
-        }
-        guard let window = webView.window else {
-            throw BrowserControlFailure.failed("the WebKit tab is not attached to a renderable window")
-        }
-        var timestamp = ProcessInfo.processInfo.systemUptime
-        for character in text {
-            let characters = String(character)
-            guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
-                                              timestamp: timestamp, windowNumber: window.windowNumber,
-                                              context: nil, characters: characters,
-                                              charactersIgnoringModifiers: characters,
-                                              isARepeat: false, keyCode: 0),
-                  let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [],
-                                            timestamp: timestamp + 0.001, windowNumber: window.windowNumber,
-                                            context: nil, characters: characters,
-                                            charactersIgnoringModifiers: characters,
-                                            isARepeat: false, keyCode: 0) else {
-                throw BrowserControlFailure.failed("could not construct native keyboard events")
-            }
-            NSApp.postEvent(down, atStart: false)
-            NSApp.postEvent(up, atStart: false)
-            timestamp += 0.002
-        }
-        try await Task.sleep(nanoseconds: 80_000_000)
-        let afterKeyboard = try await trustedEventCount(webView, key: "keyboard")
-        let valueIsExact = (try await webView.evaluate(script: BrowserScripts.verifyPreparedType)) as? Bool == true
-        if afterKeyboard > beforeKeyboard && valueIsExact {
-            managed.lastInteractionMode = "native"
-        } else {
-            guard (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
-                throw BrowserControlFailure.failed("the page has no focused editable element")
-            }
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-        }
+        managed.lastInteractionMode = "dom-injected"
     }
 
-    private func postNativeClick(_ webView: WKWebView, x: Double, y: Double) throws {
-        // CSS/screenshot coordinates are top-left based. WKWebView is normally a
-        // flipped NSView, but keep the conversion correct if WebKit changes that.
-        let local = CGPoint(x: x, y: webView.isFlipped ? y : webView.bounds.height - y)
-        let windowPoint = webView.convert(local, to: nil)
-        guard let window = webView.window else {
-            throw BrowserControlFailure.failed("the WebKit tab is not attached to a renderable window")
-        }
-        let timestamp = ProcessInfo.processInfo.systemUptime
-        guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: windowPoint,
-                                            modifierFlags: [], timestamp: timestamp,
-                                            windowNumber: window.windowNumber, context: nil,
-                                            eventNumber: 0, clickCount: 1, pressure: 1),
-              let up = NSEvent.mouseEvent(with: .leftMouseUp, location: windowPoint,
-                                          modifierFlags: [], timestamp: timestamp + 0.01,
-                                          windowNumber: window.windowNumber, context: nil,
-                                          eventNumber: 0, clickCount: 1, pressure: 0) else {
-            throw BrowserControlFailure.failed("could not construct native mouse events")
-        }
-        // Queue through NSApplication instead of invoking WKWebView.mouseDown directly:
-        // WebKit's remote content view is reached by the normal window dispatch path.
-        NSApp.postEvent(down, atStart: false)
-        NSApp.postEvent(up, atStart: false)
-    }
-
-    private func nativeScroll(_ managed: BrowserManagedTab, dx: Double, dy: Double) async throws {
-        let webView = managed.webView
-        if !shouldUseNativeInput(managed) {
-            _ = try await webView.evaluate(script: BrowserScripts.scroll(dx: dx, dy: dy))
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
-        }
-        let before = try await trustedEventCount(webView, key: "wheel")
-        guard shouldUseNativeInput(managed) else {
-            _ = try await webView.evaluate(script: BrowserScripts.scroll(dx: dx, dy: dy))
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-            return
-        }
-        let local = CGPoint(x: webView.bounds.midX, y: webView.bounds.midY)
-        let windowPoint = webView.convert(local, to: nil)
-        guard let window = webView.window else {
-            throw BrowserControlFailure.failed("the WebKit tab is not attached to a renderable window")
-        }
-        guard let cgEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                                    wheelCount: 2, wheel1: Int32(-dy),
-                                    wheel2: Int32(-dx), wheel3: 0) else {
-            throw BrowserControlFailure.failed("could not construct a native scroll event")
-        }
-        cgEvent.location = window.convertPoint(toScreen: windowPoint)
-        cgEvent.postToPid(pid_t(ProcessInfo.processInfo.processIdentifier))
-        try await Task.sleep(nanoseconds: 80_000_000)
-        let after = try await trustedEventCount(webView, key: "wheel")
-        if after == before {
-            _ = try await webView.evaluate(script: BrowserScripts.scroll(dx: dx, dy: dy))
-            managed.lastInteractionMode = "dom-coordinate-fallback"
-        } else {
-            managed.lastInteractionMode = "native"
-        }
-    }
-
-    private func shouldUseNativeInput(_ managed: BrowserManagedTab) -> Bool {
-        let webView = managed.webView
-        guard let window = webView.window else { return false }
-        let isHidden = hiddenTabs[managed.tab.id] != nil || window is BrowserOffscreenWindow
-        return BrowserNativeInputPolicy.allowsNativeInput(
-            enabled: nativeInputEnabled,
-            tabIsHidden: isHidden,
-            applicationIsActive: NSApp.isActive,
-            tabIsSelected: dashboards?.activeID == managed.tab.id,
-            windowIsKey: window.isKeyWindow,
-            windowIsVisible: window.isVisible && window.occlusionState.contains(.visible)
-        )
-    }
-
-    private func trustedEventCount(_ webView: WKWebView, key: String) async throws -> Int {
-        let value = try await webView.evaluate(script: BrowserScripts.trustedEventCount(key: key))
-        if let value = value as? NSNumber { return value.intValue }
-        return 0
+    private func isolatedScroll(_ managed: BrowserManagedTab, dx: Double, dy: Double) async throws {
+        _ = try await managed.webView.evaluate(script: BrowserScripts.scroll(dx: dx, dy: dy))
+        managed.lastInteractionMode = "dom-injected"
     }
 
     private func waitForLoad(_ webView: WKWebView, timeout: TimeInterval = 30) async {
@@ -688,22 +620,37 @@ private final class BrowserManagedTab: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tab.isLoading = true
+        tab.status = nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         tab.isLoading = false
+        tab.status = nil
         if let url = webView.url { tab.url = url; tab.address = url.absoluteString }
         if let title = webView.title, !title.isEmpty { tab.title = title }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        tab.isLoading = false
-        tab.status = error.localizedDescription
+        handleFailure(error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        tab.isLoading = false
-        tab.status = error.localizedDescription
+        handleFailure(error)
+    }
+
+    private func handleFailure(_ error: Error) {
+        switch DashboardNavigationFailurePolicy.disposition(for: error) {
+        case .superseded:
+            // Redirects and a newer agent navigation cancel the older request.
+            // Preserve the newer load instead of leaving a permanent -999 error.
+            tab.isLoading = webView.isLoading
+        case .contentHandled:
+            tab.isLoading = false
+            tab.status = nil
+        case .retryable, .report:
+            tab.isLoading = false
+            tab.status = error.localizedDescription
+        }
     }
 
     func detachFromOffscreenWindow() {
@@ -803,6 +750,14 @@ private extension WKWebView {
             }
         }
     }
+
+    func callAsync(script: String, arguments: [String: Any]) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            callAsyncJavaScript(script, arguments: arguments, in: nil, in: .page) { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
 }
 
 // MARK: - Browser scripts
@@ -827,7 +782,8 @@ private enum BrowserScripts {
         }
         const r = el.getBoundingClientRect();
         const type = (el.getAttribute('type') || '').toLowerCase();
-        const rawValue = ('value' in el && type !== 'password') ? String(el.value || '') : '';
+        const protectedValue = el.getAttribute('data-argus-protected-field') === 'true';
+        const rawValue = ('value' in el && type !== 'password' && !protectedValue) ? String(el.value || '') : '';
         const name = el.getAttribute('aria-label') || el.getAttribute('title') ||
           el.getAttribute('placeholder') || el.innerText || el.textContent || '';
         elements.push({
@@ -854,12 +810,130 @@ private enum BrowserScripts {
     }))()
     """#
 
+    // `value` arrives through WebKit's argument channel, never interpolated into
+    // JavaScript source or returned by this function. Mark every injected field
+    // so later semantic snapshots redact it even when a site uses type="text".
+    static let fillProtectedField = #"""
+    const protectedValue = String(credentialValue ?? '');
+    let el = null;
+    if (typeof targetRef === 'string') {
+      el = [...document.querySelectorAll('[data-argus-browser-ref]')]
+        .find(node => node.getAttribute('data-argus-browser-ref') === targetRef) || null;
+    } else if (Number.isFinite(targetX) && Number.isFinite(targetY)) {
+      el = document.elementFromPoint(targetX, targetY);
+    }
+    if (!el || el.disabled || el.readOnly) return {ok:false};
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      const proto = el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      el.focus({preventScroll:true});
+      if (setter) setter.call(el, protectedValue); else el.value = protectedValue;
+      el.setAttribute('data-argus-protected-field', 'true');
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+      return {ok:String(el.value) === protectedValue};
+    }
+    if (el.isContentEditable) {
+      el.focus({preventScroll:true});
+      el.textContent = protectedValue;
+      el.setAttribute('data-argus-protected-field', 'true');
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+      return {ok:String(el.textContent || '') === protectedValue};
+    }
+    return {ok:false};
+    """#
+
     static func coordinateClick(x: Double, y: Double) -> String {
         return #"""
         (() => {
           const x = \#(x), y = \#(y);
           const el = document.elementFromPoint(x, y);
           if (!el) return false;
+
+          // A native HTMLSelectElement opens an AppKit popup outside WKWebView's
+          // composited page, so takeSnapshot cannot see it. Mirror that one popup
+          // inside the page: screenshots and subsequent coordinate/ref clicks then
+          // describe the same state, while the selected value is still written to
+          // the real element and its normal input/change handlers are fired.
+          const overlayID = '__argus-browser-select-overlay';
+          const existingOverlay = document.getElementById(overlayID);
+          const optionRow = el.closest?.('[data-argus-select-index]');
+          if (existingOverlay && optionRow && existingOverlay.contains(optionRow)) {
+            const selectRef = existingOverlay.getAttribute('data-argus-select-ref');
+            const select = [...document.querySelectorAll('select[data-argus-browser-ref]')]
+              .find(node => node.getAttribute('data-argus-browser-ref') === selectRef);
+            const index = Number(optionRow.getAttribute('data-argus-select-index'));
+            if (!(select instanceof HTMLSelectElement) || !Number.isInteger(index) ||
+                !select.options[index] || select.options[index].disabled) return false;
+            const setter = Object.getOwnPropertyDescriptor(
+              HTMLSelectElement.prototype, 'selectedIndex'
+            )?.set;
+            if (setter) setter.call(select, index); else select.selectedIndex = index;
+            select.focus({preventScroll:true});
+            select.dispatchEvent(new Event('input', {bubbles:true}));
+            select.dispatchEvent(new Event('change', {bubbles:true}));
+            existingOverlay.remove();
+            return true;
+          }
+
+          if (existingOverlay) existingOverlay.remove();
+          if (el instanceof HTMLSelectElement) {
+            window.__argusBrowserRef = window.__argusBrowserRef || 0;
+            let selectRef = el.getAttribute('data-argus-browser-ref');
+            if (!selectRef) {
+              selectRef = 'e' + (++window.__argusBrowserRef);
+              el.setAttribute('data-argus-browser-ref', selectRef);
+            }
+            const selectRect = el.getBoundingClientRect();
+            const computed = getComputedStyle(el);
+            const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+            const overlay = document.createElement('div');
+            overlay.id = overlayID;
+            overlay.setAttribute('data-argus-select-ref', selectRef);
+            overlay.setAttribute('role', 'listbox');
+            overlay.setAttribute('aria-label', el.getAttribute('aria-label') || el.name || 'Options');
+            Object.assign(overlay.style, {
+              all: 'initial', position: 'fixed', zIndex: '2147483647', boxSizing: 'border-box',
+              minWidth: Math.max(selectRect.width, 180) + 'px',
+              maxWidth: Math.max(220, Math.min(innerWidth - 16, 560)) + 'px',
+              maxHeight: Math.max(120, Math.min(innerHeight - 16, 420)) + 'px',
+              overflowY: 'auto', overflowX: 'hidden',
+              color: dark ? '#f4f4f5' : '#18181b', background: dark ? '#242428' : '#ffffff',
+              border: '1px solid ' + (dark ? '#5b5b63' : '#a1a1aa'), borderRadius: '7px',
+              boxShadow: '0 10px 30px rgba(0,0,0,.28)', padding: '4px',
+              font: computed.font || '13px -apple-system, BlinkMacSystemFont, sans-serif',
+              lineHeight: '1.35', textAlign: 'left'
+            });
+            [...el.options].forEach((option, index) => {
+              const row = document.createElement('div');
+              row.setAttribute('role', 'option');
+              row.setAttribute('aria-selected', option.selected ? 'true' : 'false');
+              row.setAttribute('data-argus-select-index', String(index));
+              row.textContent = option.label || option.textContent || option.value;
+              Object.assign(row.style, {
+                all: 'initial', display: 'block', boxSizing: 'border-box', padding: '7px 10px',
+                borderRadius: '4px', whiteSpace: 'normal', overflowWrap: 'anywhere',
+                color: option.disabled ? (dark ? '#77777f' : '#a1a1aa') :
+                  (option.selected ? (dark ? '#ffffff' : '#111827') : (dark ? '#f4f4f5' : '#18181b')),
+                background: option.selected ? (dark ? '#245ea8' : '#dbeafe') : 'transparent',
+                font: computed.font || '13px -apple-system, BlinkMacSystemFont, sans-serif',
+                lineHeight: '1.35', cursor: option.disabled ? 'default' : 'pointer'
+              });
+              overlay.appendChild(row);
+            });
+            document.documentElement.appendChild(overlay);
+            const overlayRect = overlay.getBoundingClientRect();
+            const roomBelow = innerHeight - selectRect.bottom - 8;
+            const top = roomBelow >= Math.min(overlayRect.height, 160)
+              ? selectRect.bottom + 3 : Math.max(8, selectRect.top - overlayRect.height - 3);
+            overlay.style.left = Math.max(8, Math.min(selectRect.left, innerWidth - overlayRect.width - 8)) + 'px';
+            overlay.style.top = Math.max(8, Math.min(top, innerHeight - overlayRect.height - 8)) + 'px';
+            overlay.querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest'});
+            return true;
+          }
+
           const pointer = (name, buttons) => el.dispatchEvent(new PointerEvent(name, {
             bubbles:true, cancelable:true, clientX:x, clientY:y, pointerId:1,
             pointerType:'mouse', isPrimary:true, button:0, buttons
@@ -914,15 +988,6 @@ private enum BrowserScripts {
         """#
     }
 
-    static let verifyPreparedType = #"""
-    (() => {
-      const state = window.__argusPreparedType;
-      if (!state?.el) return false;
-      if (state.kind === 'value') return String(state.el.value) === state.expected;
-      return String(state.el.textContent || '').includes(state.text);
-    })()
-    """#
-
     static let applyPreparedType = #"""
     (() => {
       const state = window.__argusPreparedType;
@@ -956,23 +1021,6 @@ private enum BrowserScripts {
 
     static func scroll(dx: Double, dy: Double) -> String {
         "window.scrollBy({left:\(dx), top:\(dy), behavior:'instant'}); true"
-    }
-
-    static func trustedEventCount(key: String) -> String {
-        let encoded = jsString(key)
-        return #"""
-        (() => {
-          if (!window.__argusTrustedEvents) {
-            window.__argusTrustedEvents = {pointer:0, keyboard:0, wheel:0};
-            for (const name of ['pointerdown','mousedown','click'])
-              addEventListener(name, e => { if (e.isTrusted) window.__argusTrustedEvents.pointer++; }, true);
-            for (const name of ['keydown','beforeinput','input'])
-              addEventListener(name, e => { if (e.isTrusted) window.__argusTrustedEvents.keyboard++; }, true);
-            addEventListener('wheel', e => { if (e.isTrusted) window.__argusTrustedEvents.wheel++; }, true);
-          }
-          return window.__argusTrustedEvents[\#(encoded)] || 0;
-        })()
-        """#
     }
 
     static func rect(ref: String) -> String {
