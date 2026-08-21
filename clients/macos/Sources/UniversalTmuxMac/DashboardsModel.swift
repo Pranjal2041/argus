@@ -261,7 +261,7 @@ final class DashboardsModel: ObservableObject {
         let fwHost = machine.fwHost, name = machine.name, fwScheme = machine.fwScheme
         Task { @MainActor in
             if let local = await ensureForward(brokerHost: fwHost, name: name, scheme: fwScheme, remotePort: port) {
-                t.load("http://127.0.0.1:\(local)\(path)")
+                t.load("\(scheme)://127.0.0.1:\(local)\(path)")
             } else {
                 t.status = "couldn't forward \(name):\(port)"
             }

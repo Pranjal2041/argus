@@ -8,6 +8,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var files = FilesModel()   // shared so "Reveal in Files" + the window use one instance
     @StateObject private var dashboards = DashboardsModel()   // shared by the window + terminal ⌘-click
     @StateObject private var browserControl = BrowserControlService() // optional ut browser provider hosted by Argus
+    @StateObject private var credentialVault = CredentialVaultStore() // local secrets + bounded agent grants
     @StateObject private var notebooks = NotebooksModel()     // open notebooks shown in the main pane
     @StateObject private var wandb = WandbController()        // single persistent-login webview for in-place W&B runs
     @StateObject private var gitPanels = GitPanels()          // read-only git viewer webviews (kept alive per session)
@@ -16,6 +17,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var commandCenter = CommandCenterModel()  // experimental: per-agent status overview
     @StateObject private var lab = LabModel()                      // Argus Lab (experiments hub)
     @StateObject private var artifacts = ArtifactStore()           // explicit panel artifact library
+    @StateObject private var webArtifacts = WebArtifactStore()     // durable, runnable dashboard recipes
     @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
     @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
@@ -38,6 +40,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(terminals)
                 .environmentObject(files)
                 .environmentObject(dashboards)
+                .environmentObject(credentialVault)
                 .environmentObject(notebooks)
                 .environmentObject(wandb)
                 .environmentObject(gitPanels)
@@ -45,13 +48,15 @@ struct UniversalTmuxApp: App {
                 .environmentObject(commandCenter)
                 .environmentObject(lab)
                 .environmentObject(artifacts)
+                .environmentObject(webArtifacts)
                 .environmentObject(themeStore)
                 .environmentObject(recovery)
                 .environmentObject(weeklyProgress)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
-                    browserControl.start(dashboards: dashboards, state: state)
+                    browserControl.start(dashboards: dashboards, state: state, credentialVault: credentialVault)
+                    credentialVault.unattendedModeActive = lab.unattendedMode
                     weeklyProgressRemote.start()
                     screenshotArtifacts.bind(
                         state: state,
@@ -94,11 +99,12 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("p", modifiers: .command)
                 Button("Files…") { state.openWindowRequest = "files" }
                     .keyboardShortcut("f", modifiers: [.command, .shift])
+                Button("Credential Vault…") { state.openWindowRequest = "vault" }
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
                     .keyboardShortcut("y", modifiers: [.command, .shift])
-                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false; state.showWebArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
@@ -111,13 +117,13 @@ struct UniversalTmuxApp: App {
                     else { state.presentWeeklyProgress() }
                 }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
-                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Todo Maps…") { state.showTodos.toggle(); if state.showTodos { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false; state.showWebArtifacts = false } }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
-                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Notes Hub…") { state.showNotes.toggle(); if state.showNotes { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false; state.showWebArtifacts = false } }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false } }
+                Button("Activity Ledger…") { state.showLedger.toggle(); if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false; state.showWebArtifacts = false } }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
-                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false } }
+                Button("Lab…") { state.showLab.toggle(); if state.showLab { state.showOverview = false; state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false; state.showWebArtifacts = false } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 Button("Artifacts…") {
                     if state.showArtifacts {
@@ -128,6 +134,11 @@ struct UniversalTmuxApp: App {
                     }
                 }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Web Artifacts…") {
+                    if state.showWebArtifacts { state.showWebArtifacts = false }
+                    else { state.presentWebArtifacts() }
+                }
+                    .keyboardShortcut("k", modifiers: [.command, .shift])
                 Button("Argus Wrapped…") { state.openWindowRequest = "wrapped" }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button("Theme…") { state.showThemePicker = true }
@@ -215,6 +226,15 @@ struct UniversalTmuxApp: App {
         .defaultSize(width: 1100, height: 760)
         .windowStyle(.hiddenTitleBar)
 
+        Window("Credential Vault", id: "vault") {
+            CredentialVaultView()
+                .environmentObject(credentialVault)
+                .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
+                .allowsFullScreen()
+        }
+        .defaultSize(width: 920, height: 650)
+        .windowStyle(.hiddenTitleBar)
+
         Window("Argus Wrapped", id: "wrapped") {
             WrappedWindowView(host: wrappedHost)
                 .preferredColorScheme(.dark)
@@ -226,7 +246,7 @@ struct UniversalTmuxApp: App {
 
         Settings {
             SettingsView(terminals: terminals, state: state, lab: lab,
-                         commandCenter: commandCenter)
+                         commandCenter: commandCenter, credentialVault: credentialVault)
         }
     }
 }
@@ -237,6 +257,7 @@ struct SettingsView: View {
     @ObservedObject var state: AppState
     @ObservedObject var lab: LabModel
     @ObservedObject var commandCenter: CommandCenterModel
+    @ObservedObject var credentialVault: CredentialVaultStore
     @ObservedObject private var capsLockAttention = CapsLockAttentionController.shared
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     @AppStorage(CapsLockAttentionPrefs.enabledKey) private var capsLockBlinkEnabled = false
@@ -385,10 +406,14 @@ struct SettingsView: View {
                 if let error = lab.unattendedModeError {
                     Text(error).font(.caption).foregroundStyle(.red)
                 }
+                Toggle("Allow Argus Vault credentials while unattended", isOn: Binding(
+                    get: { credentialVault.allowInUnattendedMode },
+                    set: { credentialVault.setAllowInUnattendedMode($0) }
+                ))
             } header: {
                 Text("Automation")
             } footer: {
-                Text("Keeps Lab work moving while you're away by automatically approving access-key requests and recorded run proposals. Every automatic decision is labeled in Lab's audit trail. This does not answer terminal questions yet.")
+                Text("Unattended Mode keeps Lab work moving automatically. Vault access is separate and off by default; when enabled, verified panel agents may use saved credentials without waiting, including while this Mac is locked after its first unlock. Passwords still never leave Argus.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -497,6 +522,7 @@ struct HiddenPanelsView: View {
                                 state.showOverview = false
                                 state.showPlanner = false
                                 state.showArtifacts = false
+                                state.showWebArtifacts = false
                                 state.showHiddenPicker = false
                             }
                         }
@@ -714,11 +740,23 @@ private func showAbout() {
 struct ThemedRoot: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var themeStore: ThemeStore
+    @EnvironmentObject var credentialVault: CredentialVaultStore
     var body: some View {
         RootView()
             .id(themeStore.themeID)
             .sheet(isPresented: $state.showThemePicker) {
                 ThemePickerView().environmentObject(themeStore)
+            }
+            .sheet(item: Binding(
+                get: { credentialVault.pendingApproval },
+                set: { request in
+                    if request == nil && credentialVault.pendingApproval != nil {
+                        credentialVault.denyPending()
+                    }
+                }
+            )) { request in
+                CredentialApprovalSheet(request: request)
+                    .environmentObject(credentialVault)
             }
     }
 }
@@ -738,6 +776,7 @@ struct RootView: View {
     @EnvironmentObject var terminals: TerminalController
     @EnvironmentObject var files: FilesModel
     @EnvironmentObject var dashboards: DashboardsModel
+    @EnvironmentObject var credentialVault: CredentialVaultStore
     @EnvironmentObject var notebooks: NotebooksModel
     @EnvironmentObject var wandb: WandbController
     @EnvironmentObject var gitPanels: GitPanels
@@ -745,6 +784,7 @@ struct RootView: View {
     @EnvironmentObject var commandCenter: CommandCenterModel
     @EnvironmentObject var lab: LabModel
     @EnvironmentObject var artifacts: ArtifactStore
+    @EnvironmentObject var webArtifacts: WebArtifactStore
     @EnvironmentObject var recovery: WorkspaceRecoveryController
     @EnvironmentObject var weeklyProgress: WeeklyProgressController
     @ViewBuilder private var ledgerPane: some View {
@@ -786,7 +826,7 @@ struct RootView: View {
             // Artifacts is a library destination, not a panel detail. Give it the
             // entire window while preserving the user's normal sidebar setting
             // so closing the library restores the workspace exactly as it was.
-            if state.columns != .detailOnly && !state.showArtifacts && !state.showWeeklyProgress {
+            if state.columns != .detailOnly && !state.showArtifacts && !state.showWebArtifacts && !state.showWeeklyProgress {
                 sidebar
                     .frame(width: currentSidebarWidth)
                     .frame(maxHeight: .infinity)
@@ -794,7 +834,9 @@ struct RootView: View {
                 sidebarResizeHandle
             }
             Group {
-                if state.showArtifacts {
+                if state.showWebArtifacts {
+                    WebArtifactsView()
+                } else if state.showArtifacts {
                     ArtifactsView()
                 } else if state.showWeeklyProgress {
                     WeeklyProgressView()
@@ -844,6 +886,7 @@ struct RootView: View {
             // hardware alert needs its status model running in the background.
             if CapsLockAttentionPrefs.enabled { commandCenter.start() }
             lab.bind(state)   // app-wide: approval notifications fire with the pane closed
+            credentialVault.unattendedModeActive = lab.unattendedMode
             recovery.bind(state)
             recovery.checkForRecovery(offerAutomatically: true)
             AttentionNotifier.shared.requestAuthorizationIfNeeded()
@@ -852,8 +895,12 @@ struct RootView: View {
         .onReceive(state.$sessionsByMachine) { _ in commandCenter.refreshAttention() }
         .onReceive(state.$hiddenSessions) { _ in commandCenter.refreshAttention() }
         .onReceive(state.$backlog) { _ in commandCenter.refreshAttention() }
+        .onReceive(lab.$unattendedMode) { credentialVault.unattendedModeActive = $0 }
         .onChange(of: state.searchFocusToken) { _ in searchFocused = true }
-        .onChange(of: state.selection) { _ in notebooks.activeID = nil }   // selecting a terminal leaves the notebook view
+        .onChange(of: state.selection) { _ in
+            notebooks.activeID = nil
+            state.showWebArtifacts = false
+        }   // selecting a terminal leaves top-level libraries and the notebook view
         // When an overlay dismisses, the keyboard goes back to the visible
         // TERMINAL — never stranded on whatever AppKit picks next (the
         // sidebar filter). One central place so every close path is covered.
@@ -1074,11 +1121,11 @@ struct RootView: View {
             IconButton(system: "rectangle.on.rectangle.angled", help: "Dashboards") { openWindow(id: "dashboards") }
             IconButton(system: "book.closed", help: "Activity Ledger (⇧⌘J)") {
                 state.showLedger.toggle()
-                if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false }
+                if state.showLedger { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLab = false; state.showArtifacts = false; state.showWebArtifacts = false }
             }
             IconButton(system: "flask", help: "Lab (⇧⌘L)") {
                 state.showLab.toggle()
-                if state.showLab { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false }
+                if state.showLab { state.showOverview = false; state.showPlanner = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showArtifacts = false; state.showWebArtifacts = false }
             }
         }
         .frame(height: 34)
@@ -1195,7 +1242,7 @@ struct RootView: View {
                         unseen: state.unseen.contains(ref.id),
                         folderText: state.folderDisplay((s.path?.isEmpty == false) ? s.path! : "—", isLocal: m.isLocal),
                         selected: state.selection == ref,
-                        onTap: { state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false },
+                        onTap: { state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false; state.showWebArtifacts = false },
                         onRename: { state.renameText = s.name; state.renameTarget = ref },
                         onKill: { state.killTarget = ref },
                         onCopyName: {
@@ -1204,7 +1251,7 @@ struct RootView: View {
                         },
                         onHide: { state.hide(ref) },
                         wandbRuns: terminals.wandbRuns(for: ref),
-                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false; terminals.showWandb(ref, run: run) },
+                        onOpenWandb: { run in state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false; state.showWebArtifacts = false; terminals.showWandb(ref, run: run) },
                         onClearWandb: { run in terminals.clearWandb(run, for: ref) },
                         onReveal: (m.isLocal && (s.path?.isEmpty == false))
                             ? { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path ?? "") }
@@ -1221,7 +1268,7 @@ struct RootView: View {
                             : nil,
                         onGit: !state.resolveBase(for: ref).isEmpty
                             ? {
-                                state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false
+                                state.selection = ref; state.showOverview = false; state.showPlanner = false; state.showArtifacts = false; state.showWebArtifacts = false
                                 if !terminals.isGitShown(ref) {
                                     terminals.toggleGit(ref, httpBase: m.httpBase, dir: state.resolveBase(for: ref))
                                 }
@@ -1249,7 +1296,7 @@ struct RootView: View {
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Theme.accent.opacity(0.16) : Color.clear))
         .contentShape(Rectangle())
-        .onTapGesture { notebooks.select(nb.id); state.showArtifacts = false }
+        .onTapGesture { notebooks.select(nb.id); state.showArtifacts = false; state.showWebArtifacts = false }
     }
 
     private func folderLabel(_ text: String) -> some View {
@@ -1817,6 +1864,7 @@ struct CommandPalette: View {
                     state.showOverview = false
                     state.showPlanner = false
                     state.showArtifacts = false
+                    state.showWebArtifacts = false
                 })
             }
         }
@@ -1834,6 +1882,9 @@ struct CommandPalette: View {
             ("archivebox", "Open Artifacts", "⇧⌘I", {
                 artifacts.openLibrary()
                 state.presentArtifacts()
+            }),
+            ("point.3.connected.trianglepath.dotted", "Open Web Artifacts", "⇧⌘K", {
+                state.presentWebArtifacts()
             }),
             ("pencil", "Rename Current Session…", "⇧⌘R",
              { if let s = state.selection { state.renameText = s.session; state.renameTarget = s } }),
@@ -1861,6 +1912,7 @@ struct CommandPalette: View {
             // not available inside the AppKit palette panel's hosting view.
             ("folder", "Open Files", "", { state.openWindowRequest = "files" }),
             ("chart.line.uptrend.xyaxis", "Open Dashboards", "", { state.openWindowRequest = "dashboards" }),
+            ("key.horizontal", "Open Credential Vault", "", { state.openWindowRequest = "vault" }),
             ("network", "Open Port Forwards", "", { state.openWindowRequest = "ports" }),
             ("sparkles", "Argus Wrapped", "", { state.openWindowRequest = "wrapped" }),
         ]

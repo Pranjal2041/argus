@@ -104,6 +104,7 @@ final class ClipboardScreenshotArtifactMonitor: NSObject, ObservableObject {
             state.$showLedger.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             state.$showLab.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             state.$showArtifacts.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            state.$showWebArtifacts.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             notebooks.$activeID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
         ]
         for publisher in stateChanges {
@@ -175,6 +176,7 @@ final class ClipboardScreenshotArtifactMonitor: NSObject, ObservableObject {
               !state.showLedger,
               !state.showLab,
               !state.showArtifacts,
+              !state.showWebArtifacts,
               let ref = state.selection
         else { return nil }
         return state.artifactContext(for: ref)

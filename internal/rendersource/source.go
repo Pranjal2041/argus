@@ -127,6 +127,19 @@ func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, bes
 					Origin: candidate.provider + "-transcript", Confidence: score,
 				}
 			}
+			// codexMessages and claudeMessages are newest-first. Once the newest
+			// response has a proven near-prompt match, it is the current turn;
+			// do not let a longer previous answer outrank a shorter visible prefix
+			// merely because the older answer contributes more matching tokens.
+			if score >= minimumConfidence {
+				return best
+			}
+		}
+		// Files are newest-first. Once one transcript contains a proven
+		// near-prompt screen match, reading older multi-megabyte histories cannot
+		// improve provenance and makes unscoped Windows discovery needlessly slow.
+		if best.Confidence >= minimumConfidence {
+			return best
 		}
 	}
 	return best

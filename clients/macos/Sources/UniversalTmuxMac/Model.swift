@@ -558,6 +558,7 @@ final class AppState: ObservableObject {
         showOverview = false
         showPlanner = false
         showArtifacts = false
+        showWebArtifacts = false
         let ref = SessionRef(machineID: m.id, session: wf.name)
         if (sessionsByMachine[m.id] ?? []).contains(where: { $0.name == wf.name }) {
             selection = ref                              // already running → just open it
@@ -702,6 +703,7 @@ final class AppState: ObservableObject {
     @Published var showNotes = false
     @Published var showLedger = false   // in-app Activity Ledger (⇧⌘J), a fleet-wide top-level view
     @Published var showArtifacts = false // local library of panel renders and screenshots
+    @Published var showWebArtifacts = false // restartable web services saved by agents
     // Argus Lab (⇧⌘L). UT_OPEN_LAB=1 opens it on launch — the hook the
     // screenshot-verification harness uses to capture the real pane.
     @Published var showLab = ProcessInfo.processInfo.environment["UT_OPEN_LAB"] == "1"
@@ -864,6 +866,7 @@ final class AppState: ObservableObject {
         showPlanner = false
         showOverview = false
         showArtifacts = false
+        showWebArtifacts = false
     }
 
     private func plannerFields(_ commitment: PlannerCommitment, action: String) -> [String: Any] {
@@ -1282,11 +1285,27 @@ final class AppState: ObservableObject {
         showLedger = false
         showLab = false
         showArtifacts = false
+        showWebArtifacts = false
     }
 
     /// Present the Artifact library as the one active top-level surface.
     func presentArtifacts() {
         showArtifacts = true
+        showWeeklyProgress = false
+        showOverview = false
+        showPlanner = false
+        showTodos = false
+        showNotes = false
+        showLedger = false
+        showLab = false
+        showWebArtifacts = false
+    }
+
+    /// Present Web Artifacts as its own top-level surface. These are executable
+    /// web-service recipes, never files in the ordinary Artifact library.
+    func presentWebArtifacts() {
+        showWebArtifacts = true
+        showArtifacts = false
         showWeeklyProgress = false
         showOverview = false
         showPlanner = false
@@ -1301,6 +1320,7 @@ final class AppState: ObservableObject {
     func presentWeeklyProgress() {
         showWeeklyProgress = true
         showArtifacts = false
+        showWebArtifacts = false
         showOverview = false
         showPlanner = false
         showTodos = false
@@ -1567,6 +1587,7 @@ final class AppState: ObservableObject {
         showOverview = false
         showPlanner = false
         showArtifacts = false
+        showWebArtifacts = false
     }
 
     func refresh(
@@ -1722,6 +1743,7 @@ final class AppState: ObservableObject {
                 self.showOverview = false
                 self.showPlanner = false
                 self.showArtifacts = false
+                self.showWebArtifacts = false
             }
             self.refreshAll()
         }

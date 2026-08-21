@@ -498,6 +498,26 @@ type codexTranscriptProvider interface {
 	CodexTranscript(name string) (string, error)
 }
 
+// renderWorkingDirectoryProvider lets a backend distinguish a live pane cwd
+// from a creation-time directory. tmux reports pane_current_path, but ConPTY
+// currently retains only the directory in which the shell was created. Using
+// that stale value to scope transcript discovery excludes the correct agent
+// history after the user changes directory inside a Windows panel.
+type renderWorkingDirectoryProvider interface {
+	RenderWorkingDirectory(name string) (cwd string, reliable bool)
+}
+
+func renderWorkingDirectory(provider session.Provider, name, cached string) string {
+	if source, ok := provider.(renderWorkingDirectoryProvider); ok {
+		cwd, reliable := source.RenderWorkingDirectory(name)
+		if !reliable {
+			return ""
+		}
+		return cwd
+	}
+	return cached
+}
+
 // Has reports whether a session with this exact name exists right now.
 func (m *Manager) Has(name string) bool { return m.prov.Has(name) }
 
@@ -532,6 +552,7 @@ func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
 			break
 		}
 	}
+	cwd = renderWorkingDirectory(m.prov, name, cwd)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return rendersource.Result{}, fmt.Errorf("resolve home directory: %w", err)

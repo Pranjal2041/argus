@@ -1,5 +1,6 @@
 import AppKit
 import PDFKit
+import QuickLookThumbnailing
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -93,26 +94,29 @@ struct ArtifactsView: View {
     private var panelList: some View {
         let panels = ArtifactLibraryQuery.panels(artifacts.records, sort: artifacts.sortOrder)
         return ScrollView {
-            LazyVStack(spacing: 0) {
+            LazyVGrid(columns: galleryColumns, alignment: .leading, spacing: 16) {
                 if panels.isEmpty {
                     emptyState(
                         icon: "doc.badge.plus",
                         title: "No artifacts yet",
                         detail: "Save a render, screenshot, or explicit file snapshot from a panel."
                     )
-                } else {
+                    .gridCellColumns(3)
+                }
+                if !panels.isEmpty {
+                    artifactSectionHeader("PANEL CAPTURES", count: panels.count, icon: "rectangle.stack")
                     ForEach(panels) { panel in
                         Button {
                             artifacts.open(panel: panel.context)
                         } label: {
-                            panelRow(panel)
+                            panelCard(panel)
                         }
                         .buttonStyle(.plain)
-                        Divider().overlay(Theme.border).padding(.leading, 58)
                     }
                 }
             }
             .padding(.horizontal, 20)
+            .padding(.top, 18)
             .padding(.bottom, 24)
         }
     }
@@ -124,21 +128,24 @@ struct ArtifactsView: View {
             sort: artifacts.sortOrder
         )
         return ScrollView {
-            LazyVStack(spacing: 0) {
+            LazyVGrid(columns: galleryColumns, alignment: .leading, spacing: 16) {
                 if records.isEmpty {
                     emptyState(
                         icon: "magnifyingglass",
                         title: "No matching artifacts",
                         detail: "Search uses the saved filename."
                     )
-                } else {
+                    .gridCellColumns(3)
+                }
+                if !records.isEmpty {
+                    artifactSectionHeader("SAVED FILES", count: records.count, icon: "doc")
                     ForEach(records) { record in
-                        artifactRow(record, showsPanel: true)
-                        Divider().overlay(Theme.border).padding(.leading, 58)
+                        artifactCard(record, showsPanel: true)
                     }
                 }
             }
             .padding(.horizontal, 20)
+            .padding(.top, 18)
             .padding(.bottom, 24)
         }
     }
@@ -180,7 +187,7 @@ struct ArtifactsView: View {
             .padding(.bottom, 13)
             Divider().overlay(Theme.border)
             ScrollView {
-                LazyVStack(spacing: 0) {
+                LazyVGrid(columns: galleryColumns, alignment: .leading, spacing: 16) {
                     if records.isEmpty {
                         emptyState(
                             icon: artifacts.query.isEmpty ? "doc.badge.plus" : "magnifyingglass",
@@ -188,77 +195,124 @@ struct ArtifactsView: View {
                             detail: artifacts.query.isEmpty
                                 ? "Save a render, screenshot, or explicit file snapshot here."
                                 : "Try a different filename."
-                        )
-                    } else {
+                    )
+                        .gridCellColumns(3)
+                    }
+                    if !records.isEmpty {
+                        artifactSectionHeader("SAVED FILES", count: records.count, icon: "doc")
                         ForEach(records) { record in
-                            artifactRow(record, showsPanel: false)
-                            Divider().overlay(Theme.border).padding(.leading, 58)
+                            artifactCard(record, showsPanel: false)
                         }
                     }
                 }
                 .padding(.horizontal, 20)
+                .padding(.top, 18)
                 .padding(.bottom, 24)
             }
         }
     }
 
-    private func panelRow(_ panel: ArtifactPanelSummary) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: "terminal")
-                .font(cf(14, .medium))
-                .foregroundStyle(Theme.accent)
-                .frame(width: 24, height: 24)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(panel.context.sessionName)
-                    .font(cf(14.5, .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Text(panelLocation(panel.context))
-                    .font(cf(11.5)).foregroundStyle(Theme.textTertiary).lineLimit(1)
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 3) {
-                Text("\(panel.count) artifact\(panel.count == 1 ? "" : "s")")
-                    .font(cf(12.5, .medium)).foregroundStyle(Theme.textSecondary)
-                Text(relativeTime(panel.lastSavedAt))
-                    .font(cf(10.5)).foregroundStyle(Theme.textTertiary)
-            }
-            Image(systemName: "chevron.right")
-                .font(cf(10, .semibold)).foregroundStyle(Theme.textTertiary)
-        }
-        .contentShape(Rectangle())
-        .padding(.horizontal, 12)
-        .frame(minHeight: 64)
+    private var galleryColumns: [GridItem] {
+        [GridItem(.adaptive(
+            minimum: max(176, 206 * uiScale),
+            maximum: max(250, 310 * uiScale)
+        ), spacing: 16)]
     }
 
-    private func artifactRow(_ record: ArtifactRecord, showsPanel: Bool) -> some View {
+    private func panelCard(_ panel: ArtifactPanelSummary) -> some View {
+        let previews = Array(ArtifactLibraryQuery.records(
+            artifacts.records,
+            panel: panel.context,
+            sort: .newest
+        ).prefix(3))
+        return VStack(alignment: .leading, spacing: 0) {
+            ArtifactPanelContactSheet(records: previews, store: artifacts)
+                .frame(maxWidth: .infinity)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .clipped()
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Text(panel.context.sessionName)
+                        .font(cf(14, .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("\(panel.count)")
+                        .font(cf(10.5, .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Theme.surface))
+                }
+                Text(panelLocation(panel.context))
+                    .font(cf(10.5))
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Updated " + relativeTime(panel.lastSavedAt))
+                    .font(cf(10))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(12)
+        }
+        .contentShape(Rectangle())
+        .modifier(ArtifactGalleryCardSurface())
+        .help("Open artifacts for \(panel.context.sessionName)")
+    }
+
+    private func artifactCard(_ record: ArtifactRecord, showsPanel: Bool) -> some View {
         Button { artifacts.open(artifact: record) } label: {
-            HStack(spacing: 14) {
-                Image(systemName: artifactIcon(record))
-                    .font(cf(15, .medium))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 0) {
+                ArtifactThumbnailView(record: record, url: artifacts.fileURL(for: record))
+                    .frame(maxWidth: .infinity)
+                    .aspectRatio(4 / 3, contentMode: .fit)
+                    .clipped()
                 VStack(alignment: .leading, spacing: 3) {
                     Text(record.filename)
-                        .font(cf(14, .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                    HStack(spacing: 5) {
-                        if showsPanel {
-                            Text(record.panel.sessionName).lineLimit(1)
-                            Text("·")
-                        }
-                        Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
-                        Text("·")
-                        Text(byteLabel(record.byteCount))
+                        .font(cf(12.5, .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    if showsPanel {
+                        Text(record.panel.sessionName)
+                            .font(cf(10.5, .medium))
+                            .foregroundStyle(Theme.accent)
+                            .lineLimit(1)
                     }
-                    .font(cf(11)).foregroundStyle(Theme.textTertiary)
+                    Text(record.createdAt.formatted(date: .abbreviated, time: .shortened)
+                         + " · " + byteLabel(record.byteCount))
+                        .font(cf(10))
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
                 }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(cf(10, .semibold)).foregroundStyle(Theme.textTertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(11)
             }
             .contentShape(Rectangle())
-            .padding(.horizontal, 12)
-            .frame(minHeight: 62)
+            .modifier(ArtifactGalleryCardSurface())
         }
         .buttonStyle(.plain)
+        .help("Open \(record.filename)")
+    }
+
+    private func artifactSectionHeader(_ title: String, count: Int, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(cf(10.5, .semibold))
+                .foregroundStyle(Theme.accent)
+            Text(title)
+                .font(cf(10.5, .bold))
+                .tracking(1.2)
+                .foregroundStyle(Theme.textSecondary)
+            Text("\(count)")
+                .font(cf(10, .semibold))
+                .monospacedDigit()
+                .foregroundStyle(Theme.textTertiary)
+            Rectangle().fill(Theme.border).frame(height: 1)
+        }
+        .padding(.top, 4)
+        .gridCellColumns(3)
     }
 
     private func searchField(_ prompt: String) -> some View {
@@ -349,6 +403,169 @@ struct ArtifactsView: View {
     }
 }
 
+/// A restrained contact-sheet surface: visual enough to scan, but still part
+/// of Argus rather than a second file manager. Hover only lifts the card; it
+/// never moves the surrounding grid.
+private struct ArtifactGalleryCardSurface: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Theme.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        hovering ? Theme.accent.opacity(0.62) : Theme.border,
+                        lineWidth: hovering ? 1.25 : 1
+                    )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(
+                color: Color.black.opacity(hovering ? 0.20 : 0.07),
+                radius: hovering ? 12 : 4,
+                x: 0,
+                y: hovering ? 5 : 2
+            )
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
+private struct ArtifactPanelContactSheet: View {
+    let records: [ArtifactRecord]
+    let store: ArtifactStore
+
+    var body: some View {
+        GeometryReader { proxy in
+            if records.isEmpty {
+                ZStack {
+                    Theme.surface
+                    Image(systemName: "terminal")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            } else {
+                HStack(spacing: 2) {
+                    ForEach(records) { record in
+                        ArtifactThumbnailView(
+                            record: record,
+                            url: store.fileURL(for: record),
+                            showsTypeBadge: false
+                        )
+                        .frame(
+                            width: max(1, (proxy.size.width - CGFloat(records.count - 1) * 2)
+                                / CGFloat(records.count)),
+                            height: proxy.size.height
+                        )
+                    }
+                }
+            }
+        }
+        .background(Theme.surface)
+    }
+}
+
+private struct ArtifactThumbnailView: View {
+    let record: ArtifactRecord
+    let url: URL
+    var showsTypeBadge = true
+    @State private var image: NSImage?
+    @State private var finished = false
+
+    private var loadKey: String {
+        url.path + "|" + String(Int(record.byteCount))
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Theme.surface
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .padding(record.isPDF ? 9 : 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if finished {
+                VStack(spacing: 7) {
+                    Image(systemName: fallbackIcon)
+                        .font(.system(size: 24, weight: .light))
+                    Text(record.fileExtension.uppercased())
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .tracking(0.7)
+                }
+                .foregroundStyle(Theme.textTertiary)
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+
+            if showsTypeBadge {
+                Text(typeLabel)
+                    .font(.system(size: 8.5, weight: .bold))
+                    .tracking(0.55)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(8)
+            }
+        }
+        .task(id: loadKey) {
+            image = await ArtifactThumbnailLoader.shared.image(for: url)
+            finished = true
+        }
+    }
+
+    private var typeLabel: String {
+        let ext = record.fileExtension.uppercased()
+        if !ext.isEmpty { return ext }
+        return record.isImage ? "IMAGE" : record.isPDF ? "PDF" : "FILE"
+    }
+
+    private var fallbackIcon: String {
+        if record.isImage { return "photo" }
+        if record.isPDF { return "doc.richtext" }
+        return iconForFile(record.filename)
+    }
+}
+
+private actor ArtifactThumbnailLoader {
+    static let shared = ArtifactThumbnailLoader()
+    private let cache: NSCache<NSString, NSImage>
+
+    private init() {
+        cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 180
+        cache.totalCostLimit = 128 * 1024 * 1024
+    }
+
+    func image(for url: URL) async -> NSImage? {
+        let key = url.path as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 520, height: 390),
+            scale: 2,
+            representationTypes: .thumbnail
+        )
+        let image: NSImage? = await withCheckedContinuation { continuation in
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+                continuation.resume(returning: representation?.nsImage)
+            }
+        }
+        if let image {
+            let cost = max(1, Int(image.size.width * image.size.height * 4))
+            cache.setObject(image, forKey: key, cost: cost)
+        }
+        return image
+    }
+}
+
 private struct ArtifactDocumentView: View {
     let record: ArtifactRecord
     @EnvironmentObject private var state: AppState
@@ -371,37 +588,80 @@ private struct ArtifactDocumentView: View {
 
     private var liveRef: SessionRef? { state.liveRef(for: record.panel) }
     private var viewerKind: ArtifactViewerKind { ArtifactViewerKind(record) }
+    private var galleryRecords: [ArtifactRecord] {
+        ArtifactLibraryQuery.records(
+            artifacts.records,
+            panel: record.panel,
+            sort: artifacts.sortOrder
+        )
+    }
+    private var galleryIndex: Int? { galleryRecords.firstIndex { $0.id == record.id } }
+    private var previousRecord: ArtifactRecord? {
+        guard let galleryIndex, galleryIndex > 0 else { return nil }
+        return galleryRecords[galleryIndex - 1]
+    }
+    private var nextRecord: ArtifactRecord? {
+        guard let galleryIndex, galleryIndex + 1 < galleryRecords.count else { return nil }
+        return galleryRecords[galleryIndex + 1]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Theme.border)
-            Group {
-                switch viewerKind {
-                case .image:
-                    ArtifactImageView(url: artifacts.fileURL(for: record), zoom: zoom)
-                case .pdf:
-                    ArtifactPDFView(url: artifacts.fileURL(for: record), zoom: zoom)
-                case .markdown:
-                    ArtifactTextView(
-                        record: record,
-                        url: artifacts.fileURL(for: record),
-                        zoom: zoom,
-                        markdownMode: markdownMode,
-                        markdownProxy: markdownPreview,
-                        markdownPDFData: markdownPDFData,
-                        markdownPDFError: markdownPDFError,
-                        generatingMarkdownPDF: generatingMarkdownPDF,
-                        onRetryPDF: generateMarkdownPDFIfPossible
-                    )
-                case .text:
-                    ArtifactTextView(record: record, url: artifacts.fileURL(for: record), zoom: zoom)
-                case .quickLook:
-                    QuickLookFileView(url: artifacts.fileURL(for: record))
+            ZStack {
+                Group {
+                    switch viewerKind {
+                    case .image:
+                        ArtifactImageView(url: artifacts.fileURL(for: record), zoom: zoom)
+                    case .pdf:
+                        ArtifactPDFView(url: artifacts.fileURL(for: record), zoom: zoom)
+                    case .markdown:
+                        ArtifactTextView(
+                            record: record,
+                            url: artifacts.fileURL(for: record),
+                            zoom: zoom,
+                            markdownMode: markdownMode,
+                            markdownProxy: markdownPreview,
+                            markdownPDFData: markdownPDFData,
+                            markdownPDFError: markdownPDFError,
+                            generatingMarkdownPDF: generatingMarkdownPDF,
+                            onRetryPDF: generateMarkdownPDFIfPossible
+                        )
+                    case .text:
+                        ArtifactTextView(record: record, url: artifacts.fileURL(for: record), zoom: zoom)
+                    case .quickLook:
+                        QuickLookFileView(url: artifacts.fileURL(for: record))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.surface.opacity(0.25))
+
+                if galleryRecords.count > 1 {
+                    HStack {
+                        edgeNavigationButton(
+                            systemImage: "chevron.left",
+                            record: previousRecord,
+                            help: "Previous artifact",
+                            shortcut: .leftArrow
+                        )
+                        Spacer()
+                        edgeNavigationButton(
+                            systemImage: "chevron.right",
+                            record: nextRecord,
+                            help: "Next artifact",
+                            shortcut: .rightArrow
+                        )
+                    }
+                    .padding(.horizontal, 16)
+                    .allowsHitTesting(true)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.surface.opacity(0.25))
+            if galleryRecords.count > 1 {
+                Divider().overlay(Theme.border)
+                filmstrip
+            }
         }
         .background(Theme.appBackground)
         .alert("Rename Artifact", isPresented: $renameShown) {
@@ -522,8 +782,77 @@ private struct ArtifactDocumentView: View {
         } else {
             mode = record.presentation == "terminal" ? "Terminal" : "Rendered"
         }
+        let position = galleryIndex.map { " · \($0 + 1) of \(galleryRecords.count)" } ?? ""
         return record.panel.sessionName + " · " + record.panel.machineName + " · "
-            + record.createdAt.formatted(date: .abbreviated, time: .shortened) + " · " + mode
+            + record.createdAt.formatted(date: .abbreviated, time: .shortened) + " · " + mode + position
+    }
+
+    private func edgeNavigationButton(
+        systemImage: String,
+        record target: ArtifactRecord?,
+        help: String,
+        shortcut: KeyEquivalent
+    ) -> some View {
+        Button {
+            if let target { artifacts.open(artifact: target) }
+        } label: {
+            Image(systemName: systemImage)
+                .font(cf(13, .bold))
+                .foregroundStyle(Theme.textPrimary)
+                .frame(width: 36, height: 48)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Theme.border, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(target == nil)
+        .opacity(target == nil ? 0 : 0.92)
+        .keyboardShortcut(shortcut, modifiers: [])
+        .help(help + " (←/→)")
+    }
+
+    private var filmstrip: some View {
+        ScrollViewReader { reader in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 8) {
+                    ForEach(galleryRecords) { item in
+                        Button { artifacts.open(artifact: item) } label: {
+                            ArtifactThumbnailView(
+                                record: item,
+                                url: artifacts.fileURL(for: item),
+                                showsTypeBadge: false
+                            )
+                            .frame(width: 68, height: 48)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(
+                                        item.id == record.id ? Theme.accent : Theme.border,
+                                        lineWidth: item.id == record.id ? 2 : 1
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .id(item.id)
+                        .help(item.filename)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+            }
+            .frame(height: 66)
+            .background(Theme.appBackground)
+            .onAppear {
+                reader.scrollTo(record.id, anchor: .center)
+            }
+            .onChange(of: record.id) { id in
+                withAnimation(.easeOut(duration: 0.16)) {
+                    reader.scrollTo(id, anchor: .center)
+                }
+            }
+        }
     }
 
     private func compactButton(_ system: String, help: String, action: @escaping () -> Void) -> some View {

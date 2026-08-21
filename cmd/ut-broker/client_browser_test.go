@@ -14,12 +14,12 @@ func TestParseBrowserCommands(t *testing.T) {
 	}
 
 	method, params, _, err = parseBrowserCommand([]string{"click", "abc", "120.5", "44"})
-	if err != nil || method != "page.click" || params["native"] != true || params["x"] != 120.5 || params["y"] != float64(44) {
+	if err != nil || method != "page.click" || params["native"] != nil || params["x"] != 120.5 || params["y"] != float64(44) {
 		t.Fatalf("click = %q %#v %v", method, params, err)
 	}
 
 	method, params, _, err = parseBrowserCommand([]string{"type", "abc", "--ref", "e7", "hello", "world"})
-	if err != nil || method != "page.type" || params["ref"] != "e7" || params["text"] != "hello world" || params["native"] != true {
+	if err != nil || method != "page.type" || params["ref"] != "e7" || params["text"] != "hello world" || params["native"] != nil {
 		t.Fatalf("type = %q %#v %v", method, params, err)
 	}
 
@@ -34,6 +34,40 @@ func TestParseBrowserCommandsRejectBadCoordinates(t *testing.T) {
 		{"click", "abc", "x", "1"},
 		{"click", "abc", "-1", "2"},
 		{"type", "abc", "--at", "1", "bad", "text"},
+	} {
+		if _, _, _, err := parseBrowserCommand(args); err == nil {
+			t.Fatalf("parseBrowserCommand(%q) unexpectedly succeeded", args)
+		}
+	}
+}
+
+func TestParseBrowserCredentialCommands(t *testing.T) {
+	method, params, _, err := parseBrowserCommand([]string{
+		"credentials", "request", "Research Gmail", "--tab", "abc",
+	})
+	if err != nil || method != "credentials.request" || params["credential"] != "Research Gmail" || params["tab_id"] != "abc" {
+		t.Fatalf("credential request = %q %#v %v", method, params, err)
+	}
+
+	method, params, _, err = parseBrowserCommand([]string{
+		"credentials", "fill", "abc", "Research Gmail", "--grant", "opaque-token",
+		"--username-ref", "e7", "--password-at", "120", "240",
+	})
+	if err != nil || method != "credentials.fill" || params["grant"] != "opaque-token" {
+		t.Fatalf("credential fill = %q %#v %v", method, params, err)
+	}
+	targets, ok := params["targets"].(map[string]any)
+	if !ok || targets["username"].(map[string]any)["ref"] != "e7" ||
+		targets["password"].(map[string]any)["x"] != float64(120) {
+		t.Fatalf("credential targets = %#v", params["targets"])
+	}
+}
+
+func TestParseBrowserCredentialFillRequiresGrantAndTarget(t *testing.T) {
+	for _, args := range [][]string{
+		{"credentials", "fill", "abc", "Research Gmail", "--password-ref", "e8"},
+		{"credentials", "fill", "abc", "Research Gmail", "--grant", "token"},
+		{"credentials", "fill", "abc", "Research Gmail", "--grant", "token", "--password-at", "bad", "2"},
 	} {
 		if _, _, _, err := parseBrowserCommand(args); err == nil {
 			t.Fatalf("parseBrowserCommand(%q) unexpectedly succeeded", args)

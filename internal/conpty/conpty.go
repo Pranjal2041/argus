@@ -236,6 +236,14 @@ func (p *Provider) Has(name string) bool {
 	return ok
 }
 
+// RenderWorkingDirectory reports that a ConPTY session's stored dir is not a
+// live cwd. It is the shell creation directory and does not change after an
+// interactive `cd`; transcript matching must therefore rely on the captured
+// screen instead of incorrectly filtering by this stale path.
+func (*Provider) RenderWorkingDirectory(string) (string, bool) {
+	return "", false
+}
+
 // Capture renders a session's recent output as plain text for the command-center
 // status updater (GET /recent). It implements the broker's optional `capturer`
 // capability so the macOS client can summarize Windows sessions too — without it,
@@ -291,15 +299,24 @@ func (p *Provider) create(name, dir string, agent, agentShell bool, reapIdle int
 	if dir == "" {
 		dir, _ = os.UserHomeDir()
 	}
+	lineageID := newSessionLineageID()
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(value), "UT_SESSION_LINEAGE_ID=") {
+			environment = append(environment, value)
+		}
+	}
+	environment = append(environment, "UT_SESSION_LINEAGE_ID="+lineageID)
 	cpty, err := conpty.Start(p.shell,
 		conpty.ConPtyDimensions(defCols, defRows),
-		conpty.ConPtyWorkDir(dir))
+		conpty.ConPtyWorkDir(dir),
+		conpty.ConPtyEnv(environment))
 	if err != nil {
 		p.mu.Unlock()
 		return nil, false, fmt.Errorf("start ConPTY for %q: %w", name, err)
 	}
 	s := &winSession{
-		name: name, dir: dir, lineageID: newSessionLineageID(), cpty: cpty,
+		name: name, dir: dir, lineageID: lineageID, cpty: cpty,
 		outCh: make(chan session.Output, 256), lastOut: time.Now().Unix(),
 		cols: defCols, rows: defRows,
 		capture: newCaptureScreen(defCols, defRows),

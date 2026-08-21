@@ -79,6 +79,9 @@ func cmdBrowser(args []string) int {
 		return 0
 	}
 
+	if method == "credentials.request" {
+		fmt.Fprintln(os.Stderr, "Waiting for Argus credential approval…")
+	}
 	response, err := callBrowser(providerHost, method, params, browserTimeout(method))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ut browser:", err)
@@ -200,6 +203,13 @@ func callBrowser(host, method string, params map[string]any, timeout time.Durati
 		"method":  method,
 		"params":  params,
 	}
+	if method == "credentials.request" || method == "credentials.fill" {
+		caller, ok := currentBrowserCaller()
+		if !ok {
+			return browserRPCResponse{}, fmt.Errorf("credential access must be requested from inside a verified ut panel")
+		}
+		request["caller"] = caller
+	}
 	payload, _ := json.Marshal(request)
 	body, code, err := httpPost(peerURL(host, "/browser/rpc", nil), payload, timeout)
 	if err != nil {
@@ -220,6 +230,8 @@ func callBrowser(host, method string, params map[string]any, timeout time.Durati
 
 func browserTimeout(method string) time.Duration {
 	switch method {
+	case "credentials.request":
+		return 15 * time.Minute
 	case "page.screenshot":
 		return 90 * time.Second
 	case "tabs.open", "tabs.navigate":
@@ -288,7 +300,6 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 				return "", nil, "", fmt.Errorf("--ref needs exactly one element reference")
 			}
 			params["ref"] = rest[2]
-			params["native"] = true
 		} else {
 			if len(rest) != 3 {
 				return "", nil, "", fmt.Errorf("coordinate click needs x and y")
@@ -298,7 +309,7 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 			if xerr != nil || yerr != nil || x < 0 || y < 0 {
 				return "", nil, "", fmt.Errorf("click coordinates must be non-negative numbers")
 			}
-			params["x"], params["y"], params["native"] = x, y, true
+			params["x"], params["y"] = x, y
 		}
 		return "page.click", params, "", nil
 	case "type":
@@ -312,7 +323,7 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 			if len(rest) < 4 {
 				return "", nil, "", fmt.Errorf("--ref needs an element reference and text")
 			}
-			params["ref"], params["native"] = rest[2], true
+			params["ref"] = rest[2]
 			textStart = 3
 		case "--at":
 			if len(rest) < 5 {
@@ -323,10 +334,9 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 			if xerr != nil || yerr != nil || x < 0 || y < 0 {
 				return "", nil, "", fmt.Errorf("type coordinates must be non-negative numbers")
 			}
-			params["x"], params["y"], params["native"] = x, y, true
+			params["x"], params["y"] = x, y
 			textStart = 4
 		default:
-			params["native"] = true
 		}
 		params["text"] = strings.Join(rest[textStart:], " ")
 		return "page.type", params, "", nil
@@ -340,11 +350,111 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 			return "", nil, "", fmt.Errorf("scroll deltas must be numbers")
 		}
 		params["tab_id"], params["dx"], params["dy"] = rest[0], dx, dy
-		params["native"] = true
 		return "page.scroll", params, "", nil
+	case "credentials", "credential", "vault":
+		return parseBrowserCredentialCommand(rest)
 	default:
 		return "", nil, "", fmt.Errorf("unknown browser command %q (try `ut browser help`)", command)
 	}
+}
+
+func parseBrowserCredentialCommand(args []string) (method string, params map[string]any, screenshotPath string, err error) {
+	params = map[string]any{}
+	if len(args) == 0 {
+		return "", nil, "", fmt.Errorf("usage: ut browser credentials list|request|fill")
+	}
+	switch args[0] {
+	case "list", "ls":
+		if len(args) != 1 {
+			return "", nil, "", fmt.Errorf("usage: ut browser credentials list")
+		}
+		return "credentials.list", params, "", nil
+	case "request":
+		if len(args) != 2 && len(args) != 4 {
+			return "", nil, "", fmt.Errorf("usage: ut browser credentials request <credential> [--tab <tab-id>]")
+		}
+		params["credential"] = args[1]
+		if len(args) == 4 {
+			if args[2] != "--tab" || strings.TrimSpace(args[3]) == "" {
+				return "", nil, "", fmt.Errorf("request accepts only --tab <tab-id>")
+			}
+			params["tab_id"] = args[3]
+		}
+		return "credentials.request", params, "", nil
+	case "fill":
+		if len(args) < 6 {
+			return "", nil, "", fmt.Errorf("usage: ut browser credentials fill <tab-id> <credential> --grant <grant> [--username-ref ref|--username-at x y] [--password-ref ref|--password-at x y]")
+		}
+		params["tab_id"], params["credential"] = args[1], args[2]
+		targets := map[string]any{}
+		for i := 3; i < len(args); i++ {
+			switch args[i] {
+			case "--grant":
+				if i+1 >= len(args) {
+					return "", nil, "", fmt.Errorf("--grant requires a value")
+				}
+				params["grant"] = args[i+1]
+				i++
+			case "--username-ref", "--password-ref":
+				if i+1 >= len(args) {
+					return "", nil, "", fmt.Errorf("%s requires a value", args[i])
+				}
+				field := strings.TrimSuffix(strings.TrimPrefix(args[i], "--"), "-ref")
+				targets[field] = map[string]any{"ref": args[i+1]}
+				i++
+			case "--username-at", "--password-at":
+				if i+2 >= len(args) {
+					return "", nil, "", fmt.Errorf("%s requires x and y", args[i])
+				}
+				x, xerr := strconv.ParseFloat(args[i+1], 64)
+				y, yerr := strconv.ParseFloat(args[i+2], 64)
+				if xerr != nil || yerr != nil || x < 0 || y < 0 {
+					return "", nil, "", fmt.Errorf("%s coordinates must be non-negative numbers", args[i])
+				}
+				field := strings.TrimSuffix(strings.TrimPrefix(args[i], "--"), "-at")
+				targets[field] = map[string]any{"x": x, "y": y}
+				i += 2
+			default:
+				return "", nil, "", fmt.Errorf("unknown credential fill option %q", args[i])
+			}
+		}
+		grant, _ := params["grant"].(string)
+		if strings.TrimSpace(grant) == "" {
+			return "", nil, "", fmt.Errorf("--grant is required")
+		}
+		if len(targets) == 0 {
+			return "", nil, "", fmt.Errorf("provide at least one username or password target")
+		}
+		params["targets"] = targets
+		return "credentials.fill", params, "", nil
+	default:
+		return "", nil, "", fmt.Errorf("unknown credentials command %q", args[0])
+	}
+}
+
+func currentBrowserCaller() (map[string]any, bool) {
+	session, err := resolveCurrentWebArtifactSession("")
+	if err != nil {
+		return nil, false
+	}
+	body, code, err := httpGet(localBase()+"/whoami", 4*time.Second)
+	if err != nil || code != 200 {
+		return nil, false
+	}
+	var who struct {
+		Name string `json:"name"`
+		Host string `json:"host"`
+	}
+	if json.Unmarshal(body, &who) != nil || (who.Name == "" && who.Host == "") {
+		return nil, false
+	}
+	return map[string]any{
+		"machine_name":       who.Name,
+		"machine_host":       who.Host,
+		"session_name":       session.Name,
+		"stable_session_id":  session.ID,
+		"session_lineage_id": session.LineageID,
+	}, true
 }
 
 func parseBrowserOpenFlags(args []string, params map[string]any) error {
@@ -473,9 +583,20 @@ USAGE
   ut browser click <tab-id> --ref <element-ref>
   ut browser type <tab-id> [--ref ref | --at x y] <text...>
   ut browser scroll <tab-id> <dx> <dy>
+  ut browser credentials list
+  ut browser credentials request <credential> [--tab <tab-id>]
+  ut browser credentials fill <tab-id> <credential> --grant <grant> \
+      [--username-ref ref|--username-at x y] [--password-ref ref|--password-at x y]
 
 New tabs are hidden unless --visible is given. ` + "`show`" + ` promotes the exact
 live tab into Argus without reloading it. Coordinates use screenshot pixels from
 the top-left of the current viewport. Set UT_BROWSER_PROVIDER when more than one
 Argus browser provider is available.
+
+Clicks, typing, and scrolling are injected into the addressed WebKit tab. They do
+not activate Argus, move macOS focus, or send input to another application.
+
+Credential grants are opaque permissions, not passwords. The request command waits for an
+Argus approval (or resolves immediately under a saved/unattended policy). The fill command
+injects selected fields inside WebKit and returns only the field names it filled.
 `
