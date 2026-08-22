@@ -278,23 +278,29 @@ final class LabWebPanel: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             let env = events.first(where: { $0.kind == "run-start" })?.data
                 ?? events.first(where: { $0.kind == "proposal" })?.data
             var files: [String: Any] = [:]
-            var params: [[String: String]] = []
+            let sizeByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0.size) })
+            var params: [[String: Any]] = []
             for ref in env?.params ?? [] {
                 let name = "files/" + (ref.path as NSString).lastPathComponent
                 if let t = await lab.runFileText(card, run: run, name: name) {
-                    params.append(["path": ref.path, "text": String(t.prefix(6000))])
+                    let preview = String(t.prefix(100_000))
+                    params.append(["path": ref.path, "text": preview,
+                                   "complete": Int64(preview.utf8.count) >= (sizeByName[name] ?? 0)])
                 }
             }
             if !params.isEmpty { files["params"] = params }
             if (env?.snapshot?.patchBytes ?? 0) > 0,
                let d = await lab.runFileText(card, run: run, name: "snapshot/diff.patch") {
-                files["diff"] = String(d.prefix(30000))
+                files["diff"] = d
+                files["diffComplete"] = Int64(d.utf8.count) >= (sizeByName["snapshot/diff.patch"] ?? 0)
             }
             if let l = await lab.runFileText(card, run: run, name: "log.txt", tailBytes: 16000) {
                 files["log"] = l
+                files["logSize"] = sizeByName["log.txt"] ?? Int64(l.utf8.count)
             }
             if let e = await lab.runFileText(card, run: run, name: "files/env.txt") {
-                files["env"] = String(e.prefix(8000))
+                files["env"] = e
+                files["envComplete"] = Int64(e.utf8.count) >= (sizeByName["files/env.txt"] ?? 0)
             }
             var evArr: [[String: Any]] = []
             let enc = JSONEncoder()
