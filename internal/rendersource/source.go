@@ -27,7 +27,12 @@ const (
 	minimumConfidence  = 0.58
 	matchAnchorTokens  = 8
 	minimumMatchTokens = 16
-	maxAnchorPositions = 12
+	// Kernel process inspection binds an exact Codex rollout to one pane. Its
+	// newest response may have only a short prefix painted before the TUI
+	// virtualizes the rest, so eight contiguous tail tokens are sufficient there.
+	// Directory-scan fallbacks retain the stricter sixteen-token requirement.
+	exactTranscriptMinimumMatchTokens = 8
+	maxAnchorPositions                = 12
 )
 
 var ErrNoMatch = errors.New("no authoritative agent source matches this terminal")
@@ -74,9 +79,17 @@ func ResolveWithCodexTranscript(home, cwd, screen, codexTranscript string) (Resu
 	best := Result{}
 	if codexTranscript != "" {
 		if info, err := os.Stat(codexTranscript); err == nil && !info.IsDir() {
-			best = bestFromFiles([]candidateFile{{
+			// Once the pane's live Codex process identifies its exact rollout,
+			// only that rollout's newest assistant message is authoritative. If
+			// it is not visible enough yet, preserve the lossless terminal frame;
+			// never walk backward to a fully visible previous response.
+			best = bestFromExactCodex(candidateFile{
 				path: codexTranscript, provider: "codex", mtime: info.ModTime(),
-			}}, cwd, screenTokens, best)
+			}, cwd, screenTokens)
+			if best.Confidence >= minimumConfidence {
+				return best, nil
+			}
+			return Result{}, ErrNoMatch
 		}
 	}
 	// Try Codex first. A strong screen match already identifies the authored
@@ -102,6 +115,30 @@ func ResolveWithCodexTranscript(home, cwd, screen, codexTranscript string) (Resu
 		return Result{}, ErrNoMatch
 	}
 	return best, nil
+}
+
+func bestFromExactCodex(file candidateFile, cwd string, screenTokens []string) Result {
+	messages := codexMessages(file.path)
+	if len(messages) == 0 {
+		return Result{}
+	}
+	candidate := messages[0]
+	if cwd != "" && candidate.cwd != "" && !samePath(candidate.cwd, cwd) {
+		return Result{}
+	}
+	if len(candidate.text) > maxSourceBytes {
+		return Result{}
+	}
+	score := overlapScoreWithMinimum(
+		tokenize(candidate.text), screenTokens, exactTranscriptMinimumMatchTokens,
+	)
+	if score < minimumConfidence {
+		return Result{}
+	}
+	return Result{
+		Source: candidate.text, Format: "markdown",
+		Origin: candidate.provider + "-transcript", Confidence: score,
+	}
 }
 
 func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, best Result) Result {
@@ -400,6 +437,10 @@ func tokenize(text string) []string {
 }
 
 func overlapScore(source, screen []string) float64 {
+	return overlapScoreWithMinimum(source, screen, minimumMatchTokens)
+}
+
+func overlapScoreWithMinimum(source, screen []string, minimumTokens int) float64 {
 	if len(source) < 8 || len(screen) < 8 {
 		return 0
 	}
@@ -428,7 +469,7 @@ func overlapScore(source, screen []string) float64 {
 		anchors    int
 	}
 	runs := make(map[int]anchorRun)
-	requiredTokens := min(minimumMatchTokens, len(source))
+	requiredTokens := min(minimumTokens, len(source))
 	// A real answer may be followed by a small amount of prompt/status chrome,
 	// but not by another prose response. This guard is what makes failure safe:
 	// if the newest text cannot be resolved yet, Render keeps the exact terminal

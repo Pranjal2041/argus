@@ -225,6 +225,60 @@ Use the completed filing documents as the immutable observation set, then packag
 	}
 }
 
+func TestExactCodexTranscriptUsesShortVisiblePrefixOfNewestTurn(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	previous := `Completed one full evaluation with a detailed score report, artifact inventory, and reproducible verification notes. The prior response is fully visible in terminal scrollback and would otherwise produce a stronger overlap score.`
+	currentPrefix := "Here is the complete context. The precise task description given to Codex was:"
+	current := currentPrefix + `
+
+Using the supplied hydraulic project and field-observation package, produce a calibrated regulatory model, supporting report, and complete reproducible deliverable bundle. This full authored response continues well beyond the short prefix painted by the terminal.`
+	path := filepath.Join(home, ".codex2", "sessions", "2026", "08", "22", "rollout-live.jsonl")
+	writeLines(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": previous}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": current}},
+		}},
+	)
+
+	got, err := ResolveWithCodexTranscript(home, cwd, previous+"\n\n"+currentPrefix, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != current {
+		t.Fatalf("wanted newest exact-transcript answer, got %q", got.Source)
+	}
+}
+
+func TestExactCodexTranscriptNeverFallsBackToPreviousTurn(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	previous := `The previous response is fully visible and contains enough distinctive words to pass the normal transcript overlap threshold with very high confidence.`
+	current := `A completely different newest response exists in the exact rollout but has not reached the terminal screen yet. It must not cause the renderer to resurrect the previous response.`
+	path := filepath.Join(home, ".codex2", "sessions", "2026", "08", "22", "rollout-live.jsonl")
+	writeLines(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": previous}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": current}},
+		}},
+	)
+
+	_, err := ResolveWithCodexTranscript(home, cwd, previous, path)
+	if !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("expected terminal fallback instead of previous turn, got %v", err)
+	}
+}
+
 func TestResolveDoesNotUpgradeToPreviousTurnWhenNewTailIsUnmatched(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
