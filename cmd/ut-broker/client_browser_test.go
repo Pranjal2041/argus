@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,6 +30,39 @@ func TestParseBrowserCommands(t *testing.T) {
 	method, params, path, err := parseBrowserCommand([]string{"screenshot", "abc", "--full-page", "-o", "page.png"})
 	if err != nil || method != "page.screenshot" || params["full_page"] != true || path != "page.png" {
 		t.Fatalf("screenshot = %q %#v %q %v", method, params, path, err)
+	}
+}
+
+func TestParseBrowserUploadReadsCallingMachineFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagram.svg")
+	content := []byte(`<svg xmlns="http://www.w3.org/2000/svg"><text>Argus</text></svg>`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	method, params, _, err := parseBrowserCommand([]string{"upload", "abc", "--ref", "e9", path})
+	if err != nil || method != "page.upload" || params["tab_id"] != "abc" || params["ref"] != "e9" {
+		t.Fatalf("upload = %q %#v %v", method, params, err)
+	}
+	files, ok := params["files"].([]map[string]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("upload files = %#v", params["files"])
+	}
+	if files[0]["name"] != "diagram.svg" || !strings.HasPrefix(files[0]["mime_type"].(string), "image/svg+xml") {
+		t.Fatalf("upload metadata = %#v", files[0])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(files[0]["data_base64"].(string))
+	if err != nil || string(decoded) != string(content) {
+		t.Fatalf("upload content = %q, %v", decoded, err)
+	}
+	if _, leakedPath := files[0]["path"]; leakedPath {
+		t.Fatal("browser RPC must not expose the calling machine's path")
+	}
+}
+
+func TestParseBrowserUploadRejectsNonFile(t *testing.T) {
+	if _, _, _, err := parseBrowserCommand([]string{"upload", "abc", t.TempDir()}); err == nil {
+		t.Fatal("uploading a directory unexpectedly succeeded")
 	}
 }
 

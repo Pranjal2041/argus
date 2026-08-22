@@ -86,6 +86,79 @@ final class CredentialVaultTests: XCTestCase {
         }
     }
 
+    func testAPIKeyRequestResolvesSavedNameToItsEnvironmentVariable() async throws {
+        let (vault, defaults, _, suite) = makeVault()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try vault.saveAPIKey(name: "OpenAI primary", group: "Research",
+                             variable: "OPENAI_API_KEY", value: "sk-primary")
+        try vault.saveAPIKey(name: "OpenAI secondary", group: "Research",
+                             variable: "OPENAI_API_KEY", value: "sk-secondary")
+        try vault.saveAPIKey(name: "Anthropic", group: "Research",
+                             variable: "ANTHROPIC_API_KEY", value: "sk-ant")
+        let caller = testCaller(session: "research", cwd: "/work/project")
+        let task = Task {
+            try await vault.requestAPIKey(name: "openai primary",
+                                          destination: "/work/project/.env", caller: caller)
+        }
+        await Task.yield()
+        let request = try XCTUnwrap(vault.pendingAPIKeyApproval)
+        XCTAssertEqual(request.name, "openai primary")
+        XCTAssertEqual(request.candidates.map(\.name), ["OpenAI primary"])
+        vault.approvePendingAPIKey()
+        let response = try await task.value
+        XCTAssertEqual(response.variable, "OPENAI_API_KEY")
+        XCTAssertEqual(response.entry.name, "OpenAI primary")
+        XCTAssertEqual(response.value, "sk-primary")
+    }
+
+    func testAPIKeyValueNeverAppearsInPersistedMetadata() throws {
+        let (vault, defaults, _, suite) = makeVault()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let value = "never-persist-this-api-key"
+        try vault.saveAPIKey(name: "OpenAI", group: "", variable: "OPENAI_API_KEY", value: value)
+        for (_, stored) in defaults.persistentDomain(forName: suite) ?? [:] {
+            if let data = stored as? Data {
+                XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(value))
+            }
+        }
+    }
+
+    func testUnknownAPIKeyCanBeSavedInsideItsPendingApproval() async throws {
+        let (vault, defaults, _, suite) = makeVault()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let caller = testCaller(session: "new-project", cwd: "/work/new-project")
+        let task = Task {
+            try await vault.requestAPIKey(name: "New service",
+                                          destination: "/work/new-project/.env", caller: caller)
+        }
+        await Task.yield()
+        XCTAssertEqual(vault.pendingAPIKeyApproval?.candidates.count, 0)
+        try vault.saveAndApprovePendingAPIKey(variable: "NEW_SERVICE_API_KEY", value: "new-secret")
+        let response = try await task.value
+        XCTAssertEqual(response.entry.name, "New service")
+        XCTAssertEqual(response.value, "new-secret")
+        XCTAssertEqual(vault.apiKeyEntries(for: "NEW_SERVICE_API_KEY").count, 1)
+    }
+
+    func testLegacyEntriesDecodeAsSignIns() throws {
+        struct LegacyEntry: Codable {
+            let id: UUID
+            let name: String
+            let group: String
+            let createdAt: Date
+            let updatedAt: Date
+        }
+        let suite = "CredentialVaultTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacy = LegacyEntry(id: UUID(), name: "Existing Gmail", group: "Research",
+                                 createdAt: Date(), updatedAt: Date())
+        defaults.set(try JSONEncoder().encode([legacy]), forKey: "ut.credentialVault.entries.v1")
+        let vault = CredentialVaultStore(secretStore: MemoryCredentialSecretStore(), defaults: defaults)
+        XCTAssertEqual(vault.entries.first?.kind, .login)
+        XCTAssertEqual(vault.entries.first?.environmentVariable, "")
+    }
+
     private func makeVault() -> (CredentialVaultStore, UserDefaults, MemoryCredentialSecretStore, String) {
         let suite = "CredentialVaultTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -93,9 +166,11 @@ final class CredentialVaultTests: XCTestCase {
         return (CredentialVaultStore(secretStore: secrets, defaults: defaults), defaults, secrets, suite)
     }
 
-    private func testCaller(session: String) -> BrowserCredentialCaller {
+    private func testCaller(session: String, cwd: String = "") -> BrowserCredentialCaller {
         BrowserCredentialCaller(machineName: "babel-p9-28", machineHost: "babel-p9-28",
                                 sessionName: session, stableSessionID: "$4",
-                                sessionLineageID: "tmux:lineage:$4")
+                                sessionLineageID: "tmux:lineage:$4",
+                                workingDirectory: cwd,
+                                dotenvPath: cwd.isEmpty ? "" : cwd + "/.env")
     }
 }

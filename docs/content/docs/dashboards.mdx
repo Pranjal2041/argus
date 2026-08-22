@@ -26,7 +26,8 @@ For dashboards that should stay current without interaction, each tab can auto-r
 
 When Argus is open on the Mac, an agent on **any** `ut` machine can drive the same WebKit browser
 through `ut browser`. New agent tabs are hidden by default; `show` promotes the exact live tab into
-Dashboards without reloading it or losing its cookies, JavaScript state, or scroll position.
+Dashboards in the background without reloading it, taking focus, or losing its cookies, JavaScript
+state, or scroll position.
 
 ```bash
 ut browser status
@@ -36,6 +37,7 @@ ut browser snapshot <tab-id>
 ut browser screenshot <tab-id> -o page.png
 ut browser click <tab-id> 420 260
 ut browser type <tab-id> --ref e7 "search text"
+ut browser upload <tab-id> --ref e12 /absolute/path/to/results.pdf
 ut browser scroll <tab-id> 0 700
 ut browser show <tab-id>
 ```
@@ -44,6 +46,11 @@ Screenshots are first-class observations: an explicit `screenshot` writes the PN
 and every click, type, or scroll writes its resulting viewport PNG to a temporary observation path
 on the agent's machine. `snapshot` returns readable page text plus interactive elements and stable
 references such as `e7`; coordinate actions use top-left screenshot coordinates.
+
+`upload` reads the file on the machine where the command runs—even when that is Babel—and attaches
+it directly to the page's `<input type="file">`. It does not open a native file picker or activate
+Argus. Hidden file inputs appear in `snapshot`; target one by ref/coordinates, or omit the target
+when the page contains exactly one file input. The aggregate upload limit is 32 MiB per command.
 
 The browser process, WebKit profile, cookies, and network connection all remain on the **Mac running
 Argus**. A command issued on Babel is relayed Babel broker → Mac broker → Argus, so opening Gmail

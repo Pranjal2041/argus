@@ -36,7 +36,14 @@ started on.
 
 - Tailscale auth keys are read from `~/.universal-tmux/authkey` (mode `600`) and are **never**
   committed — the repository only contains a `tskey-auth-…` placeholder.
-- Image-generation and other API keys live in a git-ignored `.env`.
+- API keys can be stored in the macOS **Credential Vault**. An agent requests a saved key by its
+  human name, such as `ut api-key request daytona`; the vault entry determines the environment
+  variable written to `.env`, and there is deliberately no API-key listing command. Argus shows the
+  verified panel, machine, exact variable, and absolute `.env` destination before approval. The
+  requesting CLI appends the value over the encrypted tailnet without placing it in shell arguments,
+  process environment, terminal output, broker logs, or persisted vault metadata. Existing
+  assignments are never replaced, and concurrent requests are serialized and rechecked.
+- Project API keys ultimately live in that project's git-ignored `.env`, just as when added by hand.
 - The full git history has been scanned to confirm no real keys, tokens, or passwords were ever
   committed.
 

@@ -112,8 +112,10 @@ code and parameter bind-hash check before launch. Turning the mode off stops fut
 decisions; approvals already committed remain part of the append-only record. Keep the Mac awake
 and reachable if it needs to approve requests from remote machines.
 
-The current scope is intentionally limited to Lab gates. Unattended Mode does not yet answer
-free-form questions in terminal agents.
+The main automation scope remains Lab gates; it does not answer free-form questions in terminal
+agents. Credential Vault access has its own separate, off-by-default switch. If that switch is
+enabled, unattended mode may also fill approved browser sign-ins or append a uniquely matching API
+key to the exact `.env` requested by a verified panel.
 
 ## The Lab hub
 

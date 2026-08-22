@@ -55,7 +55,7 @@ struct UniversalTmuxApp: App {
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
-                    browserControl.start(dashboards: dashboards, state: state, credentialVault: credentialVault)
+                    browserControl.start(dashboards: dashboards, credentialVault: credentialVault)
                     credentialVault.unattendedModeActive = lab.unattendedMode
                     weeklyProgressRemote.start()
                     screenshotArtifacts.bind(
@@ -413,7 +413,7 @@ struct SettingsView: View {
             } header: {
                 Text("Automation")
             } footer: {
-                Text("Unattended Mode keeps Lab work moving automatically. Vault access is separate and off by default; when enabled, verified panel agents may use saved credentials without waiting, including while this Mac is locked after its first unlock. Passwords still never leave Argus.")
+                Text("Unattended Mode keeps Lab work moving automatically. Vault access is separate and off by default; when enabled, verified panel agents may use saved browser sign-ins or add a uniquely matching API key to the requested project .env without waiting, including while this Mac is locked after its first unlock. Browser passwords never leave Argus; API keys travel over Tailscale only to the requesting machine and are never printed.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -741,6 +741,25 @@ struct ThemedRoot: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var themeStore: ThemeStore
     @EnvironmentObject var credentialVault: CredentialVaultStore
+
+    private enum VaultApproval: Identifiable {
+        case login(CredentialApprovalRequest)
+        case apiKey(APIKeyApprovalRequest)
+
+        var id: UUID {
+            switch self {
+            case .login(let request): return request.id
+            case .apiKey(let request): return request.id
+            }
+        }
+    }
+
+    private var vaultApproval: VaultApproval? {
+        if let request = credentialVault.pendingApproval { return .login(request) }
+        if let request = credentialVault.pendingAPIKeyApproval { return .apiKey(request) }
+        return nil
+    }
+
     var body: some View {
         RootView()
             .id(themeStore.themeID)
@@ -748,15 +767,18 @@ struct ThemedRoot: View {
                 ThemePickerView().environmentObject(themeStore)
             }
             .sheet(item: Binding(
-                get: { credentialVault.pendingApproval },
-                set: { request in
-                    if request == nil && credentialVault.pendingApproval != nil {
-                        credentialVault.denyPending()
+                get: { vaultApproval },
+                set: { _ in }
+            )) { approval in
+                Group {
+                    switch approval {
+                    case .login(let request):
+                        CredentialApprovalSheet(request: request).environmentObject(credentialVault)
+                    case .apiKey(let request):
+                        APIKeyApprovalSheet(request: request).environmentObject(credentialVault)
                     }
                 }
-            )) { request in
-                CredentialApprovalSheet(request: request)
-                    .environmentObject(credentialVault)
+                .interactiveDismissDisabled(true)
             }
     }
 }

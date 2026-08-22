@@ -15,7 +15,10 @@ import (
 )
 
 const defaultStaleAfter = 15 * time.Second
-const maxRPCRequestBytes = 1 << 20
+
+// page.upload carries up to 32 MiB of raw files as base64 JSON. Leave room for
+// encoding and metadata while retaining a hard request bound at every broker.
+const maxRPCRequestBytes = 48 << 20
 
 // Registration is refreshed by Argus while its browser provider is alive.
 // Port always identifies a loopback-only HTTP listener in the Argus process.
