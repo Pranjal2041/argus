@@ -21,7 +21,7 @@ import (
 var meshVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
 	"tail": true, "send": true, "cp": true, "forward": true, "lab": true,
-	"browser": true, "web-artifacts": true,
+	"browser": true, "web-artifacts": true, "api-key": true, "api_key": true,
 	"help": true, "--help": true, "-h": true,
 }
 
@@ -65,6 +65,8 @@ func runClient(args []string) int {
 		return cmdBrowser(rest)
 	case "web-artifacts":
 		return cmdWebArtifacts(rest)
+	case "api-key", "api_key":
+		return cmdAPIKey(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ut: unknown command %q (try `ut help`)\n", verb)
 		return 2
@@ -727,6 +729,7 @@ USAGE
   ut forward stop <id>                  stop one forward
   ut browser <subcommand>               control Argus's Mac-hosted browser from any machine
   ut web-artifacts <subcommand>         save exact web-service recipes for one-click Argus launch
+  ut api-key request <NAME>              ask Argus to add one saved API key to this folder's .env
   ut lab   <subcommand>                 run experiments through the recorded, human-
                                         approved lab protocol (see ` + "`ut lab help`" + `)
 

@@ -3,14 +3,50 @@ import CryptoKit
 import Foundation
 import Security
 
+enum CredentialVaultKind: String, Codable, CaseIterable, Identifiable {
+    case login
+    case apiKey
+
+    var id: String { rawValue }
+    var title: String { self == .login ? "Sign-ins" : "API keys" }
+}
+
 struct CredentialVaultEntry: Codable, Hashable, Identifiable {
     let id: UUID
     var name: String
     var group: String
+    var kind: CredentialVaultKind
+    var environmentVariable: String
     let createdAt: Date
     var updatedAt: Date
 
     var displayGroup: String { group.isEmpty ? "Ungrouped" : group }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, group, kind, environmentVariable, createdAt, updatedAt
+    }
+
+    init(id: UUID, name: String, group: String, kind: CredentialVaultKind,
+         environmentVariable: String = "", createdAt: Date, updatedAt: Date) {
+        self.id = id
+        self.name = name
+        self.group = group
+        self.kind = kind
+        self.environmentVariable = environmentVariable
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        group = try values.decodeIfPresent(String.self, forKey: .group) ?? ""
+        kind = try values.decodeIfPresent(CredentialVaultKind.self, forKey: .kind) ?? .login
+        environmentVariable = try values.decodeIfPresent(String.self, forKey: .environmentVariable) ?? ""
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        updatedAt = try values.decode(Date.self, forKey: .updatedAt)
+    }
 }
 
 struct CredentialVaultSecret: Codable, Equatable {
@@ -32,6 +68,8 @@ struct BrowserCredentialCaller: Codable, Equatable {
     var sessionName: String
     var stableSessionID: String
     var sessionLineageID: String
+    var workingDirectory: String = ""
+    var dotenvPath: String = ""
 
     var displayName: String {
         let machine = machineName.isEmpty ? machineHost : machineName
@@ -55,6 +93,43 @@ struct BrowserCredentialCaller: Codable, Equatable {
     }
 
     var isAttributed: Bool { !sessionName.isEmpty && (!machineName.isEmpty || !machineHost.isEmpty) }
+}
+
+struct APIKeyApprovalResponse {
+    let entry: CredentialVaultEntry
+    let variable: String
+    let value: String
+}
+
+final class APIKeyApprovalRequest: Identifiable, ObservableObject {
+    let id = UUID()
+    let name: String
+    let destination: String
+    let caller: BrowserCredentialCaller
+    @Published private(set) var candidates: [CredentialVaultEntry]
+    @Published var selectedEntryID: UUID?
+
+    fileprivate let continuation: CheckedContinuation<APIKeyApprovalResponse, Error>
+
+    init(name: String, destination: String, caller: BrowserCredentialCaller,
+         candidates: [CredentialVaultEntry],
+         continuation: CheckedContinuation<APIKeyApprovalResponse, Error>) {
+        self.name = name
+        self.destination = destination
+        self.caller = caller
+        self.candidates = candidates
+        self.selectedEntryID = candidates.first?.id
+        self.continuation = continuation
+    }
+
+    var selectedEntry: CredentialVaultEntry? {
+        candidates.first { $0.id == selectedEntryID }
+    }
+
+    fileprivate func select(_ entries: [CredentialVaultEntry], preferredID: UUID? = nil) {
+        candidates = entries
+        selectedEntryID = preferredID ?? entries.first?.id
+    }
 }
 
 enum CredentialGrantDuration: String, Codable, CaseIterable, Identifiable {
@@ -235,6 +310,7 @@ enum CredentialVaultError: LocalizedError {
 final class CredentialVaultStore: ObservableObject {
     @Published private(set) var entries: [CredentialVaultEntry] = []
     @Published private(set) var pendingApproval: CredentialApprovalRequest?
+    @Published private(set) var pendingAPIKeyApproval: APIKeyApprovalRequest?
     @Published private(set) var auditEvents: [CredentialVaultAuditEvent] = []
     @Published private(set) var allowInUnattendedMode: Bool
     @Published var errorMessage: String?
@@ -251,6 +327,7 @@ final class CredentialVaultStore: ObservableObject {
     private var policies: [CredentialGrantPolicy] = []
     private var activeGrants: [String: ActiveCredentialGrant] = [:]
     private var approvalQueue: [CredentialApprovalRequest] = []
+    private var apiKeyApprovalQueue: [APIKeyApprovalRequest] = []
 
     private static let entriesKey = "ut.credentialVault.entries.v1"
     private static let policiesKey = "ut.credentialVault.policies.v1"
@@ -273,7 +350,21 @@ final class CredentialVaultStore: ObservableObject {
     }
 
     func entry(named name: String) -> CredentialVaultEntry? {
-        entries.first { $0.name.caseInsensitiveCompare(name.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame }
+        entries.first {
+            $0.kind == .login &&
+                $0.name.caseInsensitiveCompare(name.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
+        }
+    }
+
+    func apiKeyEntries(for variable: String) -> [CredentialVaultEntry] {
+        entries.filter { $0.kind == .apiKey && $0.environmentVariable == variable }
+    }
+
+    func apiKeyEntries(named name: String) -> [CredentialVaultEntry] {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return entries.filter {
+            $0.kind == .apiKey && $0.name.caseInsensitiveCompare(cleanName) == .orderedSame
+        }
     }
 
     func save(id: UUID? = nil, name: String, group: String,
@@ -294,6 +385,40 @@ final class CredentialVaultStore: ObservableObject {
             availableAfterFirstUnlock: allowInUnattendedMode
         )
         let entry = CredentialVaultEntry(id: entryID, name: cleanName, group: cleanGroup,
+                                         kind: .login,
+                                         createdAt: createdAt, updatedAt: now)
+        if let index = entries.firstIndex(where: { $0.id == entryID }) { entries[index] = entry }
+        else { entries.append(entry) }
+        sortEntries()
+        persistEntries()
+        audit("saved", entry: entry, caller: "You")
+    }
+
+    func saveAPIKey(id: UUID? = nil, name: String, group: String,
+                    variable: String, value: String) throws {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanGroup = group.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanVariable = variable.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else { throw CredentialVaultError.invalid("API-key name is required.") }
+        guard Self.validEnvironmentVariable(cleanVariable) else {
+            throw CredentialVaultError.invalid("Enter a valid environment variable such as OPENAI_API_KEY.")
+        }
+        guard !value.isEmpty && !value.contains("\n") && !value.contains("\r") else {
+            throw CredentialVaultError.invalid("API key is required and must be one line.")
+        }
+        if entries.contains(where: { $0.id != id && $0.name.caseInsensitiveCompare(cleanName) == .orderedSame }) {
+            throw CredentialVaultError.invalid("A credential named \"\(cleanName)\" already exists.")
+        }
+        let now = Date()
+        let entryID = id ?? UUID()
+        let createdAt = entries.first(where: { $0.id == entryID })?.createdAt ?? now
+        try secretStore.write(
+            id: entryID,
+            secret: CredentialVaultSecret(username: "", password: value),
+            availableAfterFirstUnlock: allowInUnattendedMode
+        )
+        let entry = CredentialVaultEntry(id: entryID, name: cleanName, group: cleanGroup,
+                                         kind: .apiKey, environmentVariable: cleanVariable,
                                          createdAt: createdAt, updatedAt: now)
         if let index = entries.firstIndex(where: { $0.id == entryID }) { entries[index] = entry }
         else { entries.append(entry) }
@@ -364,6 +489,72 @@ final class CredentialVaultStore: ObservableObject {
         }
     }
 
+    func requestAPIKey(name: String, destination: String,
+                       caller: BrowserCredentialCaller) async throws -> APIKeyApprovalResponse {
+        guard caller.isAttributed else {
+            throw CredentialVaultError.invalid("API-key access must be requested from a verified ut panel.")
+        }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else {
+            throw CredentialVaultError.invalid("A saved API-key name is required.")
+        }
+        let candidates = apiKeyEntries(named: cleanName)
+        if unattendedModeActive && allowInUnattendedMode && candidates.count == 1,
+           let entry = candidates.first {
+            let secret = try secretStore.read(id: entry.id)
+            audit("approved unattended write to \(destination)", entry: entry, caller: caller.displayName)
+            return APIKeyApprovalResponse(entry: entry, variable: entry.environmentVariable, value: secret.password)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = APIKeyApprovalRequest(name: cleanName, destination: destination,
+                                                caller: caller, candidates: candidates,
+                                                continuation: continuation)
+            if pendingAPIKeyApproval == nil {
+                pendingAPIKeyApproval = request
+                NSApp?.requestUserAttention(.criticalRequest)
+            } else {
+                apiKeyApprovalQueue.append(request)
+            }
+        }
+    }
+
+    func approvePendingAPIKey() {
+        guard let request = pendingAPIKeyApproval,
+              let entry = request.selectedEntry else { return }
+        do {
+            let secret = try secretStore.read(id: entry.id)
+            let response = APIKeyApprovalResponse(entry: entry, variable: entry.environmentVariable,
+                                                  value: secret.password)
+            audit("approved write to \(request.destination)", entry: entry,
+                  caller: request.caller.displayName)
+            finishCurrentAPIKey { request.continuation.resume(returning: response) }
+        } catch {
+            finishCurrentAPIKey { request.continuation.resume(throwing: error) }
+        }
+    }
+
+    func saveAndApprovePendingAPIKey(variable: String, value: String) throws {
+        guard let request = pendingAPIKeyApproval else {
+            throw CredentialVaultError.invalid("The API-key request is no longer pending.")
+        }
+        try saveAPIKey(name: request.name, group: "", variable: variable, value: value)
+        let candidates = apiKeyEntries(named: request.name)
+        let saved = candidates.first {
+            $0.name.caseInsensitiveCompare(request.name) == .orderedSame
+        }
+        request.select(candidates, preferredID: saved?.id)
+        approvePendingAPIKey()
+    }
+
+    func denyPendingAPIKey() {
+        guard let request = pendingAPIKeyApproval else { return }
+        if let entry = request.selectedEntry {
+            audit("denied write to \(request.destination)", entry: entry,
+                  caller: request.caller.displayName)
+        }
+        finishCurrentAPIKey { request.continuation.resume(throwing: CredentialVaultError.denied) }
+    }
+
     func approvePending() {
         guard let request = pendingApproval else { return }
         var scope = request.scope
@@ -429,6 +620,15 @@ final class CredentialVaultStore: ObservableObject {
         completion()
         if !approvalQueue.isEmpty {
             pendingApproval = approvalQueue.removeFirst()
+            NSApp?.requestUserAttention(.criticalRequest)
+        }
+    }
+
+    private func finishCurrentAPIKey(_ completion: () -> Void) {
+        pendingAPIKeyApproval = nil
+        completion()
+        if !apiKeyApprovalQueue.isEmpty {
+            pendingAPIKeyApproval = apiKeyApprovalQueue.removeFirst()
             NSApp?.requestUserAttention(.criticalRequest)
         }
     }
@@ -530,5 +730,9 @@ final class CredentialVaultStore: ObservableObject {
     private static func decode<T: Decodable>(_ type: T.Type, _ data: Data?) -> T? {
         guard let data else { return nil }
         return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private static func validEnvironmentVariable(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil
     }
 }

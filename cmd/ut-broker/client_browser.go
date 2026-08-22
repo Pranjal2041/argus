@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,6 +44,11 @@ type browserRPCResponse struct {
 // a healthy provider. Keep the probe bounded while leaving enough headroom for
 // the broker's own peer-resolution pass.
 const browserProviderProbeTimeout = 15 * time.Second
+
+// Browser uploads travel as base64 inside the versioned JSON RPC. Keep the
+// aggregate raw payload bounded so an accidental model-selected directory or
+// huge checkpoint cannot balloon the broker or Argus process.
+const browserUploadMaxBytes int64 = 32 << 20
 
 func cmdBrowser(args []string) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
@@ -90,7 +96,7 @@ func cmdBrowser(args []string) int {
 	if screenshotPath != "" || method == "page.screenshot" {
 		return writeBrowserScreenshot(response, screenshotPath, false)
 	}
-	if method == "page.click" || method == "page.type" || method == "page.scroll" {
+	if method == "page.click" || method == "page.type" || method == "page.scroll" || method == "page.upload" {
 		return writeBrowserScreenshot(response, "", true)
 	}
 	printBrowserResult(response.Result)
@@ -203,7 +209,7 @@ func callBrowser(host, method string, params map[string]any, timeout time.Durati
 		"method":  method,
 		"params":  params,
 	}
-	if method == "credentials.request" || method == "credentials.fill" {
+	if method == "credentials.request" || method == "credentials.fill" || method == "api_keys.request" {
 		caller, ok := currentBrowserCaller()
 		if !ok {
 			return browserRPCResponse{}, fmt.Errorf("credential access must be requested from inside a verified ut panel")
@@ -230,9 +236,9 @@ func callBrowser(host, method string, params map[string]any, timeout time.Durati
 
 func browserTimeout(method string) time.Duration {
 	switch method {
-	case "credentials.request":
+	case "credentials.request", "api_keys.request":
 		return 15 * time.Minute
-	case "page.screenshot":
+	case "page.screenshot", "page.upload":
 		return 90 * time.Second
 	case "tabs.open", "tabs.navigate":
 		return 60 * time.Second
@@ -340,6 +346,37 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 		}
 		params["text"] = strings.Join(rest[textStart:], " ")
 		return "page.type", params, "", nil
+	case "upload":
+		if len(rest) < 2 {
+			return "", nil, "", fmt.Errorf("usage: ut browser upload <tab-id> [--ref ref | --at x y] <path...>")
+		}
+		params["tab_id"] = rest[0]
+		fileStart := 1
+		switch rest[1] {
+		case "--ref":
+			if len(rest) < 4 || strings.TrimSpace(rest[2]) == "" {
+				return "", nil, "", fmt.Errorf("--ref needs an element reference and at least one path")
+			}
+			params["ref"] = rest[2]
+			fileStart = 3
+		case "--at":
+			if len(rest) < 5 {
+				return "", nil, "", fmt.Errorf("--at needs x, y, and at least one path")
+			}
+			x, xerr := strconv.ParseFloat(rest[2], 64)
+			y, yerr := strconv.ParseFloat(rest[3], 64)
+			if xerr != nil || yerr != nil || x < 0 || y < 0 {
+				return "", nil, "", fmt.Errorf("upload coordinates must be non-negative numbers")
+			}
+			params["x"], params["y"] = x, y
+			fileStart = 4
+		}
+		files, loadErr := loadBrowserUploadFiles(rest[fileStart:])
+		if loadErr != nil {
+			return "", nil, "", loadErr
+		}
+		params["files"] = files
+		return "page.upload", params, "", nil
 	case "scroll":
 		if len(rest) != 3 {
 			return "", nil, "", fmt.Errorf("usage: ut browser scroll <tab-id> <dx> <dy>")
@@ -356,6 +393,42 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 	default:
 		return "", nil, "", fmt.Errorf("unknown browser command %q (try `ut browser help`)", command)
 	}
+}
+
+func loadBrowserUploadFiles(paths []string) ([]map[string]any, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("provide at least one file path")
+	}
+	files := make([]map[string]any, 0, len(paths))
+	var total int64
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read %q: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("%q is not a regular file", path)
+		}
+		if info.Size() > browserUploadMaxBytes-total {
+			return nil, fmt.Errorf("upload exceeds the %d MiB total limit", browserUploadMaxBytes>>20)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read %q: %w", path, err)
+		}
+		total += int64(len(data))
+		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		files = append(files, map[string]any{
+			"name":             filepath.Base(path),
+			"mime_type":        mimeType,
+			"data_base64":      base64.StdEncoding.EncodeToString(data),
+			"last_modified_ms": info.ModTime().UnixMilli(),
+		})
+	}
+	return files, nil
 }
 
 func parseBrowserCredentialCommand(args []string) (method string, params map[string]any, screenshotPath string, err error) {
@@ -448,12 +521,18 @@ func currentBrowserCaller() (map[string]any, bool) {
 	if json.Unmarshal(body, &who) != nil || (who.Name == "" && who.Host == "") {
 		return nil, false
 	}
+	workingDirectory, err := os.Getwd()
+	if err != nil || !filepath.IsAbs(workingDirectory) {
+		return nil, false
+	}
 	return map[string]any{
 		"machine_name":       who.Name,
 		"machine_host":       who.Host,
 		"session_name":       session.Name,
 		"stable_session_id":  session.ID,
 		"session_lineage_id": session.LineageID,
+		"working_directory":  workingDirectory,
+		"dotenv_path":        filepath.Join(workingDirectory, ".env"),
 	}, true
 }
 
@@ -514,13 +593,14 @@ func printBrowserResult(raw json.RawMessage) {
 
 func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, observation bool) int {
 	var result struct {
-		ImageBase64     string  `json:"image_base64"`
-		MimeType        string  `json:"mime_type"`
-		TabID           string  `json:"tab_id"`
-		Width           float64 `json:"width"`
-		Height          float64 `json:"height"`
-		Generation      int     `json:"generation"`
-		InteractionMode string  `json:"interaction_mode"`
+		ImageBase64     string   `json:"image_base64"`
+		MimeType        string   `json:"mime_type"`
+		TabID           string   `json:"tab_id"`
+		Width           float64  `json:"width"`
+		Height          float64  `json:"height"`
+		Generation      int      `json:"generation"`
+		InteractionMode string   `json:"interaction_mode"`
+		Uploaded        []string `json:"uploaded"`
 	}
 	if err := json.Unmarshal(response.Result, &result); err != nil || result.ImageBase64 == "" {
 		fmt.Fprintln(os.Stderr, "ut browser screenshot: Argus returned no image")
@@ -556,6 +636,9 @@ func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, o
 		return 1
 	}
 	fmt.Printf("%s\n", path)
+	if len(result.Uploaded) > 0 {
+		fmt.Printf("uploaded %s\n", strings.Join(result.Uploaded, ", "))
+	}
 	fmt.Printf("tab %s · %.0fx%.0f · observation %d", result.TabID, result.Width, result.Height, result.Generation)
 	if result.InteractionMode != "" {
 		fmt.Printf(" · %s", result.InteractionMode)
@@ -582,19 +665,23 @@ USAGE
   ut browser click <tab-id> <x> <y>
   ut browser click <tab-id> --ref <element-ref>
   ut browser type <tab-id> [--ref ref | --at x y] <text...>
+  ut browser upload <tab-id> [--ref ref | --at x y] <path...>
   ut browser scroll <tab-id> <dx> <dy>
   ut browser credentials list
   ut browser credentials request <credential> [--tab <tab-id>]
   ut browser credentials fill <tab-id> <credential> --grant <grant> \
       [--username-ref ref|--username-at x y] [--password-ref ref|--password-at x y]
 
-New tabs are hidden unless --visible is given. ` + "`show`" + ` promotes the exact
-live tab into Argus without reloading it. Coordinates use screenshot pixels from
-the top-left of the current viewport. Set UT_BROWSER_PROVIDER when more than one
-Argus browser provider is available.
+New tabs are hidden unless --visible is given. ` + "`show`" + ` adds the exact live
+tab to Argus without reloading or activating Argus. Upload reads files on the
+calling machine, then attaches them to the page's file input without opening a
+native picker; omit a target only when the page has one file input. Coordinates
+use screenshot pixels from the top-left of the current viewport. Set
+UT_BROWSER_PROVIDER when more than one Argus browser provider is available.
 
-Clicks, typing, and scrolling are injected into the addressed WebKit tab. They do
-not activate Argus, move macOS focus, or send input to another application.
+Clicks, typing, scrolling, and uploads are injected into the addressed WebKit tab.
+They do not activate Argus, move macOS focus, open native pickers, or send input
+to another application.
 
 Credential grants are opaque permissions, not passwords. The request command waits for an
 Argus approval (or resolves immediately under a saved/unattended policy). The fill command

@@ -60,8 +60,8 @@ func brokerLog(name string) string { return filepath.Join(os.TempDir(), name) }
 var clientVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
 	"tail": true, "send": true, "cp": true, "lab": true, "forward": true,
-	"browser": true, "web-artifacts": true,
-	"help":    true, "--help": true, "-h": true,
+	"browser": true, "web-artifacts": true, "api-key": true, "api_key": true,
+	"help": true, "--help": true, "-h": true,
 }
 
 func main() {

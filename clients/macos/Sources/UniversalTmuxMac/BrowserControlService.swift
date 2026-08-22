@@ -15,7 +15,6 @@ final class BrowserControlService: ObservableObject {
     @Published private(set) var providerPort: UInt16?
 
     private weak var dashboards: DashboardsModel?
-    private weak var appState: AppState?
     private weak var credentialVault: CredentialVaultStore?
     private var listener: BrowserLoopbackServer?
     private var heartbeat: Timer?
@@ -30,10 +29,8 @@ final class BrowserControlService: ObservableObject {
         browserHostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
     }
 
-    func start(dashboards: DashboardsModel, state: AppState,
-               credentialVault: CredentialVaultStore) {
+    func start(dashboards: DashboardsModel, credentialVault: CredentialVaultStore) {
         self.dashboards = dashboards
-        self.appState = state
         self.credentialVault = credentialVault
         guard listener == nil else { return }
         let server = BrowserLoopbackServer { [weak self] body in
@@ -102,7 +99,8 @@ final class BrowserControlService: ObservableObject {
             let result: Any
             // An approval may remain pending for minutes. It must not hold the
             // browser interaction lane and make unrelated tabs appear frozen.
-            if method == "credentials.list" || method == "credentials.request" {
+            if method == "credentials.list" || method == "credentials.request" ||
+                method == "api_keys.request" {
                 result = try await dispatch(method: method, params: params, caller: caller)
             } else {
                 await acquireRPC()
@@ -182,6 +180,14 @@ final class BrowserControlService: ObservableObject {
             try await typeText(managed, params: params)
             try await Task.sleep(nanoseconds: 180_000_000)
             return try await screenshot(managed, fullPage: false)
+        case "page.upload":
+            let tab = try resolveTab(params)
+            let managed = ensureManaged(tab)
+            let uploaded = try await uploadFiles(managed, params: params)
+            try await Task.sleep(nanoseconds: 180_000_000)
+            var observation = try await screenshot(managed, fullPage: false)
+            observation["uploaded"] = uploaded
+            return observation
         case "page.scroll":
             let tab = try resolveTab(params)
             let managed = ensureManaged(tab)
@@ -194,7 +200,7 @@ final class BrowserControlService: ObservableObject {
             guard let credentialVault else {
                 throw BrowserControlFailure.failed("Argus Credential Vault is unavailable")
             }
-            return ["credentials": credentialVault.entries.map { entry in
+            return ["credentials": credentialVault.entries.filter { $0.kind == .login }.map { entry in
                 ["name": entry.name, "group": entry.group,
                  "fields": ["username", "password"]] as [String: Any]
             }]
@@ -241,6 +247,32 @@ final class BrowserControlService: ObservableObject {
             return ["tab_id": tab.id.uuidString.lowercased(),
                     "url": managed.webView.url?.absoluteString ?? "",
                     "filled": filled]
+        case "api_keys.request":
+            guard let credentialVault else {
+                throw BrowserControlFailure.failed("Argus Credential Vault is unavailable")
+            }
+            guard let caller else {
+                throw BrowserControlFailure.invalid("API-key access must originate from a verified ut panel")
+            }
+            guard let name = params["name"] as? String,
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw BrowserControlFailure.invalid("saved API-key name is required")
+            }
+            guard !caller.workingDirectory.isEmpty, !caller.dotenvPath.isEmpty,
+                  caller.dotenvPath == Self.dotenvPath(for: caller.workingDirectory) else {
+                throw BrowserControlFailure.invalid("the calling panel did not provide a valid .env destination")
+            }
+            let existingVariables = Set(params["existing_variables"] as? [String] ?? [])
+            if let entry = credentialVault.apiKeyEntries(named: name).first,
+               existingVariables.contains(entry.environmentVariable) {
+                return ["variable": entry.environmentVariable, "value": "",
+                        "credential": entry.name, "already_present": true]
+            }
+            let approval = try await credentialVault.requestAPIKey(
+                name: name, destination: caller.dotenvPath, caller: caller
+            )
+            return ["variable": approval.variable, "value": approval.value,
+                    "credential": approval.entry.name, "already_present": false]
         default:
             throw BrowserControlFailure.invalid("unknown browser method \(method)")
         }
@@ -253,9 +285,18 @@ final class BrowserControlService: ObservableObject {
             machineHost: raw["machine_host"] as? String ?? "",
             sessionName: raw["session_name"] as? String ?? "",
             stableSessionID: raw["stable_session_id"] as? String ?? "",
-            sessionLineageID: raw["session_lineage_id"] as? String ?? ""
+            sessionLineageID: raw["session_lineage_id"] as? String ?? "",
+            workingDirectory: raw["working_directory"] as? String ?? "",
+            dotenvPath: raw["dotenv_path"] as? String ?? ""
         )
         return caller.isAttributed ? caller : nil
+    }
+
+    private static func dotenvPath(for workingDirectory: String) -> String {
+        guard let last = workingDirectory.last else { return "" }
+        if last == "/" || last == "\\" { return workingDirectory + ".env" }
+        let separator = workingDirectory.contains("\\") && !workingDirectory.contains("/") ? "\\" : "/"
+        return workingDirectory + separator + ".env"
     }
 
     // MARK: tabs
@@ -304,11 +345,13 @@ final class BrowserControlService: ObservableObject {
     }
 
     private func show(_ tab: DashboardTab) {
-        if let hidden = hiddenTabs.removeValue(forKey: tab.id) {
-            hidden.detachFromOffscreenWindow()
-        }
-        dashboards?.adoptBrowserTab(tab, select: true)
-        appState?.openWindowRequest = "dashboards"
+        // "Visible" means retained in the user's Dashboard tab strip. It must
+        // never open an Argus window or replace the tab the user is reading.
+        // Keep the offscreen host until WebTabView naturally reparents the live
+        // WKWebView when the user selects this tab.
+        _ = hiddenTabs.removeValue(forKey: tab.id)
+        let shouldSelect = dashboards?.activeID == nil
+        dashboards?.adoptBrowserTab(tab, select: shouldSelect)
     }
 
     private func close(_ tab: DashboardTab) {
@@ -539,19 +582,98 @@ final class BrowserControlService: ObservableObject {
         guard let text = params["text"] as? String else {
             throw BrowserControlFailure.invalid("type requires text")
         }
+        if try await typeIntoContentEditable(managed, params: params, text: text) {
+            return
+        }
         if let ref = params["ref"] as? String {
-            guard let rect = try await managed.webView.evaluate(script: BrowserScripts.rect(ref: ref)) as? [String: Any],
-                  let x = rect.double("x"), let y = rect.double("y"),
-                  let width = rect.double("width"), let height = rect.double("height") else {
+            guard (try await managed.webView.evaluate(
+                script: BrowserScripts.focus(ref: ref)
+            ) as? Bool) == true else {
                 throw BrowserControlFailure.notFound("element reference \(ref) is missing or cannot be focused")
             }
-            try await isolatedType(managed, x: x + width / 2, y: y + height / 2, text: text)
+            try await isolatedType(managed, x: nil, y: nil, text: text)
             return
         } else if let x = params.double("x"), let y = params.double("y") {
             try await isolatedType(managed, x: x, y: y, text: text)
             return
         }
         try await isolatedType(managed, x: nil, y: nil, text: text)
+    }
+
+    /// Contenteditable editors such as Gmail's reply body may synchronously
+    /// replace themselves when focused. Resolve and edit them in one WebKit call,
+    /// before focus can invalidate the DOM ref between two RPC steps. Standard
+    /// inputs return `handled:false` and retain the existing value-setter path.
+    private func typeIntoContentEditable(_ managed: BrowserManagedTab,
+                                         params: [String: Any], text: String) async throws -> Bool {
+        var arguments: [String: Any] = [
+            "insertedText": text,
+            "targetRef": NSNull(), "targetX": NSNull(), "targetY": NSNull()
+        ]
+        if let ref = params["ref"] as? String { arguments["targetRef"] = ref }
+        if let x = params.double("x") { arguments["targetX"] = x }
+        if let y = params.double("y") { arguments["targetY"] = y }
+        guard let result = try await managed.webView.callAsync(
+            script: BrowserScripts.typeIntoContentEditable,
+            arguments: arguments
+        ) as? [String: Any] else {
+            throw BrowserControlFailure.failed("WebKit returned an invalid typing result")
+        }
+        guard result["handled"] as? Bool == true else { return false }
+        guard result["ok"] as? Bool == true else {
+            throw BrowserControlFailure.failed(
+                result["error"] as? String ?? "the contenteditable element rejected text"
+            )
+        }
+        managed.lastInteractionMode = "dom-contenteditable"
+        return true
+    }
+
+    private func uploadFiles(_ managed: BrowserManagedTab,
+                             params: [String: Any]) async throws -> [String] {
+        guard let payloads = params["files"] as? [[String: Any]], !payloads.isEmpty else {
+            throw BrowserControlFailure.invalid("upload requires at least one file")
+        }
+        var files: [[String: Any]] = []
+        var totalBytes = 0
+        for payload in payloads {
+            guard let name = payload["name"] as? String,
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let base64 = payload["data_base64"] as? String,
+                  let decoded = Data(base64Encoded: base64) else {
+                throw BrowserControlFailure.invalid("upload contains an invalid file payload")
+            }
+            totalBytes += decoded.count
+            guard totalBytes <= 32 * 1024 * 1024 else {
+                throw BrowserControlFailure.invalid("upload exceeds the 32 MiB total limit")
+            }
+            files.append([
+                "name": name,
+                "mimeType": payload["mime_type"] as? String ?? "application/octet-stream",
+                "dataBase64": base64,
+                "lastModified": payload["last_modified_ms"] as? NSNumber ?? 0
+            ])
+        }
+        var arguments: [String: Any] = [
+            "uploadFiles": files,
+            "targetRef": NSNull(), "targetX": NSNull(), "targetY": NSNull()
+        ]
+        if let ref = params["ref"] as? String { arguments["targetRef"] = ref }
+        if let x = params.double("x") { arguments["targetX"] = x }
+        if let y = params.double("y") { arguments["targetY"] = y }
+        guard let result = try await managed.webView.callAsync(
+            script: BrowserScripts.attachFiles,
+            arguments: arguments
+        ) as? [String: Any] else {
+            throw BrowserControlFailure.failed("the page did not accept the uploaded files")
+        }
+        guard result["ok"] as? Bool == true else {
+            throw BrowserControlFailure.notFound(
+                result["error"] as? String ?? "no matching file input was found"
+            )
+        }
+        managed.lastInteractionMode = "dom-file-upload"
+        return result["names"] as? [String] ?? files.compactMap { $0["name"] as? String }
     }
 
     /// Agent input is always evaluated inside the addressed page. Posting NSEvents
@@ -771,25 +893,32 @@ private enum BrowserScripts {
         const s = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
       };
-      const selector = 'a,button,input,textarea,select,[role],[contenteditable="true"],[tabindex]';
-      const elements = [];
-      for (const el of document.querySelectorAll(selector)) {
-        if (!visible(el) || elements.length >= 750) continue;
+        const selector = 'a,button,input,textarea,select,[role],[contenteditable="true"],[tabindex]';
+        const elements = [];
+        for (const el of document.querySelectorAll(selector)) {
+        const type = (el.getAttribute('type') || '').toLowerCase();
+        const isFileInput = el instanceof HTMLInputElement && type === 'file';
+        const isVisible = visible(el);
+        // Hidden file inputs back many visible upload buttons. Include them so
+        // an agent can address the real picker by ref without opening AppKit.
+        if ((!isVisible && !isFileInput) || elements.length >= 750) continue;
         let ref = el.getAttribute('data-argus-browser-ref');
         if (!ref) {
           ref = 'e' + (++window.__argusBrowserRef);
           el.setAttribute('data-argus-browser-ref', ref);
         }
         const r = el.getBoundingClientRect();
-        const type = (el.getAttribute('type') || '').toLowerCase();
         const protectedValue = el.getAttribute('data-argus-protected-field') === 'true';
         const rawValue = ('value' in el && type !== 'password' && !protectedValue) ? String(el.value || '') : '';
         const name = el.getAttribute('aria-label') || el.getAttribute('title') ||
-          el.getAttribute('placeholder') || el.innerText || el.textContent || '';
+          el.getAttribute('placeholder') || el.getAttribute('name') ||
+          el.innerText || el.textContent || (isFileInput ? 'File upload' : '');
         elements.push({
           ref, tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '',
           type, name: String(name).trim().replace(/\s+/g, ' ').slice(0, 300),
-          value: rawValue.slice(0, 1000), disabled: !!el.disabled,
+          value: rawValue.slice(0, 1000), disabled: !!el.disabled, visible: isVisible,
+          accept: isFileInput ? String(el.accept || '') : '',
+          multiple: isFileInput ? !!el.multiple : false,
           rect: {x:r.x, y:r.y, width:r.width, height:r.height}
         });
       }
@@ -843,6 +972,113 @@ private enum BrowserScripts {
       return {ok:String(el.textContent || '') === protectedValue};
     }
     return {ok:false};
+    """#
+
+    // File bytes arrive through WebKit's argument channel and become browser
+    // File objects. This is the page-level equivalent of a user choosing files;
+    // it never presents NSOpenPanel or changes macOS application focus.
+    static let attachFiles = #"""
+    const payloads = Array.isArray(uploadFiles) ? uploadFiles : [];
+    const byRef = (ref) => [...document.querySelectorAll('[data-argus-browser-ref]')]
+      .find(node => node.getAttribute('data-argus-browser-ref') === ref) || null;
+    let target = typeof targetRef === 'string' ? byRef(targetRef) : null;
+    if (!target && Number.isFinite(targetX) && Number.isFinite(targetY)) {
+      target = document.elementFromPoint(targetX, targetY);
+    }
+    const asFileInput = (node) => {
+      if (!node) return null;
+      if (node instanceof HTMLInputElement && node.type === 'file') return node;
+      if (node instanceof HTMLLabelElement && node.control instanceof HTMLInputElement &&
+          node.control.type === 'file') return node.control;
+      const label = node.closest?.('label');
+      if (label?.control instanceof HTMLInputElement && label.control.type === 'file') {
+        return label.control;
+      }
+      const descendant = node.querySelector?.('input[type="file"]');
+      if (descendant) return descendant;
+      let scope = node.parentElement;
+      for (let depth = 0; scope && depth < 3; depth++, scope = scope.parentElement) {
+        const nearby = [...scope.querySelectorAll('input[type="file"]')];
+        if (nearby.length === 1) return nearby[0];
+      }
+      return null;
+    };
+    let input = asFileInput(target);
+    if (!input && !target) {
+      const candidates = [...document.querySelectorAll('input[type="file"]')];
+      if (candidates.length === 1) input = candidates[0];
+      else if (candidates.length > 1) {
+        return {ok:false, error:'the page has multiple file inputs; use --ref or --at'};
+      }
+    }
+    if (!(input instanceof HTMLInputElement) || input.type !== 'file') {
+      return {ok:false, error:'no file input matches the requested target'};
+    }
+    if (input.disabled) return {ok:false, error:'the file input is disabled'};
+    if (!input.multiple && payloads.length > 1) {
+      return {ok:false, error:'the file input accepts only one file'};
+    }
+    try {
+      const transfer = new DataTransfer();
+      for (const payload of payloads) {
+        const binary = atob(String(payload.dataBase64 || ''));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index++) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        transfer.items.add(new File([bytes], String(payload.name || 'upload'), {
+          type: String(payload.mimeType || 'application/octet-stream'),
+          lastModified: Number(payload.lastModified || Date.now())
+        }));
+      }
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files')?.set;
+      if (setter) setter.call(input, transfer.files); else input.files = transfer.files;
+      input.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
+      input.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
+      return {ok:true, names:[...input.files].map(file => file.name)};
+    } catch (error) {
+      return {ok:false, error:String(error?.message || error || 'file attachment failed')};
+    }
+    """#
+
+    static let typeIntoContentEditable = #"""
+    const editableSelector = '[contenteditable]:not([contenteditable="false"])';
+    const byRef = (ref) => [...document.querySelectorAll('[data-argus-browser-ref]')]
+      .find(node => node.getAttribute('data-argus-browser-ref') === ref) || null;
+    let target = typeof targetRef === 'string' ? byRef(targetRef) : null;
+    if (!target && Number.isFinite(targetX) && Number.isFinite(targetY)) {
+      target = document.elementFromPoint(targetX, targetY);
+    }
+    if (!target && targetRef == null && !Number.isFinite(targetX)) {
+      target = document.activeElement;
+    }
+    const editor = target?.matches?.(editableSelector)
+      ? target : target?.closest?.(editableSelector);
+    if (!(editor instanceof HTMLElement) || !editor.isContentEditable) {
+      return {handled:false};
+    }
+    try {
+      const text = String(insertedText ?? '');
+      if (text.length === 0) return {handled:true, ok:true};
+      const fragment = editor.ownerDocument.createDocumentFragment();
+      text.split('\n').forEach((line, index) => {
+        if (index > 0) fragment.appendChild(editor.ownerDocument.createElement('br'));
+        if (line.length > 0) fragment.appendChild(editor.ownerDocument.createTextNode(line));
+      });
+      editor.appendChild(fragment);
+      let inputEvent;
+      try {
+        inputEvent = new InputEvent('input', {
+          bubbles:true, composed:true, data:text, inputType:'insertText'
+        });
+      } catch (_) {
+        inputEvent = new Event('input', {bubbles:true, composed:true});
+      }
+      try { editor.dispatchEvent(inputEvent); } catch (_) {}
+      return {handled:true, ok:true};
+    } catch (error) {
+      return {handled:true, ok:false, error:String(error?.message || error || 'typing failed')};
+    }
     """#
 
     static func coordinateClick(x: Double, y: Double) -> String {
@@ -953,8 +1189,28 @@ private enum BrowserScripts {
     static func coordinateFocus(x: Double, y: Double) -> String {
         #"""
         (() => {
-          const el = document.elementFromPoint(\#(x), \#(y));
+          const hit = document.elementFromPoint(\#(x), \#(y));
+          if (!hit) return false;
+          const selector = 'input,textarea,[contenteditable]:not([contenteditable="false"])';
+          const el = hit.matches?.(selector) ? hit : hit.closest?.(selector);
           if (!el) return false;
+          el.focus({preventScroll:true});
+          return document.activeElement === el || el.contains(document.activeElement);
+        })()
+        """#
+    }
+
+    static func focus(ref: String) -> String {
+        let encoded = jsString(ref)
+        return #"""
+        (() => {
+          const referenced = [...document.querySelectorAll('[data-argus-browser-ref]')]
+            .find(node => node.getAttribute('data-argus-browser-ref') === \#(encoded));
+          if (!referenced) return false;
+          const selector = 'input,textarea,[contenteditable]:not([contenteditable="false"])';
+          const el = referenced.matches?.(selector) ? referenced : referenced.closest?.(selector);
+          if (!el || el.disabled || el.readOnly) return false;
+          el.scrollIntoView({block:'center', inline:'center'});
           el.focus({preventScroll:true});
           return document.activeElement === el || el.contains(document.activeElement);
         })()
@@ -974,12 +1230,6 @@ private enum BrowserScripts {
             window.__argusPreparedType = {
               el, kind:'value', start, end, original:String(el.value),
               expected:String(el.value).slice(0, start) + text + String(el.value).slice(end)
-            };
-            return true;
-          }
-          if (el.isContentEditable) {
-            window.__argusPreparedType = {
-              el, kind:'contenteditable', originalHTML:el.innerHTML, text
             };
             return true;
           }
@@ -1003,17 +1253,6 @@ private enum BrowserScripts {
         el.dispatchEvent(new Event('input', {bubbles:true}));
         el.dispatchEvent(new Event('change', {bubbles:true}));
         return String(el.value) === state.expected;
-      }
-      if (state.kind === 'contenteditable') {
-        el.innerHTML = state.originalHTML;
-        el.focus({preventScroll:true});
-        const selection = getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(el); range.collapse(false);
-        selection.removeAllRanges(); selection.addRange(range);
-        const inserted = document.execCommand('insertText', false, state.text);
-        el.dispatchEvent(new Event('input', {bubbles:true}));
-        return inserted || String(el.textContent || '').includes(state.text);
       }
       return false;
     })()
@@ -1093,7 +1332,7 @@ private final class BrowserLoopbackServer {
             guard let self else { connection.cancel(); return }
             var accumulated = buffer
             if let data { accumulated.append(data) }
-            if accumulated.count > 20 * 1024 * 1024 {
+            if accumulated.count > 64 * 1024 * 1024 {
                 self.send(.json(["ok": false, "error": "request too large"], status: 413), on: connection)
                 return
             }

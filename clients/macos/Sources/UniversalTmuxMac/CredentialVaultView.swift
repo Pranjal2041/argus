@@ -8,6 +8,7 @@ struct CredentialVaultView: View {
     @State private var editing: CredentialVaultEntry?
     @State private var adding = false
     @State private var deleting: CredentialVaultEntry?
+    @State private var selectedKind: CredentialVaultKind = .login
 
     private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size * uiScale, weight: weight)
@@ -15,10 +16,12 @@ struct CredentialVaultView: View {
 
     private var filtered: [CredentialVaultEntry] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return vault.entries }
-        return vault.entries.filter {
+        let entries = vault.entries.filter { $0.kind == selectedKind }
+        guard !query.isEmpty else { return entries }
+        return entries.filter {
             $0.name.localizedCaseInsensitiveContains(query) ||
-                $0.group.localizedCaseInsensitiveContains(query)
+                $0.group.localizedCaseInsensitiveContains(query) ||
+                $0.environmentVariable.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -41,10 +44,10 @@ struct CredentialVaultView: View {
         }
         .frame(minWidth: 820, minHeight: 560)
         .sheet(isPresented: $adding) {
-            CredentialEditorView(entry: nil).environmentObject(vault)
+            CredentialEditorView(entry: nil, kind: selectedKind).environmentObject(vault)
         }
         .sheet(item: $editing) { entry in
-            CredentialEditorView(entry: entry).environmentObject(vault)
+            CredentialEditorView(entry: entry, kind: entry.kind).environmentObject(vault)
         }
         .alert("Credential Vault", isPresented: Binding(
             get: { vault.errorMessage != nil },
@@ -64,15 +67,19 @@ struct CredentialVaultView: View {
                 deleting = nil
             }
         } message: {
-            Text("\(deleting?.name ?? "This credential") and its saved password will be removed from this Mac.")
+            Text("\(deleting?.name ?? "This credential") and its saved secret will be removed from this Mac.")
         }
         .onAppear {
-            if selection == nil { selection = vault.entries.first?.id }
+            if selection == nil { selection = vault.entries.first { $0.kind == selectedKind }?.id }
         }
         .onChange(of: vault.entries) { entries in
-            if selection == nil || !entries.contains(where: { $0.id == selection }) {
-                selection = entries.first?.id
+            let visible = entries.filter { $0.kind == selectedKind }
+            if selection == nil || !visible.contains(where: { $0.id == selection }) {
+                selection = visible.first?.id
             }
+        }
+        .onChange(of: selectedKind) { kind in
+            selection = vault.entries.first { $0.kind == kind }?.id
         }
     }
 
@@ -87,7 +94,7 @@ struct CredentialVaultView: View {
             .frame(width: 38 * uiScale, height: 38 * uiScale)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Credential Vault").font(cf(21, .bold)).foregroundStyle(Theme.textPrimary)
-                Text("Secrets stay on this Mac. Agents receive permission, never passwords.")
+                Text("Secrets are injected into approved destinations and never shown in terminals.")
                     .font(cf(11.5)).foregroundStyle(Theme.textTertiary)
             }
             Spacer()
@@ -110,9 +117,9 @@ struct CredentialVaultView: View {
                 ))
             }
             .buttonStyle(.plain)
-            .help("When Argus Unattended Mode is on, verified panel agents may use saved credentials without waiting. Secrets remain on this Mac and remain available after its first unlock.")
+            .help("When Argus Unattended Mode is on, verified panel agents may use saved sign-ins or add a uniquely matching API key to the requested .env without waiting.")
             Button { adding = true } label: {
-                Label("Add credential", systemImage: "plus")
+                Label(selectedKind == .login ? "Add sign-in" : "Add API key", systemImage: "plus")
             }
             .buttonStyle(AccentButtonStyle(scale: uiScale))
         }
@@ -121,9 +128,17 @@ struct CredentialVaultView: View {
 
     private var credentialList: some View {
         VStack(spacing: 12 * uiScale) {
+            Picker("", selection: $selectedKind) {
+                ForEach(CredentialVaultKind.allCases) { kind in
+                    Text(kind.title).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
             HStack(spacing: 8 * uiScale) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.textTertiary)
-                TextField("Search credentials", text: $search)
+                TextField(selectedKind == .login ? "Search sign-ins" : "Search API keys", text: $search)
                     .textFieldStyle(.plain).font(cf(12.5)).foregroundStyle(Theme.textPrimary)
             }
             .padding(.horizontal, 11 * uiScale).padding(.vertical, 9 * uiScale)
@@ -133,7 +148,9 @@ struct CredentialVaultView: View {
             if filtered.isEmpty {
                 Spacer()
                 Image(systemName: "key.slash").font(cf(28)).foregroundStyle(Theme.textTertiary)
-                Text(search.isEmpty ? "No saved credentials" : "No matches")
+                Text(search.isEmpty
+                     ? (selectedKind == .login ? "No saved sign-ins" : "No saved API keys")
+                     : "No matches")
                     .font(cf(12.5, .medium)).foregroundStyle(Theme.textSecondary)
                 Spacer()
             } else {
@@ -147,7 +164,8 @@ struct CredentialVaultView: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(entry.name).font(cf(13, .semibold)).foregroundStyle(Theme.textPrimary)
                                             .lineLimit(1)
-                                        Text(entry.displayGroup).font(cf(10.5)).foregroundStyle(Theme.textTertiary)
+                                        Text(entry.kind == .apiKey ? entry.environmentVariable : entry.displayGroup)
+                                            .font(cf(10.5)).foregroundStyle(Theme.textTertiary)
                                             .lineLimit(1)
                                     }
                                     Spacer()
@@ -178,7 +196,8 @@ struct CredentialVaultView: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(entry.name).font(cf(26, .bold)).foregroundStyle(Theme.textPrimary)
-                            Text(entry.displayGroup).font(cf(12, .medium)).foregroundStyle(Theme.textSecondary)
+                            Text(entry.kind == .apiKey ? entry.environmentVariable : entry.displayGroup)
+                                .font(cf(12, .medium)).foregroundStyle(Theme.textSecondary)
                         }
                         Spacer()
                         Button("Edit") { editing = entry }.buttonStyle(GhostButtonStyle(scale: uiScale))
@@ -189,10 +208,16 @@ struct CredentialVaultView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 13 * uiScale) {
-                        Text("AVAILABLE FIELDS").font(cf(10.5, .bold)).tracking(1.3)
+                        Text(entry.kind == .login ? "AVAILABLE FIELDS" : "ENVIRONMENT VALUE")
+                            .font(cf(10.5, .bold)).tracking(1.3)
                             .foregroundStyle(Theme.textTertiary)
-                        vaultField(icon: "person", name: "username", value: "Stored locally")
-                        vaultField(icon: "key", name: "password", value: "••••••••••••")
+                        if entry.kind == .login {
+                            vaultField(icon: "person", name: "username", value: "Stored locally")
+                            vaultField(icon: "key", name: "password", value: "••••••••••••")
+                        } else {
+                            vaultField(icon: "terminal", name: entry.environmentVariable,
+                                       value: "••••••••••••")
+                        }
                     }
                     .padding(18 * uiScale).glassCard(cornerRadius: 12, strong: true)
 
@@ -201,8 +226,10 @@ struct CredentialVaultView: View {
                             Text("RECENT ACCESS").font(cf(10.5, .bold)).tracking(1.3)
                                 .foregroundStyle(Theme.textTertiary)
                             Spacer()
-                            Button("Forget saved approvals") { vault.revokeSavedPolicies() }
-                                .buttonStyle(.plain).font(cf(10.5, .medium)).foregroundStyle(Theme.accent)
+                            if entry.kind == .login {
+                                Button("Forget saved approvals") { vault.revokeSavedPolicies() }
+                                    .buttonStyle(.plain).font(cf(10.5, .medium)).foregroundStyle(Theme.accent)
+                            }
                         }
                         let events = vault.auditEvents.filter { $0.credentialName == entry.name }.prefix(8)
                         if events.isEmpty {
@@ -231,11 +258,14 @@ struct CredentialVaultView: View {
         } else {
             VStack(spacing: 12 * uiScale) {
                 Image(systemName: "lock.shield").font(cf(42)).foregroundStyle(Theme.accent.opacity(0.8))
-                Text("A quiet place for agent credentials").font(cf(18, .semibold)).foregroundStyle(Theme.textPrimary)
-                Text("Add a login once. Approve how long an agent may use it when requested.")
+                Text(selectedKind == .login ? "No saved sign-ins" : "No saved API keys")
+                    .font(cf(18, .semibold)).foregroundStyle(Theme.textPrimary)
+                Text(selectedKind == .login
+                     ? "Add a login once. Approve how long an agent may use it when requested."
+                     : "Save a key once. Approve the exact project .env whenever it is requested.")
                     .font(cf(12)).foregroundStyle(Theme.textSecondary).multilineTextAlignment(.center)
                     .frame(maxWidth: 340 * uiScale)
-                Button("Add first credential") { adding = true }
+                Button(selectedKind == .login ? "Add first sign-in" : "Add first API key") { adding = true }
                     .buttonStyle(AccentButtonStyle(scale: uiScale))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -258,10 +288,12 @@ struct CredentialEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("ut.uiScale") private var uiScale = 1.0
     let entry: CredentialVaultEntry?
+    let kind: CredentialVaultKind
     @State private var name = ""
     @State private var group = ""
     @State private var username = ""
     @State private var password = ""
+    @State private var environmentVariable = ""
     @State private var errorText: String?
 
     private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
@@ -271,17 +303,27 @@ struct CredentialEditorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18 * uiScale) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(entry == nil ? "Add credential" : "Edit credential")
+                Text(entry == nil
+                     ? (kind == .login ? "Add sign-in" : "Add API key")
+                     : (kind == .login ? "Edit sign-in" : "Edit API key"))
                     .font(cf(20, .bold)).foregroundStyle(Theme.textPrimary)
-                Text("The password is encrypted by macOS and never returned to an agent.")
+                Text(kind == .login
+                     ? "The password is encrypted by macOS and injected only after approval."
+                     : "The key is encrypted by macOS and written only to an approved .env file.")
                     .font(cf(11)).foregroundStyle(Theme.textTertiary)
             }
             VStack(spacing: 12 * uiScale) {
-                labeledField("Name", hint: "Research Gmail", text: $name)
-                labeledField("Group", hint: "Research accounts (optional)", text: $group)
-                labeledField("Username", hint: "name@example.com", text: $username)
+                labeledField("Name", hint: kind == .login ? "Research Gmail" : "OpenAI research", text: $name)
+                labeledField("Group", hint: kind == .login
+                             ? "Research accounts (optional)" : "Research APIs (optional)", text: $group)
+                if kind == .login {
+                    labeledField("Username", hint: "name@example.com", text: $username)
+                } else {
+                    labeledField("Environment variable", hint: "OPENAI_API_KEY", text: $environmentVariable)
+                }
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Password").font(cf(10.5, .semibold)).foregroundStyle(Theme.textSecondary)
+                    Text(kind == .login ? "Password" : "API key")
+                        .font(cf(10.5, .semibold)).foregroundStyle(Theme.textSecondary)
                     SecureField("Required", text: $password)
                         .textFieldStyle(.plain).font(cf(13)).foregroundStyle(Theme.textPrimary)
                         .padding(.horizontal, 12 * uiScale).padding(.vertical, 10 * uiScale)
@@ -294,8 +336,12 @@ struct CredentialEditorView: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
-                    .buttonStyle(AccentButtonStyle(enabled: !name.isEmpty && !password.isEmpty, scale: uiScale))
-                    .disabled(name.isEmpty || password.isEmpty)
+                    .buttonStyle(AccentButtonStyle(
+                        enabled: !name.isEmpty && !password.isEmpty &&
+                            (kind == .login || !environmentVariable.isEmpty), scale: uiScale
+                    ))
+                    .disabled(name.isEmpty || password.isEmpty ||
+                              (kind == .apiKey && environmentVariable.isEmpty))
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -320,6 +366,7 @@ struct CredentialEditorView: View {
         guard let entry else { return }
         name = entry.name
         group = entry.group
+        environmentVariable = entry.environmentVariable
         do {
             let secret = try vault.secret(for: entry)
             username = secret.username
@@ -329,8 +376,13 @@ struct CredentialEditorView: View {
 
     private func save() {
         do {
-            try vault.save(id: entry?.id, name: name, group: group,
-                           username: username, password: password)
+            if kind == .login {
+                try vault.save(id: entry?.id, name: name, group: group,
+                               username: username, password: password)
+            } else {
+                try vault.saveAPIKey(id: entry?.id, name: name, group: group,
+                                     variable: environmentVariable, value: password)
+            }
             dismiss()
         } catch { errorText = error.localizedDescription }
     }
@@ -412,5 +464,140 @@ struct CredentialApprovalSheet: View {
         .padding(25 * uiScale)
         .frame(width: 480 * uiScale)
         .background(Theme.appBackground)
+    }
+}
+
+struct APIKeyApprovalSheet: View {
+    @EnvironmentObject private var vault: CredentialVaultStore
+    @ObservedObject var request: APIKeyApprovalRequest
+    @AppStorage("ut.uiScale") private var uiScale = 1.0
+    @State private var newEnvironmentVariable = ""
+    @State private var newKeyValue = ""
+    @State private var errorText: String?
+
+    private func cf(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size * uiScale, weight: weight)
+    }
+
+    private var destinationVariable: String {
+        request.selectedEntry?.environmentVariable ??
+            newEnvironmentVariable.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 19 * uiScale) {
+            HStack(alignment: .top, spacing: 13 * uiScale) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Theme.waiting.opacity(0.15))
+                    Image(systemName: "key.fill").font(cf(18, .bold)).foregroundStyle(Theme.waiting)
+                }
+                .frame(width: 42 * uiScale, height: 42 * uiScale)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Add API key to .env?").font(cf(20, .bold)).foregroundStyle(Theme.textPrimary)
+                    Text(request.caller.displayName).font(cf(11.5, .medium)).foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 11 * uiScale) {
+                HStack {
+                    Text(request.name).font(cf(15, .semibold)).foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Text("Value remains hidden").font(cf(10.5, .medium)).foregroundStyle(Theme.attached)
+                }
+                if !destinationVariable.isEmpty {
+                    Text("Will add \(destinationVariable)")
+                        .font(.system(size: 11.5 * uiScale, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                HStack(alignment: .top, spacing: 9 * uiScale) {
+                    Image(systemName: "folder").foregroundStyle(Theme.textTertiary)
+                    Text(request.destination)
+                        .font(.system(size: 11.5 * uiScale, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(14 * uiScale).glassCard(cornerRadius: 11, strong: true)
+
+            VStack(alignment: .leading, spacing: 9 * uiScale) {
+                Text("SAVED KEY").font(cf(10, .bold)).tracking(1.2).foregroundStyle(Theme.textTertiary)
+                if request.candidates.isEmpty {
+                    VStack(spacing: 9 * uiScale) {
+                        TextField("Environment variable, e.g. DAYTONA_API_KEY",
+                                  text: $newEnvironmentVariable)
+                            .textFieldStyle(.plain).font(cf(12.5)).foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 11 * uiScale).padding(.vertical, 9 * uiScale)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+                        SecureField("Paste \(request.name) key", text: $newKeyValue)
+                            .textFieldStyle(.plain).font(cf(12.5)).foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 11 * uiScale).padding(.vertical, 9 * uiScale)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+                    }
+                } else if request.candidates.count == 1, let entry = request.selectedEntry {
+                    HStack {
+                        Text(entry.name).font(cf(12.5, .semibold)).foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                        Text(entry.environmentVariable)
+                            .font(.system(size: 10.5 * uiScale, design: .monospaced))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    .padding(11 * uiScale)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
+                } else {
+                    Picker("", selection: $request.selectedEntryID) {
+                        ForEach(request.candidates) { entry in
+                            Text("\(entry.name) · \(entry.environmentVariable)").tag(Optional(entry.id))
+                        }
+                    }
+                    .labelsHidden()
+                }
+                Text(destinationVariable.isEmpty
+                     ? "Choose the environment-variable name. Existing .env contents are preserved."
+                     : "Argus appends only \(destinationVariable). Existing .env contents are preserved.")
+                    .font(cf(10)).foregroundStyle(Theme.textTertiary)
+                if let errorText {
+                    Text(errorText).font(cf(10.5)).foregroundStyle(Theme.unreachable)
+                }
+            }
+
+            HStack {
+                Button("Deny") { vault.denyPendingAPIKey() }
+                    .buttonStyle(GhostButtonStyle(color: Theme.textSecondary, scale: uiScale))
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(request.candidates.isEmpty ? "Save & add key" : "Add key") {
+                    if request.candidates.isEmpty {
+                        do {
+                            try vault.saveAndApprovePendingAPIKey(variable: newEnvironmentVariable,
+                                                                 value: newKeyValue)
+                        } catch { errorText = error.localizedDescription }
+                    } else {
+                        vault.approvePendingAPIKey()
+                    }
+                }
+                    .buttonStyle(AccentButtonStyle(
+                        enabled: !request.candidates.isEmpty ||
+                            (!newEnvironmentVariable.isEmpty && !newKeyValue.isEmpty), scale: uiScale
+                    ))
+                    .disabled(request.candidates.isEmpty &&
+                              (newEnvironmentVariable.isEmpty || newKeyValue.isEmpty))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(25 * uiScale)
+        .frame(width: 520 * uiScale)
+        .background(Theme.appBackground)
+        .onAppear {
+            if newEnvironmentVariable.isEmpty {
+                let words = request.name.uppercased()
+                    .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                    .filter { !$0.isEmpty }
+                let base = words.joined(separator: "_")
+                newEnvironmentVariable = base.hasSuffix("_API_KEY") ? base : base + "_API_KEY"
+            }
+        }
     }
 }
