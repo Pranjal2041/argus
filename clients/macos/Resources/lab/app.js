@@ -19,9 +19,12 @@ const Lab = {
   initialized: false,
   drawerOpen: false,
   researchQuery: "",
+  researchPage: 0,
   researchFilter: "active",
   accessFilter: "all",
   runFilter: "all",
+  runQuery: "",
+  runPage: 0,
   runTab: "summary",
   compareMode: false,
   comparePicks: [],
@@ -46,6 +49,7 @@ const esc = value => String(value == null ? "" : value).replace(/[&<>"']/g, ch =
 })[ch]);
 const jsText = value => String(value == null ? "" : value);
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const RUN_PAGE_SIZE = 100;
 
 function icon(name) {
   const paths = {
@@ -677,11 +681,54 @@ function renderAccessMain() {
   </div>`;
 }
 
+function searchTerms(query) {
+  return String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function searchMatches(values, query) {
+  const terms = searchTerms(query);
+  if (!terms.length) return true;
+  const haystack = values.filter(Boolean).join(" ").toLowerCase();
+  return terms.every(term => haystack.includes(term));
+}
+
+function searchMatchesRun(card, run, query) {
+  return searchMatches([
+    card.project, card.machineName, card.cwd, card.setID,
+    run.id, run.machine, run.group, run.tier, run.status,
+    run.latest, run.started, run.latestAt,
+  ], query);
+}
+
+function searchMatchRank(card, run, query) {
+  const raw = String(query || "").trim().toLowerCase();
+  const id = String(run.id || "").toLowerCase();
+  const numeric = /^r?(\d+)$/.exec(raw);
+  if (id === raw || (numeric && id === `r${numeric[1]}`)) return 0;
+  if (searchTerms(query).includes(id)) return 1;
+  const group = String(run.group || "").toLowerCase();
+  if (group === raw) return 2;
+  if (id.startsWith(raw) || (numeric && id.startsWith(`r${numeric[1]}`))) return 3;
+  if (group.startsWith(raw)) return 4;
+  if ([card.project, card.setID, card.machineName].some(value => String(value || "").toLowerCase() === raw)) return 5;
+  return 10;
+}
+
+function compareSearchMatches(a, b, query) {
+  return searchMatchRank(a.card, a.run, query) - searchMatchRank(b.card, b.run, query)
+    || runActivityAt(b.run, b.card).localeCompare(runActivityAt(a.run, a.card))
+    || runNumber(b.run.id) - runNumber(a.run.id);
+}
+
 function searchMatchesSet(card, query) {
-  if (!query) return true;
-  const haystack = [card.project, card.machineName, card.cwd, card.setID]
-    .concat(card.runs.flatMap(run => [run.id, run.group, run.latest, run.status])).join(" ").toLowerCase();
-  return haystack.includes(query.toLowerCase());
+  return searchMatches([card.project, card.machineName, card.cwd, card.setID], query)
+    || card.runs.some(run => searchMatchesRun(card, run, query));
+}
+
+function matchingResearchRuns() {
+  if (!searchTerms(Lab.researchQuery).length) return [];
+  return allRuns(true).filter(({ card, run }) => searchMatchesRun(card, run, Lab.researchQuery))
+    .sort((a, b) => compareSearchMatches(a, b, Lab.researchQuery));
 }
 
 function setSignals(card) {
@@ -699,6 +746,9 @@ function setSignals(card) {
 
 function researchCards() {
   let cards = Lab.model.sets.filter(card => searchMatchesSet(card, Lab.researchQuery));
+  // Search is deliberately global. A stale Active/Archive segment must not
+  // hide a matching historical experiment.
+  if (searchTerms(Lab.researchQuery).length) return cards;
   if (Lab.researchFilter !== "archived") cards = cards.filter(card => !card.archived);
   if (Lab.researchFilter === "archived") cards = cards.filter(card => card.archived || card.runs.some(run => run.archived));
   if (Lab.researchFilter === "active") cards = cards.filter(card => card.runs.some(run => !run.archived && ["running", "needs", "approved"].includes(statusInfo(run.status).key)) || card.runs.length === 0);
@@ -709,16 +759,17 @@ function researchCards() {
 
 function renderResearchContext() {
   const cards = researchCards();
+  const searchCount = searchTerms(Lab.researchQuery).length ? matchingResearchRuns().length : null;
   const groups = new Map();
   for (const card of cards) {
     if (!groups.has(card.project)) groups.set(card.project, []);
     groups.get(card.project).push(card);
   }
-  return `<div class="context-heading"><span class="context-title">Research index</span><span class="context-count">${Lab.model.sets.length} sets</span></div>
-    <div class="context-search">${icon("search")}<input id="research-search" data-draft="research-search" value="${esc(Lab.researchQuery)}" placeholder="Project, run, result…" aria-label="Search research"></div>
-    <div class="segmented" style="margin:0 5px 14px;display:flex">
+  return `<div class="context-heading"><span class="context-title">Research index</span><span class="context-count">${searchCount == null ? `${Lab.model.sets.length} sets` : `${searchCount} matches`}</span></div>
+    <div class="context-search">${icon("search")}<input id="research-search" data-draft="research-search" value="${esc(Lab.researchQuery)}" placeholder="Search every experiment…" aria-label="Search every experiment"></div>
+    ${searchCount == null ? `<div class="segmented" style="margin:0 5px 14px;display:flex">
       ${[["active","Active"],["all","All"],["failed","Failed"],["archived","Archive"]].map(([key,label]) => `<button class="segment ${Lab.researchFilter === key ? "active" : ""}" type="button" data-research-filter="${key}">${label}</button>`).join("")}
-    </div>
+    </div>` : `<div class="context-help search-scope-note">Searching active, finished, stopped, failed, and archived runs.</div>`}
     ${[...groups.entries()].sort((a,b) => a[0].localeCompare(b[0])).map(([project, sets]) => `<section class="project-group">
       <div class="project-name">${esc(project)}</div>
       ${sets.sort((a,b) => cardActivityAt(b).localeCompare(cardActivityAt(a)) || String(b.id).localeCompare(String(a.id))).map(card => {
@@ -911,11 +962,26 @@ function decisionDock(kind, data) {
 }
 
 function renderResearchMain() {
+  if (!Lab.selection && searchTerms(Lab.researchQuery).length) return renderResearchSearchResults();
   if (!Lab.selection) return renderResearchOverview();
   if (Lab.selection.type === "compare") return renderCompare();
   if (Lab.selection.type === "run") return renderRunRecord();
   if (Lab.selection.type === "set") return renderSetPage();
   return renderResearchOverview();
+}
+
+function renderResearchSearchResults() {
+  const entries = matchingResearchRuns();
+  const page = pagedRuns(entries, Lab.researchPage);
+  Lab.researchPage = page.page;
+  return `<div class="main-content wide">
+    <div class="eyebrow">All experiment history</div>
+    <h1 class="display-title">${entries.length} match${entries.length === 1 ? "" : "es"}</h1>
+    <p class="lede">Results for “${esc(Lab.researchQuery.trim())}” across every loaded project, set, machine, group, status, and reported result.</p>
+    <div class="section-head"><h2>Experiments</h2><span class="section-kicker">${runRange(page, entries.length)}</span></div>
+    ${entries.length ? `${renderRunLedger(page.entries, false, true)}${renderRunPager(page, entries.length, "research")}`
+      : emptyState("No experiments match", "Try a run id, group, project, machine, status, or words from a reported result.")}
+  </div>`;
 }
 
 function renderSignalStrip(entries) {
@@ -996,24 +1062,59 @@ function renderSetPage() {
     ${renderSignalStrip(card.runs)}
     <div class="research-toolbar">
       <div class="segmented">${[["all","All"],["active","Active"],["failed","Failed"],["stopped","Stopped"],["finished","Finished"],["archived","Archive"]].map(([key,label]) => `<button class="segment ${Lab.runFilter === key ? "active" : ""}" type="button" data-run-filter="${key}">${label}</button>`).join("")}</div>
+      <label class="run-search">${icon("search")}<input id="run-search" class="text-input" value="${esc(Lab.runQuery)}" placeholder="Search this set…" aria-label="Search runs in this experiment set"></label>
       <span style="flex:1"></span>
-      <button class="button small ${Lab.compareMode ? "primary" : ""}" type="button" data-action="compare-mode">${icon("compare")}${Lab.compareMode ? "Cancel compare" : "Compare runs"}</button>
-      ${Lab.compareMode && Lab.comparePicks.length === 2 ? `<button class="button primary small" type="button" data-action="compare-go">Compare ${esc(Lab.comparePicks[0])} / ${esc(Lab.comparePicks[1])}</button>` : ""}
+      ${Lab.compareMode ? `<span class="compare-count">Select two runs · ${Lab.comparePicks.length}/2</span>
+        <button class="button small" type="button" data-action="compare-mode">Cancel</button>
+        <button class="button primary small" type="button" data-action="compare-go" ${Lab.comparePicks.length === 2 ? "" : "disabled"}>${icon("compare")}Compare selected</button>`
+        : `<button class="button small" type="button" data-action="compare-mode">${icon("compare")}Compare runs</button>`}
     </div>
-    ${renderRunLedger(filteredRuns(card), Lab.compareMode)}
+    ${renderSetRuns(card)}
   </div>`;
 }
 
 function filteredRuns(card) {
   let runs = card.runs.map(run => ({ card, run }));
-  if (Lab.runFilter !== "archived") runs = runs.filter(({run}) => !run.archived);
   if (Lab.runFilter === "archived") runs = runs.filter(({run}) => run.archived);
-  if (Lab.runFilter === "active") runs = runs.filter(({run}) => ["running","needs","approved"].includes(statusInfo(run.status).key));
-  if (Lab.runFilter === "failed") runs = runs.filter(({run}) => statusInfo(run.status).key === "failed");
-  if (Lab.runFilter === "stopped") runs = runs.filter(({run}) => statusInfo(run.status).key === "stopped");
-  if (Lab.runFilter === "finished") runs = runs.filter(({run}) => statusInfo(run.status).key === "finished");
-  return runs.sort((a,b) => runActivityAt(b.run, b.card).localeCompare(runActivityAt(a.run, a.card))
-    || runNumber(b.run.id) - runNumber(a.run.id));
+  if (Lab.runFilter === "active") runs = runs.filter(({run}) => !run.archived && ["running","needs","approved"].includes(statusInfo(run.status).key));
+  if (Lab.runFilter === "failed") runs = runs.filter(({run}) => !run.archived && statusInfo(run.status).key === "failed");
+  if (Lab.runFilter === "stopped") runs = runs.filter(({run}) => !run.archived && statusInfo(run.status).key === "stopped");
+  if (Lab.runFilter === "finished") runs = runs.filter(({run}) => !run.archived && statusInfo(run.status).key === "finished");
+  if (searchTerms(Lab.runQuery).length) runs = runs.filter(({card: itemCard, run}) => searchMatchesRun(itemCard, run, Lab.runQuery));
+  return runs.sort((a,b) => searchTerms(Lab.runQuery).length
+    ? compareSearchMatches(a, b, Lab.runQuery)
+    : runActivityAt(b.run, b.card).localeCompare(runActivityAt(a.run, a.card)) || runNumber(b.run.id) - runNumber(a.run.id));
+}
+
+function pagedRuns(entries, requestedPage) {
+  const pages = Math.max(1, Math.ceil(entries.length / RUN_PAGE_SIZE));
+  const page = clamp(Number(requestedPage) || 0, 0, pages - 1);
+  const start = page * RUN_PAGE_SIZE;
+  return { entries: entries.slice(start, start + RUN_PAGE_SIZE), page, pages, start };
+}
+
+function runRange(page, total) {
+  if (!total) return "0 runs";
+  return `${page.start + 1}–${Math.min(page.start + RUN_PAGE_SIZE, total)} of ${total}`;
+}
+
+function renderRunPager(page, total, scope) {
+  if (total <= RUN_PAGE_SIZE) return "";
+  return `<nav class="run-pager" aria-label="Experiment pages">
+    <span>${runRange(page, total)}</span>
+    <span>Page ${page.page + 1} of ${page.pages}</span>
+    <button class="button small" type="button" data-run-page="${scope}" data-page="${page.page - 1}" ${page.page === 0 ? "disabled" : ""}>Previous</button>
+    <button class="button small" type="button" data-run-page="${scope}" data-page="${page.page + 1}" ${page.page + 1 >= page.pages ? "disabled" : ""}>Next</button>
+  </nav>`;
+}
+
+function renderSetRuns(card) {
+  const entries = filteredRuns(card);
+  const page = pagedRuns(entries, Lab.runPage);
+  Lab.runPage = page.page;
+  if (!entries.length) return `<div class="empty-state" style="min-height:220px"><div><h2>No runs in this view.</h2><p>Change the filter or search every experiment from the Research index.</p></div></div>`;
+  return `<div class="run-count-line">${runRange(page, entries.length)}</div>
+    ${renderRunLedger(page.entries, Lab.compareMode)}${renderRunPager(page, entries.length, "set")}`;
 }
 
 function runNumber(id) { const match = /^R(\d+)$/.exec(id || ""); return match ? Number(match[1]) : -1; }
@@ -1021,7 +1122,7 @@ function runNumber(id) { const match = /^R(\d+)$/.exec(id || ""); return match ?
 function renderRunLedger(entries, compare, showScope = false) {
   if (!entries.length) return `<div class="empty-state" style="min-height:220px"><div><h2>No runs in this view.</h2><p>Change the filter or wait for the agent to record one.</p></div></div>`;
   return `<div class="ledger-wrap"><table class="ledger ${showScope ? "with-scope" : ""}"><thead><tr>${compare ? `<th class="compare-col"></th>` : ""}<th class="run-col">${showScope ? "Run / set" : "Run"}</th><th class="status-col">Phase</th><th class="tag-col">Tier / group</th><th>Latest result</th><th class="time-col">Started</th></tr></thead><tbody>
-    ${entries.map(({card,run}) => `<tr data-open-run="${esc(card.id)}" data-run="${esc(run.id)}" style="${run.archived ? "opacity:.55" : ""}">
+    ${entries.map(({card,run}) => `<tr class="${run.archived ? "archived " : ""}${compare && Lab.comparePicks.includes(run.id) ? "compare-selected" : ""}" data-open-run="${esc(card.id)}" data-run="${esc(run.id)}">
       ${compare ? `<td class="compare-col"><input type="checkbox" data-compare-pick="${esc(run.id)}" ${Lab.comparePicks.includes(run.id) ? "checked" : ""} aria-label="Select ${esc(run.id)} for comparison"></td>` : ""}
       <td class="run-col">${esc(run.id)}${showScope ? `<span class="run-scope" title="${esc(`${card.project} · ${card.machineName}`)}">${esc(card.project)}</span>` : ""}</td><td class="status-col">${statusWord(run.status)}</td>
       <td class="tag-col">${run.tier ? `<span class="tag">${esc(run.tier)}</span>` : ""}${run.group ? `<span class="tag" style="margin-left:4px">${esc(run.group)}</span>` : ""}</td>
@@ -1262,32 +1363,206 @@ function renderCompare() {
   const detailA = detailFor(card.id, runA.id), detailB = detailFor(card.id, runB.id);
   const a = foldDetail(detailA), b = foldDetail(detailB);
   const endA = a.end && a.end.data || {}, endB = b.end && b.end.data || {};
-  const resultA = [...a.results].reverse().find(event => event.kind === "result" && event.text);
-  const resultB = [...b.results].reverse().find(event => event.kind === "result" && event.text);
-  const paramsA = a.files.params && a.files.params[0], paramsB = b.files.params && b.files.params[0];
   return `<div class="main-content wide">${breadcrumbs([{label:card.project,action:`data-select-set="${esc(card.id)}"`},{label:`${runA.id} vs ${runB.id}`}])}
     <div class="eyebrow">Run comparison</div><h1 class="display-title mono">${esc(runA.id)} <span class="quiet">/</span> ${esc(runB.id)}</h1>
-    <p class="lede">A literal difference view of two recorded envelopes. Parameter lines are compared exactly; no semantic config interpretation is implied.</p>
+    <p class="lede">Every captured aspect of the two runs. Exact matches are stated explicitly; differences retain both original records; unavailable evidence is never inferred.</p>
     ${!detailA || !detailB ? `<div class="skeleton"></div><div class="skeleton"></div>` : `<div class="compare-heads">
-      ${compareRow("", runA.id, runB.id, "run")}${compareRow("Phase", statusInfo(runA.status).label, statusInfo(runB.status).label)}${compareRow("Result", resultA && resultA.text || "—", resultB && resultB.text || "—")}${compareRow("Duration", duration(endA.durationSec), duration(endB.durationSec))}${compareRow("Exit", endA.exit == null ? "—" : endA.exit, endB.exit == null ? "—" : endB.exit)}${compareRow("Command", (a.env.argv || []).join(" ") || "—", (b.env.argv || []).join(" ") || "—")}${compareRow("Code", codeState(a.env.snapshot), codeState(b.env.snapshot))}
+      ${compareRow("", runA.id, runB.id, "run")}
+      ${compareRow("Phase", statusInfo(runA.status).label, statusInfo(runB.status).label)}
+      ${compareRow("Tier / group", [runA.tier, runA.group].filter(Boolean).join(" / ") || "—", [runB.tier, runB.group].filter(Boolean).join(" / ") || "—")}
+      ${compareRow("Started", runA.started || "—", runB.started || "—")}
+      ${compareRow("Duration", duration(endA.durationSec), duration(endB.durationSec))}
+      ${compareRow("Exit", endA.exit == null ? "—" : endA.exit, endB.exit == null ? "—" : endB.exit)}
+      ${compareRow("Machine", a.env.machine || runA.machine || card.machineName || "—", b.env.machine || runB.machine || card.machineName || "—")}
+      ${compareRow("Session", a.env.tmuxSession || "—", b.env.tmuxSession || "—")}
+      ${compareRow("Working dir", a.env.cwd || "—", b.env.cwd || "—")}
+      ${compareRow("Command", (a.env.argv || []).join(" ") || "—", (b.env.argv || []).join(" ") || "—")}
+      ${compareRow("Binding", a.env.bind || "—", b.env.bind || "—")}
+      ${compareRow("Code", codeState(a.env.snapshot), codeState(b.env.snapshot))}
     </div>
-    ${paramsA && paramsB ? `<div class="section-head"><h2>Parameter delta</h2><span class="section-kicker">exact non-empty lines</span></div>${parameterDelta(paramsA, paramsB, runA.id, runB.id)}` : ""}`}
+    ${renderCodeComparison(a, b, runA.id, runB.id)}
+    ${renderParameterComparison(a, b, runA.id, runB.id)}
+    ${renderEnvironmentComparison(a, b, runA.id, runB.id)}
+    ${renderDataComparison(a, b, runA.id, runB.id)}
+    ${renderResultComparison(a, b, runA.id, runB.id)}
+    ${renderManifestComparison(a, b, runA.id, runB.id)}
+    ${renderLogComparison(a, b, runA.id, runB.id)}
+    ${renderEventComparison(a, b, runA.id, runB.id)}`}
   </div>`;
 }
 
-function compareRow(label, a, b, klass) { return `<div class="compare-cell label">${esc(label)}</div><div class="compare-cell ${klass || ""}">${esc(a)}</div><div class="compare-cell ${klass || ""}">${esc(b)}</div>`; }
+function compareRow(label, a, b, klass) {
+  const state = comparisonState(a, b);
+  return `<div class="compare-cell label state-${state}">${esc(label)}</div><div class="compare-cell ${klass || ""}">${esc(a)}</div><div class="compare-cell ${klass || ""}">${esc(b)}</div>`;
+}
 function codeState(snapshot) {
   if (!snapshot || !Object.keys(snapshot).length) return "—";
   if (snapshot.noGit) return "no Git repository";
   return `${(snapshot.baseSha || "unknown").slice(0,10)}${snapshot.patchBytes ? ` + ${snapshot.patchBytes} B diff` : " · clean"}`;
 }
-function parameterDelta(a, b, labelA, labelB) {
-  const linesA = String(a.text || "").split("\n").filter(line => line.trim());
-  const linesB = String(b.text || "").split("\n").filter(line => line.trim());
-  const setA = new Set(linesA), setB = new Set(linesB);
-  const onlyA = linesA.filter(line => !setB.has(line)), onlyB = linesB.filter(line => !setA.has(line));
-  if (!onlyA.length && !onlyB.length) return `<div class="guidance-strip">Captured parameter lines are identical.</div>`;
-  return `<div class="compare-delta"><section class="delta-panel a">${renderEvidenceBlock(`only in ${labelA}`, onlyA.join("\n") || "nothing", `cmp-a:${labelA}:${labelB}`, "wrap")}</section><section class="delta-panel b">${renderEvidenceBlock(`only in ${labelB}`, onlyB.join("\n") || "nothing", `cmp-b:${labelA}:${labelB}`, "wrap")}</section></div>`;
+
+function captured(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+
+function stableValue(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableValue(value[key])}`).join(",")}}`;
+  }
+  if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
+  return JSON.stringify(value);
+}
+
+function comparisonState(a, b) {
+  const hasA = captured(a), hasB = captured(b);
+  if (!hasA && !hasB) return "missing";
+  if (!hasA || !hasB) return "partial";
+  return stableValue(a) === stableValue(b) ? "same" : "different";
+}
+
+function combinedComparisonState(states) {
+  if (states.includes("different")) return "different";
+  if (states.includes("partial")) return "partial";
+  if (states.includes("same")) return "same";
+  return "missing";
+}
+
+function comparisonStateLabel(state) {
+  return ({ same: "Identical", different: "Different", partial: "Partly captured", missing: "Not captured" })[state] || state;
+}
+
+function comparisonSection(title, kicker, state, body, collapsed = false) {
+  const heading = `<div class="comparison-section-head"><div><h2>${esc(title)}</h2><span>${esc(kicker)}</span></div><span class="comparison-state state-${state}">${comparisonStateLabel(state)}</span></div>`;
+  return collapsed
+    ? `<details class="comparison-section comparison-collapsed"><summary>${heading}</summary><div class="comparison-section-body">${body}</div></details>`
+    : `<section class="comparison-section">${heading}<div class="comparison-section-body">${body}</div></section>`;
+}
+
+function evidencePair(a, b, labelA, labelB, key, mode = "wrap", sameMessage = "Captured contents are identical.") {
+  const state = comparisonState(a, b);
+  if (state === "missing") return `<div class="comparison-message missing">Neither run captured this evidence.</div>`;
+  if (state === "partial") return `<div class="compare-delta"><section class="delta-panel a">${renderEvidenceBlock(labelA, a || "not captured", `${key}:a`, mode)}</section><section class="delta-panel b">${renderEvidenceBlock(labelB, b || "not captured", `${key}:b`, mode)}</section></div>`;
+  if (state === "same") return `<div class="comparison-message same">${esc(sameMessage)}</div><details class="matched-evidence"><summary>Inspect identical capture</summary>${renderEvidenceBlock(`${labelA} = ${labelB}`, a, `${key}:same`, mode)}</details>`;
+  return `<div class="compare-delta"><section class="delta-panel a">${renderEvidenceBlock(labelA, a, `${key}:a`, mode)}</section><section class="delta-panel b">${renderEvidenceBlock(labelB, b, `${key}:b`, mode)}</section></div>`;
+}
+
+function renderCodeComparison(a, b, labelA, labelB) {
+  const patchA = a.files.diff, patchB = b.files.diff;
+  const snapshotState = comparisonState(a.env.snapshot, b.env.snapshot);
+  const sizeA = a.env.snapshot && a.env.snapshot.patchBytes, sizeB = b.env.snapshot && b.env.snapshot.patchBytes;
+  const cleanA = sizeA === 0, cleanB = sizeB === 0;
+  const patchState = cleanA && cleanB ? "same" : comparisonState(patchA, patchB);
+  const state = combinedComparisonState([snapshotState, patchState]);
+  const completeA = cleanA || a.files.diffComplete === true;
+  const completeB = cleanB || b.files.diffComplete === true;
+  const complete = completeA && completeB;
+  const message = cleanA && cleanB
+    ? "Both runs used clean working trees at the recorded base commit; no patch was needed."
+    : complete
+      ? `The full captured code patches are byte-for-byte identical (${bytes(sizeA || new TextEncoder().encode(patchA || "").length)} each).`
+      : "The loaded patch prefixes are identical; at least one full patch exceeded the comparison payload limit.";
+  const rows = `<div class="comparison-facts">${compareRow("Base commit", a.env.snapshot && a.env.snapshot.baseSha || "—", b.env.snapshot && b.env.snapshot.baseSha || "—")}${compareRow("Patch bytes", sizeA == null ? "—" : sizeA, sizeB == null ? "—" : sizeB)}${compareRow("Archived files", a.env.snapshot && a.env.snapshot.archived == null ? "—" : a.env.snapshot.archived, b.env.snapshot && b.env.snapshot.archived == null ? "—" : b.env.snapshot.archived)}</div>`;
+  const evidence = cleanA && cleanB
+    ? `<div class="comparison-message same">${esc(message)}</div>`
+    : evidencePair(patchA && colorDiff(patchA), patchB && colorDiff(patchB), labelA, labelB, `code:${labelA}:${labelB}`, "html", message);
+  return comparisonSection("Code delta", complete ? "full captured patch" : "captured patch prefix", state,
+    rows + evidence);
+}
+
+function fileName(path) {
+  return String(path || "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
+}
+
+function parameterRecords(detail) {
+  const loaded = new Map((detail.files.params || []).map(item => [fileName(item.path), item]));
+  return new Map((detail.env.params || []).map(ref => {
+    const name = fileName(ref.path), item = loaded.get(name) || {};
+    return [name, { ...ref, ...item, path: ref.path || item.path }];
+  }));
+}
+
+function renderParameterComparison(a, b, labelA, labelB) {
+  const mapA = parameterRecords(a), mapB = parameterRecords(b);
+  const names = [...new Set([...mapA.keys(), ...mapB.keys()])].sort();
+  const states = names.map(name => comparisonState(mapA.get(name)?.sha256 || mapA.get(name)?.text, mapB.get(name)?.sha256 || mapB.get(name)?.text));
+  const state = combinedComparisonState(states);
+  const rows = names.map((name, index) => {
+    const itemA = mapA.get(name), itemB = mapB.get(name);
+    const rowState = states[index];
+    const evidence = rowState === "different" || rowState === "partial"
+      ? evidencePair(itemA && itemA.text, itemB && itemB.text, `${labelA} · ${name}`, `${labelB} · ${name}`, `param:${labelA}:${labelB}:${name}`)
+      : "";
+    return `<div class="comparison-file state-${rowState}"><div class="comparison-file-name">${esc(name)}</div><div class="comparison-file-path" title="${esc(itemA && itemA.path || "")}">${esc(itemA && itemA.path || "not captured")}</div><div class="comparison-file-path" title="${esc(itemB && itemB.path || "")}">${esc(itemB && itemB.path || "not captured")}</div><span class="comparison-state state-${rowState}">${comparisonStateLabel(rowState)}</span>${evidence}</div>`;
+  }).join("");
+  return comparisonSection("Parameters", `${names.length} declared file${names.length === 1 ? "" : "s"} · content hashes first`, state,
+    rows || `<div class="comparison-message missing">Neither run declared parameter files.</div>`);
+}
+
+function renderEnvironmentComparison(a, b, labelA, labelB) {
+  const factsA = a.env.env || {}, factsB = b.env.env || {};
+  const factState = comparisonState(factsA, factsB);
+  const complete = a.files.envComplete === true && b.files.envComplete === true;
+  let fileState = comparisonState(a.files.env, b.files.env);
+  if (fileState === "same" && !complete) fileState = "partial";
+  const rows = `<div class="comparison-facts">${["os", "arch", "python", "gpus"].map(key => compareRow(key, factsA[key] || "—", factsB[key] || "—")).join("")}</div>`;
+  const sameMessage = complete ? "The complete captured environment files are identical." : "The loaded environment prefixes are identical; at least one full file exceeded the payload limit.";
+  return comparisonSection("Environment", complete ? "structured facts and complete environment freeze" : "structured facts and captured environment prefix", combinedComparisonState([factState, fileState]),
+    rows + evidencePair(a.files.env, b.files.env, `${labelA} · env.txt`, `${labelB} · env.txt`, `env:${labelA}:${labelB}`, "wrap", sameMessage));
+}
+
+function refRecords(refs) {
+  return new Map((refs || []).map(ref => [fileName(ref.path), ref]));
+}
+
+function renderDataComparison(a, b, labelA, labelB) {
+  const mapA = refRecords(a.env.dataFiles), mapB = refRecords(b.env.dataFiles);
+  const names = [...new Set([...mapA.keys(), ...mapB.keys()])].sort();
+  const states = names.map(name => comparisonState(mapA.get(name)?.sha256, mapB.get(name)?.sha256));
+  const state = combinedComparisonState(states);
+  const rows = names.map((name, index) => `<div class="comparison-file compact state-${states[index]}"><div class="comparison-file-name">${esc(name)}</div><div class="comparison-file-path">${esc(mapA.get(name)?.path || "not declared")}</div><div class="comparison-file-path">${esc(mapB.get(name)?.path || "not declared")}</div><span class="comparison-state state-${states[index]}">${comparisonStateLabel(states[index])}</span></div>`).join("");
+  return comparisonSection("Declared data", "paths and SHA-256 fingerprints", state,
+    rows || `<div class="comparison-message missing">Neither run declared data files.</div>`);
+}
+
+function resultEvents(detail) {
+  return detail.events.filter(event => event.kind === "result" && event.text);
+}
+
+function renderResultStack(events, label) {
+  return `<section class="comparison-stack"><div class="evidence-head">${esc(label)} · ${events.length} report${events.length === 1 ? "" : "s"}</div>${events.length ? events.map(event => `<article><time>${esc(event.time || "")}</time><div class="selectable">${renderReportText(event.text)}</div></article>`).join("") : `<div class="comparison-message missing">No results reported.</div>`}</section>`;
+}
+
+function renderResultComparison(a, b, labelA, labelB) {
+  const eventsA = resultEvents(a), eventsB = resultEvents(b);
+  const state = comparisonState(eventsA.map(event => event.text), eventsB.map(event => event.text));
+  return comparisonSection("Reported results", "every result event, in recorded order", state,
+    `<div class="compare-delta">${renderResultStack(eventsA, labelA)}${renderResultStack(eventsB, labelB)}</div>`);
+}
+
+function manifestRecords(detail) {
+  return new Map((detail.manifest || []).map(item => [item.name, item.size]));
+}
+
+function renderManifestComparison(a, b, labelA, labelB) {
+  const mapA = manifestRecords(a), mapB = manifestRecords(b);
+  const names = [...new Set([...mapA.keys(), ...mapB.keys()])].sort();
+  const states = names.map(name => comparisonState(mapA.get(name), mapB.get(name)));
+  const rows = names.map((name, index) => `<div class="manifest-compare-row state-${states[index]}"><span>${esc(name)}</span><span>${mapA.has(name) ? bytes(mapA.get(name)) : "—"}</span><span>${mapB.has(name) ? bytes(mapB.get(name)) : "—"}</span><span class="comparison-state state-${states[index]}">${comparisonStateLabel(states[index])}</span></div>`).join("");
+  return comparisonSection("Stored artifacts", `${names.length} manifest entr${names.length === 1 ? "y" : "ies"} · names and sizes`, combinedComparisonState(states),
+    names.length ? `<div class="manifest-compare-head"><span>Artifact</span><span>${esc(labelA)}</span><span>${esc(labelB)}</span><span>State</span></div>${rows}` : `<div class="comparison-message missing">Neither run stored artifacts.</div>`);
+}
+
+function renderLogComparison(a, b, labelA, labelB) {
+  const sizeA = a.files.logSize, sizeB = b.files.logSize;
+  const state = combinedComparisonState([comparisonState(sizeA, sizeB), comparisonState(a.files.log, b.files.log)]);
+  const body = `<div class="comparison-facts">${compareRow("Full log size", sizeA == null ? "—" : bytes(sizeA), sizeB == null ? "—" : bytes(sizeB))}</div>${evidencePair(a.files.log, b.files.log, `${labelA} · log tail`, `${labelB} · log tail`, `log:${labelA}:${labelB}`)}`;
+  return comparisonSection("Logs", "last 16 KB compared; full sizes retained", state, body, true);
+}
+
+function renderEventComparison(a, b, labelA, labelB) {
+  const textA = JSON.stringify(a.events, null, 2), textB = JSON.stringify(b.events, null, 2);
+  return comparisonSection("Event record", `${a.events.length} events / ${b.events.length} events · complete JSON`, comparisonState(a.events, b.events),
+    evidencePair(textA, textB, `${labelA} · events`, `${labelB} · events`, `events:${labelA}:${labelB}`), true);
 }
 
 function renderGuidanceMain() {
@@ -1462,7 +1737,7 @@ function setArea(area) {
 }
 
 function selectPending(type, id) { Lab.area = "inbox"; Lab.selection = { type, id }; Lab.drawerOpen = false; resetMainScroll(); render(); }
-function selectSet(card) { Lab.area = "research"; Lab.selection = { type: "set", card }; Lab.drawerOpen = false; Lab.compareMode = false; Lab.comparePicks = []; resetMainScroll(); render(); }
+function selectSet(card) { Lab.area = "research"; Lab.selection = { type: "set", card }; Lab.drawerOpen = false; Lab.compareMode = false; Lab.comparePicks = []; Lab.runQuery = ""; Lab.runPage = 0; resetMainScroll(); render(); }
 function preferredRunTab(cardID, runID) {
   const card = cardByID(cardID);
   const run = card && card.runs.find(item => item.id === runID);
@@ -1476,6 +1751,12 @@ function openRun(card, run) {
   Lab.runTab = preferredRunTab(card, run); resetMainScroll(); render();
 }
 
+function toggleComparePick(id) {
+  if (Lab.comparePicks.includes(id)) Lab.comparePicks = Lab.comparePicks.filter(item => item !== id);
+  else Lab.comparePicks = [...Lab.comparePicks, id].slice(-2);
+  render();
+}
+
 document.addEventListener("click", event => {
   const markdownLink = event.target.closest(".markdown-report a[href]");
   if (markdownLink) { event.preventDefault(); post({ type: "openURL", url: markdownLink.href }); return; }
@@ -1486,15 +1767,27 @@ document.addEventListener("click", event => {
   const set = event.target.closest("[data-select-set]");
   if (set) { selectSet(set.dataset.selectSet); return; }
   const run = event.target.closest("[data-open-run]");
-  if (run && !event.target.matches("input[type=checkbox]")) { openRun(run.dataset.openRun, run.dataset.run); return; }
+  if (run && !event.target.matches("input[type=checkbox]")) {
+    if (Lab.compareMode && Lab.selection && Lab.selection.type === "set" && Lab.selection.card === run.dataset.openRun) {
+      toggleComparePick(run.dataset.run); return;
+    }
+    openRun(run.dataset.openRun, run.dataset.run); return;
+  }
   const home = event.target.closest("[data-research-home]");
   if (home) { Lab.area = "research"; Lab.selection = null; resetMainScroll(); render(); return; }
   const filter = event.target.closest("[data-research-filter]");
-  if (filter) { Lab.researchFilter = filter.dataset.researchFilter; render(); return; }
+  if (filter) { Lab.researchFilter = filter.dataset.researchFilter; Lab.researchPage = 0; render(); return; }
   const accessFilter = event.target.closest("[data-access-filter]");
   if (accessFilter) { Lab.accessFilter = accessFilter.dataset.accessFilter; render(); return; }
   const runFilter = event.target.closest("[data-run-filter]");
-  if (runFilter) { Lab.runFilter = runFilter.dataset.runFilter; render(); return; }
+  if (runFilter) { Lab.runFilter = runFilter.dataset.runFilter; Lab.runPage = 0; render(); return; }
+  const runPage = event.target.closest("[data-run-page]");
+  if (runPage) {
+    const page = Math.max(0, Number(runPage.dataset.page) || 0);
+    if (runPage.dataset.runPage === "research") Lab.researchPage = page;
+    else Lab.runPage = page;
+    resetMainScroll(); render(); return;
+  }
   const tab = event.target.closest("[data-run-tab]");
   if (tab) { Lab.runTab = tab.dataset.runTab; Lab.scroll.main = $("#main").scrollTop; render(); return; }
   const scope = event.target.closest("[data-guidance-scope]");
@@ -1620,7 +1913,11 @@ document.addEventListener("input", event => {
   const input = event.target;
   if (input.dataset && input.dataset.draft) Lab.drafts[input.dataset.draft] = input.value;
   if (input.id === "stop-reason") syncStopDialogControls();
-  if (input.id === "research-search") { Lab.researchQuery = input.value; Lab.scroll.context = 0; render(); const next = $("#research-search"); if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); } }
+  if (input.id === "research-search") {
+    Lab.researchQuery = input.value; Lab.researchPage = 0; Lab.selection = null; Lab.scroll.context = 0; resetMainScroll(); render();
+    const next = $("#research-search"); if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+  }
+  if (input.id === "run-search") { Lab.runQuery = input.value; Lab.runPage = 0; render(); }
 });
 
 document.addEventListener("change", event => {
@@ -1632,11 +1929,7 @@ document.addEventListener("change", event => {
   }
   if (input.dataset && input.dataset.comparePick) {
     event.stopPropagation();
-    const id = input.dataset.comparePick;
-    if (input.checked && !Lab.comparePicks.includes(id)) Lab.comparePicks.push(id);
-    if (!input.checked) Lab.comparePicks = Lab.comparePicks.filter(item => item !== id);
-    while (Lab.comparePicks.length > 2) Lab.comparePicks.shift();
-    render(); return;
+    toggleComparePick(input.dataset.comparePick); return;
   }
   if (input.dataset && input.dataset.action === "policy") startAction("policy", { card: input.dataset.card, policy: input.value }, "Approval policy updated");
 });

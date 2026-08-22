@@ -301,6 +301,17 @@
     manifest: [{ name: "events.jsonl", size: 3101 }, { name: "log.txt", size: 74003 }],
   };
 
+  // Mirror the completeness metadata supplied by the native Lab bridge so
+  // comparison fixtures exercise the same evidence states as production.
+  for (const detail of [...Object.values(details), offlineDetail]) {
+    const files = detail.files || {};
+    if (Object.prototype.hasOwnProperty.call(files, "diff")) files.diffComplete = true;
+    if (Object.prototype.hasOwnProperty.call(files, "env")) files.envComplete = true;
+    for (const param of files.params || []) param.complete = true;
+    const log = (detail.manifest || []).find(item => item.name === "log.txt");
+    if (log) files.logSize = log.size;
+  }
+
   UTLab.setData(model);
   for (const [run, detail] of Object.entries(details)) UTLab.setRunDetail(localCard, run, detail);
   UTLab.setRunDetail(offlineCard, "R7", fixture === "offline-summary" ? { events: [], files: {}, manifest: [] } : offlineDetail);
