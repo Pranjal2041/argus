@@ -18,15 +18,28 @@ final class BrowserControlService: ObservableObject {
     private weak var credentialVault: CredentialVaultStore?
     private var listener: BrowserLoopbackServer?
     private var heartbeat: Timer?
+    private var lifecycleWatchdog: Timer?
     private var hiddenTabs: [UUID: BrowserManagedTab] = [:]
     private var managedTabs: [UUID: BrowserManagedTab] = [:]
     private var ownedTabIDs: Set<UUID> = []
+    private var automaticClosures: [UUID: BrowserAutomaticTabClosure] = [:]
     private var rpcBusy = false
     private var rpcWaiters: [CheckedContinuation<Void, Never>] = []
     private let browserHostName: String
+    private let hiddenTabLifetime: TimeInterval
+    private let hiddenTabMemoryLimit: UInt64
+    private let now: () -> Date
+    private let webProcessUsage: (WKWebView) -> BrowserWebProcessUsage?
 
-    init() {
+    init(hiddenTabLifetime: TimeInterval = 12 * 60 * 60,
+         hiddenTabMemoryLimit: UInt64 = 4 * 1_024 * 1_024 * 1_024,
+         now: @escaping () -> Date = Date.init,
+         webProcessUsage: @escaping (WKWebView) -> BrowserWebProcessUsage? = BrowserWebProcessMonitor.usage) {
         browserHostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        self.hiddenTabLifetime = hiddenTabLifetime
+        self.hiddenTabMemoryLimit = hiddenTabMemoryLimit
+        self.now = now
+        self.webProcessUsage = webProcessUsage
     }
 
     func start(dashboards: DashboardsModel, credentialVault: CredentialVaultStore) {
@@ -38,6 +51,7 @@ final class BrowserControlService: ObservableObject {
             return await self.handleRPC(body)
         }
         listener = server
+        startLifecycleWatchdog()
         server.start { [weak self] port in
             Task { @MainActor in
                 guard let self else { return }
@@ -61,10 +75,21 @@ final class BrowserControlService: ObservableObject {
         await handleRPC(body).body
     }
 
+    func runLifecycleWatchdogForTesting() {
+        enforceHiddenTabLimits()
+    }
+
     private func startHeartbeat() {
         heartbeat?.invalidate()
         heartbeat = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.registerProvider() }
+        }
+    }
+
+    private func startLifecycleWatchdog() {
+        lifecycleWatchdog?.invalidate()
+        lifecycleWatchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.enforceHiddenTabLimits() }
         }
     }
 
@@ -87,6 +112,7 @@ final class BrowserControlService: ObservableObject {
     }
 
     private func handleRPC(_ body: Data) async -> BrowserHTTPResponse {
+        var requestedTabToken: String?
         do {
             guard let request = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                   (request["version"] as? Int) == 1,
@@ -95,6 +121,7 @@ final class BrowserControlService: ObservableObject {
             }
             reconcileManagedTabs()
             let params = request["params"] as? [String: Any] ?? [:]
+            requestedTabToken = params["tab_id"] as? String
             let caller = browserCredentialCaller(request["caller"])
             let result: Any
             // An approval may remain pending for minutes. It must not hold the
@@ -107,6 +134,9 @@ final class BrowserControlService: ObservableObject {
                 defer { releaseRPC() }
                 result = try await dispatch(method: method, params: params, caller: caller)
             }
+            if let closure = automaticClosure(matching: params["tab_id"] as? String) {
+                throw BrowserControlFailure.failed(closure.message)
+            }
             let response: [String: Any] = [
                 "ok": true,
                 "id": request["id"] as? String ?? "",
@@ -114,9 +144,15 @@ final class BrowserControlService: ObservableObject {
             ]
             return .json(response)
         } catch {
+            let reportedError: Error
+            if let closure = automaticClosure(matching: requestedTabToken) {
+                reportedError = BrowserControlFailure.failed(closure.message)
+            } else {
+                reportedError = error
+            }
             return .json([
                 "ok": false,
-                "error": (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                "error": (reportedError as? LocalizedError)?.errorDescription ?? reportedError.localizedDescription
             ])
         }
     }
@@ -317,6 +353,9 @@ final class BrowserControlService: ObservableObject {
         let tokenLower = token.lowercased()
         let matches = allTabs().filter { $0.id.uuidString.lowercased().hasPrefix(tokenLower) }
         guard matches.count == 1, let tab = matches.first else {
+            if matches.isEmpty, let closure = automaticClosure(matching: token) {
+                throw BrowserControlFailure.failed(closure.message)
+            }
             if matches.isEmpty { throw BrowserControlFailure.notFound("no browser tab matches \(token)") }
             throw BrowserControlFailure.invalid("tab id \(token) is ambiguous")
         }
@@ -334,11 +373,15 @@ final class BrowserControlService: ObservableObject {
                                host: "Argus · \(browserHostName)", url: url)
         tab.persist = true
         ownedTabIDs.insert(tab.id)
-        let managed = makeOffscreenTab(tab, viewport: CGSize(width: width, height: height))
+        let managed = makeOffscreenTab(tab, viewport: CGSize(width: width, height: height),
+                                       createdAt: now())
         managedTabs[tab.id] = managed
         hiddenTabs[tab.id] = managed
         managed.webView.load(URLRequest(url: url))
         await waitForLoad(managed.webView)
+        if let closure = automaticClosures[tab.id] {
+            throw BrowserControlFailure.failed(closure.message)
+        }
         sync(tab, from: managed.webView)
         if params["visible"] as? Bool == true { show(tab) }
         return tabDescription(tab)
@@ -367,17 +410,20 @@ final class BrowserControlService: ObservableObject {
         if let webView = tab.heldWebView ?? tab.webView {
             tab.persist = true
             tab.heldWebView = webView
-            let managed = BrowserManagedTab(tab: tab, webView: webView, window: nil)
+            let managed = BrowserManagedTab(tab: tab, webView: webView, window: nil,
+                                            createdAt: now())
             managedTabs[tab.id] = managed
             return managed
         }
-        let managed = makeOffscreenTab(tab, viewport: CGSize(width: 1440, height: 900))
+        let managed = makeOffscreenTab(tab, viewport: CGSize(width: 1440, height: 900),
+                                       createdAt: now())
         managedTabs[tab.id] = managed
         if let url = tab.url { managed.webView.load(URLRequest(url: url)) }
         return managed
     }
 
-    private func makeOffscreenTab(_ tab: DashboardTab, viewport: CGSize) -> BrowserManagedTab {
+    private func makeOffscreenTab(_ tab: DashboardTab, viewport: CGSize,
+                                  createdAt: Date) -> BrowserManagedTab {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         let webView = WKWebView(frame: CGRect(origin: .zero, size: viewport), configuration: configuration)
@@ -399,7 +445,8 @@ final class BrowserControlService: ObservableObject {
         // host far offscreen makes it genuinely hidden without using a special DOM
         // path that would differ from the visible browser.
         window.orderBack(nil)
-        let managed = BrowserManagedTab(tab: tab, webView: webView, window: window)
+        let managed = BrowserManagedTab(tab: tab, webView: webView, window: window,
+                                        createdAt: createdAt)
         webView.navigationDelegate = managed
         return managed
     }
@@ -411,6 +458,68 @@ final class BrowserControlService: ObservableObject {
             managedTabs.removeValue(forKey: id)?.close()
             ownedTabIDs.remove(id)
         }
+    }
+
+    private func enforceHiddenTabLimits() {
+        let checkedAt = now()
+        automaticClosures = automaticClosures.filter {
+            checkedAt.timeIntervalSince($0.value.closedAt) < 24 * 60 * 60
+        }
+
+        let expired = hiddenTabs.values.filter {
+            checkedAt.timeIntervalSince($0.createdAt) >= hiddenTabLifetime
+        }
+        for managed in expired {
+            closeAutomatically(
+                managed,
+                message: "Hidden browser tab \(managed.tab.id.uuidString.lowercased()) expired after its 12-hour lifetime limit. Open a new tab and retry.",
+                at: checkedAt
+            )
+        }
+
+        var processGroups: [Int32: (bytes: UInt64, tabs: [BrowserManagedTab])] = [:]
+        for managed in hiddenTabs.values {
+            guard let usage = webProcessUsage(managed.webView), usage.processID > 0 else { continue }
+            var group = processGroups[usage.processID] ?? (usage.residentBytes, [])
+            group.bytes = max(group.bytes, usage.residentBytes)
+            group.tabs.append(managed)
+            processGroups[usage.processID] = group
+        }
+        for group in processGroups.values where group.bytes >= hiddenTabMemoryLimit {
+            let actual = Self.gibibytes(group.bytes)
+            let limit = Self.gibibytes(hiddenTabMemoryLimit)
+            for managed in group.tabs {
+                closeAutomatically(
+                    managed,
+                    message: "Hidden browser tab \(managed.tab.id.uuidString.lowercased()) was closed because its WebKit content process used \(actual), exceeding the \(limit) limit. Open a new tab and retry.",
+                    at: checkedAt
+                )
+            }
+        }
+    }
+
+    private func closeAutomatically(_ managed: BrowserManagedTab, message: String, at date: Date) {
+        let id = managed.tab.id
+        guard hiddenTabs.removeValue(forKey: id) != nil else { return }
+        automaticClosures[id] = BrowserAutomaticTabClosure(message: message, closedAt: date)
+        managed.tab.status = message
+        managedTabs.removeValue(forKey: id)
+        managed.close()
+        ownedTabIDs.remove(id)
+        NSLog("Argus browser watchdog: %@", message)
+    }
+
+    private func automaticClosure(matching token: String?) -> BrowserAutomaticTabClosure? {
+        guard let token, !token.isEmpty else { return nil }
+        let lowered = token.lowercased()
+        let matches = automaticClosures.filter {
+            $0.key.uuidString.lowercased().hasPrefix(lowered)
+        }
+        return matches.count == 1 ? matches.first?.value : nil
+    }
+
+    private static func gibibytes(_ bytes: UInt64) -> String {
+        String(format: "%.2f GiB", Double(bytes) / Double(1_024 * 1_024 * 1_024))
     }
 
     private func acquireRPC() async {
@@ -433,7 +542,7 @@ final class BrowserControlService: ObservableObject {
 
     private func tabDescription(_ tab: DashboardTab) -> [String: Any] {
         let webView = tab.heldWebView ?? tab.webView
-        return [
+        var description: [String: Any] = [
             "id": tab.id.uuidString.lowercased(),
             "title": tab.displayTitle,
             "url": webView?.url?.absoluteString ?? tab.url?.absoluteString ?? "",
@@ -447,6 +556,13 @@ final class BrowserControlService: ObservableObject {
             "browser_host": browserHostName,
             "network_origin": browserHostName
         ]
+        if let managed = hiddenTabs[tab.id] {
+            description["hidden_expires_at"] = ISO8601DateFormatter().string(
+                from: managed.createdAt.addingTimeInterval(hiddenTabLifetime)
+            )
+            description["memory_limit_bytes"] = hiddenTabMemoryLimit
+        }
+        return description
     }
 
     private func normalizedURL(_ raw: String) -> URL? {
@@ -730,14 +846,16 @@ final class BrowserControlService: ObservableObject {
 private final class BrowserManagedTab: NSObject, WKNavigationDelegate {
     let tab: DashboardTab
     let webView: WKWebView
+    let createdAt: Date
     var window: NSWindow?
     var generation = 0
     var lastInteractionMode: String?
 
-    init(tab: DashboardTab, webView: WKWebView, window: NSWindow?) {
+    init(tab: DashboardTab, webView: WKWebView, window: NSWindow?, createdAt: Date) {
         self.tab = tab
         self.webView = webView
         self.window = window
+        self.createdAt = createdAt
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -791,6 +909,44 @@ private final class BrowserManagedTab: NSObject, WKNavigationDelegate {
         window = nil
         tab.heldWebView = nil
         tab.webView = nil
+    }
+}
+
+private struct BrowserAutomaticTabClosure {
+    let message: String
+    let closedAt: Date
+}
+
+struct BrowserWebProcessUsage: Equatable {
+    let processID: Int32
+    let residentBytes: UInt64
+}
+
+private enum BrowserWebProcessMonitor {
+    static func usage(_ webView: WKWebView) -> BrowserWebProcessUsage? {
+        // WebKit exposes no public per-WKWebView memory API. This longstanding
+        // selector is used only to identify the WebContent process; memory itself
+        // comes from the public proc_pid_rusage API. If the selector disappears,
+        // expiry remains active and memory enforcement safely becomes unavailable.
+        let selector = NSSelectorFromString("_webProcessIdentifier")
+        guard webView.responds(to: selector),
+              let number = webView.value(forKey: "_webProcessIdentifier") as? NSNumber else {
+            return nil
+        }
+        let processID = number.int32Value
+        guard processID > 0 else { return nil }
+        var info = rusage_info_v4()
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(
+                to: rusage_info_t?.self,
+                capacity: MemoryLayout<rusage_info_v4>.size / MemoryLayout<rusage_info_t?>.size
+            ) { rebound in
+                proc_pid_rusage(processID, RUSAGE_INFO_V4, rebound)
+            }
+        }
+        guard result == 0 else { return nil }
+        return BrowserWebProcessUsage(processID: processID,
+                                      residentBytes: info.ri_phys_footprint)
     }
 }
 

@@ -133,6 +133,79 @@ final class BrowserControlServiceTests: XCTestCase {
                        "agent tab creation must not switch the user's active tab")
     }
 
+    func testHiddenTabExpiresWithAnExplicitAgentError() async throws {
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let service = BrowserControlService(
+            hiddenTabLifetime: 12 * 60 * 60,
+            now: { clock },
+            webProcessUsage: { _ in nil }
+        )
+        service.bindForTesting(dashboards: dashboards)
+        let opened = try await rpc(service, method: "tabs.open", params: [
+            "url": "data:text/html,temporary", "visible": false
+        ])
+        let tabID = try XCTUnwrap(opened["id"] as? String)
+        XCTAssertNotNil(opened["hidden_expires_at"] as? String)
+
+        clock.addTimeInterval(12 * 60 * 60 + 1)
+        service.runLifecycleWatchdogForTesting()
+
+        let response = try await rawRPC(service, method: "page.snapshot",
+                                        params: ["tab_id": tabID])
+        XCTAssertEqual(response["ok"] as? Bool, false)
+        XCTAssertTrue((response["error"] as? String ?? "").contains("12-hour lifetime limit"))
+    }
+
+    func testHiddenTabMemoryLimitClosesItWhileVisibleTabsAreExempt() async throws {
+        let limit: UInt64 = 4 * 1_024 * 1_024 * 1_024
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        let service = BrowserControlService(
+            hiddenTabMemoryLimit: limit,
+            webProcessUsage: { _ in
+                BrowserWebProcessUsage(processID: 42, residentBytes: limit + 1)
+            }
+        )
+        service.bindForTesting(dashboards: dashboards)
+        let hidden = try await rpc(service, method: "tabs.open", params: [
+            "url": "data:text/html,hidden", "visible": false
+        ])
+        let visible = try await rpc(service, method: "tabs.open", params: [
+            "url": "data:text/html,visible", "visible": true
+        ])
+        let hiddenID = try XCTUnwrap(hidden["id"] as? String)
+        let visibleID = try XCTUnwrap(visible["id"] as? String)
+
+        service.runLifecycleWatchdogForTesting()
+
+        let closed = try await rawRPC(service, method: "page.snapshot",
+                                      params: ["tab_id": hiddenID])
+        XCTAssertEqual(closed["ok"] as? Bool, false)
+        XCTAssertTrue((closed["error"] as? String ?? "").contains("exceeding the 4.00 GiB limit"))
+        _ = try await rpc(service, method: "page.snapshot", params: ["tab_id": visibleID])
+    }
+
+    func testProductionWebProcessSamplerCanMeasureALoadedHiddenTab() async throws {
+        let service = BrowserControlService(hiddenTabMemoryLimit: 1)
+        service.bindForTesting(
+            dashboards: DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                        persistTabState: false)
+        )
+        let opened = try await rpc(service, method: "tabs.open", params: [
+            "url": "data:text/html,measured", "visible": false
+        ])
+        let tabID = try XCTUnwrap(opened["id"] as? String)
+
+        service.runLifecycleWatchdogForTesting()
+
+        let response = try await rawRPC(service, method: "page.snapshot",
+                                        params: ["tab_id": tabID])
+        XCTAssertEqual(response["ok"] as? Bool, false)
+        XCTAssertTrue((response["error"] as? String ?? "").contains("WebKit content process used"))
+    }
+
     func testAgentUploadAttachesFileWithoutOpeningNativePicker() async throws {
         let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
                                          persistTabState: false)
@@ -312,16 +385,21 @@ final class BrowserControlServiceTests: XCTestCase {
 
     private func rpc(_ service: BrowserControlService, method: String,
                      params: [String: Any], caller: [String: Any]? = nil) async throws -> [String: Any] {
+        let response = try await rawRPC(service, method: method, params: params, caller: caller)
+        if response["ok"] as? Bool != true {
+            XCTFail(response["error"] as? String ?? "browser RPC failed")
+        }
+        return try XCTUnwrap(response["result"] as? [String: Any])
+    }
+
+    private func rawRPC(_ service: BrowserControlService, method: String,
+                        params: [String: Any], caller: [String: Any]? = nil) async throws -> [String: Any] {
         var request: [String: Any] = ["version": 1, "id": UUID().uuidString,
                                           "method": method, "params": params]
         if let caller { request["caller"] = caller }
         let body = try JSONSerialization.data(withJSONObject: request)
         let responseData = await service.processRPCForTesting(body)
-        let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
-        if response["ok"] as? Bool != true {
-            XCTFail(response["error"] as? String ?? "browser RPC failed")
-        }
-        return try XCTUnwrap(response["result"] as? [String: Any])
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
     }
 
     private func number(_ dictionary: [String: Any], _ key: String) -> Double {
