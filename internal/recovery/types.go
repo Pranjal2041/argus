@@ -35,6 +35,7 @@ type Entry struct {
 	Argv          []string `json:"argv,omitempty"`
 	SessionID     string   `json:"sessionId,omitempty"`
 	SessionPath   string   `json:"sessionPath,omitempty"`
+	CodexHome     string   `json:"codexHome,omitempty"`
 	Windows       int      `json:"windows"`
 	Panes         int      `json:"panes"`
 	CaptureError  string   `json:"captureError,omitempty"`

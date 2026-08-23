@@ -112,6 +112,13 @@ func effectiveExecutable(entry Entry) (string, error) {
 	return path, nil
 }
 
+func environmentExecutable() string {
+	if path, err := exec.LookPath("env"); err == nil {
+		return path
+	}
+	return "env"
+}
+
 func resumeArgv(entry Entry) ([]string, error) {
 	if entry.Agent == AgentShell {
 		return nil, nil
@@ -133,7 +140,11 @@ func resumeArgv(entry Entry) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		return append([]string{executable}, append(options, "resume", entry.SessionID)...), nil
+		command := append([]string{executable}, append(options, "resume", entry.SessionID)...)
+		if home := effectiveCodexHome(entry); home != "" {
+			command = append([]string{environmentExecutable(), "CODEX_HOME=" + home}, command...)
+		}
+		return command, nil
 	case AgentClaude:
 		options, err := preserveOptions(args[1:], claudeRestoreOptions, map[string]bool{
 			"-r": true, "--resume": true, "-c": true, "--continue": true,
@@ -144,6 +155,33 @@ func resumeArgv(entry Entry) ([]string, error) {
 		return append([]string{executable}, append(options, "--resume", entry.SessionID)...), nil
 	default:
 		return nil, fmt.Errorf("unsupported agent %q", entry.Agent)
+	}
+}
+
+// effectiveCodexHome preserves the account/profile behind any Codex launcher
+// (codex2 today, arbitrary wrappers tomorrow). New snapshots record it
+// explicitly; older snapshots can recover it from the authoritative rollout
+// path without guessing from a command name.
+func effectiveCodexHome(entry Entry) string {
+	if home := strings.TrimSpace(entry.CodexHome); home != "" {
+		return filepath.Clean(home)
+	}
+	return codexHomeFromTranscript(entry.SessionPath)
+}
+
+func codexHomeFromTranscript(path string) string {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." || path == "" {
+		return ""
+	}
+	for directory := filepath.Dir(path); ; directory = filepath.Dir(directory) {
+		if filepath.Base(directory) == "sessions" {
+			return filepath.Dir(directory)
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return ""
+		}
 	}
 }
 

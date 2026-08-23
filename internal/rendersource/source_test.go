@@ -3,6 +3,7 @@ package rendersource
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -237,8 +238,12 @@ Using the supplied hydraulic project and field-observation package, produce a ca
 	writeLines(t, path,
 		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
 		map[string]any{"type": "response_item", "payload": map[string]any{
-			"type": "message", "role": "assistant",
+			"type": "message", "role": "assistant", "phase": "final_answer",
 			"content": []map[string]any{{"type": "output_text", "text": previous}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": "Continue with the current result."}},
 		}},
 		map[string]any{"type": "response_item", "payload": map[string]any{
 			"type": "message", "role": "assistant",
@@ -264,8 +269,12 @@ func TestExactCodexTranscriptNeverFallsBackToPreviousTurn(t *testing.T) {
 	writeLines(t, path,
 		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
 		map[string]any{"type": "response_item", "payload": map[string]any{
-			"type": "message", "role": "assistant",
+			"type": "message", "role": "assistant", "phase": "final_answer",
 			"content": []map[string]any{{"type": "output_text", "text": previous}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": "Start another turn."}},
 		}},
 		map[string]any{"type": "response_item", "payload": map[string]any{
 			"type": "message", "role": "assistant",
@@ -276,6 +285,109 @@ func TestExactCodexTranscriptNeverFallsBackToPreviousTurn(t *testing.T) {
 	_, err := ResolveWithCodexTranscript(home, cwd, previous, path)
 	if !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("expected terminal fallback instead of previous turn, got %v", err)
+	}
+}
+
+func TestExactCodexTranscriptKeepsAllMessagesInActiveTurn(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	first := "I reproduced the renderer failure and identified the process-owned transcript that belongs to this exact panel."
+	last := "The remaining issue is the handoff: multiple assistant progress messages belong to one active turn and must stay together."
+	path := filepath.Join(home, ".codex2", "sessions", "2026", "08", "23", "rollout-active.jsonl")
+	writeLines(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": "Fix the renderer."}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "commentary",
+			"content": []map[string]any{{"type": "output_text", "text": first}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call"}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "commentary",
+			"content": []map[string]any{{"type": "output_text", "text": last}},
+		}},
+	)
+
+	got, err := ResolveWithCodexTranscript(home, cwd, last, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := first + "\n\n" + last
+	if got.Source != want {
+		t.Fatalf("active turn source = %q, want %q", got.Source, want)
+	}
+}
+
+func TestExactCodexTranscriptUsesFinalAnswerFromCompletedTurn(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	progress := "I am checking the implementation and running the focused regression suite before reporting the completed result."
+	final := "The implementation is complete. Normal Codex and custom Codex homes both restore and render correctly."
+	path := filepath.Join(home, ".codex2", "sessions", "2026", "08", "23", "rollout-complete.jsonl")
+	writeLines(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": "Implement it."}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "commentary",
+			"content": []map[string]any{{"type": "output_text", "text": progress}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "final_answer",
+			"content": []map[string]any{{"type": "output_text", "text": final}},
+		}},
+		map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_complete"}},
+	)
+
+	got, err := ResolveWithCodexTranscript(home, cwd, final, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != final {
+		t.Fatalf("completed turn source = %q, want final answer %q", got.Source, final)
+	}
+}
+
+func TestExactCodexTranscriptAcceptsShortNewestAnswer(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	short := "Topping all four. 😎"
+	path := filepath.Join(home, ".codex2", "sessions", "2026", "08", "23", "rollout-short.jsonl")
+	writeLines(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": "What would be better?"}},
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "final_answer",
+			"content": []map[string]any{{"type": "output_text", "text": short}},
+		}},
+		map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_complete"}},
+	)
+
+	screen := "A previous detailed response remains above the prompt with plenty of unrelated terminal content.\n\n• Topping all four. 😎\n\n› Ask Codex to do anything"
+	got, err := ResolveWithCodexTranscript(home, cwd, screen, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != short {
+		t.Fatalf("short exact source = %q, want %q", got.Source, short)
+	}
+}
+
+func TestDirectoryScanStillRejectsShortAmbiguousAnswer(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	writeCodex(t, home, "short.jsonl", cwd, "Done.")
+	_, err := Resolve(home, cwd, "A prior response has enough terminal words. Done. Ask Codex to do anything.")
+	if !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("expected unscoped short answer to remain rejected, got %v", err)
 	}
 }
 
@@ -309,9 +421,13 @@ func writeCodexMessages(t *testing.T, home, name, cwd string, sources ...string)
 	t.Helper()
 	path := filepath.Join(home, ".codex", "sessions", "2026", "07", "18", name)
 	values := []any{map[string]any{"type": "session_meta", "payload": map[string]any{"cwd": cwd}}}
-	for _, source := range sources {
+	for index, source := range sources {
 		values = append(values, map[string]any{"type": "response_item", "payload": map[string]any{
-			"type": "message", "role": "assistant",
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": fmt.Sprintf("Turn %d", index+1)}},
+		}})
+		values = append(values, map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "message", "role": "assistant", "phase": "final_answer",
 			"content": []map[string]any{{"type": "output_text", "text": source}},
 		}})
 	}

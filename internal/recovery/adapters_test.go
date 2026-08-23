@@ -27,6 +27,47 @@ func TestCodexResumePreservesSafetyModeAndReplacesSelector(t *testing.T) {
 	}
 }
 
+func TestCodexResumePreservesCustomHomeForEveryPanel(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), ".codex2")
+	entry := Entry{
+		Agent: AgentCodex, Executable: exe, SessionID: testSessionID,
+		Argv: []string{"codex", "--yolo"}, CodexHome: home,
+	}
+	got, err := resumeArgv(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{environmentExecutable(), "CODEX_HOME=" + home, exe, "--yolo", "resume", testSessionID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resume argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestCodexResumeInfersCustomHomeFromOlderSnapshot(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), ".codex-profile")
+	entry := Entry{
+		Agent: AgentCodex, Executable: exe, SessionID: testSessionID,
+		Argv:        []string{"codex"},
+		SessionPath: filepath.Join(home, "sessions", "2026", "08", "23", "rollout.jsonl"),
+	}
+	got, err := resumeArgv(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{environmentExecutable(), "CODEX_HOME=" + home, exe, "resume", testSessionID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resume argv = %#v, want %#v", got, want)
+	}
+}
+
 func TestClaudeResumePreservesPermissionMode(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "claude")
 	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
