@@ -471,6 +471,7 @@ func captureEntry(pane paneInfo, processes map[int]processInfo) Entry {
 		entry.SessionID, entry.SessionPath, _, err = inspectClaude(process.PID, state)
 	case AgentCodex:
 		entry.SessionID, entry.SessionPath, err = inspectCodex(process.PID, state)
+		entry.CodexHome = codexHomeFromTranscript(entry.SessionPath)
 	}
 	if err != nil {
 		entry.CaptureError = err.Error()

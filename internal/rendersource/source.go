@@ -314,21 +314,60 @@ func codexSessionCWD(path string) (string, bool) {
 
 func codexMessages(path string) []message {
 	lines := tailLines(path, maxTranscriptTail)
-	out := make([]message, 0, maxMessagesPerFile)
-	for i := len(lines) - 1; i >= 0 && len(out) < maxMessagesPerFile; i-- {
+	type turn struct {
+		messages []string
+		finals   []string
+	}
+	turns := make([]message, 0, maxMessagesPerFile)
+	current := turn{}
+	flush := func() {
+		parts := current.messages
+		if len(current.finals) > 0 {
+			// A completed Codex turn may contain several progress updates followed
+			// by a final answer. Render the authored final document in that case;
+			// while a turn is active, retain all progress messages instead of
+			// truncating it to whichever update happened to be written last.
+			parts = current.finals
+		}
+		if text := strings.TrimSpace(strings.Join(parts, "\n\n")); text != "" {
+			turns = append(turns, message{text: text, provider: "codex"})
+		}
+		current = turn{}
+	}
+
+	for _, line := range lines {
 		var envelope struct {
 			Type    string `json:"type"`
 			Payload struct {
 				Type    string `json:"type"`
 				Role    string `json:"role"`
+				Phase   string `json:"phase"`
 				Content []struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
 				} `json:"content"`
 			} `json:"payload"`
 		}
-		if json.Unmarshal(lines[i], &envelope) != nil || envelope.Type != "response_item" ||
-			envelope.Payload.Type != "message" || envelope.Payload.Role != "assistant" {
+		if json.Unmarshal(line, &envelope) != nil {
+			continue
+		}
+		if envelope.Type == "event_msg" && envelope.Payload.Type == "task_complete" {
+			flush()
+			continue
+		}
+		if envelope.Type != "response_item" || envelope.Payload.Type != "message" {
+			continue
+		}
+		if envelope.Payload.Role == "user" {
+			// Consecutive context/user records belong to the same new turn. A user
+			// message after assistant output is the reliable legacy boundary for
+			// transcripts that predate task_started/task_complete events.
+			if len(current.messages) > 0 {
+				flush()
+			}
+			continue
+		}
+		if envelope.Payload.Role != "assistant" {
 			continue
 		}
 		var parts []string
@@ -338,8 +377,18 @@ func codexMessages(path string) []message {
 			}
 		}
 		if text := strings.TrimSpace(strings.Join(parts, "\n\n")); text != "" {
-			out = append(out, message{text: text, provider: "codex"})
+			current.messages = append(current.messages, text)
+			if envelope.Payload.Phase == "final_answer" {
+				current.finals = append(current.finals, text)
+			}
 		}
+	}
+	flush()
+
+	// Resolver candidates are newest-first across both providers.
+	out := make([]message, 0, min(maxMessagesPerFile, len(turns)))
+	for index := len(turns) - 1; index >= 0 && len(out) < maxMessagesPerFile; index-- {
+		out = append(out, turns[index])
 	}
 	return out
 }
@@ -437,11 +486,20 @@ func tokenize(text string) []string {
 }
 
 func overlapScore(source, screen []string) float64 {
+	// Directory scans do not have process provenance, so short generic phrases
+	// remain insufficient to identify a conversation safely.
+	if len(source) < 8 {
+		return 0
+	}
 	return overlapScoreWithMinimum(source, screen, minimumMatchTokens)
 }
 
 func overlapScoreWithMinimum(source, screen []string, minimumTokens int) float64 {
-	if len(source) < 8 || len(screen) < 8 {
+	// Exact process-owned transcripts may legitimately end in a very short
+	// answer ("Done.", "Topping all four."). Process provenance plus a match
+	// near the terminal tail is sufficient; unscoped discovery is filtered by
+	// overlapScore above before it reaches this matcher.
+	if len(source) == 0 || len(screen) < 8 {
 		return 0
 	}
 
