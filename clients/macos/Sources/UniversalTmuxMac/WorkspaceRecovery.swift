@@ -38,6 +38,7 @@ struct WorkspaceRecoveryPanel: Decodable, Identifiable {
 
     var id: String { name }
     var isReady: Bool { state == "ready" }
+    var requiresReview: Bool { state == "unsupported" }
     var permissionLabel: String? {
         let args = argv ?? []
         if args.contains("--yolo") || args.contains("--dangerously-bypass-approvals-and-sandbox") {
@@ -459,6 +460,7 @@ final class WorkspaceRecoveryController: ObservableObject {
 struct WorkspaceRecoveryView: View {
     @ObservedObject var recovery: WorkspaceRecoveryController
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
+    @State private var panelUnderReview: WorkspaceRecoveryPanel?
 
     private var snapshot: WorkspaceRecoverySnapshot? { recovery.status?.snapshot }
     private var panels: [WorkspaceRecoveryPanel] { recovery.status?.panels ?? [] }
@@ -485,6 +487,9 @@ struct WorkspaceRecoveryView: View {
         }
         .frame(width: 720 * uiScale, height: 620 * uiScale)
         .background(Theme.appBackground)
+        .sheet(item: $panelUnderReview) { panel in
+            WorkspaceRecoveryReviewView(panel: panel, scale: uiScale)
+        }
     }
 
     private var header: some View {
@@ -656,7 +661,8 @@ struct WorkspaceRecoveryView: View {
                         result: recovery.results[panel.name],
                         isRestoring: recovery.phase == .restoring,
                         scale: uiScale,
-                        action: { recovery.toggle(panel.name) }
+                        action: { recovery.toggle(panel.name) },
+                        reviewAction: { panelUnderReview = panel }
                     )
                 }
             }
@@ -774,49 +780,65 @@ private struct WorkspaceRecoveryRow: View {
     let isRestoring: Bool
     let scale: Double
     let action: () -> Void
+    let reviewAction: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12 * scale) {
-                selectionMark
-                Circle().fill(agentColor).frame(width: 7 * scale, height: 7 * scale)
-                VStack(alignment: .leading, spacing: 4 * scale) {
-                    HStack(spacing: 7 * scale) {
-                        Text(panel.name)
-                            .font(.system(size: 13 * scale, weight: .semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                            .lineLimit(1)
-                        Text(agentTitle)
-                            .font(.system(size: 9.5 * scale, weight: .semibold, design: .monospaced))
-                            .tracking(0.35 * scale)
-                            .foregroundStyle(agentColor)
-                        if let permission = panel.permissionLabel {
-                            Text(permission)
-                                .font(.system(size: 9 * scale, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(Theme.waiting)
-                                .padding(.horizontal, 5 * scale).padding(.vertical, 1.5 * scale)
-                                .background(Capsule().fill(Theme.waiting.opacity(0.12)))
-                        }
-                    }
-                    Text(panel.directory)
-                        .font(.system(size: 10.5 * scale, design: .monospaced))
-                        .foregroundStyle(Theme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 10 * scale)
-                stateLabel
+        Group {
+            if panel.isReady {
+                Button(action: action) { rowContent }
+                    .buttonStyle(.plain)
+                    .disabled(isRestoring || result != nil)
+            } else {
+                rowContent
             }
-            .padding(.horizontal, 13 * scale)
-            .padding(.vertical, 10 * scale)
-            .background(hovering && panel.isReady ? Theme.selection.opacity(0.48) : Color.clear)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .disabled(!panel.isReady || isRestoring || result != nil)
         .onHover { hovering = $0 }
         .help(panel.detail ?? "")
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: 12 * scale) {
+            selectionMark
+            Circle().fill(agentColor).frame(width: 7 * scale, height: 7 * scale)
+            VStack(alignment: .leading, spacing: 4 * scale) {
+                HStack(spacing: 7 * scale) {
+                    Text(panel.name)
+                        .font(.system(size: 13 * scale, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                    Text(agentTitle)
+                        .font(.system(size: 9.5 * scale, weight: .semibold, design: .monospaced))
+                        .tracking(0.35 * scale)
+                        .foregroundStyle(agentColor)
+                    if let permission = panel.permissionLabel {
+                        Text(permission)
+                            .font(.system(size: 9 * scale, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.waiting)
+                            .padding(.horizontal, 5 * scale).padding(.vertical, 1.5 * scale)
+                            .background(Capsule().fill(Theme.waiting.opacity(0.12)))
+                    }
+                }
+                Text(panel.directory)
+                    .font(.system(size: 10.5 * scale, design: .monospaced))
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !panel.isReady, let detail = panel.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10.5 * scale))
+                        .foregroundStyle(stateColor)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 10 * scale)
+            stateLabel
+        }
+        .padding(.horizontal, 13 * scale)
+        .padding(.vertical, 10 * scale)
+        .background(hovering && panel.isReady ? Theme.selection.opacity(0.48) : Color.clear)
+        .contentShape(Rectangle())
     }
 
     private var selectionMark: some View {
@@ -848,6 +870,9 @@ private struct WorkspaceRecoveryRow: View {
                 Text("Starting")
             }
             .foregroundStyle(Theme.accent)
+        } else if panel.requiresReview {
+            Button("Review", action: reviewAction)
+                .buttonStyle(RecoverySecondaryButtonStyle(scale: scale))
         } else {
             Text(stateTitle)
                 .foregroundStyle(panel.isReady ? Theme.textSecondary : stateColor)
@@ -861,7 +886,8 @@ private struct WorkspaceRecoveryRow: View {
         case "conflict": return "Name conflict"
         case "missing-directory": return "Folder missing"
         case "missing-session": return "History missing"
-        default: return "Review needed"
+        case "unsupported": return "Review"
+        default: return "Unavailable"
         }
     }
 
@@ -879,6 +905,102 @@ private struct WorkspaceRecoveryRow: View {
 
     private var agentColor: Color {
         switch panel.agent { case "claude": return Theme.waiting; case "codex": return Theme.running; default: return Theme.textTertiary }
+    }
+}
+
+struct WorkspaceRecoveryReviewView: View {
+    let panel: WorkspaceRecoveryPanel
+    let scale: Double
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18 * scale) {
+            HStack(spacing: 12 * scale) {
+                Image(systemName: "exclamationmark.magnifyingglass")
+                    .font(.system(size: 20 * scale, weight: .medium))
+                    .foregroundStyle(Theme.waiting)
+                    .frame(width: 38 * scale, height: 38 * scale)
+                    .background(RoundedRectangle(cornerRadius: 9 * scale).fill(Theme.waiting.opacity(0.12)))
+                VStack(alignment: .leading, spacing: 2 * scale) {
+                    Text("REVIEW RECOVERY")
+                        .font(.system(size: 10 * scale, weight: .semibold, design: .monospaced))
+                        .tracking(1.0 * scale)
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(panel.name)
+                        .font(.system(size: 19 * scale, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                Spacer()
+            }
+
+            reviewSection("WHY ARGUS PAUSED") {
+                Text(panel.detail ?? "Argus could not prove that this saved launch can be replayed safely.")
+                    .foregroundStyle(Theme.textPrimary)
+            }
+
+            reviewSection("CAPTURED STATE") {
+                reviewField("Agent", panel.agent.capitalized)
+                reviewField("Folder", panel.directory, monospaced: true)
+                if let session = panel.sessionId, !session.isEmpty {
+                    reviewField("Verified conversation", session, monospaced: true)
+                }
+            }
+
+            if let argv = panel.argv, !argv.isEmpty {
+                reviewSection("CAPTURED LAUNCH") {
+                    Text(argv.map(WorkspaceRecoveryController.shellQuote).joined(separator: " "))
+                        .font(.system(size: 11 * scale, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Text("Nothing was started or overwritten. Correct the saved launch command, or reopen this conversation manually using the verified session above.")
+                .font(.system(size: 11 * scale))
+                .foregroundStyle(Theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(RecoveryPrimaryButtonStyle(enabled: true, scale: scale))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24 * scale)
+        .frame(width: 560 * scale)
+        .background(Theme.appBackground)
+    }
+
+    private func reviewSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 9 * scale) {
+            Text(title)
+                .font(.system(size: 9 * scale, weight: .semibold, design: .monospaced))
+                .tracking(0.8 * scale)
+                .foregroundStyle(Theme.textTertiary)
+            VStack(alignment: .leading, spacing: 8 * scale, content: content)
+                .padding(12 * scale)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8 * scale).fill(Theme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 8 * scale).stroke(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private func reviewField(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2 * scale) {
+            Text(label)
+                .font(.system(size: 9 * scale, weight: .medium))
+                .foregroundStyle(Theme.textTertiary)
+            Text(value)
+                .font(.system(size: 11 * scale, design: monospaced ? .monospaced : .default))
+                .foregroundStyle(Theme.textPrimary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

@@ -27,6 +27,39 @@ func TestCodexResumePreservesSafetyModeAndReplacesSelector(t *testing.T) {
 	}
 }
 
+func TestCodexResumeDropsVerifiedDuplicateLauncherMarker(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := Entry{
+		Agent: AgentCodex, Executable: exe, SessionID: testSessionID,
+		Argv: []string{exe, "--yolo", "codex", "resume", testSessionID},
+	}
+	got, err := resumeArgv(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{exe, "--yolo", "resume", testSessionID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resume argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestCodexResumeDoesNotDropUnverifiedLauncherMarker(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := Entry{
+		Agent: AgentCodex, Executable: exe, SessionID: testSessionID,
+		Argv: []string{exe, "--yolo", "codex", "resume", "019f9bfd-86da-7133-8213-39aa87070000"},
+	}
+	if _, err := resumeArgv(entry); err == nil {
+		t.Fatal("resumeArgv should reject a launcher marker whose resume ID was not independently verified")
+	}
+}
+
 func TestCodexResumePreservesCustomHomeForEveryPanel(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "codex")
 	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {

@@ -58,6 +58,25 @@ final class WorkspaceRecoveryTests: XCTestCase {
         XCTAssertEqual(status.candidates?.first?.host, "babel-p9-28")
     }
 
+    func testUnsupportedPanelIsExplicitlyReviewable() throws {
+        let json = #"""
+        {
+          "name":"robocasa",
+          "directory":"/data/user_data/pranjala/robocasa",
+          "agent":"codex",
+          "sessionId":"019fb048-79c0-7600-827c-9400d729dbcb",
+          "argv":["codex","--future-option"],
+          "state":"unsupported",
+          "detail":"unknown startup option \"--future-option\" requires manual review",
+          "selected":false
+        }
+        """#.data(using: .utf8)!
+        let panel = try JSONDecoder().decode(WorkspaceRecoveryPanel.self, from: json)
+        XCTAssertTrue(panel.requiresReview)
+        XCTAssertFalse(panel.isReady)
+        XCTAssertEqual(panel.detail, "unknown startup option \"--future-option\" requires manual review")
+    }
+
     @MainActor
     func testRemoteRecoveryCommandQuotingPreservesPanelNames() {
         XCTAssertEqual(WorkspaceRecoveryController.shellQuote("plain-panel"), "plain-panel")
@@ -109,6 +128,7 @@ final class WorkspaceRecoveryTests: XCTestCase {
             {"name":"spatial_sound","directory":"/Users/pranjal/Developer/spatial_sound","agent":"claude","argv":["claude","--dangerously-skip-permissions"],"state":"ready","detail":"Resume the exact saved conversation.","selected":true},
             {"name":"econ_kernel","directory":"/Users/pranjal/Developer/econ_kernel","agent":"codex","argv":["codex","--yolo"],"state":"ready","detail":"Resume the exact saved conversation.","selected":true},
             {"name":"pace_zsh","directory":"/Users/pranjal/Developer/pace","agent":"shell","state":"ready","detail":"Restore an interactive shell in its original folder.","selected":true},
+            {"name":"manual_panel","directory":"/tmp/manual","agent":"codex","sessionId":"019fb048-79c0-7600-827c-9400d729dbcb","argv":["codex","--future-option"],"state":"unsupported","detail":"Unknown startup option --future-option.","selected":false},
             {"name":"existing_panel","directory":"/tmp/existing","agent":"codex","state":"already-running","detail":"This exact workspace is already running.","selected":false},
             {"name":"renamed_panel","directory":"/tmp/old","agent":"claude","state":"conflict","detail":"A different live session already uses this panel name.","selected":false}
           ],
@@ -132,6 +152,34 @@ final class WorkspaceRecoveryTests: XCTestCase {
         XCTAssertGreaterThan(host.fittingSize.width, 0)
         XCTAssertGreaterThan(host.fittingSize.height, 0)
         if let path = ProcessInfo.processInfo.environment["UT_RECOVERY_SCREENSHOT"],
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    @MainActor
+    func testRecoveryReviewRendersActionableDetails() throws {
+        let json = #"""
+        {
+          "name":"manual_panel",
+          "directory":"/data/user_data/pranjala/research",
+          "agent":"codex",
+          "sessionId":"019fb048-79c0-7600-827c-9400d729dbcb",
+          "argv":["/home/pranjala/bin/codex","--future-option"],
+          "state":"unsupported",
+          "detail":"Unknown startup option --future-option cannot be replayed safely.",
+          "selected":false
+        }
+        """#.data(using: .utf8)!
+        let panel = try JSONDecoder().decode(WorkspaceRecoveryPanel.self, from: json)
+        let host = NSHostingView(rootView: WorkspaceRecoveryReviewView(panel: panel, scale: 1))
+        host.frame = NSRect(x: 0, y: 0, width: 560, height: 590)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.width, 0)
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+        if let path = ProcessInfo.processInfo.environment["UT_RECOVERY_REVIEW_SCREENSHOT"],
            let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
             host.cacheDisplay(in: host.bounds, to: bitmap)
             try bitmap.representation(using: .png, properties: [:])?
