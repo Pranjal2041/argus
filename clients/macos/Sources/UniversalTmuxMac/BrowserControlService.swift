@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import ImageIO
 import Network
@@ -30,16 +31,19 @@ final class BrowserControlService: ObservableObject {
     private let hiddenTabMemoryLimit: UInt64
     private let now: () -> Date
     private let webProcessUsage: (WKWebView) -> BrowserWebProcessUsage?
+    private let appWindowCapture: () throws -> CGImage
 
     init(hiddenTabLifetime: TimeInterval = 12 * 60 * 60,
          hiddenTabMemoryLimit: UInt64 = 4 * 1_024 * 1_024 * 1_024,
          now: @escaping () -> Date = Date.init,
-         webProcessUsage: @escaping (WKWebView) -> BrowserWebProcessUsage? = BrowserWebProcessMonitor.usage) {
+         webProcessUsage: @escaping (WKWebView) -> BrowserWebProcessUsage? = BrowserWebProcessMonitor.usage,
+         appWindowCapture: @escaping () throws -> CGImage = ArgusWindowCapture.captureMainWindow) {
         browserHostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         self.hiddenTabLifetime = hiddenTabLifetime
         self.hiddenTabMemoryLimit = hiddenTabMemoryLimit
         self.now = now
         self.webProcessUsage = webProcessUsage
+        self.appWindowCapture = appWindowCapture
     }
 
     func start(dashboards: DashboardsModel, credentialVault: CredentialVaultStore) {
@@ -77,6 +81,13 @@ final class BrowserControlService: ObservableObject {
 
     func runLifecycleWatchdogForTesting() {
         enforceHiddenTabLimits()
+    }
+
+    func repositionHiddenHostForTesting(tabID: String, to origin: CGPoint)
+        -> (alpha: CGFloat, frame: CGRect, isVisible: Bool)? {
+        guard let id = UUID(uuidString: tabID), let window = hiddenTabs[id]?.window else { return nil }
+        window.setFrameOrigin(origin)
+        return (window.alphaValue, window.frame, window.isVisible)
     }
 
     private func startHeartbeat() {
@@ -160,6 +171,16 @@ final class BrowserControlService: ObservableObject {
     private func dispatch(method: String, params: [String: Any],
                           caller: BrowserCredentialCaller?) async throws -> Any {
         switch method {
+        case "app.screenshot":
+            let image = try appWindowCapture()
+            let encoded = try await BrowserScreenshotEncoder.encode(image)
+            return [
+                "scope": "argus-window",
+                "mime_type": "image/png",
+                "width": encoded.width,
+                "height": encoded.height,
+                "image_base64": encoded.base64
+            ]
         case "tabs.list":
             return ["tabs": allTabs().map(tabDescription)]
         case "tabs.open":
@@ -424,8 +445,7 @@ final class BrowserControlService: ObservableObject {
 
     private func makeOffscreenTab(_ tab: DashboardTab, viewport: CGSize,
                                   createdAt: Date) -> BrowserManagedTab {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        let configuration = ArgusBrowserIdentity.persistentConfiguration()
         let webView = WKWebView(frame: CGRect(origin: .zero, size: viewport), configuration: configuration)
         webView.setFrameSize(viewport)
         tab.heldWebView = webView
@@ -436,18 +456,21 @@ final class BrowserControlService: ObservableObject {
         )
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.transient, .ignoresCycle]
-        window.alphaValue = 0.01
-        // Hidden browser rendering must never intercept the user's pointer, even
-        // if macOS temporarily repositions windows while spaces/apps reactivate.
+        // WebKit stays attached to an ordered render surface, but the surface is
+        // completely absent from the compositor. macOS may relocate an offscreen
+        // window during Space/full-screen changes; zero alpha keeps that harmless.
+        window.alphaValue = 0
+        // Hidden browser rendering must never intercept the user's pointer.
         window.ignoresMouseEvents = true
         window.contentView = webView
         // WebKit paints while attached to an ordered window. Keeping the borderless
-        // host far offscreen makes it genuinely hidden without using a special DOM
-        // path that would differ from the visible browser.
+        // host offscreen avoids unnecessary composition work; zero alpha above is
+        // the actual visibility guarantee and does not depend on these coordinates.
         window.orderBack(nil)
         let managed = BrowserManagedTab(tab: tab, webView: webView, window: window,
                                         createdAt: createdAt)
         webView.navigationDelegate = managed
+        webView.uiDelegate = managed
         return managed
     }
 
@@ -652,23 +675,37 @@ final class BrowserControlService: ObservableObject {
                 throw BrowserControlFailure.invalid("credential has no \(field) field")
             }
             var arguments: [String: Any] = [
-                "credentialValue": value,
                 "targetRef": NSNull(), "targetX": NSNull(), "targetY": NSNull()
             ]
+            let point: CGPoint
             if let ref = target["ref"] as? String, !ref.isEmpty {
                 arguments["targetRef"] = ref
+                guard let rect = try await managed.webView.evaluate(
+                    script: BrowserScripts.rect(ref: ref)
+                ) as? [String: Any],
+                      let x = rect.double("x"), let y = rect.double("y"),
+                      let width = rect.double("width"), let height = rect.double("height") else {
+                    throw BrowserControlFailure.notFound("the \(field) target is no longer present")
+                }
+                point = CGPoint(x: x + width / 2, y: y + height / 2)
             } else if let x = target.double("x"), let y = target.double("y"), x >= 0, y >= 0 {
                 arguments["targetX"] = x
                 arguments["targetY"] = y
+                point = CGPoint(x: x, y: y)
             } else {
                 throw BrowserControlFailure.invalid("\(field) target requires an element ref or x/y coordinates")
             }
-            guard let result = try await managed.webView.callAsync(
-                script: BrowserScripts.fillProtectedField,
+
+            // The secret never enters page JavaScript. Native WebKit input can
+            // reach cross-origin frames, shadow DOM, and framework-controlled
+            // fields that document.elementFromPoint cannot inspect. Marking is
+            // best-effort and only prevents a reachable field from appearing in
+            // a later semantic snapshot.
+            _ = try? await managed.webView.callAsync(
+                script: BrowserScripts.markProtectedField,
                 arguments: arguments
-            ) as? [String: Any], result["ok"] as? Bool == true else {
-                throw BrowserControlFailure.notFound("the \(field) target is missing or not editable")
-            }
+            )
+            try await isolatedProtectedType(managed, point: point, text: value)
             filled.append(field)
         }
         guard !filled.isEmpty else {
@@ -678,6 +715,13 @@ final class BrowserControlService: ObservableObject {
         return filled
     }
 
+    private func isolatedProtectedType(_ managed: BrowserManagedTab,
+                                       point: CGPoint, text: String) async throws {
+        try nativeClick(managed, x: point.x, y: point.y)
+        try await Task.sleep(nanoseconds: 40_000_000)
+        try nativeType(managed, text: text, replacingCurrentField: true)
+    }
+
     private func click(_ managed: BrowserManagedTab, params: [String: Any]) async throws {
         if let ref = params["ref"] as? String {
             guard let rect = try await managed.webView.evaluate(script: BrowserScripts.rect(ref: ref)) as? [String: Any],
@@ -685,13 +729,13 @@ final class BrowserControlService: ObservableObject {
                   let width = rect.double("width"), let height = rect.double("height") else {
                 throw BrowserControlFailure.notFound("element reference \(ref) is missing or no longer current")
             }
-            try await isolatedClick(managed, x: x + width / 2, y: y + height / 2)
+            try await domClick(managed, x: x + width / 2, y: y + height / 2)
             return
         }
         guard let x = params.double("x"), let y = params.double("y") else {
             throw BrowserControlFailure.invalid("click requires coordinates or an element reference")
         }
-        try await isolatedClick(managed, x: x, y: y)
+        try nativeClick(managed, x: x, y: y)
     }
 
     private func typeText(_ managed: BrowserManagedTab, params: [String: Any]) async throws {
@@ -792,11 +836,9 @@ final class BrowserControlService: ObservableObject {
         return result["names"] as? [String] ?? files.compactMap { $0["name"] as? String }
     }
 
-    /// Agent input is always evaluated inside the addressed page. Posting NSEvents
-    /// through NSApplication can change first responder, activate an Argus window,
-    /// or race a user's application switch, so it is deliberately not an automation
-    /// transport even for a currently visible browser tab.
-    private func isolatedClick(_ managed: BrowserManagedTab, x: Double, y: Double) async throws {
+    /// Element-reference clicks retain the in-page path because native HTML select
+    /// menus are mirrored into the document so screenshots can observe them.
+    private func domClick(_ managed: BrowserManagedTab, x: Double, y: Double) async throws {
         let webView = managed.webView
         guard x >= 0, y >= 0, x <= webView.bounds.width, y <= webView.bounds.height else {
             throw BrowserControlFailure.invalid("coordinates are outside the current viewport")
@@ -807,18 +849,77 @@ final class BrowserControlService: ObservableObject {
         managed.lastInteractionMode = "dom-injected"
     }
 
+    /// Coordinate clicks enter the addressed WKWebView's native AppKit input path.
+    /// They are delivered directly to its content view rather than posted through
+    /// NSApplication/CGEvent, so WebKit owns hit testing (including child frames)
+    /// without moving the pointer or activating Argus/the offscreen host window.
+    private func nativeClick(_ managed: BrowserManagedTab, x: Double, y: Double) throws {
+        let webView = managed.webView
+        guard x >= 0, y >= 0, x <= webView.bounds.width, y <= webView.bounds.height else {
+            throw BrowserControlFailure.invalid("coordinates are outside the current viewport")
+        }
+        guard let window = webView.window ?? managed.window else {
+            throw BrowserControlFailure.failed("the browser tab has no live WebKit host")
+        }
+
+        let point = CGPoint(x: x, y: webView.isFlipped ? y : webView.bounds.height - y)
+        guard let target = webView.hitTest(point) else {
+            throw BrowserControlFailure.notFound("no WebKit content exists at the requested coordinates")
+        }
+        let location = webView.convert(point, to: nil)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        func mouseEvent(_ type: NSEvent.EventType, clickCount: Int, pressure: Float) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: timestamp,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: clickCount,
+                pressure: pressure
+            ) else {
+                throw BrowserControlFailure.failed("could not construct a WebKit mouse event")
+            }
+            return event
+        }
+
+        target.mouseMoved(with: try mouseEvent(.mouseMoved, clickCount: 0, pressure: 0))
+        target.mouseDown(with: try mouseEvent(.leftMouseDown, clickCount: 1, pressure: 1))
+        target.mouseUp(with: try mouseEvent(.leftMouseUp, clickCount: 1, pressure: 0))
+        managed.lastInteractionMode = "native-webkit"
+    }
+
     private func isolatedType(_ managed: BrowserManagedTab, x: Double?, y: Double?, text: String) async throws {
         let webView = managed.webView
         if let x, let y {
-            guard (try await webView.evaluate(script: BrowserScripts.coordinateFocus(x: x, y: y)) as? Bool) == true else {
-                throw BrowserControlFailure.notFound("no editable page element exists at the requested coordinates")
-            }
+            try nativeClick(managed, x: x, y: y)
+            try await Task.sleep(nanoseconds: 40_000_000)
         }
-        guard (try await webView.evaluate(script: BrowserScripts.prepareType(text: text)) as? Bool) == true,
-              (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true else {
-            throw BrowserControlFailure.failed("the page has no focused editable element")
+        if x == nil, y == nil,
+           (try await webView.evaluate(script: BrowserScripts.prepareType(text: text)) as? Bool) == true,
+           (try await webView.evaluate(script: BrowserScripts.applyPreparedType)) as? Bool == true {
+            managed.lastInteractionMode = "dom-injected"
+            return
         }
-        managed.lastInteractionMode = "dom-injected"
+        try nativeType(managed, text: text)
+    }
+
+    /// Inserts through WebKit's NSTextInputClient after a native coordinate click.
+    /// A hidden tab's offscreen window has its own first responder even though it can
+    /// never become key, so text stays scoped to that page and not the user's app.
+    private func nativeType(_ managed: BrowserManagedTab, text: String,
+                            replacingCurrentField: Bool = false) throws {
+        guard let responder = (managed.webView.window ?? managed.window)?.firstResponder,
+              let inputClient = responder as? NSTextInputClient else {
+            throw BrowserControlFailure.failed("the page has no focused WebKit text input")
+        }
+        if replacingCurrentField {
+            inputClient.doCommand(by: NSSelectorFromString("selectAll:"))
+        }
+        inputClient.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        managed.lastInteractionMode = "native-webkit"
     }
 
     private func isolatedScroll(_ managed: BrowserManagedTab, dx: Double, dy: Double) async throws {
@@ -843,7 +944,7 @@ final class BrowserControlService: ObservableObject {
 // MARK: - Managed WebKit state
 
 @MainActor
-private final class BrowserManagedTab: NSObject, WKNavigationDelegate {
+private final class BrowserManagedTab: ArgusRemoteWebUIDelegate, WKNavigationDelegate {
     let tab: DashboardTab
     let webView: WKWebView
     let createdAt: Date
@@ -903,6 +1004,7 @@ private final class BrowserManagedTab: NSObject, WKNavigationDelegate {
     func close() {
         webView.stopLoading()
         webView.navigationDelegate = nil
+        webView.uiDelegate = nil
         webView.removeFromSuperview()
         window?.contentView = nil
         window?.close()
@@ -961,6 +1063,57 @@ private struct BrowserEncodedScreenshot: Sendable {
     let base64: String
     let width: Int
     let height: Int
+}
+
+enum ArgusWindowCapture {
+    static func captureMainWindow() throws -> CGImage {
+        guard let window = NSApp.windows.first(where: {
+            $0.identifier == ArgusWindowIdentity.main && $0.windowNumber > 0
+        }) else {
+            throw BrowserControlFailure.failed("the Argus main window is unavailable")
+        }
+
+        guard let view = window.contentView else {
+            throw BrowserControlFailure.failed("the Argus main-window content is unavailable")
+        }
+        return try renderViewTree(view, scale: window.backingScaleFactor)
+    }
+
+    /// Render only Argus's in-process Core Animation tree. Unlike AppKit's display
+    /// cache path, this never asks WindowServer to copy a composed window, so remote
+    /// WebKit surfaces cannot turn an app screenshot into a Screen Recording prompt.
+    /// A remote surface may be absent from this image; browser tabs have their own
+    /// `WKWebView.takeSnapshot` path and must be captured through that API instead.
+    static func renderViewTree(_ view: NSView, scale requestedScale: CGFloat) throws -> CGImage {
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+        guard let layer = view.layer else {
+            throw BrowserControlFailure.failed("the Argus main-window layer tree is unavailable")
+        }
+        let bounds = view.bounds
+        let scale = max(requestedScale, 1)
+        let width = Int(ceil(bounds.width * scale))
+        let height = Int(ceil(bounds.height * scale))
+        guard width > 0, height > 0,
+              let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            throw BrowserControlFailure.failed("Argus could not allocate its window snapshot")
+        }
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -bounds.minX, y: -bounds.minY)
+        layer.render(in: context)
+        guard let image = context.makeImage() else {
+            throw BrowserControlFailure.failed("Argus could not encode its window snapshot")
+        }
+        return image
+    }
 }
 
 private enum BrowserScreenshotEncoder {
@@ -1095,11 +1248,11 @@ private enum BrowserScripts {
     }))()
     """#
 
-    // `value` arrives through WebKit's argument channel, never interpolated into
-    // JavaScript source or returned by this function. Mark every injected field
-    // so later semantic snapshots redact it even when a site uses type="text".
-    static let fillProtectedField = #"""
-    const protectedValue = String(credentialValue ?? '');
+    // Credential values use native WebKit text input and never enter page
+    // JavaScript. This best-effort marker only redacts a reachable field from
+    // later semantic snapshots; cross-origin and closed-shadow fields are already
+    // outside the top document's observation boundary.
+    static let markProtectedField = #"""
     let el = null;
     if (typeof targetRef === 'string') {
       el = [...document.querySelectorAll('[data-argus-browser-ref]')]
@@ -1107,27 +1260,9 @@ private enum BrowserScripts {
     } else if (Number.isFinite(targetX) && Number.isFinite(targetY)) {
       el = document.elementFromPoint(targetX, targetY);
     }
-    if (!el || el.disabled || el.readOnly) return {ok:false};
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      const proto = el instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      el.focus({preventScroll:true});
-      if (setter) setter.call(el, protectedValue); else el.value = protectedValue;
-      el.setAttribute('data-argus-protected-field', 'true');
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
-      return {ok:String(el.value) === protectedValue};
-    }
-    if (el.isContentEditable) {
-      el.focus({preventScroll:true});
-      el.textContent = protectedValue;
-      el.setAttribute('data-argus-protected-field', 'true');
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
-      return {ok:String(el.textContent || '') === protectedValue};
-    }
-    return {ok:false};
+    if (!el) return false;
+    el.setAttribute('data-argus-protected-field', 'true');
+    return true;
     """#
 
     // File bytes arrive through WebKit's argument channel and become browser
@@ -1338,20 +1473,6 @@ private enum BrowserScripts {
           el.focus({preventScroll:true});
           pointer('pointerup', 0); mouse('mouseup', 0); mouse('click', 0);
           return true;
-        })()
-        """#
-    }
-
-    static func coordinateFocus(x: Double, y: Double) -> String {
-        #"""
-        (() => {
-          const hit = document.elementFromPoint(\#(x), \#(y));
-          if (!hit) return false;
-          const selector = 'input,textarea,[contenteditable]:not([contenteditable="false"])';
-          const el = hit.matches?.(selector) ? hit : hit.closest?.(selector);
-          if (!el) return false;
-          el.focus({preventScroll:true});
-          return document.activeElement === el || el.contains(document.activeElement);
         })()
         """#
     }

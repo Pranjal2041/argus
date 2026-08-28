@@ -45,6 +45,16 @@ fi
 codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
 echo "Signed with stable identity: $SIGN_IDENTITY"
 
+signing_field() {
+    local bundle="$1"
+    local field="$2"
+    codesign -dvvv "$bundle" 2>&1 \
+        | awk -F= -v field="$field" '$1 == field && !found { print $2; found = 1 }'
+}
+
+NEW_TEAM_ID="$(signing_field "$APP" TeamIdentifier)"
+NEW_CD_HASH="$(signing_field "$APP" CDHash)"
+
 echo "Built $(pwd)/$APP"
 
 # Install to /Applications so a normal relaunch (Dock/Spotlight/⌘-Tab) runs THIS build.
@@ -52,6 +62,30 @@ echo "Built $(pwd)/$APP"
 # /Applications copy while `open ./Argus.app` only launches the repo one — which looks
 # like "the new build didn't take". Set UT_NO_INSTALL=1 to skip.
 if [ "${UT_NO_INSTALL:-0}" != "1" ]; then
+    # WebKit's persistent WebCrypto master key uses the signing Team ID as its
+    # stable Keychain partition. Without a Team ID, macOS falls back to the
+    # executable's per-build cdhash. Replacing an already-authorized build in
+    # that state makes the next browser access ask for the login Keychain again.
+    # Refuse the unsafe install rather than surprising the user with a prompt.
+    if [ -d /Applications/Argus.app ] \
+        && [ "$NEW_TEAM_ID" = "not set" ] \
+        && security find-generic-password \
+            -a 'com.apple.WebKit.WebCrypto.master+dev.universaltmux.mac' \
+            "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+        INSTALLED_CD_HASH="$(signing_field /Applications/Argus.app CDHash)"
+        if [ -n "$INSTALLED_CD_HASH" ] && [ "$NEW_CD_HASH" != "$INSTALLED_CD_HASH" ]; then
+            cat >&2 <<EOF
+Error: refusing to replace the WebCrypto-authorized Argus build.
+
+The selected signing identity has no Team ID, so macOS would identify this
+new build by a different cdhash and ask for Keychain access again.
+
+Create an Apple Development certificate for Xcode team 7T4GGGT2QF, then set
+UT_CODESIGN_IDENTITY to that identity before installing.
+EOF
+            exit 1
+        fi
+    fi
     rm -rf /Applications/Argus.app
     ditto "$APP" /Applications/Argus.app && echo "Installed to /Applications/Argus.app"
 fi

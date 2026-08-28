@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import LocalAuthentication
 import Security
 
 enum CredentialVaultKind: String, Codable, CaseIterable, Identifiable {
@@ -221,13 +222,16 @@ final class KeychainCredentialSecretStore: CredentialSecretStore {
     private let service = "com.universal-tmux.Argus.credential-vault"
 
     func read(id: UUID) throws -> CredentialVaultSecret {
-        var query = baseQuery(id: id)
+        var query = baseQuery(id: id, failIfInteractionRequired: true)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let data = result as? Data else {
             if status == errSecItemNotFound { throw CredentialVaultError.secretMissing }
+            if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+                throw CredentialVaultError.authorizationRequired
+            }
             throw CredentialVaultError.keychain(status)
         }
         do { return try JSONDecoder().decode(CredentialVaultSecret.self, from: data) }
@@ -244,8 +248,14 @@ final class KeychainCredentialSecretStore: CredentialSecretStore {
             kSecAttrAccessible as String: accessibility,
             kSecAttrLabel as String: "Argus credential"
         ]
-        let updateStatus = SecItemUpdate(baseQuery(id: id) as CFDictionary, attributes as CFDictionary)
+        let updateStatus = SecItemUpdate(
+            baseQuery(id: id, failIfInteractionRequired: true) as CFDictionary,
+            attributes as CFDictionary
+        )
         if updateStatus == errSecSuccess { return }
+        if updateStatus == errSecInteractionNotAllowed || updateStatus == errSecAuthFailed {
+            throw CredentialVaultError.authorizationRequired
+        }
         guard updateStatus == errSecItemNotFound else { throw CredentialVaultError.keychain(updateStatus) }
         attributes.merge(baseQuery(id: id)) { current, _ in current }
         let addStatus = SecItemAdd(attributes as CFDictionary, nil)
@@ -253,8 +263,11 @@ final class KeychainCredentialSecretStore: CredentialSecretStore {
     }
 
     func delete(id: UUID) throws {
-        let status = SecItemDelete(baseQuery(id: id) as CFDictionary)
+        let status = SecItemDelete(baseQuery(id: id, failIfInteractionRequired: true) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
+            if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+                throw CredentialVaultError.authorizationRequired
+            }
             throw CredentialVaultError.keychain(status)
         }
     }
@@ -265,22 +278,31 @@ final class KeychainCredentialSecretStore: CredentialSecretStore {
             : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         for id in ids {
             let status = SecItemUpdate(
-                baseQuery(id: id) as CFDictionary,
+                baseQuery(id: id, failIfInteractionRequired: true) as CFDictionary,
                 [kSecAttrAccessible as String: accessibility] as CFDictionary
             )
             guard status == errSecSuccess || status == errSecItemNotFound else {
+                if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+                    throw CredentialVaultError.authorizationRequired
+                }
                 throw CredentialVaultError.keychain(status)
             }
         }
     }
 
-    private func baseQuery(id: UUID) -> [String: Any] {
-        [
+    private func baseQuery(id: UUID, failIfInteractionRequired: Bool = false) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: id.uuidString.lowercased(),
             kSecAttrSynchronizable as String: false
         ]
+        if failIfInteractionRequired {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext as String] = context
+        }
+        return query
     }
 }
 
@@ -292,6 +314,7 @@ enum CredentialVaultError: LocalizedError {
     case secretMissing
     case secretUnreadable
     case keychain(OSStatus)
+    case authorizationRequired
 
     var errorDescription: String? {
         switch self {
@@ -302,6 +325,8 @@ enum CredentialVaultError: LocalizedError {
         case .secretUnreadable: return "The credential secret could not be decoded."
         case .keychain(let status):
             return SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status)"
+        case .authorizationRequired:
+            return "This credential belongs to an earlier Argus build. Argus blocked the Keychain authorization prompt."
         }
     }
 }

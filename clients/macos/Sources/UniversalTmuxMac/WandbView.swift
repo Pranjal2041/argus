@@ -6,14 +6,13 @@ import WebKit
 /// `.default()` — PERSISTENT and shared — so you log into W&B once and every run
 /// (and every relaunch) stays logged in. Reused across panels/runs (just
 /// navigated), so toggling back to a run you were already viewing is instant.
-final class WandbController: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+final class WandbController: ArgusRemoteWebUIDelegate, ObservableObject, WKNavigationDelegate {
     let webView: WKWebView
     @Published var isLoading = false
     private var loaded: URL?
 
     override init() {
-        let cfg = WKWebViewConfiguration()
-        cfg.websiteDataStore = .default()       // persistent, shared → login survives
+        let cfg = ArgusBrowserIdentity.persistentConfiguration()
         webView = WKWebView(frame: .zero, configuration: cfg)
         webView.allowsBackForwardNavigationGestures = true
         super.init()

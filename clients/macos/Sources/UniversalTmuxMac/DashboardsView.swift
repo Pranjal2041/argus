@@ -62,8 +62,7 @@ struct WebTabView: NSViewRepresentable {
             tab.webView = wv
             return wv
         }
-        let cfg = WKWebViewConfiguration()
-        cfg.websiteDataStore = .default()   // persistent cookies for token/login dashboards
+        let cfg = ArgusBrowserIdentity.persistentConfiguration()
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.navigationDelegate = context.coordinator
         wv.uiDelegate = context.coordinator
@@ -91,7 +90,7 @@ struct WebTabView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: ArgusRemoteWebUIDelegate, WKNavigationDelegate {
         let tab: DashboardTab
         var lastLoaded: URL?
         var retries = 0
@@ -192,6 +191,9 @@ struct WebTabView: NSViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ wv: WKWebView) {
             if let u = wv.url ?? tab.url { wv.load(URLRequest(url: u)) }
         }
+        // Argus browser tabs are automation/read surfaces, not conferencing
+        // clients. Deny camera/microphone before WebKit can surface an OS prompt;
+        // display capture is independently blocked at document start.
         // target=_blank / window.open → load in the same view instead of dropping it.
         func webView(_ wv: WKWebView, createWebViewWith cfg: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {

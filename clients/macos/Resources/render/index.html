@@ -1123,11 +1123,48 @@
 
   window.UTRender = {
     lastError: null,
+    payloadChunks: [],
     // Backwards-compatible plain Markdown entry point used by Files preview.
     set(md, px) { activeDocument = null; if (px) this.setZoom(px); renderMarkdown(md, false); },
     setDocument(doc, px, presentation) {
       if (px) this.setZoom(px);
       presentDocument(doc, presentation || "terminal");
+    },
+    beginDocumentPayload() {
+      this.payloadChunks = [];
+    },
+    appendDocumentPayload(chunk) {
+      this.payloadChunks.push(String(chunk || ""));
+    },
+    commitDocumentPayload(px, presentation) {
+      try {
+        let total = 0;
+        const decoded = this.payloadChunks.map((chunk) => {
+          const binary = atob(chunk);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          total += bytes.length;
+          return bytes;
+        });
+        const payload = new Uint8Array(total);
+        let offset = 0;
+        for (const bytes of decoded) { payload.set(bytes, offset); offset += bytes.length; }
+        const doc = JSON.parse(new TextDecoder("utf-8").decode(payload));
+        this.payloadChunks = [];
+        this.setDocument(doc, px, presentation);
+      } catch (error) {
+        this.payloadChunks = [];
+        this.showTransferFailure(String(error && error.message || error));
+        throw error;
+      }
+    },
+    showTransferFailure(message) {
+      this.lastError = String(message || "Render payload transfer failed");
+      const out = document.getElementById("out");
+      const pre = document.createElement("pre");
+      pre.className = "term";
+      pre.textContent = this.lastError;
+      out.replaceChildren(pre);
     },
     setZoom(px) { document.body.style.fontSize = px + "px"; },
     setLayout(layout) {

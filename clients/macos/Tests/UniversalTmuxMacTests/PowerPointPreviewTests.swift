@@ -15,6 +15,16 @@ final class PowerPointPreviewTests: XCTestCase {
         XCTAssertEqual(fileKindForPreview("archive.zip", size: 750_000_000), .binary)
     }
 
+    func testWordFamiliesUseQuickLookRegardlessOfDocumentSize() {
+        for ext in ["docx", "DOC", "docm", "dotx", "dot", "dotm"] {
+            XCTAssertEqual(
+                fileKindForPreview("report.\(ext)", size: 750_000_000),
+                .quickLook,
+                "\(ext) should remain previewable above the text-memory cap"
+            )
+        }
+    }
+
     func testQuickLookLeasePreservesExtensionAndDeletesCacheOnRelease() throws {
         let fm = FileManager.default
         let sourceDirectory = fm.temporaryDirectory
