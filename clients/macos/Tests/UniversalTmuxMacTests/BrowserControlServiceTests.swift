@@ -1,9 +1,88 @@
+import AppKit
+import CoreGraphics
 import Foundation
 import XCTest
 @testable import UniversalTmuxMac
 
 @MainActor
 final class BrowserControlServiceTests: XCTestCase {
+    func testArgusWindowCaptureRendersTheOwnedLayerTree() throws {
+        let view = NSView(frame: CGRect(x: 0, y: 0, width: 40, height: 24))
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.systemBlue.cgColor
+
+        let image = try ArgusWindowCapture.renderViewTree(view, scale: 2)
+
+        XCTAssertEqual(image.width, 80)
+        XCTAssertEqual(image.height, 48)
+    }
+
+    func testBrowserConfigurationBlocksDisplayCaptureBeforePageCodeRuns() {
+        let configuration = ArgusBrowserIdentity.persistentConfiguration()
+        let scripts = configuration.userContentController.userScripts
+
+        XCTAssertTrue(scripts.contains {
+            $0.injectionTime == .atDocumentStart &&
+            !$0.isForMainFrameOnly &&
+            $0.source.contains("getDisplayMedia") &&
+            $0.source.contains("NotAllowedError")
+        })
+    }
+
+    func testRemoteWebDelegateDeniesDisplayCaptureInWebKitUIProcess() {
+        let delegate = ArgusRemoteWebUIDelegate()
+        let selector = NSSelectorFromString(
+            "_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:"
+        )
+
+        XCTAssertTrue(delegate.responds(to: selector))
+    }
+
+    func testArgusWindowScreenshotReturnsPNGFromAppOwnedCapture() async throws {
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 48, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(red: 0.1, green: 0.5, blue: 0.9, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 48, height: 32))
+        let image = try XCTUnwrap(context.makeImage())
+        let service = BrowserControlService(appWindowCapture: { image })
+        service.bindForTesting(dashboards: dashboards)
+
+        let result = try await rpc(service, method: "app.screenshot", params: [:])
+        XCTAssertEqual(result["scope"] as? String, "argus-window")
+        XCTAssertEqual(result["mime_type"] as? String, "image/png")
+        XCTAssertEqual(result["width"] as? Int, 48)
+        XCTAssertEqual(result["height"] as? Int, 32)
+        let encoded = try XCTUnwrap(result["image_base64"] as? String)
+        let png = try XCTUnwrap(Data(base64Encoded: encoded))
+        XCTAssertTrue(png.starts(with: [0x89, 0x50, 0x4E, 0x47]))
+    }
+
+    func testBrowserTabsAdvertiseTheInstalledSafariIdentity() async throws {
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        let service = BrowserControlService()
+        service.bindForTesting(dashboards: dashboards)
+        let html = """
+        <!doctype html><meta charset="utf-8">
+        <body><script>document.body.textContent = navigator.userAgent</script></body>
+        """
+        let dataURL = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+
+        let opened = try await rpc(service, method: "tabs.open", params: ["url": dataURL])
+        let tabID = try XCTUnwrap(opened["id"] as? String)
+        let snapshot = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
+        let userAgent = snapshot["text"] as? String ?? ""
+
+        XCTAssertTrue(userAgent.contains("AppleWebKit/"), userAgent)
+        XCTAssertTrue(userAgent.contains("Version/\(ArgusBrowserIdentity.safariVersion)"), userAgent)
+        XCTAssertTrue(userAgent.contains("Safari/605.1.15"), userAgent)
+    }
+
     func testHiddenWebKitTabSupportsScreenshotIsolatedInputAndPromotion() async throws {
         let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
                                          persistTabState: false)
@@ -23,6 +102,18 @@ final class BrowserControlServiceTests: XCTestCase {
         XCTAssertEqual(opened["visible"] as? Bool, false)
         XCTAssertTrue(dashboards.tabs.isEmpty)
 
+        // macOS can move an ordered offscreen host back onto a screen during
+        // Space/full-screen transitions. Reproduce that exact failure: the host
+        // must remain fully invisible while the existing screenshot and native
+        // input assertions below continue to pass.
+        let host = try XCTUnwrap(service.repositionHiddenHostForTesting(
+            tabID: tabID, to: CGPoint(x: 160, y: 0)
+        ))
+        XCTAssertTrue(host.isVisible)
+        XCTAssertEqual(host.frame.origin.x, 160, accuracy: 0.1)
+        XCTAssertEqual(host.frame.origin.y, 0, accuracy: 0.1)
+        XCTAssertEqual(host.alpha, 0, accuracy: 0.0001)
+
         let firstSnapshot = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
         let elements = try XCTUnwrap(firstSnapshot["elements"] as? [[String: Any]])
         let input = try XCTUnwrap(elements.first(where: { $0["name"] as? String == "Name" }))
@@ -37,7 +128,7 @@ final class BrowserControlServiceTests: XCTestCase {
         ])
         XCTAssertEqual((typedObservation["width"] as? NSNumber)?.intValue, 900)
         XCTAssertEqual((typedObservation["height"] as? NSNumber)?.intValue, 600)
-        XCTAssertEqual(typedObservation["interaction_mode"] as? String, "dom-injected")
+        XCTAssertEqual(typedObservation["interaction_mode"] as? String, "native-webkit")
         let typedSnapshot = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
         let typedElements = try XCTUnwrap(typedSnapshot["elements"] as? [[String: Any]])
         XCTAssertEqual(typedElements.first(where: { $0["name"] as? String == "Name" })?["value"] as? String, "Argus")
@@ -49,7 +140,7 @@ final class BrowserControlServiceTests: XCTestCase {
             "y": number(buttonRect, "y") + 10
         ])
         XCTAssertFalse((observation["image_base64"] as? String ?? "").isEmpty)
-        XCTAssertEqual(observation["interaction_mode"] as? String, "dom-injected")
+        XCTAssertEqual(observation["interaction_mode"] as? String, "native-webkit")
         let clickedSnapshot = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
         XCTAssertTrue((clickedSnapshot["text"] as? String ?? "").contains("Clicked"))
 
@@ -66,6 +157,56 @@ final class BrowserControlServiceTests: XCTestCase {
         XCTAssertEqual(dashboards.tabs.count, 1)
         XCTAssertEqual(dashboards.tabs.first?.id.uuidString.lowercased(), tabID)
         XCTAssertNotNil(dashboards.tabs.first?.heldWebView)
+    }
+
+    func testNativeCoordinateInputReachesAHiddenChildFrame() async throws {
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        let service = BrowserControlService()
+        service.bindForTesting(dashboards: dashboards)
+        let html = """
+        <!doctype html><meta charset="utf-8">
+        <style>html,body{margin:0}iframe{position:absolute;left:40px;top:40px;width:500px;height:280px;border:0}</style>
+        <output id="result"></output><iframe id="login"></iframe>
+        <script>
+          const child = login.contentDocument;
+          child.open();
+          child.write(`<!doctype html><style>
+            html,body{margin:0}input,button{position:absolute;left:40px;width:320px;height:50px}
+            input{top:40px}button{top:120px}
+          </style>
+          <input aria-label="Framed name" oninput="parent.result.textContent='typed:'+this.value">
+          <button onclick="parent.result.textContent='clicked'">Framed button</button>`);
+          child.close();
+        </script>
+        """
+        let dataURL = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+        let opened = try await rpc(service, method: "tabs.open", params: [
+            "url": dataURL, "visible": false, "width": 800, "height": 500
+        ])
+        let tabID = try XCTUnwrap(opened["id"] as? String)
+        let keyWindowBeforeInput = NSApp.keyWindow
+
+        let initial = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
+        XCTAssertTrue((initial["elements"] as? [[String: Any]] ?? []).isEmpty,
+                      "the main-frame DOM resolver deliberately cannot see iframe controls")
+
+        let typed = try await rpc(service, method: "page.type", params: [
+            "tab_id": tabID, "x": 100, "y": 100, "text": "Argus"
+        ])
+        XCTAssertEqual(typed["interaction_mode"] as? String, "native-webkit")
+        let afterType = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
+        XCTAssertTrue((afterType["text"] as? String ?? "").contains("typed:Argus"))
+
+        let clicked = try await rpc(service, method: "page.click", params: [
+            "tab_id": tabID, "x": 100, "y": 180
+        ])
+        XCTAssertEqual(clicked["interaction_mode"] as? String, "native-webkit")
+        let afterClick = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
+        XCTAssertTrue((afterClick["text"] as? String ?? "").contains("clicked"))
+        XCTAssertTrue(dashboards.tabs.isEmpty, "native input must not reveal a hidden tab")
+        XCTAssertTrue(NSApp.keyWindow === keyWindowBeforeInput,
+                      "native input must not activate the hidden browser window")
     }
 
     func testNativeSelectOptionsRemainVisibleAndClickableInObservations() async throws {
@@ -338,6 +479,59 @@ final class BrowserControlServiceTests: XCTestCase {
         XCTAssertEqual(afterElements.first { $0["name"] as? String == "Email" }?["value"] as? String, "")
         XCTAssertEqual(afterElements.first { $0["name"] as? String == "Password" }?["value"] as? String, "")
         XCTAssertFalse((after["text"] as? String ?? "").contains("local-only-secret"))
+    }
+
+    func testCredentialFillCoordinatesReachClosedShadowPasswordField() async throws {
+        let suite = "BrowserShadowCredentialTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let secrets = MemoryCredentialSecretStore()
+        let vault = CredentialVaultStore(secretStore: secrets, defaults: defaults)
+        let password = "shadow-secret-742"
+        try vault.save(name: "Shadow Login", group: "Test",
+                       username: "", password: password)
+        vault.setAllowInUnattendedMode(true)
+        vault.unattendedModeActive = true
+
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        let service = BrowserControlService()
+        service.bindForTesting(dashboards: dashboards, credentialVault: vault)
+        let html = """
+        <!doctype html><meta charset="utf-8">
+        <div id="host" style="width:320px;height:70px"></div><p id="result">empty</p>
+        <script>
+          const root = document.querySelector('#host').attachShadow({mode:'closed'});
+          const input = document.createElement('input');
+          input.type = 'password';
+          input.style.cssText = 'display:block;width:280px;height:40px;margin:10px';
+          input.addEventListener('input', () => {
+            document.querySelector('#result').textContent = `length ${input.value.length}`;
+          });
+          root.append(input);
+        </script>
+        """
+        let dataURL = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+        let opened = try await rpc(service, method: "tabs.open", params: ["url": dataURL])
+        let tabID = try XCTUnwrap(opened["id"] as? String)
+        let caller: [String: Any] = [
+            "machine_name": "babel-p9-28", "machine_host": "babel-p9-28",
+            "session_name": "research", "stable_session_id": "$4",
+            "session_lineage_id": "tmux:lineage:$4"
+        ]
+        let granted = try await rpc(service, method: "credentials.request", params: [
+            "credential": "Shadow Login", "tab_id": tabID
+        ], caller: caller)
+        let token = try XCTUnwrap(granted["grant"] as? String)
+        let result = try await rpc(service, method: "credentials.fill", params: [
+            "tab_id": tabID, "credential": "Shadow Login", "grant": token,
+            "targets": ["password": ["x": 80, "y": 35]]
+        ], caller: caller)
+        XCTAssertEqual(result["filled"] as? [String], ["password"])
+
+        let after = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
+        XCTAssertTrue((after["text"] as? String ?? "").contains("length \(password.count)"))
+        XCTAssertFalse((after["text"] as? String ?? "").contains(password))
     }
 
     func testAPIKeyRequestUsesExactCallerDotenvAndNeverAppearsInCredentialList() async throws {

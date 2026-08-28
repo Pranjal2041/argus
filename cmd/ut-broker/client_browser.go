@@ -93,7 +93,7 @@ func cmdBrowser(args []string) int {
 		fmt.Fprintln(os.Stderr, "ut browser:", err)
 		return 1
 	}
-	if screenshotPath != "" || method == "page.screenshot" {
+	if screenshotPath != "" || method == "page.screenshot" || method == "app.screenshot" {
 		return writeBrowserScreenshot(response, screenshotPath, false)
 	}
 	if method == "page.click" || method == "page.type" || method == "page.scroll" || method == "page.upload" {
@@ -287,7 +287,17 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 		return "page.snapshot", params, "", nil
 	case "screenshot":
 		if len(rest) == 0 {
-			return "", nil, "", fmt.Errorf("usage: ut browser screenshot <tab-id> [--full-page] [-o path]")
+			return "", nil, "", fmt.Errorf("usage: ut browser screenshot <tab-id> [--full-page] [-o path] | --argus [-o path]")
+		}
+		if rest[0] == "--argus" {
+			path, err := parseScreenshotFlags(rest[1:], params)
+			if err != nil {
+				return "", nil, "", err
+			}
+			if params["full_page"] == true {
+				return "", nil, "", fmt.Errorf("--full-page applies only to browser tabs")
+			}
+			return "app.screenshot", params, path, nil
 		}
 		params["tab_id"] = rest[0]
 		params["full_page"] = false
@@ -596,6 +606,7 @@ func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, o
 		ImageBase64     string   `json:"image_base64"`
 		MimeType        string   `json:"mime_type"`
 		TabID           string   `json:"tab_id"`
+		Scope           string   `json:"scope"`
 		Width           float64  `json:"width"`
 		Height          float64  `json:"height"`
 		Generation      int      `json:"generation"`
@@ -612,6 +623,11 @@ func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, o
 		return 1
 	}
 	path := requestedPath
+	if path == "" {
+		if result.Scope == "argus-window" {
+			path = fmt.Sprintf("argus-window-%s.png", time.Now().Format("20060102-150405.000"))
+		}
+	}
 	if path == "" {
 		short := result.TabID
 		if len(short) > 8 {
@@ -639,6 +655,10 @@ func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, o
 	if len(result.Uploaded) > 0 {
 		fmt.Printf("uploaded %s\n", strings.Join(result.Uploaded, ", "))
 	}
+	if result.Scope == "argus-window" {
+		fmt.Printf("Argus window · %.0fx%.0f\n", result.Width, result.Height)
+		return 0
+	}
 	fmt.Printf("tab %s · %.0fx%.0f · observation %d", result.TabID, result.Width, result.Height, result.Generation)
 	if result.InteractionMode != "" {
 		fmt.Printf(" · %s", result.InteractionMode)
@@ -662,6 +682,7 @@ USAGE
   ut browser back|forward|reload <tab-id>
   ut browser snapshot <tab-id>
   ut browser screenshot <tab-id> [--full-page] [-o path]
+  ut browser screenshot --argus [-o path]
   ut browser click <tab-id> <x> <y>
   ut browser click <tab-id> --ref <element-ref>
   ut browser type <tab-id> [--ref ref | --at x y] <text...>
