@@ -224,6 +224,128 @@ func TestAgentRestorePassesArgvWithoutShellReparsing(t *testing.T) {
 	t.Fatal("restored command did not run")
 }
 
+func babelTestStore(root, host, socket string, now time.Time) *Store {
+	return &Store{
+		Socket: socket,
+		Dir:    filepath.Join(root, safeComponent(host), safeComponent(socket)),
+		Root:   root, Host: host, Cluster: "babel",
+		Now: func() time.Time { return now },
+	}
+}
+
+func TestBabelCrossNodeRestoreUsesSharedSnapshotAndConsumesEachPanel(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	socket := fmt.Sprintf("ut-recovery-babel-%d", os.Getpid())
+	cleanup := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
+	cleanup()
+	t.Cleanup(cleanup)
+	// A target allocation has a live broker supervisor but no user panels yet.
+	if err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "_ut-test").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 28, 15, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	directory := t.TempDir()
+	directory, _ = filepath.EvalSymlinks(directory)
+	source := babelTestStore(root, "babel-p9-28", socket, now.Add(-2*time.Minute))
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: "departed-node", Host: source.Host, Socket: socket,
+		ServerID: "old-server", CapturedAt: now.Add(-2 * time.Minute),
+		Entries: []Entry{{Name: "research", Directory: directory, Agent: AgentShell, Windows: 1, Panes: 1}},
+	}
+	if err := source.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	target := babelTestStore(root, "babel-q9-16", socket, now)
+	status := target.Status("")
+	if !status.Available || status.Snapshot == nil || status.Snapshot.ID != snapshot.ID {
+		t.Fatalf("cross-node recovery status = %#v", status)
+	}
+	if status.TargetHost != target.Host || len(status.Candidates) != 1 || status.Candidates[0].Host != source.Host {
+		t.Fatalf("cross-node candidates = %#v", status)
+	}
+	response := target.Restore(snapshot.ID, []string{"research"}, 1)
+	if len(response.Results) != 1 || response.Results[0].State != RestoreRestored {
+		t.Fatalf("cross-node restore = %#v", response)
+	}
+	targetSnapshots, err := target.loadAll()
+	if err != nil || len(targetSnapshots) != 1 || len(targetSnapshots[0].Entries) != 1 || targetSnapshots[0].Entries[0].Name != "research" {
+		t.Fatalf("restored target was not durably captured before its receipt: snapshots=%#v err=%v", targetSnapshots, err)
+	}
+	if err := exec.Command("tmux", "-L", socket, "kill-session", "-t", "=research").Run(); err != nil {
+		t.Fatal(err)
+	}
+	afterClose := target.Status("")
+	if afterClose.Available || afterClose.Snapshot != nil || len(afterClose.Candidates) != 0 {
+		t.Fatalf("consumed cross-node workspace was offered again: %#v", afterClose)
+	}
+}
+
+func TestBabelLiveSourceIsNotOfferedForCrossNodeRestore(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 8, 28, 15, 0, 0, 0, time.UTC)
+	source := babelTestStore(root, "babel-p9-28", "definitely-no-server", now.Add(-30*time.Second))
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: "live-node", Host: source.Host, Socket: source.Socket,
+		ServerID: "live-server", CapturedAt: now.Add(-30 * time.Second),
+		Entries: []Entry{{Name: "research", Directory: t.TempDir(), Agent: AgentShell}},
+	}
+	if err := source.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	target := babelTestStore(root, "babel-q9-16", source.Socket, now)
+	status := target.Status("")
+	if status.Available || status.Snapshot != nil || len(status.Candidates) != 0 {
+		t.Fatalf("live Babel node was offered as a recovery source: %#v", status)
+	}
+	explicit := target.Status(snapshot.ID)
+	if explicit.Snapshot != nil || explicit.Error == "" {
+		t.Fatalf("explicit snapshot bypassed the live-node guard: %#v", explicit)
+	}
+}
+
+func TestBabelExpiredSourceIsOutsideTheRecoveryWindow(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 8, 28, 15, 0, 0, 0, time.UTC)
+	source := babelTestStore(root, "babel-p9-28", "no-server", now.Add(-8*24*time.Hour))
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: "expired-node", Host: source.Host, Socket: source.Socket,
+		ServerID: "expired-server", CapturedAt: now.Add(-8 * 24 * time.Hour),
+		Entries: []Entry{{Name: "research", Directory: t.TempDir(), Agent: AgentShell}},
+	}
+	if err := source.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	target := babelTestStore(root, "babel-q9-16", source.Socket, now)
+	if status := target.Status(""); status.Available || status.Snapshot != nil || len(status.Candidates) != 0 {
+		t.Fatalf("expired Babel snapshot was offered: %#v", status)
+	}
+	if status := target.Status(snapshot.ID); status.Snapshot != nil || !strings.Contains(status.Error, "retention") {
+		t.Fatalf("expired Babel snapshot was explicitly restorable: %#v", status)
+	}
+}
+
+func TestCaptureEnabledOnBabelOnlyByDefault(t *testing.T) {
+	for _, test := range []struct {
+		goos, host, override string
+		want                 bool
+	}{
+		{"darwin", "macbook", "", true},
+		{"linux", "babel-p9-28", "", true},
+		{"linux", "ut-babel-q9-16.example.ts.net", "", true},
+		{"linux", "orchard-login", "", false},
+		{"linux", "orchard-login", "1", true},
+	} {
+		if got := CaptureEnabled(test.goos, test.host, test.override); got != test.want {
+			t.Fatalf("CaptureEnabled(%q, %q, %q) = %v, want %v", test.goos, test.host, test.override, got, test.want)
+		}
+	}
+}
+
 func TestBootstrapCanUseAFailedRestoreShell(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")

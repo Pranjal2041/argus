@@ -469,6 +469,7 @@ func captureEntry(pane paneInfo, processes map[int]processInfo) Entry {
 	switch agent {
 	case AgentClaude:
 		entry.SessionID, entry.SessionPath, _, err = inspectClaude(process.PID, state)
+		entry.ClaudeConfig = strings.TrimSpace(state.Environment["CLAUDE_CONFIG_DIR"])
 	case AgentCodex:
 		entry.SessionID, entry.SessionPath, err = inspectCodex(process.PID, state)
 		entry.CodexHome = codexHomeFromTranscript(entry.SessionPath)
@@ -493,7 +494,10 @@ func (s *Store) Capture() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	host, _ := os.Hostname()
+	host := s.Host
+	if host == "" {
+		host, _ = os.Hostname()
+	}
 	snapshot := Snapshot{
 		SchemaVersion: SchemaVersion, ID: snapshotID(serverID), Host: host, Socket: s.Socket,
 		BootID: boot, ServerID: serverID, ServerPID: serverPID, ServerStarted: started, CapturedAt: s.Now().UTC(),
@@ -623,13 +627,35 @@ func (s *Store) Status(requestedSnapshot string) Status {
 	if err != nil {
 		return Status{Error: err.Error()}
 	}
+	allItems, err := s.loadCluster()
+	if err != nil {
+		return Status{Error: err.Error()}
+	}
 	current, currentServerID := currentEntries(s.Socket)
-	var selected *Snapshot
+	var localSelected *Snapshot
+	requestedUnavailable := ""
 	if requestedSnapshot != "" {
-		for index := range items {
-			if items[index].ID == requestedSnapshot {
-				selected = &items[index]
+		for index := range allItems {
+			if allItems[index].ID == requestedSnapshot {
+				localSelected = &allItems[index]
 				break
+			}
+		}
+		if localSelected != nil && s.Cluster != "" && !sameRecoveryHost(localSelected.Host, s.Host) {
+			if localSelected.CapturedAt.Before(s.Now().Add(-RetentionDays * 24 * time.Hour)) {
+				requestedUnavailable = fmt.Sprintf("recovery snapshot %q is older than the %d-day retention window", requestedSnapshot, RetentionDays)
+				localSelected = nil
+			}
+		}
+		if localSelected != nil && s.Cluster != "" && !sameRecoveryHost(localSelected.Host, s.Host) {
+			for _, item := range allItems {
+				if sameRecoveryHost(item.Host, localSelected.Host) {
+					if s.Now().Sub(item.CapturedAt) < CrossHostStaleAfter {
+						localSelected = nil
+						requestedUnavailable = fmt.Sprintf("source host %q is still publishing live recovery snapshots", item.Host)
+					}
+					break // allItems is newest-first
+				}
 			}
 		}
 	} else if currentServerID == "" {
@@ -637,7 +663,7 @@ func (s *Store) Status(requestedSnapshot string) Status {
 		// the workspace that disappeared.
 		for index := range items {
 			if len(items[index].Entries) > 0 {
-				selected = &items[index]
+				localSelected = &items[index]
 				break
 			}
 		}
@@ -654,27 +680,97 @@ func (s *Store) Status(requestedSnapshot string) Status {
 			// capture has not landed yet.
 			for index := range items {
 				if len(items[index].Entries) > 0 && items[index].ServerID != currentServerID {
-					selected = &items[index]
+					localSelected = &items[index]
 					break
 				}
 			}
 		} else if currentSnapshot.RecoverySourceID != "" && !currentSnapshot.RecoveryComplete {
 			for index := range items {
 				if items[index].ID == currentSnapshot.RecoverySourceID {
-					selected = &items[index]
+					localSelected = &items[index]
 					break
 				}
 			}
 		}
 	}
-	status := Status{Snapshot: selected, CurrentServerID: currentServerID}
+	// Cross-node candidates are only the newest server lifetime from each
+	// departed Babel host. A fresh snapshot is a live lease and is never offered,
+	// which prevents cloning a workspace that is still running elsewhere.
+	byHost := map[string]Snapshot{}
+	if s.Cluster != "" {
+		for _, item := range allItems {
+			if sameRecoveryHost(item.Host, s.Host) {
+				continue
+			}
+			key := strings.ToLower(strings.TrimSpace(item.Host))
+			if _, exists := byHost[key]; !exists {
+				byHost[key] = item
+			}
+		}
+	}
+	var candidates []Snapshot
+	if localSelected != nil && requestedSnapshot == "" {
+		candidates = append(candidates, *localSelected)
+	}
+	for _, latest := range byHost {
+		if latest.CapturedAt.Before(s.Now().Add(-RetentionDays * 24 * time.Hour)) {
+			continue
+		}
+		if s.Now().Sub(latest.CapturedAt) < CrossHostStaleAfter {
+			continue
+		}
+		candidate := latest
+		if len(candidate.Entries) == 0 && candidate.RecoverySourceID != "" && !candidate.RecoveryComplete {
+			for _, item := range allItems {
+				if item.ID == candidate.RecoverySourceID {
+					candidate = item
+					break
+				}
+			}
+		}
+		if len(s.remainingEntries(candidate)) > 0 {
+			candidates = append(candidates, candidate)
+		}
+	}
+	// De-duplicate a local predecessor that was also encountered through a host
+	// alias, then expose every source so the UI can switch between old nodes.
+	unique := map[string]Snapshot{}
+	for _, candidate := range candidates {
+		unique[candidate.ID] = candidate
+	}
+	candidates = candidates[:0]
+	for _, candidate := range unique {
+		candidates = append(candidates, candidate)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].CapturedAt.After(candidates[j].CapturedAt) })
+	selected := localSelected
+	if requestedSnapshot == "" && selected == nil && len(candidates) > 0 {
+		selected = &candidates[0]
+	}
+	status := Status{Snapshot: selected, CurrentServerID: currentServerID, TargetHost: s.Host}
+	for _, candidate := range candidates {
+		ready := 0
+		remaining := s.remainingEntries(candidate)
+		for _, entry := range remaining {
+			if preflight(entry, current).State == PanelReady {
+				ready++
+			}
+		}
+		status.Candidates = append(status.Candidates, RecoveryCandidate{
+			ID: candidate.ID, Host: candidate.Host, CapturedAt: candidate.CapturedAt,
+			PanelCount: len(remaining), ReadyCount: ready,
+		})
+	}
 	if selected == nil {
 		if requestedSnapshot != "" {
-			status.Error = fmt.Sprintf("recovery snapshot %q not found", requestedSnapshot)
+			status.Error = requestedUnavailable
+			if status.Error == "" {
+				status.Error = fmt.Sprintf("recovery snapshot %q not found", requestedSnapshot)
+			}
 		}
 		return status
 	}
-	for _, entry := range selected.Entries {
+	for _, entry := range s.remainingEntries(*selected) {
 		panel := preflight(entry, current)
 		if panel.State == PanelReady {
 			status.ReadyCount++
@@ -822,6 +918,34 @@ func (s *Store) Restore(snapshotID string, names []string, concurrency int) Rest
 		}(index, panel)
 	}
 	wg.Wait()
+	targetServer := ""
+	var targetCaptureErr error
+	if s.Cluster != "" && !sameRecoveryHost(status.Snapshot.Host, s.Host) {
+		for _, result := range results {
+			if result.State == RestoreRestored || result.State == RestoreAlreadyRunning {
+				target, err := s.Capture()
+				if err != nil {
+					targetCaptureErr = err
+				} else {
+					targetServer = target.ServerID
+				}
+				break
+			}
+		}
+	}
+	for index := range results {
+		if results[index].State == RestoreRestored || results[index].State == RestoreAlreadyRunning {
+			if targetCaptureErr != nil {
+				results[index].State = RestoreFailed
+				results[index].Detail = "Workspace resumed, but the target recovery snapshot could not be saved: " + targetCaptureErr.Error()
+				continue
+			}
+			if err := s.markRestored(*status.Snapshot, results[index].Name, targetServer); err != nil {
+				results[index].State = RestoreFailed
+				results[index].Detail = "Workspace resumed, but its cross-node recovery receipt could not be saved: " + err.Error()
+			}
+		}
+	}
 	for _, name := range names {
 		if !found[name] {
 			results = append(results, RestoreResult{Name: name, State: RestoreFailed, Detail: "Panel is not present in this recovery snapshot."})

@@ -152,7 +152,11 @@ func resumeArgv(entry Entry) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		return append([]string{executable}, append(options, "--resume", entry.SessionID)...), nil
+		command := append([]string{executable}, append(options, "--resume", entry.SessionID)...)
+		if config := strings.TrimSpace(entry.ClaudeConfig); config != "" {
+			command = append([]string{environmentExecutable(), "CLAUDE_CONFIG_DIR=" + filepath.Clean(config)}, command...)
+		}
+		return command, nil
 	default:
 		return nil, fmt.Errorf("unsupported agent %q", entry.Agent)
 	}

@@ -90,9 +90,9 @@ func main() {
 	go broker.RunDailyBackupLoop(ctx)
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
-	// Automatic reboot recovery is a Mac workspace feature. Cluster brokers do
-	// not spend cycles walking agent process state unless explicitly opted in.
-	if runtime.GOOS == "darwin" || os.Getenv("UT_RECOVERY_ENABLE") == "1" {
+	// Mac restores after reboot; Babel restores the same logical workspace after
+	// a scheduler allocation moves it to a different node.
+	if recovery.CaptureEnabled(runtime.GOOS, hostName, os.Getenv("UT_RECOVERY_ENABLE")) {
 		recoveryStore := recovery.NewStore(*tmuxSock)
 		go recoveryStore.RunCaptureLoop(ctx, 30*time.Second, func(err error) {
 			log.Printf("warn: workspace recovery snapshot: %v", err)
