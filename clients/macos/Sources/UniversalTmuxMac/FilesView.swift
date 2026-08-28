@@ -1037,7 +1037,7 @@ struct GoToFolderView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "arrow.right.to.line").font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
-                TextField("Go to folder…", text: $text)
+                TextField("Go to folder…", text: singleLineText)
                     .textFieldStyle(.plain).font(.system(size: 15, design: .monospaced))
                     .foregroundStyle(invalid ? Theme.waiting : Theme.textPrimary)
                     .focused($focused)
@@ -1093,6 +1093,13 @@ struct GoToFolderView: View {
         .onExitCommand { tab.closeGoTo() }
     }
 
+    private var singleLineText: Binding<String> {
+        Binding(
+            get: { text },
+            set: { text = GoToPathInput.singleLine($0) }
+        )
+    }
+
     private func lastSeg(_ p: String) -> String {
         let t = p.hasSuffix(tab.sep) ? String(p.dropLast()) : p
         return t.range(of: tab.sep, options: .backwards).map { String(t[$0.upperBound...]) } ?? t
@@ -1124,12 +1131,26 @@ struct GoToFolderView: View {
     private func removeKeys() { if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil } }
 }
 
+enum GoToPathInput {
+    /// Terminal and agent output can place a long path across multiple copied
+    /// lines. A path jump is intentionally single-line, so join those fragments
+    /// and discard indentation immediately adjacent to each line break.
+    static func singleLine(_ raw: String) -> String {
+        guard raw.contains(where: \.isNewline) else { return raw }
+        return raw
+            .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined()
+    }
+}
+
 func iconForFile(_ name: String) -> String {
     switch (name as NSString).pathExtension.lowercased() {
     case "png","jpg","jpeg","gif","bmp","tiff","tif","webp","heic","heif","svg","ico","icns": return "photo"
     case "mp4","mov","m4v","avi","mkv","webm": return "film"
     case "mp3","wav","m4a","flac","aac","ogg","aiff": return "music.note"
     case "pdf": return "doc.richtext"
+    case "docx","doc","docm","dotx","dot","dotm": return "doc.richtext"
     case "pptx","ppt","ppsx","pps","potx","pot": return "rectangle.on.rectangle"
     case "zip","tar","gz","tgz","bz2","xz","7z","rar","dmg": return "doc.zipper"
     case "json","yaml","yml","toml","xml","ini","cfg","conf","plist": return "curlybraces"

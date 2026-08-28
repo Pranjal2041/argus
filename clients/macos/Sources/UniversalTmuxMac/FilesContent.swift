@@ -158,7 +158,7 @@ struct PDFKitView: NSViewRepresentable {
     final class Coordinator { var fit: CGFloat = 0 }
 }
 
-// MARK: - system document preview (PowerPoint)
+// MARK: - system document preview (Office documents)
 
 /// `QLPreviewView` becomes permanently deactivated when its containing NSWindow
 /// closes. Assigning a non-nil item to that same instance after the window reopens

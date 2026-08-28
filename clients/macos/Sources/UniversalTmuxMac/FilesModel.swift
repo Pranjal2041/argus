@@ -149,13 +149,13 @@ enum FileContent {
     case image(NSImage)
     case pdf(Data)
     case media(URL)          // streamed by AVPlayer (Range), never fully downloaded
-    case quickLook(QuickLookPreviewFile) // read-only system preview (PowerPoint, etc.)
+    case quickLook(QuickLookPreviewFile) // read-only system preview (Office documents, etc.)
     case binary(FileEntry)
     case error(String)
 }
 
 /// Pure file classification shared by the Files model and regression tests.
-/// PowerPoint decks use the system Quick Look renderer, which adds no bundled
+/// Office documents use the system Quick Look renderer, which adds no bundled
 /// conversion engine and is evaluated only when the user opens that file.
 func fileKindForPreview(_ name: String, size: Int64, textCap: Int64 = 5_000_000) -> FileKind {
     let ext = (name as NSString).pathExtension.lowercased()
@@ -163,10 +163,11 @@ func fileKindForPreview(_ name: String, size: Int64, textCap: Int64 = 5_000_000)
     let video: Set<String> = ["mp4","mov","m4v","avi","mkv","webm"]
     let audio: Set<String> = ["mp3","wav","aac","m4a","flac","ogg","oga","aiff","aif"]
     let powerPoint: Set<String> = ["pptx","ppt","ppsx","pps","potx","pot"]
+    let word: Set<String> = ["docx","doc","docm","dotx","dot","dotm"]
     if images.contains(ext) { return .image }
     if video.contains(ext) || audio.contains(ext) { return .media }
     if ext == "pdf" { return .pdf }
-    if powerPoint.contains(ext) { return .quickLook }
+    if powerPoint.contains(ext) || word.contains(ext) { return .quickLook }
     if size > textCap { return .binary }
     return .text // fetchContent downgrades to .binary if the bytes are not UTF-8
 }
