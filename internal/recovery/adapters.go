@@ -95,6 +95,20 @@ func preserveOptions(args []string, specs map[string]optionSpec, stopWords map[s
 	return out, nil
 }
 
+// normalizeCodexResumeArgs removes the extra launcher marker emitted by some
+// Codex wrappers. It is safe to ignore only when it sits directly before a
+// resume selector whose ID matches the conversation independently identified
+// from Codex's open rollout file.
+func normalizeCodexResumeArgs(args []string, sessionID string) []string {
+	for index := 1; index+1 < len(args); index++ {
+		if args[index] != "resume" || args[index+1] != sessionID || !strings.EqualFold(args[index-1], AgentCodex) {
+			continue
+		}
+		return append(append([]string{}, args[:index-1]...), args[index:]...)
+	}
+	return args
+}
+
 func effectiveExecutable(entry Entry) (string, error) {
 	if entry.Executable != "" {
 		if info, err := os.Stat(entry.Executable); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
@@ -136,7 +150,8 @@ func resumeArgv(entry Entry) ([]string, error) {
 	}
 	switch entry.Agent {
 	case AgentCodex:
-		options, err := preserveOptions(args[1:], codexRestoreOptions, map[string]bool{"resume": true})
+		codexArgs := normalizeCodexResumeArgs(args[1:], entry.SessionID)
+		options, err := preserveOptions(codexArgs, codexRestoreOptions, map[string]bool{"resume": true})
 		if err != nil {
 			return nil, err
 		}
