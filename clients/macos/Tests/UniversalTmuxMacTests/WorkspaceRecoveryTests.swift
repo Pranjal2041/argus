@@ -15,6 +15,10 @@ final class WorkspaceRecoveryTests: XCTestCase {
             "capturedAt": "2026-08-04T20:00:00.000Z"
           },
           "currentServerId": "new-server",
+          "targetHost": "babel-q9-16",
+          "candidates": [
+            {"id":"snapshot-one","host":"babel-p9-28","capturedAt":"2026-08-04T20:00:00.000Z","panelCount":2,"readyCount":2}
+          ],
           "readyCount": 2,
           "panels": [
             {
@@ -50,6 +54,15 @@ final class WorkspaceRecoveryTests: XCTestCase {
         XCTAssertEqual(status.panels[0].permissionLabel, "YOLO")
         XCTAssertEqual(status.panels[1].permissionLabel, "BYPASS")
         XCTAssertTrue(status.panels.allSatisfy(\.isReady))
+        XCTAssertEqual(status.targetHost, "babel-q9-16")
+        XCTAssertEqual(status.candidates?.first?.host, "babel-p9-28")
+    }
+
+    @MainActor
+    func testRemoteRecoveryCommandQuotingPreservesPanelNames() {
+        XCTAssertEqual(WorkspaceRecoveryController.shellQuote("plain-panel"), "plain-panel")
+        XCTAssertEqual(WorkspaceRecoveryController.shellQuote("panel with spaces"), "'panel with spaces'")
+        XCTAssertEqual(WorkspaceRecoveryController.shellQuote("it's-safe"), "'it'\"'\"'s-safe'")
     }
 
     @MainActor
@@ -83,8 +96,13 @@ final class WorkspaceRecoveryTests: XCTestCase {
         let json = #"""
         {
           "available": true,
-          "snapshot": {"id":"old-mac","host":"pranjals-mac","socket":"ut","capturedAt":"2026-08-04T20:00:00.000Z"},
-          "currentServerId": "new-mac",
+          "snapshot": {"id":"old-mac","host":"babel-p9-28","socket":"ut","capturedAt":"2026-08-04T20:00:00.000Z"},
+          "currentServerId": "new-babel",
+          "targetHost": "babel-q9-16",
+          "candidates": [
+            {"id":"old-mac","host":"babel-p9-28","capturedAt":"2026-08-04T20:00:00.000Z","panelCount":4,"readyCount":4},
+            {"id":"older","host":"babel-u5-16","capturedAt":"2026-08-03T20:00:00.000Z","panelCount":2,"readyCount":2}
+          ],
           "readyCount": 4,
           "panels": [
             {"name":"cua_speed_run_fable","directory":"/Users/pranjal/Developer/cua-speedrun","agent":"codex","argv":["codex","--yolo"],"state":"ready","detail":"Resume the exact saved conversation.","selected":true},
@@ -99,6 +117,12 @@ final class WorkspaceRecoveryTests: XCTestCase {
         """#.data(using: .utf8)!
         let controller = WorkspaceRecoveryController()
         controller.status = try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: json)
+        controller.targets = [
+            WorkspaceRecoveryTarget(id: "local", name: "this mac", host: "this mac", route: nil),
+            WorkspaceRecoveryTarget(id: "q9", name: "babel-q9-16", host: "babel-q9-16", route: "babel-q9-16")
+        ]
+        controller.selectedTargetID = "q9"
+        controller.selectedSourceID = "old-mac"
         controller.selectAll()
         let host = NSHostingView(rootView: WorkspaceRecoveryView(recovery: controller))
         host.frame = NSRect(x: 0, y: 0, width: 720, height: 620)

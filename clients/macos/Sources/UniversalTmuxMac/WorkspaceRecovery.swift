@@ -8,6 +8,23 @@ struct WorkspaceRecoverySnapshot: Decodable {
     let capturedAt: String
 }
 
+struct WorkspaceRecoveryCandidate: Decodable, Identifiable, Equatable {
+    let id: String
+    let host: String
+    let capturedAt: String
+    let panelCount: Int
+    let readyCount: Int
+}
+
+struct WorkspaceRecoveryTarget: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let host: String
+    let route: String?
+
+    var isLocal: Bool { route == nil }
+}
+
 struct WorkspaceRecoveryPanel: Decodable, Identifiable {
     let name: String
     let directory: String
@@ -38,6 +55,8 @@ struct WorkspaceRecoveryStatus: Decodable {
     let available: Bool
     let snapshot: WorkspaceRecoverySnapshot?
     let currentServerId: String?
+    let candidates: [WorkspaceRecoveryCandidate]?
+    let targetHost: String?
     let readyCount: Int
     let panels: [WorkspaceRecoveryPanel]
     let error: String?
@@ -75,15 +94,36 @@ final class WorkspaceRecoveryController: ObservableObject {
     @Published var phase: Phase = .idle
     @Published var showSheet = false
     @Published var errorMessage: String?
+    @Published var targets: [WorkspaceRecoveryTarget] = [
+        WorkspaceRecoveryTarget(id: "local", name: "this mac", host: "this mac", route: nil)
+    ]
+    @Published var selectedTargetID = "local"
+    @Published var selectedSourceID = ""
 
     private weak var appState: AppState?
     private var checkGeneration = 0
+    private var statusByTarget: [String: WorkspaceRecoveryStatus] = [:]
     private let socket = ProcessInfo.processInfo.environment["UT_TMUX_SOCKET"] ?? "ut"
     private static let offeredSnapshotKey = "ut.recovery.lastOfferedSnapshot.v1"
 
     var readyPanels: [WorkspaceRecoveryPanel] { status?.panels.filter(\.isReady) ?? [] }
     var selectedCount: Int { selected.intersection(Set(readyPanels.map(\.name))).count }
     var hasOffer: Bool { status?.available == true && !readyPanels.isEmpty }
+    var selectedTarget: WorkspaceRecoveryTarget {
+        targets.first(where: { $0.id == selectedTargetID }) ?? Self.localTarget
+    }
+    var sourceCandidates: [WorkspaceRecoveryCandidate] {
+        if let candidates = status?.candidates, !candidates.isEmpty { return candidates }
+        guard let snapshot = status?.snapshot else { return [] }
+        return [WorkspaceRecoveryCandidate(
+            id: snapshot.id, host: snapshot.host, capturedAt: snapshot.capturedAt,
+            panelCount: status?.panels.count ?? 0, readyCount: status?.readyCount ?? 0
+        )]
+    }
+
+    private static let localTarget = WorkspaceRecoveryTarget(
+        id: "local", name: "this mac", host: "this mac", route: nil
+    )
 
     func bind(_ state: AppState) { appState = state }
 
@@ -106,6 +146,9 @@ final class WorkspaceRecoveryController: ObservableObject {
                 return
             }
             self.status = decoded
+            self.statusByTarget[Self.localTarget.id] = decoded
+            self.selectedTargetID = Self.localTarget.id
+            self.selectedSourceID = decoded.snapshot?.id ?? ""
             self.selected = Set(decoded.panels.filter(\.isReady).map(\.name))
             self.results = [:]
             self.phase = .idle
@@ -121,7 +164,23 @@ final class WorkspaceRecoveryController: ObservableObject {
 
     func open() {
         showSheet = true
-        checkForRecovery()
+        scanTargets()
+    }
+
+    func selectTarget(_ id: String) {
+        guard id != selectedTargetID, targets.contains(where: { $0.id == id }) else { return }
+        selectedTargetID = id
+        if let cached = statusByTarget[id] {
+            apply(cached)
+        } else {
+            checkSelectedTarget()
+        }
+    }
+
+    func selectSource(_ id: String) {
+        guard id != selectedSourceID, sourceCandidates.contains(where: { $0.id == id }) else { return }
+        selectedSourceID = id
+        checkSelectedTarget(snapshot: id)
     }
 
     func toggle(_ name: String) {
@@ -148,7 +207,8 @@ final class WorkspaceRecoveryController: ObservableObject {
         for name in selected.sorted() {
             arguments += ["--session", name]
         }
-        Self.runTool(arguments, timeout: 180) { [weak self] output in
+        if !selectedTarget.isLocal { arguments += ["--bootstrap=false"] }
+        runRecovery(arguments, on: selectedTarget, timeout: 180) { [weak self] output in
             guard let self else { return }
             guard let decoded = try? JSONDecoder().decode(WorkspaceRestoreResponse.self, from: output.data) else {
                 self.phase = .finished
@@ -163,13 +223,124 @@ final class WorkspaceRecoveryController: ObservableObject {
             if !failures.isEmpty {
                 self.errorMessage = "\(failures.count) panel\(failures.count == 1 ? "" : "s") could not be restored. Nothing was overwritten."
             } else if let bootstrap = decoded.bootstrap, bootstrap != "started" {
-                self.errorMessage = "The panels were restored, but the broker could not restart: (bootstrap)"
+                self.errorMessage = "The panels were restored, but the broker could not restart: \(bootstrap)"
             }
             // The supervisor needs a moment to bind :8722 before the normal
             // discovery pass. A second pass covers slower launchd/tmux startup.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.appState?.refreshAll() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { self.appState?.refreshAll() }
         }
+    }
+
+    private func scanTargets() {
+        checkGeneration &+= 1
+        let generation = checkGeneration
+        let machines = appState?.machines ?? []
+        let babel = machines.filter(Self.isBabelMachine).map {
+            WorkspaceRecoveryTarget(
+                id: $0.id, name: $0.name,
+                host: $0.host.isEmpty ? $0.name : $0.host,
+                route: $0.id
+            )
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        targets = [Self.localTarget] + babel
+        phase = .checking
+        status = nil
+        selected = []
+        errorMessage = nil
+        statusByTarget = [:]
+
+        let group = DispatchGroup()
+        var discovered: [String: WorkspaceRecoveryStatus] = [:]
+        for target in targets {
+            group.enter()
+            runRecovery(["recovery", "status", "--tmux-socket", socket], on: target) { output in
+                if let decoded = try? JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: output.data) {
+                    discovered[target.id] = decoded
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self, generation == self.checkGeneration else { return }
+            self.statusByTarget = discovered
+            let chosen = self.targets.first(where: { discovered[$0.id]?.available == true })
+                ?? self.targets.first(where: { discovered[$0.id]?.snapshot != nil })
+                ?? Self.localTarget
+            self.selectedTargetID = chosen.id
+            if let status = discovered[chosen.id] {
+                self.apply(status)
+            } else {
+                self.status = nil
+                self.selected = []
+                self.phase = .idle
+                self.errorMessage = chosen.isLocal
+                    ? "The local recovery service is unavailable."
+                    : "\(chosen.name) did not return workspace recovery status."
+            }
+        }
+    }
+
+    private func checkSelectedTarget(snapshot: String? = nil) {
+        checkGeneration &+= 1
+        let generation = checkGeneration
+        phase = .checking
+        errorMessage = nil
+        var arguments = ["recovery", "status", "--tmux-socket", socket]
+        if let snapshot, !snapshot.isEmpty { arguments += ["--snapshot", snapshot] }
+        let target = selectedTarget
+        runRecovery(arguments, on: target) { [weak self] output in
+            guard let self, generation == self.checkGeneration else { return }
+            guard let decoded = try? JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: output.data) else {
+                self.phase = .idle
+                self.errorMessage = output.stderr.isEmpty
+                    ? "\(target.name) did not return readable workspace recovery status."
+                    : output.stderr
+                return
+            }
+            self.statusByTarget[target.id] = decoded
+            self.apply(decoded)
+        }
+    }
+
+    private func apply(_ decoded: WorkspaceRecoveryStatus) {
+        status = decoded
+        selectedSourceID = decoded.snapshot?.id ?? ""
+        selected = Set(decoded.panels.filter(\.isReady).map(\.name))
+        results = [:]
+        phase = .idle
+        errorMessage = decoded.error
+    }
+
+    private static func isBabelMachine(_ machine: Machine) -> Bool {
+        [machine.name, machine.host, machine.id].contains { raw in
+            var value = raw.lowercased()
+            if let dot = value.firstIndex(of: ".") { value = String(value[..<dot]) }
+            if value.hasPrefix("ut-") { value.removeFirst(3) }
+            return value.hasPrefix("babel-")
+        }
+    }
+
+    private func runRecovery(
+        _ arguments: [String],
+        on target: WorkspaceRecoveryTarget,
+        timeout: TimeInterval = 20,
+        completion: @escaping @MainActor (RecoveryToolOutput) -> Void
+    ) {
+        guard let route = target.route else {
+            Self.runTool(arguments, timeout: timeout, completion: completion)
+            return
+        }
+        let command = "$HOME/.universal-tmux/ut-broker "
+            + arguments.map(Self.shellQuote).joined(separator: " ")
+        Self.runTool(["exec", "@" + route, command], timeout: timeout, completion: completion)
+    }
+
+    static func shellQuote(_ value: String) -> String {
+        if !value.isEmpty && value.unicodeScalars.allSatisfy({ scalar in
+            CharacterSet.alphanumerics.contains(scalar) || "_@%+=:,./-".unicodeScalars.contains(scalar)
+        }) { return value }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     func close() {
@@ -352,6 +523,43 @@ struct WorkspaceRecoveryView: View {
 
     private func summary(_ status: WorkspaceRecoveryStatus) -> some View {
         VStack(spacing: 13 * uiScale) {
+            HStack(spacing: 10 * uiScale) {
+                recoveryMenu(
+                    title: "FROM",
+                    value: sourceName,
+                    systemImage: "shippingbox",
+                    enabled: recovery.sourceCandidates.count > 1
+                ) {
+                    ForEach(recovery.sourceCandidates) { candidate in
+                        Button {
+                            recovery.selectSource(candidate.id)
+                        } label: {
+                            Label(
+                                "\(candidate.host) · \(candidate.panelCount) panel\(candidate.panelCount == 1 ? "" : "s")",
+                                systemImage: candidate.id == recovery.selectedSourceID ? "checkmark" : "circle"
+                            )
+                        }
+                    }
+                }
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11 * uiScale, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+                recoveryMenu(
+                    title: "RESTORE TO",
+                    value: recovery.selectedTarget.name,
+                    systemImage: "desktopcomputer",
+                    enabled: recovery.targets.count > 1
+                ) {
+                    ForEach(recovery.targets) { target in
+                        Button {
+                            recovery.selectTarget(target.id)
+                        } label: {
+                            Label(target.name, systemImage: target.id == recovery.selectedTargetID ? "checkmark" : "circle")
+                        }
+                    }
+                }
+                Spacer()
+            }
             HStack(alignment: .firstTextBaseline, spacing: 8 * uiScale) {
                 Text("\(status.readyCount) panel\(status.readyCount == 1 ? "" : "s") ready")
                     .font(.system(size: 14 * uiScale, weight: .semibold))
@@ -385,6 +593,57 @@ struct WorkspaceRecoveryView: View {
         .padding(.horizontal, 22 * uiScale)
         .padding(.top, 16 * uiScale)
         .padding(.bottom, 12 * uiScale)
+    }
+
+    private var sourceName: String {
+        recovery.sourceCandidates.first(where: { $0.id == recovery.selectedSourceID })?.host
+            ?? snapshot?.host
+            ?? "previous workspace"
+    }
+
+    private func recoveryMenu<Content: View>(
+        title: String,
+        value: String,
+        systemImage: String,
+        enabled: Bool,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Menu(content: content) {
+            HStack(spacing: 9 * uiScale) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12 * uiScale, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 1 * uiScale) {
+                    Text(title)
+                        .font(.system(size: 8.5 * uiScale, weight: .semibold, design: .monospaced))
+                        .tracking(0.7 * uiScale)
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(value)
+                        .font(.system(size: 12.5 * uiScale, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                }
+                if enabled {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8 * uiScale, weight: .bold))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .padding(.horizontal, 11 * uiScale)
+            .frame(height: 43 * uiScale)
+            .background(
+                RoundedRectangle(cornerRadius: 8 * uiScale, style: .continuous)
+                    .fill(Theme.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8 * uiScale, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .allowsHitTesting(enabled)
     }
 
     private var panelList: some View {
@@ -464,7 +723,7 @@ struct WorkspaceRecoveryView: View {
     private var checking: some View {
         VStack(spacing: 12 * uiScale) {
             ProgressView().controlSize(.small)
-            Text("Checking the previous tmux workspace…")
+            Text("Checking available workspace snapshots…")
                 .font(.system(size: 13 * uiScale))
                 .foregroundStyle(Theme.textSecondary)
         }
