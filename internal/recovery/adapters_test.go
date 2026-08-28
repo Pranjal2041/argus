@@ -87,6 +87,27 @@ func TestClaudeResumePreservesPermissionMode(t *testing.T) {
 	}
 }
 
+func TestClaudeResumePreservesCustomConfigDirectory(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "claude")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), ".claude-work")
+	entry := Entry{
+		Agent: AgentClaude, Executable: exe, SessionID: testSessionID,
+		Argv: []string{"claude", "--dangerously-skip-permissions"}, ClaudeConfig: config,
+	}
+	got, err := resumeArgv(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{environmentExecutable(), "CLAUDE_CONFIG_DIR=" + config, exe,
+		"--dangerously-skip-permissions", "--resume", testSessionID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resume argv = %#v, want %#v", got, want)
+	}
+}
+
 func TestResumeRefusesUnknownOptionAndInitialPrompt(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "codex")
 	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {

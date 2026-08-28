@@ -16,10 +16,13 @@ import (
 )
 
 type Store struct {
-	Socket string
-	Dir    string
-	Now    func() time.Time
-	mu     sync.Mutex
+	Socket  string
+	Dir     string
+	Root    string
+	Host    string
+	Cluster string
+	Now     func() time.Time
+	mu      sync.Mutex
 }
 
 func NewStore(socket string) *Store {
@@ -34,11 +37,36 @@ func NewStore(socket string) *Store {
 	if host == "" {
 		host = "local"
 	}
+	root := filepath.Join(home, ".universal-tmux", "recovery")
 	return &Store{
-		Socket: socket,
-		Dir:    filepath.Join(home, ".universal-tmux", "recovery", safeComponent(host), safeComponent(socket)),
-		Now:    time.Now,
+		Socket:  socket,
+		Dir:     filepath.Join(root, safeComponent(host), safeComponent(socket)),
+		Root:    root,
+		Host:    host,
+		Cluster: recoveryCluster(host),
+		Now:     time.Now,
 	}
+}
+
+func recoveryCluster(host string) string {
+	short := strings.ToLower(strings.TrimSpace(host))
+	if index := strings.IndexByte(short, '.'); index >= 0 {
+		short = short[:index]
+	}
+	if strings.HasPrefix(short, "ut-") {
+		short = strings.TrimPrefix(short, "ut-")
+	}
+	if strings.HasPrefix(short, "babel-") {
+		return "babel"
+	}
+	return ""
+}
+
+// CaptureEnabled keeps process inspection off generic Linux brokers while
+// enabling it automatically on Babel, where snapshots are needed before a
+// scheduler allocation disappears.
+func CaptureEnabled(goos, host, override string) bool {
+	return goos == "darwin" || override == "1" || recoveryCluster(host) == "babel"
 }
 
 func safeComponent(value string) string {
@@ -153,7 +181,10 @@ func (s *Store) saveCaptured(snapshot *Snapshot) error {
 			snapshot.RecoveryComplete = true
 		}
 	}
-	return s.saveLocked(*snapshot)
+	if err := s.saveLocked(*snapshot); err != nil {
+		return err
+	}
+	return s.pruneClusterLocked(snapshot.CapturedAt)
 }
 
 func entriesMatch(expected, live Entry) bool {
@@ -191,6 +222,43 @@ func (s *Store) pruneLocked(now time.Time) error {
 	return nil
 }
 
+func (s *Store) pruneClusterLocked(now time.Time) error {
+	if s.Cluster == "" || s.Root == "" {
+		return nil
+	}
+	cutoff := now.Add(-RetentionDays * 24 * time.Hour)
+	hosts, err := os.ReadDir(s.Root)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, host := range hosts {
+		if !host.IsDir() || recoveryCluster(host.Name()) != s.Cluster {
+			continue
+		}
+		directory := filepath.Join(s.Root, host.Name(), safeComponent(s.Socket))
+		items, err := loadSnapshotsFromDir(directory)
+		if err != nil {
+			continue
+		}
+		for _, item := range items {
+			if item.CapturedAt.Before(cutoff) {
+				_ = os.Remove(filepath.Join(directory, "snapshot-"+safeComponent(item.ID)+".json"))
+			}
+		}
+	}
+	receipts := filepath.Join(s.Root, "_clusters", safeComponent(s.Cluster), safeComponent(s.Socket), "receipts")
+	_ = filepath.WalkDir(receipts, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		if info, err := entry.Info(); err == nil && info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
+	return nil
+}
+
 func (s *Store) loadAll() ([]Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -198,7 +266,11 @@ func (s *Store) loadAll() ([]Snapshot, error) {
 }
 
 func (s *Store) loadAllLocked() ([]Snapshot, error) {
-	entries, err := os.ReadDir(s.Dir)
+	return loadSnapshotsFromDir(s.Dir)
+}
+
+func loadSnapshotsFromDir(directory string) ([]Snapshot, error) {
+	entries, err := os.ReadDir(directory)
 	if errors.Is(err, os.ErrNotExist) {
 		return []Snapshot{}, nil
 	}
@@ -210,7 +282,7 @@ func (s *Store) loadAllLocked() ([]Snapshot, error) {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "snapshot-") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		body, err := os.ReadFile(filepath.Join(s.Dir, entry.Name()))
+		body, err := os.ReadFile(filepath.Join(directory, entry.Name()))
 		if err != nil {
 			continue
 		}
@@ -222,6 +294,105 @@ func (s *Store) loadAllLocked() ([]Snapshot, error) {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CapturedAt.After(items[j].CapturedAt) })
 	return items, nil
+}
+
+func (s *Store) loadCluster() ([]Snapshot, error) {
+	if s.Cluster == "" || s.Root == "" {
+		return s.loadAll()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hosts, err := os.ReadDir(s.Root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Snapshot{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var items []Snapshot
+	for _, host := range hosts {
+		if !host.IsDir() || recoveryCluster(host.Name()) != s.Cluster {
+			continue
+		}
+		loaded, err := loadSnapshotsFromDir(filepath.Join(s.Root, host.Name(), safeComponent(s.Socket)))
+		if err != nil {
+			continue
+		}
+		for _, snapshot := range loaded {
+			if snapshot.Socket == s.Socket && recoveryCluster(snapshot.Host) == s.Cluster {
+				items = append(items, snapshot)
+			}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CapturedAt.After(items[j].CapturedAt) })
+	return items, nil
+}
+
+func sameRecoveryHost(a, b string) bool {
+	canonical := func(value string) string {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if index := strings.IndexByte(value, '.'); index >= 0 {
+			value = value[:index]
+		}
+		return strings.TrimPrefix(value, "ut-")
+	}
+	return canonical(a) == canonical(b)
+}
+
+type recoveryReceipt struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	SourceID      string    `json:"sourceId"`
+	Panel         string    `json:"panel"`
+	TargetHost    string    `json:"targetHost"`
+	TargetServer  string    `json:"targetServer,omitempty"`
+	RestoredAt    time.Time `json:"restoredAt"`
+}
+
+func (s *Store) receiptPath(sourceID, panel string) string {
+	sum := sha256.Sum256([]byte(panel))
+	return filepath.Join(s.Root, "_clusters", safeComponent(s.Cluster), safeComponent(s.Socket),
+		"receipts", safeComponent(sourceID), hex.EncodeToString(sum[:12])+".json")
+}
+
+func (s *Store) hasReceipt(sourceID, panel string) bool {
+	if s.Cluster == "" || s.Root == "" {
+		return false
+	}
+	body, err := os.ReadFile(s.receiptPath(sourceID, panel))
+	if err != nil {
+		return false
+	}
+	var receipt recoveryReceipt
+	return json.Unmarshal(body, &receipt) == nil && receipt.SchemaVersion == SchemaVersion &&
+		receipt.SourceID == sourceID && receipt.Panel == panel
+}
+
+func (s *Store) markRestored(source Snapshot, panel string, targetServer string) error {
+	if s.Cluster == "" || sameRecoveryHost(source.Host, s.Host) {
+		return nil
+	}
+	receipt := recoveryReceipt{
+		SchemaVersion: SchemaVersion, SourceID: source.ID, Panel: panel,
+		TargetHost: s.Host, TargetServer: targetServer, RestoredAt: s.Now().UTC(),
+	}
+	body, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(s.receiptPath(source.ID, panel), append(body, '\n'), 0o600)
+}
+
+func (s *Store) remainingEntries(snapshot Snapshot) []Entry {
+	if s.Cluster == "" || sameRecoveryHost(snapshot.Host, s.Host) {
+		return snapshot.Entries
+	}
+	entries := make([]Entry, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		if !s.hasReceipt(snapshot.ID, entry.Name) {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
 }
 
 func (s *Store) load(id string) (Snapshot, error) {

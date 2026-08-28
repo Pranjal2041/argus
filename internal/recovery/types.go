@@ -9,6 +9,10 @@ import "time"
 const (
 	SchemaVersion = 1
 	RetentionDays = 7
+	// Babel brokers snapshot every 30 seconds. Three missed snapshots is long
+	// enough to distinguish a departed allocation from ordinary scheduler or
+	// filesystem jitter without making a moved workspace wait for minutes.
+	CrossHostStaleAfter = 90 * time.Second
 )
 
 const (
@@ -36,10 +40,22 @@ type Entry struct {
 	SessionID     string   `json:"sessionId,omitempty"`
 	SessionPath   string   `json:"sessionPath,omitempty"`
 	CodexHome     string   `json:"codexHome,omitempty"`
+	ClaudeConfig  string   `json:"claudeConfig,omitempty"`
 	Windows       int      `json:"windows"`
 	Panes         int      `json:"panes"`
 	CaptureError  string   `json:"captureError,omitempty"`
 	CaptureNotice string   `json:"captureNotice,omitempty"`
+}
+
+// RecoveryCandidate is one prior workspace that can be inspected or restored
+// on the current host. Babel candidates can originate on a different node
+// because those nodes share the recovery store and agent transcript storage.
+type RecoveryCandidate struct {
+	ID         string    `json:"id"`
+	Host       string    `json:"host"`
+	CapturedAt time.Time `json:"capturedAt"`
+	PanelCount int       `json:"panelCount"`
+	ReadyCount int       `json:"readyCount"`
 }
 
 // Snapshot is the latest valid workspace observed for one tmux server
@@ -87,12 +103,14 @@ type PanelStatus struct {
 // Status is the startup offer. Available means at least one panel can be
 // restored without overwriting or guessing.
 type Status struct {
-	Available       bool          `json:"available"`
-	Snapshot        *Snapshot     `json:"snapshot,omitempty"`
-	CurrentServerID string        `json:"currentServerId,omitempty"`
-	ReadyCount      int           `json:"readyCount"`
-	Panels          []PanelStatus `json:"panels"`
-	Error           string        `json:"error,omitempty"`
+	Available       bool                `json:"available"`
+	Snapshot        *Snapshot           `json:"snapshot,omitempty"`
+	Candidates      []RecoveryCandidate `json:"candidates,omitempty"`
+	TargetHost      string              `json:"targetHost,omitempty"`
+	CurrentServerID string              `json:"currentServerId,omitempty"`
+	ReadyCount      int                 `json:"readyCount"`
+	Panels          []PanelStatus       `json:"panels"`
+	Error           string              `json:"error,omitempty"`
 }
 
 const (
