@@ -400,6 +400,47 @@ final class RenderWebIntegrationTests: XCTestCase {
         XCTAssertTrue(report.string("text").contains("point-649"))
     }
 
+    func testChunkedTransportRendersADeepTerminalDocumentInsteadOfEmptyPlaceholder() async throws {
+        let webView = try await loadRenderer()
+        let terminal: [String: Any] = [
+            "columns": 180,
+            "fontFamily": "SF Mono",
+            "background": "#11131A",
+            "foreground": "#E8E9EE",
+            "styles": [terminalStyle(foreground: "#E8E9EE")],
+            "lines": (0..<12_000).map { index in
+                terminalLine([terminalRun("deep-row-\(index) " + String(repeating: "evidence ", count: 8))])
+            },
+        ]
+        let document: [String: Any] = [
+            "id": UUID().uuidString,
+            "source": "# Exact recovered answer\n\nThe final result is visible.",
+            "sourceOrigin": "codex-transcript",
+            "terminal": terminal,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: document)
+
+        _ = try await callRenderer(
+            webView, "window.UTRender.beginDocumentPayload()", arguments: [:])
+        for offset in stride(from: 0, to: data.count, by: 96 * 1024) {
+            let chunk = data[offset..<min(data.count, offset + 96 * 1024)].base64EncodedString()
+            _ = try await callRenderer(
+                webView,
+                "window.UTRender.appendDocumentPayload(chunk)",
+                arguments: ["chunk": chunk])
+        }
+        _ = try await callRenderer(
+            webView,
+            "window.UTRender.commitDocumentPayload(px, presentation)",
+            arguments: ["px": 16, "presentation": "rendered"])
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.string("sourceOrigin"), "codex-transcript")
+        XCTAssertTrue(report.string("text").contains("Exact recovered answer"))
+        XCTAssertFalse(report.string("text").contains("Nothing to render"))
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+    }
+
     private func loadRenderer() async throws -> WKWebView {
         let webView = WKWebView(frame: .init(x: 0, y: 0, width: 900, height: 700))
         let loaded = expectation(description: "offline renderer loaded")
@@ -445,6 +486,17 @@ final class RenderWebIntegrationTests: XCTestCase {
     private func inspect(_ webView: WKWebView) async throws -> [String: Any] {
         let value = try await webView.evaluateJavaScript("window.UTRender.inspect()")
         return try XCTUnwrap(value as? [String: Any])
+    }
+
+    private func callRenderer(_ webView: WKWebView, _ script: String,
+                              arguments: [String: Any]) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.callAsyncJavaScript(
+                script, arguments: arguments, in: nil, in: .page
+            ) { result in
+                continuation.resume(with: result)
+            }
+        }
     }
 
     private func jsString(_ value: String) -> String {

@@ -518,6 +518,7 @@ private struct RenderWebView: NSViewRepresentable {
         private var shownDocument: UUID?
         private var shownSize: Double = 0
         private var shownPresentation = ""
+        private var transferGeneration = 0
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
@@ -534,17 +535,71 @@ private struct RenderWebView: NSViewRepresentable {
             }
         }
         private func push(_ wv: WKWebView, _ document: RenderDocument, _ size: Double, _ presentation: String) {
-            shownDocument = document.id
-            shownSize = size
-            shownPresentation = presentation
-            wv.evaluateJavaScript(
-                "window.UTRender.setDocument(\(js(document)), \(Int(size)), \(js(presentation)))"
-            )
+            guard let data = try? JSONEncoder().encode(document) else {
+                showTransferFailure(wv, "Argus could not encode the captured terminal document.")
+                return
+            }
+
+            // A long-lived pane can retain tens of thousands of styled rows.
+            // Sending that snapshot as one evaluateJavaScript source string
+            // exceeds WebKit's IPC message limit and silently leaves the HTML
+            // placeholder saying “Nothing to render.” Transfer bounded base64
+            // chunks through WebKit's argument channel, then decode atomically
+            // in the page. The generation guard prevents an older capture from
+            // winning when transcript recovery upgrades the document mid-send.
+            let chunks = stride(from: 0, to: data.count, by: 96 * 1024).map { offset in
+                data[offset..<min(data.count, offset + 96 * 1024)].base64EncodedString()
+            }
+            transferGeneration &+= 1
+            let generation = transferGeneration
+            Task { @MainActor [weak self, weak wv] in
+                guard let self, let wv else { return }
+                do {
+                    _ = try await self.call(
+                        wv, "window.UTRender.beginDocumentPayload()", arguments: [:])
+                    for chunk in chunks {
+                        guard self.transferGeneration == generation else { return }
+                        _ = try await self.call(
+                            wv,
+                            "window.UTRender.appendDocumentPayload(chunk)",
+                            arguments: ["chunk": chunk]
+                        )
+                    }
+                    guard self.transferGeneration == generation else { return }
+                    _ = try await self.call(
+                        wv,
+                        "window.UTRender.commitDocumentPayload(px, presentation)",
+                        arguments: ["px": Int(size), "presentation": presentation]
+                    )
+                    self.shownDocument = document.id
+                    self.shownSize = size
+                    self.shownPresentation = presentation
+                } catch {
+                    guard self.transferGeneration == generation else { return }
+                    NSLog("Argus Render payload transfer failed: %@", error.localizedDescription)
+                    self.showTransferFailure(
+                        wv, "Argus could not transfer this terminal capture to the renderer.")
+                }
+            }
         }
-        private func js<T: Encodable>(_ value: T) -> String {
-            guard let data = try? JSONEncoder().encode(value),
-                  let encoded = String(data: data, encoding: .utf8) else { return "null" }
-            return encoded
+
+        private func call(_ webView: WKWebView, _ script: String,
+                          arguments: [String: Any]) async throws -> Any? {
+            try await withCheckedThrowingContinuation { continuation in
+                webView.callAsyncJavaScript(
+                    script, arguments: arguments, in: nil, in: .page
+                ) { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+
+        private func showTransferFailure(_ webView: WKWebView, _ message: String) {
+            webView.callAsyncJavaScript(
+                "window.UTRender.showTransferFailure(message)",
+                arguments: ["message": message], in: nil, in: .page,
+                completionHandler: nil
+            )
         }
     }
 }
