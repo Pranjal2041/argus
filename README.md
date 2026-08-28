@@ -82,8 +82,9 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   clipboard screenshots, and files explicitly saved from Files can live in a local, searchable
   per-panel Artifacts library and be reopened after the session ends. After a Mac restart, Argus can
   reconstruct the previous local workspace—panel names, folders, exact Claude/Codex conversations,
-  and their safety modes—from a crash-safe recovery snapshot. On macOS, an opt-in toggle keeps the
-  Mac awake and reachable while the screen is locked.
+  and their safety modes—from a crash-safe recovery snapshot. Babel brokers use the shared home to
+  offer that workspace on a replacement allocation without duplicating a still-live node. On macOS,
+  an opt-in toggle keeps the Mac awake and reachable while the screen is locked.
 - **Files** — a cross-host file explorer with **Monaco**, the editor that powers VS Code:
   per-file tabs, `⌘P` quick-open, `⇧⌘G` Go to Folder, content search, Git-aware tree coloring,
   live Markdown preview, syntax highlighting, image / PDF / media preview, read-only PowerPoint

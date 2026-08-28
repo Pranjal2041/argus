@@ -36,7 +36,7 @@ snapshot. On Windows, a genuinely new connection can initially recover only the 
 by the bounded ConPTY ring, but that snapshot preserves DEC private modes such as bracketed paste;
 once connected, subsequent output and panel switches retain the full local history normally.
 
-## Restore the local workspace after a restart
+## Restore a workspace after a restart or Babel node change
 
 On macOS, the local broker records a crash-safe workspace snapshot every 30 seconds. After the Mac
 or its tmux server restarts, Argus offers **Restore Workspace** automatically; you can also open it
@@ -47,14 +47,21 @@ later from **View → Restore Previous Workspace…**. Choose any subset of pane
   than guessed from terminal text; and
 - recognized startup options, including `--yolo` and Claude's dangerous-permissions mode.
 
+Babel brokers write the same snapshots into the shared home. Open **Restore Workspace**, choose a
+departed source node and any currently online Babel destination, then restore the panels you want.
+A node must miss three 30-second snapshots before it is treated as departed; this prevents cloning
+a workspace that is still running. Each restored panel is durably captured on the destination
+before its source is marked consumed, so another node loss during recovery remains recoverable.
+
 Each panel is checked again immediately before creation. An existing panel with the same name is
 never overwritten: an exact match is labeled **Already running**, while a different session is a
 **Name conflict** that requires you to resolve it. Missing transcripts, folders, executables, and
 unrecognized startup options are also left for manual review instead of being guessed. Agent-owned
 mesh utility sessions remain excluded from the user workspace.
 
-Snapshots are stored locally under `~/.universal-tmux/recovery`, mode `0600`, and retained for seven
-days. This is workspace reconstruction, not process checkpointing: background commands, child
+Snapshots are stored under `~/.universal-tmux/recovery`, mode `0600`, and retained for seven days.
+The Mac store is local; Babel's store is visible to the user's other Babel allocations through the
+shared home. This is workspace reconstruction, not process checkpointing: background commands, child
 processes, RAM, and extra panes inside a multi-pane tmux session do not survive the reboot. An agent
 reopens in its exact conversation and folder, but work that existed only in a live child process is
 still gone.
