@@ -4,6 +4,7 @@ struct WebArtifactRecipe: Codable, Identifiable, Hashable, Sendable {
     let schemaVersion: Int
     let id: String
     let name: String
+    var storeID: String? = nil
     let machineName: String
     let machineHost: String
     let sessionName: String

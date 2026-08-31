@@ -4,7 +4,10 @@
 package webartifact
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +27,7 @@ const SchemaVersion = 1
 const (
 	PortModeAuto    = "auto"
 	PortPlaceholder = "{port}"
+	storeIDFile     = ".store-id"
 )
 
 // Recipe is the complete, location-independent description needed to bring a
@@ -34,6 +38,7 @@ type Recipe struct {
 	SchemaVersion    int       `json:"schemaVersion"`
 	ID               string    `json:"id"`
 	Name             string    `json:"name"`
+	StoreID          string    `json:"storeID,omitempty"`
 	MachineName      string    `json:"machineName"`
 	MachineHost      string    `json:"machineHost"`
 	SessionName      string    `json:"sessionName"`
@@ -78,6 +83,7 @@ type Registry struct {
 	mu          sync.Mutex
 	runtime     map[string]runtimeState
 	now         func() time.Time
+	storeID     string
 }
 
 func DefaultRoot() string {
@@ -108,6 +114,10 @@ func (r *Registry) listLocked() ([]Recipe, error) {
 	if err := os.MkdirAll(r.root, 0o700); err != nil {
 		return nil, err
 	}
+	storeID, err := r.ensureStoreIDLocked()
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
 		return nil, err
@@ -124,6 +134,14 @@ func (r *Registry) listLocked() ([]Recipe, error) {
 		var recipe Recipe
 		if json.Unmarshal(body, &recipe) != nil || recipe.SchemaVersion != SchemaVersion || recipe.ID == "" {
 			continue
+		}
+		// Schema-v1 recipes predate durable store identity. Their presence in
+		// this registry is the migration authority; mutable hostnames never are.
+		if recipe.StoreID == "" {
+			recipe.StoreID = storeID
+			if err := r.writeLocked(recipe); err != nil {
+				return nil, err
+			}
 		}
 		result = append(result, recipe)
 	}
@@ -151,15 +169,16 @@ func (r *Registry) Add(request AddRequest) (Recipe, error) {
 		return Recipe{}, err
 	}
 	for _, recipe := range existing {
-		if duplicateKey(recipe.MachineName, recipe.MachineHost, recipe.SessionName, recipe.Name) ==
-			duplicateKey(r.machineName, r.machineHost, request.SessionName, request.Name) {
+		if duplicateKey(recipe.StoreID, recipe.SessionName, recipe.Name) ==
+			duplicateKey(r.storeID, request.SessionName, request.Name) {
 			return Recipe{}, fmt.Errorf("web artifact %q already exists for session %q; use `ut web-artifacts update`", request.Name, request.SessionName)
 		}
 	}
-	id := recipeID(r.machineName, r.machineHost, request.SessionName, request.Name)
+	id := recipeID(r.storeID, request.SessionName, request.Name)
 	now := r.now().UTC()
 	recipe := Recipe{
 		SchemaVersion: SchemaVersion, ID: id, Name: request.Name,
+		StoreID:     r.storeID,
 		MachineName: r.machineName, MachineHost: r.machineHost,
 		SessionName: request.SessionName, StableSessionID: request.StableSessionID,
 		SessionLineageID: request.SessionLineageID,
@@ -200,8 +219,8 @@ func (r *Registry) Update(id string, request AddRequest) (Recipe, error) {
 		return Recipe{}, err
 	}
 	for _, recipe := range all {
-		if recipe.ID != current.ID && duplicateKey(recipe.MachineName, recipe.MachineHost, recipe.SessionName, recipe.Name) ==
-			duplicateKey(current.MachineName, current.MachineHost, request.SessionName, request.Name) {
+		if recipe.ID != current.ID && duplicateKey(recipe.StoreID, recipe.SessionName, recipe.Name) ==
+			duplicateKey(current.StoreID, request.SessionName, request.Name) {
 			return Recipe{}, fmt.Errorf("web artifact %q already exists for session %q", request.Name, request.SessionName)
 		}
 	}
@@ -491,50 +510,109 @@ func ParseEndpoint(raw string) (Endpoint, error) {
 }
 
 func endpointReady(raw string) bool {
-	endpoint, err := ParseEndpoint(raw)
+	_, err := ParseEndpoint(raw)
 	if err != nil {
 		return false
 	}
-	for _, host := range []string{"127.0.0.1", "::1"} {
-		conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(endpoint.Port)), 220*time.Millisecond)
-		if dialErr == nil {
-			_ = conn.Close()
-			return true
+	request, err := http.NewRequest(http.MethodGet, raw, nil)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{
+		Timeout: 700 * time.Millisecond,
+		Transport: &http.Transport{
+			Proxy:             nil,
+			DisableKeepAlives: true,
+			// ParseEndpoint restricts HTTPS to loopback. Development dashboards
+			// commonly use a self-signed certificate, so reachability must not
+			// depend on the machine trust store.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- loopback only
+		},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	_ = response.Body.Close()
+	return response.StatusCode >= 200 && response.StatusCode < 400 ||
+		response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden
+}
+
+func duplicateKey(storeID, sessionName, name string) string {
+	return strings.ToLower(strings.TrimSpace(storeID)) + "\x00" + strings.ToLower(strings.TrimSpace(sessionName)) + "\x00" + strings.ToLower(strings.TrimSpace(name))
+}
+
+func (r *Registry) ensureStoreIDLocked() (string, error) {
+	if r.storeID != "" {
+		return r.storeID, nil
+	}
+	if err := os.MkdirAll(r.root, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(r.root, storeIDFile)
+	read := func() (string, error) {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
 		}
-	}
-	return false
-}
-
-func duplicateKey(machineName, machineHost, sessionName, name string) string {
-	return machineScope(machineName, machineHost) + "\x00" + strings.ToLower(strings.TrimSpace(sessionName)) + "\x00" + strings.ToLower(strings.TrimSpace(name))
-}
-
-func machineScope(name, host string) string {
-	for _, raw := range []string{name, host} {
-		value := strings.ToLower(strings.TrimSpace(raw))
-		value = strings.TrimPrefix(value, "ut-")
-		value = strings.SplitN(value, ".", 2)[0]
-		if strings.HasPrefix(value, "babel-") {
-			return "babel"
+		value := strings.ToLower(strings.TrimSpace(string(body)))
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != 16 {
+			return "", fmt.Errorf("invalid web-artifact store identity")
 		}
+		return value, nil
 	}
-	if host != "" {
-		return strings.ToLower(strings.TrimSpace(host))
+	if value, err := read(); err == nil {
+		r.storeID = value
+		return value, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
 	}
-	return strings.ToLower(strings.TrimSpace(name))
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("create web-artifact store identity: %w", err)
+	}
+	value := hex.EncodeToString(random)
+	f, err := os.CreateTemp(r.root, ".store-id-*")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := f.Name()
+	defer os.Remove(temporaryPath)
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if _, err := f.WriteString(value + "\n"); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Link(temporaryPath, path); errors.Is(err, os.ErrExist) {
+		value, err = read()
+		if err != nil {
+			return "", err
+		}
+		r.storeID = value
+		return value, nil
+	} else if err != nil {
+		return "", err
+	}
+	r.storeID = value
+	return value, nil
 }
 
-func sameMachine(recipe Recipe, name, host string) bool {
-	normalize := func(value string) string {
-		value = strings.ToLower(strings.TrimSpace(value))
-		value = strings.TrimPrefix(value, "ut-")
-		return strings.SplitN(value, ".", 2)[0]
-	}
-	return normalize(recipe.MachineName) == normalize(name) || normalize(recipe.MachineHost) == normalize(host)
-}
-
-func recipeID(machineName, machineHost, sessionName, name string) string {
-	sum := sha256.Sum256([]byte(duplicateKey(machineName, machineHost, sessionName, name)))
+func recipeID(storeID, sessionName, name string) string {
+	sum := sha256.Sum256([]byte(duplicateKey(storeID, sessionName, name)))
 	return fmt.Sprintf("%x", sum[:16])
 }
 
@@ -565,8 +643,18 @@ func (r *Registry) loadOwnedLocked(id string) (Recipe, error) {
 	if err != nil {
 		return Recipe{}, err
 	}
-	if !sameMachine(recipe, r.machineName, r.machineHost) {
-		return Recipe{}, fmt.Errorf("%q belongs to %s, not this machine", recipe.Name, recipe.MachineName)
+	storeID, err := r.ensureStoreIDLocked()
+	if err != nil {
+		return Recipe{}, err
+	}
+	if recipe.StoreID == "" {
+		recipe.StoreID = storeID
+		if err := r.writeLocked(recipe); err != nil {
+			return Recipe{}, err
+		}
+	}
+	if recipe.StoreID != storeID {
+		return Recipe{}, fmt.Errorf("%q belongs to a different web-artifact store", recipe.Name)
 	}
 	return recipe, nil
 }
