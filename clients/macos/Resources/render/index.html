@@ -399,11 +399,21 @@
   function presentDocument(doc, presentation) {
     activeDocument = doc;
     const out = document.getElementById("out");
-    out.dataset.sourceOrigin = (doc && doc.sourceOrigin) || "terminal";
+    const sourceOrigin = (doc && doc.sourceOrigin) || "terminal";
+    out.dataset.sourceOrigin = sourceOrigin;
     if (presentation === "terminal") renderTerminal(doc && doc.terminal);
-    else renderMarkdown((doc && doc.source) || "",
-      !!doc && (doc.sourceOrigin === "terminal" || doc.sourceOrigin === "selection"),
-      doc && doc.terminal);
+    else {
+      // A terminal frame and a structured transcript are independent
+      // representations. Text overlap does not prove that an ANSI span came
+      // from this authored occurrence: the same response may also appear in a
+      // tool diff, log, prompt, or earlier turn. Only terminal-derived source
+      // can therefore borrow styles from the captured frame. Authoritative
+      // transcripts keep their semantic Markdown styling; their exact ANSI
+      // representation remains available through Terminal mode.
+      const terminalDerived = sourceOrigin === "terminal" || sourceOrigin === "selection";
+      renderMarkdown((doc && doc.source) || "", terminalDerived,
+        terminalDerived && doc ? doc.terminal : null);
+    }
   }
 
   // Box-drawing, block elements, and legacy +---+ rules mark a line as
@@ -682,14 +692,12 @@
       .replace(/⟦UTTERMTABLE(\d+)⟧/g, (_, index) => tables[+index] || "");
   }
 
-  // Semantic Markdown stays semantic, but intentional terminal colors can be
-  // carried onto it after parsing. A terminal snapshot contains considerably
-  // more than the selected answer (old tool diffs, prompts, status chrome), so
-  // a colored run is NEVER located by its text alone. Instead, complete prose
-  // lines and complete table rows must first align to one unique DOM block;
-  // only styles at the corresponding character offsets are then transferred.
-  // This keeps real accents while making short values such as "62" incapable
-  // of borrowing a background from an unrelated line in scrollback.
+  // Terminal-derived Markdown may carry intentional terminal colors after
+  // parsing. `presentDocument` never passes a terminal frame for authoritative
+  // transcripts: text alignment cannot prove occurrence identity across old
+  // diffs, prompts, logs, and repeated turns. Within one terminal-derived
+  // representation, complete prose lines and table rows must still align to a
+  // unique DOM block before their corresponding character styles transfer.
   function applyTerminalAccents(root, term, excludedLineIndexes) {
     if (!term || !Array.isArray(term.lines) || !Array.isArray(term.styles)) return;
     const excluded = excludedLineIndexes || new Set();
