@@ -1,8 +1,11 @@
 package webartifact
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -73,10 +76,10 @@ func TestAddPersistsWithoutRunning(t *testing.T) {
 	}
 }
 
-func TestAddRejectsDuplicateAcrossBabelSharedStore(t *testing.T) {
+func TestAddRejectsDuplicateAcrossSharedStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "records")
-	first := NewRegistry(root, "babel-p9-28", "babel-p9-28", &fakeRunner{has: map[string]bool{}})
-	second := NewRegistry(root, "ut-babel-u5-16", "babel-u5-16", &fakeRunner{has: map[string]bool{}})
+	first := NewRegistry(root, "worker-a", "worker-a", &fakeRunner{has: map[string]bool{}})
+	second := NewRegistry(root, "worker-b", "worker-b", &fakeRunner{has: map[string]bool{}})
 	request := validRequest(t)
 	if _, err := first.Add(request); err != nil {
 		t.Fatal(err)
@@ -86,10 +89,10 @@ func TestAddRejectsDuplicateAcrossBabelSharedStore(t *testing.T) {
 	}
 }
 
-func TestConcurrentBabelAddPublishesExactlyOneRecord(t *testing.T) {
+func TestConcurrentSharedStoreAddPublishesExactlyOneRecord(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "records")
-	first := NewRegistry(root, "babel-p9-28", "babel-p9-28", &fakeRunner{has: map[string]bool{}})
-	second := NewRegistry(root, "babel-u5-16", "babel-u5-16", &fakeRunner{has: map[string]bool{}})
+	first := NewRegistry(root, "worker-a", "worker-a", &fakeRunner{has: map[string]bool{}})
+	second := NewRegistry(root, "worker-b", "worker-b", &fakeRunner{has: map[string]bool{}})
 	request := validRequest(t)
 	start := make(chan struct{})
 	errors := make(chan error, 2)
@@ -123,20 +126,53 @@ func TestConcurrentBabelAddPublishesExactlyOneRecord(t *testing.T) {
 	}
 }
 
-func TestSharedBabelStoreCannotRunOrMutateAnotherNodesRecipe(t *testing.T) {
+func TestSharedStoreRecipeRemainsRunnableAfterHostChanges(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "records")
-	first := NewRegistry(root, "babel-p9-28", "babel-p9-28", &fakeRunner{has: map[string]bool{}})
-	second := NewRegistry(root, "babel-u5-16", "babel-u5-16", &fakeRunner{has: map[string]bool{}})
-	request := validRequest(t)
+	first := NewRegistry(root, "old-host", "old-host", &fakeRunner{has: map[string]bool{}})
+	secondRunner := &fakeRunner{has: map[string]bool{}}
+	second := NewRegistry(root, "new-host", "new-host", secondRunner)
+	request := automaticPortRequest(t)
 	recipe, err := first.Add(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := second.Start(recipe.ID); err == nil || !strings.Contains(err.Error(), "belongs to") {
-		t.Fatalf("cross-node Start error = %v", err)
+	status, err := second.Start(recipe.ID)
+	if err != nil || status.State != "starting" || secondRunner.spawned != 1 {
+		t.Fatalf("Start after host change = %+v, %v; spawned=%d", status, err, secondRunner.spawned)
 	}
-	if err := second.Delete(recipe.ID); err == nil || !strings.Contains(err.Error(), "belongs to") {
-		t.Fatalf("cross-node Delete error = %v", err)
+	if recipe.StoreID == "" {
+		t.Fatal("new recipe did not record durable store identity")
+	}
+}
+
+func TestLegacyHostnameRecipeMigratesToDurableStoreIdentity(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "records")
+	first := NewRegistry(root, "old-host", "old-host", &fakeRunner{has: map[string]bool{}})
+	request := automaticPortRequest(t)
+	recipe, err := first.Add(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe.StoreID = ""
+	recipe.MachineName = "retired-hostname"
+	recipe.MachineHost = "retired-hostname.example"
+	body, err := json.MarshalIndent(recipe, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(first.path(recipe.ID), append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeRunner{has: map[string]bool{}}
+	current := NewRegistry(root, "current-host", "current-host", runner)
+	status, err := current.Start(recipe.ID)
+	if err != nil || status.State != "starting" || runner.spawned != 1 {
+		t.Fatalf("legacy Start = %+v, %v; spawned=%d", status, err, runner.spawned)
+	}
+	loaded, err := current.List()
+	if err != nil || len(loaded) != 1 || loaded[0].StoreID == "" {
+		t.Fatalf("migrated recipes = %+v, %v", loaded, err)
 	}
 }
 
@@ -199,10 +235,41 @@ func TestAutomaticPortIsAllocatedPersistedAndSubstitutedAtLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/dashboard" {
+			http.NotFound(w, request)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
 	status, err = registry.Status(recipe.ID)
 	if err != nil || status.State != "ready" || status.URL != "http://localhost:"+portText+"/dashboard" {
 		t.Fatalf("Status() = %+v, err=%v", status, err)
+	}
+}
+
+func TestEndpointReadinessChecksTheSavedHTTPPath(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/dashboard" {
+			_, _ = w.Write([]byte("ready"))
+			return
+		}
+		http.NotFound(w, request)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	base := "http://" + listener.Addr().String()
+	if !endpointReady(base + "/dashboard") {
+		t.Fatal("existing dashboard path was not ready")
+	}
+	if endpointReady(base + "/missing") {
+		t.Fatal("TCP listener with a missing saved path was reported ready")
 	}
 }
 
@@ -264,7 +331,11 @@ func TestStartDoesNotSpawnWhenEndpointAlreadyListening(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
 	runner := &fakeRunner{has: map[string]bool{}}
 	registry := NewRegistry(filepath.Join(t.TempDir(), "records"), "mac", "mac", runner)
 	request := validRequest(t)
