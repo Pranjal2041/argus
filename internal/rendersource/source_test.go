@@ -62,9 +62,9 @@ The exact process-owned transcript preserves this complete response with enough 
 		}},
 	)
 
-	got, err := ResolveWithCodexTranscript(home, cwd,
+	got, err := ResolveWithTranscript(home, cwd,
 		"Custom home result The exact process-owned transcript preserves this complete response with enough distinctive words to prove the visible overlap.",
-		path)
+		TranscriptRef{Provider: "codex", Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,95 @@ func TestResolveClaudeTextBlocks(t *testing.T) {
 	}
 	if got.Source != source || got.Origin != "claude-transcript" {
 		t.Fatalf("unexpected result: %#v", got)
+	}
+}
+
+func TestExactClaudeTranscriptKeepsOneActiveTurnAcrossToolResults(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	path := filepath.Join(home, ".claude-custom", "projects", "project", "session.jsonl")
+	first := "I found the shared source-selection failure and am validating the provider-independent transcript contract."
+	last := "The remaining work is to preserve every authored progress block in this active turn across intervening tool results."
+	writeLines(t, path,
+		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
+			"role": "user", "content": "Fix the renderer.",
+		}},
+		map[string]any{"type": "assistant", "cwd": cwd, "message": map[string]any{
+			"role": "assistant", "stop_reason": "tool_use",
+			"content": []map[string]any{{"type": "text", "text": first}},
+		}},
+		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
+			"role": "user", "content": []map[string]any{{"type": "tool_result", "content": "ok"}},
+		}},
+		map[string]any{"type": "assistant", "cwd": filepath.Join(cwd, "nested"), "message": map[string]any{
+			"role": "assistant", "stop_reason": "tool_use",
+			"content": []map[string]any{{"type": "text", "text": last}},
+		}},
+	)
+
+	got, err := ResolveWithTranscript(home, cwd, last, TranscriptRef{Provider: "claude", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := first + "\n\n" + last
+	if got.Source != want || got.Origin != "claude-transcript" {
+		t.Fatalf("active Claude source = %#v, want %q", got, want)
+	}
+}
+
+func TestExactClaudeTranscriptUsesFinalTextFromCompletedTurn(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	path := filepath.Join(home, ".claude-custom", "projects", "project", "session.jsonl")
+	progress := "I am checking the implementation before reporting the completed result to the user."
+	final := "The implementation is complete and the full authored document now renders from the exact process-owned transcript."
+	writeLines(t, path,
+		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
+			"role": "user", "content": []map[string]any{{"type": "text", "text": "Complete it."}},
+		}},
+		map[string]any{"type": "assistant", "cwd": cwd, "message": map[string]any{
+			"role": "assistant", "stop_reason": "tool_use",
+			"content": []map[string]any{{"type": "text", "text": progress}},
+		}},
+		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
+			"role": "user", "content": []map[string]any{{"type": "tool_result", "content": "ok"}},
+		}},
+		map[string]any{"type": "assistant", "cwd": cwd, "message": map[string]any{
+			"role": "assistant", "stop_reason": "end_turn",
+			"content": []map[string]any{{"type": "text", "text": final}},
+		}},
+	)
+
+	got, err := ResolveWithTranscript(home, cwd, final, TranscriptRef{Provider: "claude", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != final {
+		t.Fatalf("completed Claude source = %q, want final text %q", got.Source, final)
+	}
+}
+
+func TestExactTranscriptDoesNotResurrectPreviousTurnBeforeAgentResponds(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	path := filepath.Join(home, ".claude-custom", "projects", "project", "session.jsonl")
+	previous := "The previous response is complete and has enough distinctive visible text to match the pane with confidence."
+	writeLines(t, path,
+		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
+			"role": "user", "content": "First turn.",
+		}},
+		map[string]any{"type": "assistant", "cwd": cwd, "message": map[string]any{
+			"role": "assistant", "stop_reason": "end_turn",
+			"content": []map[string]any{{"type": "text", "text": previous}},
+		}},
+		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
+			"role": "user", "content": "A new turn with no response yet.",
+		}},
+	)
+
+	_, err := ResolveWithTranscript(home, cwd, previous, TranscriptRef{Provider: "claude", Path: path})
+	if !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("expected exact current empty turn to reject stale source, got %v", err)
 	}
 }
 
@@ -251,7 +340,8 @@ Using the supplied hydraulic project and field-observation package, produce a ca
 		}},
 	)
 
-	got, err := ResolveWithCodexTranscript(home, cwd, previous+"\n\n"+currentPrefix, path)
+	got, err := ResolveWithTranscript(home, cwd, previous+"\n\n"+currentPrefix,
+		TranscriptRef{Provider: "codex", Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +372,8 @@ func TestExactCodexTranscriptNeverFallsBackToPreviousTurn(t *testing.T) {
 		}},
 	)
 
-	_, err := ResolveWithCodexTranscript(home, cwd, previous, path)
+	_, err := ResolveWithTranscript(home, cwd, previous,
+		TranscriptRef{Provider: "codex", Path: path})
 	if !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("expected terminal fallback instead of previous turn, got %v", err)
 	}
@@ -311,7 +402,8 @@ func TestExactCodexTranscriptKeepsAllMessagesInActiveTurn(t *testing.T) {
 		}},
 	)
 
-	got, err := ResolveWithCodexTranscript(home, cwd, last, path)
+	got, err := ResolveWithTranscript(home, cwd, last,
+		TranscriptRef{Provider: "codex", Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +436,8 @@ func TestExactCodexTranscriptUsesFinalAnswerFromCompletedTurn(t *testing.T) {
 		map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_complete"}},
 	)
 
-	got, err := ResolveWithCodexTranscript(home, cwd, final, path)
+	got, err := ResolveWithTranscript(home, cwd, final,
+		TranscriptRef{Provider: "codex", Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +465,8 @@ func TestExactCodexTranscriptAcceptsShortNewestAnswer(t *testing.T) {
 	)
 
 	screen := "A previous detailed response remains above the prompt with plenty of unrelated terminal content.\n\n• Topping all four. 😎\n\n› Ask Codex to do anything"
-	got, err := ResolveWithCodexTranscript(home, cwd, screen, path)
+	got, err := ResolveWithTranscript(home, cwd, screen,
+		TranscriptRef{Provider: "codex", Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}

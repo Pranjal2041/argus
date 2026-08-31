@@ -27,7 +27,7 @@ const (
 	minimumConfidence  = 0.58
 	matchAnchorTokens  = 8
 	minimumMatchTokens = 16
-	// Kernel process inspection binds an exact Codex rollout to one pane. Its
+	// Kernel process inspection binds an exact agent transcript to one pane. Its
 	// newest response may have only a short prefix painted before the TUI
 	// virtualizes the rest, so eight contiguous tail tokens are sufficient there.
 	// Directory-scan fallbacks retain the stricter sixteen-token requirement.
@@ -47,6 +47,14 @@ type Result struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// TranscriptRef identifies the structured conversation owned by the live
+// agent process in one terminal pane. Provider selects only the format adapter;
+// provenance, turn selection, matching, and fallback remain shared here.
+type TranscriptRef struct {
+	Provider string
+	Path     string
+}
+
 type candidateFile struct {
 	path     string
 	provider string
@@ -63,29 +71,29 @@ type message struct {
 // host. It never trusts recency alone: a candidate must strongly overlap the
 // captured screen, preventing two agents in the same folder from crossing.
 func Resolve(home, cwd, screen string) (Result, error) {
-	return ResolveWithCodexTranscript(home, cwd, screen, "")
+	return ResolveWithTranscript(home, cwd, screen, TranscriptRef{})
 }
 
-// ResolveWithCodexTranscript resolves rich source like Resolve, but first
-// considers the exact rollout file opened by the Codex process in this pane.
-// Codex may use any CODEX_HOME; process inspection is authoritative while the
-// standard ~/.codex scan remains a compatibility fallback.
-func ResolveWithCodexTranscript(home, cwd, screen, codexTranscript string) (Result, error) {
+// ResolveWithTranscript resolves rich source like Resolve, but first considers
+// the exact transcript held by the live agent process. Exact process provenance
+// is provider-independent and is stronger than a home-directory/cwd guess; the
+// provider value is used only to select the transcript format adapter.
+func ResolveWithTranscript(home, cwd, screen string, transcript TranscriptRef) (Result, error) {
 	screenTokens := tokenize(screen)
 	if len(screenTokens) < 8 {
 		return Result{}, ErrNoMatch
 	}
 
 	best := Result{}
-	if codexTranscript != "" {
-		if info, err := os.Stat(codexTranscript); err == nil && !info.IsDir() {
-			// Once the pane's live Codex process identifies its exact rollout,
-			// only that rollout's newest assistant message is authoritative. If
+	if transcript.Path != "" {
+		if info, err := os.Stat(transcript.Path); err == nil && !info.IsDir() {
+			// Once the pane's live agent process identifies its exact transcript,
+			// only that transcript's newest logical turn is authoritative. If
 			// it is not visible enough yet, preserve the lossless terminal frame;
 			// never walk backward to a fully visible previous response.
-			best = bestFromExactCodex(candidateFile{
-				path: codexTranscript, provider: "codex", mtime: info.ModTime(),
-			}, cwd, screenTokens)
+			best = bestFromExactTranscript(candidateFile{
+				path: transcript.Path, provider: transcript.Provider, mtime: info.ModTime(),
+			}, screenTokens)
 			if best.Confidence >= minimumConfidence {
 				return best, nil
 			}
@@ -117,15 +125,12 @@ func ResolveWithCodexTranscript(home, cwd, screen, codexTranscript string) (Resu
 	return best, nil
 }
 
-func bestFromExactCodex(file candidateFile, cwd string, screenTokens []string) Result {
-	messages := codexMessages(file.path)
+func bestFromExactTranscript(file candidateFile, screenTokens []string) Result {
+	messages := transcriptMessages(file)
 	if len(messages) == 0 {
 		return Result{}
 	}
 	candidate := messages[0]
-	if cwd != "" && candidate.cwd != "" && !samePath(candidate.cwd, cwd) {
-		return Result{}
-	}
 	if len(candidate.text) > maxSourceBytes {
 		return Result{}
 	}
@@ -141,15 +146,20 @@ func bestFromExactCodex(file candidateFile, cwd string, screenTokens []string) R
 	}
 }
 
+func transcriptMessages(file candidateFile) []message {
+	switch file.provider {
+	case "codex":
+		return codexMessages(file.path)
+	case "claude":
+		return claudeMessages(file.path)
+	default:
+		return nil
+	}
+}
+
 func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, best Result) Result {
 	for _, file := range files {
-		var messages []message
-		switch file.provider {
-		case "codex":
-			messages = codexMessages(file.path)
-		case "claude":
-			messages = claudeMessages(file.path)
-		}
+		messages := transcriptMessages(file)
 		for _, candidate := range messages {
 			if cwd != "" && candidate.cwd != "" && !samePath(candidate.cwd, cwd) {
 				continue
@@ -395,19 +405,54 @@ func codexMessages(path string) []message {
 
 func claudeMessages(path string) []message {
 	lines := tailLines(path, maxTranscriptTail)
-	out := make([]message, 0, maxMessagesPerFile)
-	for i := len(lines) - 1; i >= 0 && len(out) < maxMessagesPerFile; i-- {
+	type turn struct {
+		messages []string
+		finals   []string
+		cwd      string
+		started  bool
+	}
+	var turns []message
+	current := turn{}
+	flush := func() {
+		if !current.started && len(current.messages) == 0 {
+			return
+		}
+		parts := current.messages
+		if len(current.finals) > 0 {
+			parts = current.finals
+		}
+		turns = append(turns, message{
+			text: strings.TrimSpace(strings.Join(parts, "\n\n")),
+			cwd:  current.cwd, provider: "claude",
+		})
+		current = turn{}
+	}
+	for _, line := range lines {
 		var envelope struct {
 			Type    string `json:"type"`
 			CWD     string `json:"cwd"`
 			Message struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
+				Stop    string          `json:"stop_reason"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(lines[i], &envelope) != nil || envelope.Type != "assistant" ||
-			envelope.Message.Role != "assistant" {
+		if json.Unmarshal(line, &envelope) != nil {
 			continue
+		}
+		if envelope.Type == "user" && envelope.Message.Role == "user" &&
+			claudeHumanUser(envelope.Message.Content) {
+			flush()
+			current.started = true
+			current.cwd = envelope.CWD
+			continue
+		}
+		if envelope.Type != "assistant" || envelope.Message.Role != "assistant" {
+			continue
+		}
+		current.started = true
+		if envelope.CWD != "" {
+			current.cwd = envelope.CWD
 		}
 		var blocks []struct {
 			Type string `json:"type"`
@@ -427,10 +472,48 @@ func claudeMessages(path string) []message {
 			}
 		}
 		if text := strings.TrimSpace(strings.Join(parts, "\n\n")); text != "" {
-			out = append(out, message{text: text, cwd: envelope.CWD, provider: "claude"})
+			current.messages = appendDistinct(current.messages, text)
+			if envelope.Message.Stop == "end_turn" {
+				current.finals = appendDistinct(current.finals, text)
+			}
 		}
 	}
+	flush()
+
+	out := make([]message, 0, min(maxMessagesPerFile, len(turns)))
+	for index := len(turns) - 1; index >= 0 && len(out) < maxMessagesPerFile; index-- {
+		out = append(out, turns[index])
+	}
 	return out
+}
+
+func appendDistinct(values []string, value string) []string {
+	if len(values) == 0 || values[len(values)-1] != value {
+		return append(values, value)
+	}
+	return values
+}
+
+// Claude records tool results as role=user messages. Only genuine human input
+// starts a new authored turn; treating tool results as turns fragments one
+// response into many unrelated snippets and breaks provider-neutral selection.
+func claudeHumanUser(content json.RawMessage) bool {
+	var plain string
+	if json.Unmarshal(content, &plain) == nil {
+		return strings.TrimSpace(plain) != ""
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return false
+	}
+	for _, block := range blocks {
+		if block.Type != "tool_result" {
+			return true
+		}
+	}
+	return false
 }
 
 func tailLines(path string, maxBytes int64) [][]byte {

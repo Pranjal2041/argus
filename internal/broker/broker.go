@@ -491,11 +491,11 @@ type capturer interface {
 	Capture(name string, lines int) (string, error)
 }
 
-// codexTranscriptProvider identifies the exact rollout opened by the Codex
-// process in a session. Alternate CODEX_HOME handling belongs at the host
-// provider, where live process state is authoritative.
-type codexTranscriptProvider interface {
-	CodexTranscript(name string) (string, error)
+// agentTranscriptProvider identifies the exact structured conversation owned
+// by the foreground agent process. Provider-specific process discovery belongs
+// at the host provider; selection and fallback consume one shared contract.
+type agentTranscriptProvider interface {
+	AgentTranscript(name string) (rendersource.TranscriptRef, error)
 }
 
 // renderWorkingDirectoryProvider lets a backend distinguish a live pane cwd
@@ -537,9 +537,9 @@ func (m *Manager) Recent(name string, lines int) (string, error) {
 }
 
 // RenderSource returns the authoritative Markdown behind the agent response
-// visible in a session. The transcript resolver must prove strong overlap with
-// the rendered screen; if it cannot, callers fall back to their lossless styled
-// terminal snapshot instead of ever showing text from the wrong agent.
+// visible in a session. When process inspection proves an exact transcript,
+// every supported agent uses the same newest-turn and screen-overlap policy. If
+// that cannot be proved, callers retain their lossless styled terminal snapshot.
 func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
 	text, err := m.Recent(name, 600)
 	if err != nil {
@@ -560,13 +560,13 @@ func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
 	if home == "" {
 		return rendersource.Result{}, fmt.Errorf("resolve home directory: empty path")
 	}
-	var codexTranscript string
-	if provider, ok := m.prov.(codexTranscriptProvider); ok {
-		// Non-Codex panes and transient inspection failures retain the existing
-		// standard-store and Claude fallbacks.
-		codexTranscript, _ = provider.CodexTranscript(name)
+	var transcript rendersource.TranscriptRef
+	if provider, ok := m.prov.(agentTranscriptProvider); ok {
+		// Shell panes and transient inspection failures retain the conservative
+		// standard-store fallback.
+		transcript, _ = provider.AgentTranscript(name)
 	}
-	return rendersource.ResolveWithCodexTranscript(home, cwd, text, codexTranscript)
+	return rendersource.ResolveWithTranscript(home, cwd, text, transcript)
 }
 
 // Sessions returns the cached session list (refreshed in the background). Always

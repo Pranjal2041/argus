@@ -5,6 +5,13 @@ import XCTest
 
 @MainActor
 final class RenderDocumentTests: XCTestCase {
+    func testIncompleteTerminalSourceStartsInTerminalMode() {
+        XCTAssertEqual(RenderPresentation.initial(sourceOrigin: "terminal"), "terminal")
+        XCTAssertEqual(RenderPresentation.initial(sourceOrigin: "claude-transcript"), "rendered")
+        XCTAssertEqual(RenderPresentation.initial(sourceOrigin: "codex-transcript"), "rendered")
+        XCTAssertEqual(RenderPresentation.initial(sourceOrigin: "selection"), "rendered")
+    }
+
     func testDocumentCarriesResolvedTerminalStylesAndExactTableRows() throws {
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 500))
         view.nativeBackgroundColor = NSColor(hex: "#12141A")
