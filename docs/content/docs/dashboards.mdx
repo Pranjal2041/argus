@@ -33,6 +33,7 @@ state, or scroll position.
 ut browser status
 ut browser open https://example.com
 ut browser tabs
+ut browser downloads <tab-id>
 ut browser snapshot <tab-id>
 ut browser screenshot <tab-id> -o page.png
 ut browser click <tab-id> 420 260
@@ -46,6 +47,12 @@ Screenshots are first-class observations: an explicit `screenshot` writes the PN
 and every click, type, or scroll writes its resulting viewport PNG to a temporary observation path
 on the agent's machine. `snapshot` returns readable page text plus interactive elements and stable
 references such as `e7`; coordinate actions use top-left screenshot coordinates.
+
+Page-requested windows become real sibling tabs, preserving opener state, POST targets, cookies,
+and blank-first document flows instead of replacing the current page. Native WebKit downloads keep
+that same authenticated request and save collision-safe filenames into the Argus Mac's Downloads
+folder. Click output reports newly opened tab IDs and download destinations; `downloads <tab-id>`
+shows whether each transfer is downloading, finished, or failed.
 
 `upload` reads the file on the machine where the command runs—even when that is Babel—and attaches
 it directly to the page's `<input type="file">`. It does not open a native file picker or activate

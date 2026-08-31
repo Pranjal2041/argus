@@ -38,6 +38,21 @@ final class BrowserControlServiceTests: XCTestCase {
         XCTAssertTrue(delegate.responds(to: selector))
     }
 
+    func testBrowserResponsePolicyDownloadsAttachmentsAndUnsupportedContentButOpensInlinePDFs() {
+        XCTAssertTrue(ArgusBrowserNavigationPolicy.shouldDownload(
+            canShowMIMEType: true,
+            contentDisposition: "attachment; filename=statement.pdf"
+        ))
+        XCTAssertTrue(ArgusBrowserNavigationPolicy.shouldDownload(
+            canShowMIMEType: false,
+            contentDisposition: nil
+        ))
+        XCTAssertFalse(ArgusBrowserNavigationPolicy.shouldDownload(
+            canShowMIMEType: true,
+            contentDisposition: "inline; filename=statement.pdf"
+        ))
+    }
+
     func testArgusWindowScreenshotReturnsPNGFromAppOwnedCapture() async throws {
         let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
                                          persistTabState: false)
@@ -272,6 +287,121 @@ final class BrowserControlServiceTests: XCTestCase {
         XCTAssertEqual(dashboards.tabs.count, 2)
         XCTAssertEqual(dashboards.activeID, active.id,
                        "agent tab creation must not switch the user's active tab")
+    }
+
+    func testBlankFirstPopupBecomesASiblingBrowserTabWithoutReplacingItsOpener() async throws {
+        let dashboards = DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                         persistTabState: false)
+        let service = BrowserControlService()
+        service.bindForTesting(dashboards: dashboards)
+        let html = """
+        <!doctype html><meta charset="utf-8">
+        <style>body{margin:40px;font:18px -apple-system}button{padding:14px 20px}</style>
+        <h1>Statement center</h1>
+        <button aria-label="Open statement" onclick="
+          const popup = window.open('about:blank', '_blank');
+          popup.document.open();
+          popup.document.write(`<style>body{margin:48px;font:20px -apple-system;background:#f7f8fb}article{padding:32px;background:white;border-radius:18px}h1{color:#145da0}</style><article><h1>Statement opened</h1><p>The authenticated document stayed in its new browsing context.</p></article>`);
+          popup.document.close();
+        ">Open statement</button>
+        """
+        let dataURL = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+        let opened = try await rpc(service, method: "tabs.open", params: [
+            "url": dataURL, "visible": false, "width": 900, "height": 600
+        ])
+        let openerID = try XCTUnwrap(opened["id"] as? String)
+        let before = try await rpc(service, method: "page.snapshot", params: ["tab_id": openerID])
+        let button = try XCTUnwrap((before["elements"] as? [[String: Any]])?.first {
+            $0["name"] as? String == "Open statement"
+        })
+        let rect = try XCTUnwrap(button["rect"] as? [String: Any])
+
+        let observation = try await rpc(service, method: "page.click", params: [
+            "tab_id": openerID,
+            "x": number(rect, "x") + 12,
+            "y": number(rect, "y") + 12
+        ])
+        let openedTabs = try XCTUnwrap(observation["opened_tabs"] as? [[String: Any]])
+        let popupID = try XCTUnwrap(openedTabs.first?["id"] as? String)
+        XCTAssertNotEqual(popupID, openerID)
+
+        let openerAfter = try await rpc(service, method: "page.snapshot", params: ["tab_id": openerID])
+        XCTAssertTrue((openerAfter["text"] as? String ?? "").contains("Statement center"))
+        let popup = try await rpc(service, method: "page.snapshot", params: ["tab_id": popupID])
+        XCTAssertTrue((popup["text"] as? String ?? "").contains("Statement opened"))
+        XCTAssertTrue((popup["text"] as? String ?? "").contains("new browsing context"))
+
+        if let path = ProcessInfo.processInfo.environment["UT_CAPTURE_BROWSER_POPUP"] {
+            let shot = try await rpc(service, method: "page.screenshot", params: ["tab_id": popupID])
+            let encoded = try XCTUnwrap(shot["image_base64"] as? String)
+            try XCTUnwrap(Data(base64Encoded: encoded)).write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    func testWebKitDownloadWritesAuthenticatedBytesToMacFilesystemAndAvoidsCollisions() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArgusBrowserDownloads-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let statement = NSTextField(labelWithString: "General WebKit PDF download handoff")
+        statement.frame = CGRect(x: 0, y: 0, width: 520, height: 180)
+        statement.font = .systemFont(ofSize: 24, weight: .semibold)
+        statement.alignment = .center
+        let pdf = statement.dataWithPDF(inside: statement.bounds)
+        let href = "data:application/pdf;base64," + pdf.base64EncodedString()
+        let html = """
+        <!doctype html><meta charset="utf-8">
+        <style>body{margin:40px;font:18px -apple-system}a{display:inline-block;padding:14px 20px;background:#1769aa;color:white;border-radius:10px}</style>
+        <a aria-label="Save statement" download="statement.pdf" href="\(href)">Save statement</a>
+        """
+        let dataURL = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+        let service = BrowserControlService(downloadDirectory: root)
+        service.bindForTesting(
+            dashboards: DashboardsModel(restoreSavedTabs: false, startPolling: false,
+                                        persistTabState: false)
+        )
+        let opened = try await rpc(service, method: "tabs.open", params: [
+            "url": dataURL, "visible": false, "width": 900, "height": 600
+        ])
+        let tabID = try XCTUnwrap(opened["id"] as? String)
+        let before = try await rpc(service, method: "page.snapshot", params: ["tab_id": tabID])
+        let link = try XCTUnwrap((before["elements"] as? [[String: Any]])?.first {
+            $0["name"] as? String == "Save statement"
+        })
+        let rect = try XCTUnwrap(link["rect"] as? [String: Any])
+
+        for expectedName in ["statement.pdf", "statement (2).pdf"] {
+            _ = try await rpc(service, method: "page.click", params: [
+                "tab_id": tabID,
+                "x": number(rect, "x") + 12,
+                "y": number(rect, "y") + 12
+            ])
+            let destination = root.appendingPathComponent(expectedName)
+            let completed = await waitUntil {
+                guard FileManager.default.fileExists(atPath: destination.path),
+                      let listed = try? await self.rpc(
+                        service, method: "downloads.list", params: ["tab_id": tabID]
+                      ),
+                      let downloads = listed["downloads"] as? [[String: Any]] else { return false }
+                return downloads.contains {
+                    $0["path"] as? String == destination.path && $0["state"] as? String == "finished"
+                }
+            }
+            XCTAssertTrue(completed, "WebKit did not finish \(expectedName)")
+            let downloaded = try Data(contentsOf: destination)
+            XCTAssertEqual(downloaded, pdf)
+            if expectedName == "statement.pdf",
+               let path = ProcessInfo.processInfo.environment["UT_CAPTURE_BROWSER_DOWNLOAD"] {
+                try downloaded.write(to: URL(fileURLWithPath: path))
+            }
+        }
+
+        let listed = try await rpc(service, method: "downloads.list", params: ["tab_id": tabID])
+        XCTAssertEqual(listed["browser_host"] as? String, Host.current().localizedName
+                       ?? ProcessInfo.processInfo.hostName)
+        let downloads = try XCTUnwrap(listed["downloads"] as? [[String: Any]])
+        XCTAssertEqual(Set(downloads.compactMap { $0["filename"] as? String }),
+                       Set(["statement.pdf", "statement (2).pdf"]))
     }
 
     func testHiddenTabExpiresWithAnExplicitAgentError() async throws {
@@ -598,5 +728,15 @@ final class BrowserControlServiceTests: XCTestCase {
 
     private func number(_ dictionary: [String: Any], _ key: String) -> Double {
         (dictionary[key] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    private func waitUntil(timeout: TimeInterval = 4,
+                           condition: @escaping () async -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return await condition()
     }
 }

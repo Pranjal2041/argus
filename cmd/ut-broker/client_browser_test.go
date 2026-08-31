@@ -36,6 +36,11 @@ func TestParseBrowserCommands(t *testing.T) {
 	if err != nil || method != "app.screenshot" || len(params) != 0 || path != "argus.png" {
 		t.Fatalf("Argus screenshot = %q %#v %q %v", method, params, path, err)
 	}
+
+	method, params, _, err = parseBrowserCommand([]string{"downloads", "abc"})
+	if err != nil || method != "downloads.list" || params["tab_id"] != "abc" {
+		t.Fatalf("downloads = %q %#v %v", method, params, err)
+	}
 }
 
 func TestParseBrowserUploadReadsCallingMachineFile(t *testing.T) {

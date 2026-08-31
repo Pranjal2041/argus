@@ -59,6 +59,7 @@ struct WebTabView: NSViewRepresentable {
         if tab.persist, let wv = tab.heldWebView {
             wv.navigationDelegate = context.coordinator
             wv.uiDelegate = context.coordinator
+            tab.retainedWebDelegate = nil
             tab.webView = wv
             return wv
         }
@@ -66,6 +67,7 @@ struct WebTabView: NSViewRepresentable {
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.navigationDelegate = context.coordinator
         wv.uiDelegate = context.coordinator
+        tab.retainedWebDelegate = nil
         wv.allowsBackForwardNavigationGestures = true
         tab.webView = wv
         if tab.persist {
@@ -120,6 +122,24 @@ struct WebTabView: NSViewRepresentable {
             tab.isLoading = true; tab.status = nil
             if tab.readinessJS != nil { tab.contentReady = false }
             sync(wv)
+        }
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(ArgusBrowserNavigationPolicy.action(navigationAction))
+        }
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationResponse: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            decisionHandler(ArgusBrowserNavigationPolicy.response(navigationResponse))
+        }
+        func webView(_ webView: WKWebView, navigationAction: WKNavigationAction,
+                     didBecome download: WKDownload) {
+            tab.downloadHandler().attach(download)
+        }
+        func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse,
+                     didBecome download: WKDownload) {
+            tab.downloadHandler().attach(download)
         }
         func webView(_ wv: WKWebView, didCommit n: WKNavigation!) { sync(wv) }
         func webView(_ wv: WKWebView, didFinish n: WKNavigation!) {
@@ -191,14 +211,12 @@ struct WebTabView: NSViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ wv: WKWebView) {
             if let u = wv.url ?? tab.url { wv.load(URLRequest(url: u)) }
         }
-        // Argus browser tabs are automation/read surfaces, not conferencing
-        // clients. Deny camera/microphone before WebKit can surface an OS prompt;
-        // display capture is independently blocked at document start.
-        // target=_blank / window.open → load in the same view instead of dropping it.
+        // Return a real WebKit-created browsing context. Loading a popup request
+        // into `wv` destroys blank-first document flows (and their opener/session
+        // state), while returning nil cancels the popup entirely.
         func webView(_ wv: WKWebView, createWebViewWith cfg: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if let u = action.request.url { wv.load(URLRequest(url: u)) }
-            return nil
+            tab.popupWebViewFactory?(cfg, action)
         }
     }
 }
@@ -416,6 +434,9 @@ struct DashboardsView: View {
                 tab.isLoading ? tab.webView?.stopLoading() : tab.reload()
             }
             addressField(tab)
+            if !tab.downloads.isEmpty {
+                downloadMenu(tab)
+            }
             Menu {
                 Button("Off") { tab.refreshEvery = 0 }
                 Button("Every 5s") { tab.refreshEvery = 5 }
@@ -447,6 +468,44 @@ struct DashboardsView: View {
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.25)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+    }
+
+    private func downloadMenu(_ tab: DashboardTab) -> some View {
+        let latest = tab.downloads[0]
+        let symbol: String = switch latest.state {
+        case .downloading: "arrow.down.circle"
+        case .finished: "checkmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+        return Menu {
+            ForEach(Array(tab.downloads.prefix(10))) { download in
+                if download.state == .finished {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([download.fileURL])
+                    } label: {
+                        Label(download.filename, systemImage: "folder")
+                    }
+                } else {
+                    Label(
+                        download.state == .failed
+                            ? "\(download.filename): \(download.error ?? "failed")"
+                            : "\(download.filename): downloading…",
+                        systemImage: download.state == .failed
+                            ? "exclamationmark.triangle" : "arrow.down.circle"
+                    )
+                }
+            }
+        } label: {
+            Image(systemName: symbol)
+                .foregroundStyle(latest.state == .failed ? Color.orange : Theme.accent)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(latest.state == .finished
+              ? "Downloaded \(latest.filename) to Downloads"
+              : latest.state == .failed
+                ? "Download failed: \(latest.error ?? latest.filename)"
+                : "Downloading \(latest.filename)")
     }
 
     private func navBtn(_ symbol: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
