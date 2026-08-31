@@ -9,10 +9,6 @@ import "time"
 const (
 	SchemaVersion = 1
 	RetentionDays = 7
-	// Babel brokers snapshot every 30 seconds. Three missed snapshots is long
-	// enough to distinguish a departed allocation from ordinary scheduler or
-	// filesystem jitter without making a moved workspace wait for minutes.
-	CrossHostStaleAfter = 90 * time.Second
 )
 
 const (

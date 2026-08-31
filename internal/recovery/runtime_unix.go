@@ -498,7 +498,7 @@ func (s *Store) Capture() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	panes, err := listPanes(s.Socket)
+	panes, err := listPanesForCapture(s.Socket, 2*time.Second)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -522,6 +522,35 @@ func (s *Store) Capture() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+// A newly created tmux pane can exist a few scheduler ticks before tmux has a
+// current path for it. An empty path is not a usable recovery record: passing
+// it back through `new-session -c` either fails or restores in an arbitrary
+// directory. Wait briefly for tmux to settle, and if it never does, leave the
+// previous valid snapshot untouched by failing this capture.
+func listPanesForCapture(socket string, timeout time.Duration) ([]paneInfo, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		panes, err := listPanes(socket)
+		if err != nil {
+			return nil, err
+		}
+		invalid := ""
+		for _, pane := range panes {
+			if strings.TrimSpace(pane.Directory) == "" {
+				invalid = pane.Name
+				break
+			}
+		}
+		if invalid == "" {
+			return panes, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("tmux pane %q has no stable working directory", invalid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // RunCaptureLoop snapshots immediately, after each interval, and once more on
@@ -659,17 +688,6 @@ func (s *Store) Status(requestedSnapshot string) Status {
 				localSelected = nil
 			}
 		}
-		if localSelected != nil && s.Cluster != "" && !sameRecoveryHost(localSelected.Host, s.Host) {
-			for _, item := range allItems {
-				if sameRecoveryHost(item.Host, localSelected.Host) {
-					if s.Now().Sub(item.CapturedAt) < CrossHostStaleAfter {
-						localSelected = nil
-						requestedUnavailable = fmt.Sprintf("source host %q is still publishing live recovery snapshots", item.Host)
-					}
-					break // allItems is newest-first
-				}
-			}
-		}
 	} else if currentServerID == "" {
 		// Before tmux has restarted, the newest non-empty manifest is exactly
 		// the workspace that disappeared.
@@ -705,9 +723,11 @@ func (s *Store) Status(requestedSnapshot string) Status {
 			}
 		}
 	}
-	// Cross-node candidates are only the newest server lifetime from each
-	// departed Babel host. A fresh snapshot is a live lease and is never offered,
-	// which prevents cloning a workspace that is still running elsewhere.
+	// Cross-node candidates use the newest server lifetime from every other
+	// cluster host. A live allocation is a valid migration source: users often
+	// receive a replacement scheduler allocation before the old one exits, so
+	// requiring the source snapshot to become stale makes the workspace
+	// impossible to select during the handoff window.
 	byHost := map[string]Snapshot{}
 	if s.Cluster != "" {
 		for _, item := range allItems {
@@ -726,9 +746,6 @@ func (s *Store) Status(requestedSnapshot string) Status {
 	}
 	for _, latest := range byHost {
 		if latest.CapturedAt.Before(s.Now().Add(-RetentionDays * 24 * time.Hour)) {
-			continue
-		}
-		if s.Now().Sub(latest.CapturedAt) < CrossHostStaleAfter {
 			continue
 		}
 		candidate := latest

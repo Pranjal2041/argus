@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -100,8 +101,10 @@ final class WorkspaceRecoveryController: ObservableObject {
     ]
     @Published var selectedTargetID = "local"
     @Published var selectedSourceID = ""
+    @Published var targetIssues: [String: String] = [:]
 
     private weak var appState: AppState?
+    private var machineObservation: AnyCancellable?
     private var checkGeneration = 0
     private var statusByTarget: [String: WorkspaceRecoveryStatus] = [:]
     private let socket = ProcessInfo.processInfo.environment["UT_TMUX_SOCKET"] ?? "ut"
@@ -126,7 +129,16 @@ final class WorkspaceRecoveryController: ObservableObject {
         id: "local", name: "this mac", host: "this mac", route: nil
     )
 
-    func bind(_ state: AppState) { appState = state }
+    func bind(_ state: AppState) {
+        appState = state
+        machineObservation = state.$machines
+            .dropFirst()
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.showSheet, self.phase != .restoring else { return }
+                self.scanTargets()
+            }
+    }
 
     func checkForRecovery(offerAutomatically: Bool = false) {
         checkGeneration &+= 1
@@ -165,11 +177,23 @@ final class WorkspaceRecoveryController: ObservableObject {
 
     func open() {
         showSheet = true
+        // The recovery sheet must not inherit a stale discovery snapshot. A
+        // scheduler allocation may have just rejoined Tailscale under a new
+        // device identity even though its logical Babel hostname is unchanged.
+        appState?.refreshAll()
+        scanTargets()
+    }
+
+    func refresh() {
+        guard phase != .restoring else { return }
+        appState?.refreshAll()
         scanTargets()
     }
 
     func selectTarget(_ id: String) {
-        guard id != selectedTargetID, targets.contains(where: { $0.id == id }) else { return }
+        guard id != selectedTargetID,
+              targetIssues[id] == nil,
+              targets.contains(where: { $0.id == id }) else { return }
         selectedTargetID = id
         if let cached = statusByTarget[id] {
             apply(cached)
@@ -236,28 +260,24 @@ final class WorkspaceRecoveryController: ObservableObject {
     private func scanTargets() {
         checkGeneration &+= 1
         let generation = checkGeneration
-        let machines = appState?.machines ?? []
-        let babel = machines.filter(Self.isBabelMachine).map {
-            WorkspaceRecoveryTarget(
-                id: $0.id, name: $0.name,
-                host: $0.host.isEmpty ? $0.name : $0.host,
-                route: $0.id
-            )
-        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        targets = [Self.localTarget] + babel
+        targets = Self.recoveryTargets(from: appState?.machines ?? [])
         phase = .checking
         status = nil
         selected = []
         errorMessage = nil
         statusByTarget = [:]
+        targetIssues = [:]
 
         let group = DispatchGroup()
         var discovered: [String: WorkspaceRecoveryStatus] = [:]
+        var issues: [String: String] = [:]
         for target in targets {
             group.enter()
             runRecovery(["recovery", "status", "--tmux-socket", socket], on: target) { output in
                 if let decoded = try? JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: output.data) {
                     discovered[target.id] = decoded
+                } else {
+                    issues[target.id] = Self.recoveryCapabilityIssue(output)
                 }
                 group.leave()
             }
@@ -265,8 +285,11 @@ final class WorkspaceRecoveryController: ObservableObject {
         group.notify(queue: .main) { [weak self] in
             guard let self, generation == self.checkGeneration else { return }
             self.statusByTarget = discovered
-            let chosen = self.targets.first(where: { discovered[$0.id]?.available == true })
-                ?? self.targets.first(where: { discovered[$0.id]?.snapshot != nil })
+            self.targetIssues = issues
+            let supported = self.targets.filter { issues[$0.id] == nil }
+            let chosen = supported.first(where: { discovered[$0.id]?.available == true })
+                ?? supported.first(where: { discovered[$0.id]?.snapshot != nil })
+                ?? supported.first
                 ?? Self.localTarget
             self.selectedTargetID = chosen.id
             if let status = discovered[chosen.id] {
@@ -313,13 +336,40 @@ final class WorkspaceRecoveryController: ObservableObject {
         errorMessage = decoded.error
     }
 
-    private static func isBabelMachine(_ machine: Machine) -> Bool {
-        [machine.name, machine.host, machine.id].contains { raw in
-            var value = raw.lowercased()
-            if let dot = value.firstIndex(of: ".") { value = String(value[..<dot]) }
-            if value.hasPrefix("ut-") { value.removeFirst(3) }
-            return value.hasPrefix("babel-")
+    /// The Tailscale device ID is transport identity, not machine identity. A
+    /// restarted broker can acquire a suffixed route while /whoami still reports
+    /// its stable OS hostname. Keep one destination per logical host and prefer
+    /// the newest discovery entry. Recovery support is established by probing
+    /// the command, never by matching a cluster or hostname.
+    static func recoveryTargets(from machines: [Machine]) -> [WorkspaceRecoveryTarget] {
+        var remoteByHost: [String: WorkspaceRecoveryTarget] = [:]
+        for machine in machines where !machine.isLocal {
+            let host = machine.host.isEmpty ? machine.name : machine.host
+            var key = host.lowercased()
+            if let dot = key.firstIndex(of: ".") { key = String(key[..<dot]) }
+            if key.hasPrefix("ut-") { key.removeFirst(3) }
+            remoteByHost[key] = WorkspaceRecoveryTarget(
+                id: machine.id,
+                name: machine.name,
+                host: host,
+                route: machine.id
+            )
         }
+        let remotes = remoteByHost.values.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        return [localTarget] + remotes
+    }
+
+    private static func recoveryCapabilityIssue(_ output: RecoveryToolOutput) -> String {
+        let firstLine = output.stderr.split(whereSeparator: \.isNewline).first
+            .map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let firstLine, !firstLine.isEmpty {
+            return firstLine
+        }
+        return output.exitCode == 124
+            ? "Recovery probe timed out."
+            : "This broker does not support workspace recovery."
     }
 
     private func runRecovery(
@@ -512,6 +562,16 @@ struct WorkspaceRecoveryView: View {
                     .foregroundStyle(Theme.textPrimary)
             }
             Spacer()
+            Button(action: recovery.refresh) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12 * uiScale, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 30 * uiScale, height: 30 * uiScale)
+                    .background(Circle().fill(Theme.surface))
+            }
+            .buttonStyle(.plain)
+            .disabled(recovery.phase == .restoring)
+            .help("Refresh recovery machines and snapshots")
             Button(action: recovery.close) {
                 Image(systemName: "xmark")
                     .font(.system(size: 12 * uiScale, weight: .semibold))
@@ -559,8 +619,14 @@ struct WorkspaceRecoveryView: View {
                         Button {
                             recovery.selectTarget(target.id)
                         } label: {
-                            Label(target.name, systemImage: target.id == recovery.selectedTargetID ? "checkmark" : "circle")
+                            let issue = recovery.targetIssues[target.id]
+                            Label(
+                                issue == nil ? target.name : "\(target.name) — unavailable",
+                                systemImage: target.id == recovery.selectedTargetID ? "checkmark" : "circle"
+                            )
                         }
+                        .disabled(recovery.targetIssues[target.id] != nil)
+                        .help(recovery.targetIssues[target.id] ?? "Restore this machine's captured workspace")
                     }
                 }
                 Spacer()

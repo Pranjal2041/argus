@@ -4,6 +4,61 @@ import XCTest
 @testable import UniversalTmuxMac
 
 final class WorkspaceRecoveryTests: XCTestCase {
+    @MainActor
+    func testRecoveryTargetsIncludeEveryRemoteAndReplaceStaleRouteByLogicalHost() {
+        let old = Machine(
+            id: "ut-babel-p9-28.tailnet.ts.net",
+            name: "babel-p9-28",
+            host: "babel-p9-28",
+            isLocal: false,
+            httpBase: "https://100.66.142.55:8722",
+            wsBase: "wss://100.66.142.55:8722"
+        )
+        let other = Machine(
+            id: "ut-babel-u5-24.tailnet.ts.net",
+            name: "babel-u5-24",
+            host: "babel-u5-24",
+            isLocal: false,
+            httpBase: "https://100.67.236.60:8722",
+            wsBase: "wss://100.67.236.60:8722"
+        )
+        let replacement = Machine(
+            id: "ut-babel-p9-28-1.tailnet.ts.net",
+            name: "babel-p9-28",
+            host: "babel-p9-28",
+            isLocal: false,
+            httpBase: "https://100.83.220.68:8722",
+            wsBase: "wss://100.83.220.68:8722"
+        )
+        let orchard = Machine(
+            id: "ut-orchard-login-001.tailnet.ts.net",
+            name: "orchard-login-001",
+            host: "orchard-login-001",
+            os: "linux",
+            isLocal: false,
+            httpBase: "https://100.70.0.10:8722",
+            wsBase: "wss://100.70.0.10:8722"
+        )
+        let windows = Machine(
+            id: "ut-pranjala-win.tailnet.ts.net",
+            name: "pranjala-win",
+            host: "pranjala-win",
+            os: "windows",
+            isLocal: false,
+            httpBase: "https://100.70.0.11:8722",
+            wsBase: "wss://100.70.0.11:8722"
+        )
+
+        let targets = WorkspaceRecoveryController.recoveryTargets(
+            from: [old, other, orchard, windows, replacement]
+        )
+
+        XCTAssertEqual(targets.map(\.name), [
+            "this mac", "babel-p9-28", "babel-u5-24", "orchard-login-001", "pranjala-win",
+        ])
+        XCTAssertEqual(targets.first(where: { $0.name == "babel-p9-28" })?.route, replacement.id)
+    }
+
     func testStatusDecodesSafetyModesAndReadyPanels() throws {
         let json = #"""
         {
@@ -111,6 +166,23 @@ final class WorkspaceRecoveryTests: XCTestCase {
     }
 
     @MainActor
+    func testControllerKeepsUnsupportedMachineVisibleButCannotSelectIt() {
+        let controller = WorkspaceRecoveryController()
+        controller.targets = [
+            WorkspaceRecoveryTarget(id: "local", name: "this mac", host: "this mac", route: nil),
+            WorkspaceRecoveryTarget(id: "orchard", name: "orchard-login-001", host: "orchard-login-001", route: "orchard"),
+            WorkspaceRecoveryTarget(id: "windows", name: "pranjala-win", host: "pranjala-win", route: "windows"),
+        ]
+        controller.targetIssues = ["windows": "This broker does not support workspace recovery."]
+
+        controller.selectTarget("orchard")
+        XCTAssertEqual(controller.selectedTargetID, "orchard")
+        controller.selectTarget("windows")
+        XCTAssertEqual(controller.selectedTargetID, "orchard")
+        XCTAssertEqual(controller.targets.map(\.name), ["this mac", "orchard-login-001", "pranjala-win"])
+    }
+
+    @MainActor
     func testRecoverySheetRendersAtItsSupportedSize() throws {
         let json = #"""
         {
@@ -139,9 +211,9 @@ final class WorkspaceRecoveryTests: XCTestCase {
         controller.status = try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: json)
         controller.targets = [
             WorkspaceRecoveryTarget(id: "local", name: "this mac", host: "this mac", route: nil),
-            WorkspaceRecoveryTarget(id: "q9", name: "babel-q9-16", host: "babel-q9-16", route: "babel-q9-16")
+            WorkspaceRecoveryTarget(id: "orchard", name: "orchard-login-001", host: "orchard-login-001", route: "orchard-login-001")
         ]
-        controller.selectedTargetID = "q9"
+        controller.selectedTargetID = "orchard"
         controller.selectedSourceID = "old-mac"
         controller.selectAll()
         let host = NSHostingView(rootView: WorkspaceRecoveryView(recovery: controller))
