@@ -402,7 +402,7 @@ struct WeeklyProgressView: View {
                     collectionView(aggregate: false)
                 }
             }
-            .frame(maxWidth: 1040, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 28)
             .padding(.top, 24)
             .padding(.bottom, 36)
@@ -460,7 +460,7 @@ struct WeeklyProgressView: View {
                 }
                 collectionView(aggregate: true)
             }
-            .frame(maxWidth: 1180, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 28)
             .padding(.top, 24)
             .padding(.bottom, 36)

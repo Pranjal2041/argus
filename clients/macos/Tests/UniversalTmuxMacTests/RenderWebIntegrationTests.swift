@@ -9,19 +9,95 @@ final class RenderWebIntegrationTests: XCTestCase {
         let webView = try await loadRenderer()
         webView.frame = .init(x: 0, y: 0, width: 1_600, height: 900)
         _ = try await webView.evaluateJavaScript(
-            "window.UTRender.setLayout('artifact'); window.UTRender.set('# Wide reader\\n\\nReadable body.', 16)"
+            "window.UTRender.setLayout('artifact'); "
+                + "window.UTRender.setTheme({dark:true,bg:'#22232b',fg:'#d7d8df'}); "
+                + "window.UTRender.set('# Source provenance for all environments\\n\\n"
+                + "The prose keeps a readable line length while the structured evidence uses the available canvas.\\n\\n"
+                + "| # | Benchmark environment | Exact stored anchor(s) |\\n"
+                + "|---:|---|---|\\n"
+                + "| 1 | Motion-Only Ghost Jigsaw | nextgen-captchas-benchmark/Spooky_Jigsaw |\\n"
+                + "| 2 | Cursor-Controlled Constellation Hunt | captchastar-interactive-shape |', 16)"
         )
         let value = try await webView.evaluateJavaScript(
             "({ body: document.body.getBoundingClientRect().width, viewport: document.documentElement.clientWidth, "
-                + "artifact: document.documentElement.classList.contains('artifact-reader') })"
+                + "artifact: document.documentElement.classList.contains('artifact-reader'), "
+                + "wide: document.documentElement.classList.contains('wide-content'), "
+                + "table: document.querySelector('table').getBoundingClientRect().width, "
+                + "prose: document.querySelector('p').getBoundingClientRect().width })"
         )
         let metrics = try XCTUnwrap(value as? [String: Any])
         let bodyWidth = try XCTUnwrap(metrics["body"] as? NSNumber).doubleValue
         let viewportWidth = try XCTUnwrap(metrics["viewport"] as? NSNumber).doubleValue
+        let tableWidth = try XCTUnwrap(metrics["table"] as? NSNumber).doubleValue
+        let proseWidth = try XCTUnwrap(metrics["prose"] as? NSNumber).doubleValue
 
         XCTAssertEqual(metrics["artifact"] as? Bool, true)
-        XCTAssertGreaterThan(bodyWidth, 1_000, "Artifact reading must not fall back to the 740px Render folio")
-        XCTAssertLessThanOrEqual(bodyWidth, viewportWidth - 48 + 1)
+        XCTAssertEqual(metrics["wide"] as? Bool, true)
+        XCTAssertGreaterThan(bodyWidth, viewportWidth - 2)
+        XCTAssertGreaterThan(tableWidth, 1_300, "Structural content should receive the live viewport")
+        XCTAssertLessThan(proseWidth, tableWidth, "Prose should keep a readable measure inside a wide document")
+
+        if let path = ProcessInfo.processInfo.environment["UT_CAPTURE_ADAPTIVE_MARKDOWN"] {
+            let image: NSImage = try await withCheckedThrowingContinuation { continuation in
+                webView.takeSnapshot(with: nil) { image, error in
+                    if let image { continuation.resume(returning: image) }
+                    else { continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+                }
+            }
+            let bitmap = try XCTUnwrap(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
+    }
+
+    func testPlainMarkdownKeepsAReadableMeasureUntilWideContentAppears() async throws {
+        let webView = try await loadRenderer()
+        webView.frame = .init(x: 0, y: 0, width: 1_600, height: 900)
+        _ = try await webView.evaluateJavaScript(
+            "window.UTRender.setLayout('compact'); window.UTRender.set('# Reading\\n\\nPlain prose only.', 16)"
+        )
+        let value = try await webView.evaluateJavaScript(
+            "({ body: document.body.getBoundingClientRect().width, "
+                + "wide: document.documentElement.classList.contains('wide-content') })"
+        )
+        let metrics = try XCTUnwrap(value as? [String: Any])
+        let bodyWidth = try XCTUnwrap(metrics["body"] as? NSNumber).doubleValue
+
+        XCTAssertEqual(metrics["wide"] as? Bool, false)
+        XCTAssertLessThanOrEqual(bodyWidth, 821)
+    }
+
+    func testLabMainCanvasTracksTheLiveViewport() async throws {
+        let webView = try await loadResource("lab")
+        webView.frame = .init(x: 0, y: 0, width: 1_800, height: 900)
+        _ = try await webView.evaluateJavaScript(#"""
+            document.body.innerHTML = `
+              <main class="main-content wide">
+                <div class="eyebrow">Research index</div>
+                <h1 class="display-title">All experiment runs</h1>
+                <p class="lede">Readable context remains bounded while the experiment ledger uses the full workspace.</p>
+                <div class="section-head"><h2>Runs</h2><span class="section-kicker">75 recorded experiments</span></div>
+                <table class="ledger">
+                  <thead><tr><th>Run</th><th>Phase</th><th>Tier / group</th><th>Latest result</th><th>Started</th></tr></thead>
+                  <tbody><tr><td>R2521</td><td>Finished</td><td>full</td><td>Evaluation completed with verified evidence.</td><td>9h</td></tr></tbody>
+                </table>
+              </main>`;
+        """#)
+        let value = try await webView.evaluateJavaScript(
+            "({ content: document.querySelector('.main-content').getBoundingClientRect().width, "
+                + "ledger: document.querySelector('.ledger').getBoundingClientRect().width, "
+                + "viewport: document.documentElement.clientWidth })"
+        )
+        let metrics = try XCTUnwrap(value as? [String: Any])
+        let content = try XCTUnwrap(metrics["content"] as? NSNumber).doubleValue
+        let ledger = try XCTUnwrap(metrics["ledger"] as? NSNumber).doubleValue
+        let viewport = try XCTUnwrap(metrics["viewport"] as? NSNumber).doubleValue
+
+        XCTAssertGreaterThan(content, viewport - 2)
+        XCTAssertGreaterThan(ledger, 1_600)
+        if let path = ProcessInfo.processInfo.environment["UT_CAPTURE_ADAPTIVE_LAB"] {
+            try await capture(webView, to: path)
+        }
     }
 
     func testMarkdownPagesModeCanCreateAnInMemoryPDF() async throws {
@@ -442,19 +518,35 @@ final class RenderWebIntegrationTests: XCTestCase {
     }
 
     private func loadRenderer() async throws -> WKWebView {
+        try await loadResource("render")
+    }
+
+    private func loadResource(_ name: String) async throws -> WKWebView {
         let webView = WKWebView(frame: .init(x: 0, y: 0, width: 900, height: 700))
-        let loaded = expectation(description: "offline renderer loaded")
+        let loaded = expectation(description: "offline \(name) resource loaded")
         let delegate = NavigationWaiter(loaded)
         webView.navigationDelegate = delegate
         let testFile = URL(fileURLWithPath: #filePath)
         let macRoot = testFile.deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
-        let renderDir = macRoot.appendingPathComponent("Resources/render", isDirectory: true)
-        webView.loadFileURL(renderDir.appendingPathComponent("index.html"),
-                            allowingReadAccessTo: renderDir)
+        let resourceDir = macRoot.appendingPathComponent("Resources/\(name)", isDirectory: true)
+        webView.loadFileURL(resourceDir.appendingPathComponent("index.html"),
+                            allowingReadAccessTo: resourceDir)
         await fulfillment(of: [loaded], timeout: 8)
         withExtendedLifetime(delegate) {}
         return webView
+    }
+
+    private func capture(_ webView: WKWebView, to path: String) async throws {
+        let image: NSImage = try await withCheckedThrowingContinuation { continuation in
+            webView.takeSnapshot(with: nil) { image, error in
+                if let image { continuation.resume(returning: image) }
+                else { continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+            }
+        }
+        let bitmap = try XCTUnwrap(image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        try png.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     private func setDocument(_ webView: WKWebView, source: String, origin: String,
