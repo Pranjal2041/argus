@@ -127,12 +127,9 @@ def terminal_table_document() -> dict:
     }
 
 
-def contaminated_transcript_document() -> dict:
+def transcript_with_contaminated_scrollback() -> dict:
     default = 0
-    yellow = 1
-    stale_green = 2
-    stale_purple = 3
-    genuine_green = 4
+    stale_green = 1
 
     def run(text: str, style: int = default) -> dict:
         return {"text": text, "style": style, "link": None}
@@ -151,17 +148,11 @@ def contaminated_transcript_document() -> dict:
             "strikethrough": False,
         }
 
-    source = """Measured uniformly using the emitted reasoning prefix—not hidden model internals:
-
-| Model/mode | Raw coverage | Mean CoT/action |
-|---|---:|---:|
-| Dense2305 full | 128/128 | **104.89** |
-| Router-trained Step900 router | 128/128 | **68.36** |
-| No-router Stage B step900 full | 128/128 | **89.86** |
-| Router-trained Step900 full | 128/128 | **70.31** |
-
-Main observations follow.
-"""
+    source = (
+        "The servo path is rejected, and the diffuser decision is between "
+        "**Meross** for easiest automation, Airversa for refillable waterless oil, "
+        "and ASAKUKI for lowest cost."
+    )
     return {
         "id": "00000000-0000-0000-0000-000000000004",
         "source": source,
@@ -173,37 +164,19 @@ Main observations follow.
             "foreground": "#E8E9EE",
             "styles": [
                 style("#E8E9EE"),
-                style("#F1D18A", bold=True),
-                style("#AAB2BD", background="#31443A"),
-                style("#AAB2BD", background="#513040"),
-                style("#35C46A", bold=True),
+                style("#CDD6F4", background="#213A2B"),
             ],
             "lines": [
-                line(run("Main "), run("observations", stale_green), run(" follow.")),
+                # An old tool diff contains the same answer with independently
+                # wrapped green insertion spans. A transcript must not borrow
+                # presentation from this separate representation.
+                line(run("The servo path is rejected, and the diffuser decision is between Meross for easiest",
+                         stale_green)),
+                line(run("automation, Airversa for refillable waterless oil, and ASAKUKI for lowest cost.",
+                         stale_green)),
                 line(),
-                line(run("Edited report: "), run("reason", stale_green), run(" "),
-                     run("router", stale_green), run(" "), run("68", stale_green),
-                     run(" "), run("66", stale_purple), run(" "), run("full", stale_green)),
-                line(),
-                line(run("Measured uniformly using the emitted reasoning prefix—not hidden model internals:")),
-                line(),
-                line(run(" Model/mode", yellow), run(" " * 22),
-                     run("Raw coverage", yellow), run("    "), run("Mean CoT/action", yellow)),
-                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
-                line(run(" Dense2305 full                   128/128         104.89")),
-                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
-                line(run(" Router-                          128/128         "),
-                     run("68.36", genuine_green)),
-                line(run(" trained")),
-                line(run(" Step900")),
-                line(run(" router")),
-                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
-                line(run(" No-router Stage B step900 full  128/128         89.86")),
-                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
-                line(run(" Router-trained Step900 full     128/128         70.31")),
-                line(run(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━")),
-                line(),
-                line(run("Main observations follow.")),
+                line(run("The servo path is rejected, and the diffuser decision is between Meross for ")),
+                line(run("easiest automation, Airversa for refillable waterless oil, and ASAKUKI for lowest cost.")),
             ],
         },
     }
@@ -319,15 +292,15 @@ def main() -> None:
         assert pass_color != "rgb(31, 35, 40)", pass_color
         page.screenshot(path=str(output_dir / "borderless-table-rendered.png"), full_page=True)
 
-        contaminated = contaminated_transcript_document()
+        contaminated = transcript_with_contaminated_scrollback()
         page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'rendered')", [contaminated])
         contaminated_report = page.evaluate("window.UTRender.inspect()")
         assert contaminated_report["error"] is None, contaminated_report["error"]
-        assert contaminated_report["tables"] == 1
-        assert page.locator('.terminal-accent[style*="background-color"]').count() == 0
-        assert page.locator('th [data-terminal-style="1"]').count() == 3
-        assert page.locator('td [data-terminal-style="4"]').text_content() == "68.36"
-        page.screenshot(path=str(output_dir / "context-aligned-colors.png"), full_page=True)
+        assert contaminated_report["terminalAccents"] == 0
+        assert contaminated_report["sourceOrigin"] == "codex-transcript"
+        assert page.locator(".terminal-accent,[data-terminal-style]").count() == 0
+        assert page.locator("strong").text_content() == "Meross"
+        page.screenshot(path=str(output_dir / "transcript-style-isolation.png"), full_page=True)
 
         page.evaluate("([doc]) => window.UTRender.setDocument(doc, 16, 'terminal')", [active_document])
         terminal = page.evaluate("window.UTRender.inspect()")
