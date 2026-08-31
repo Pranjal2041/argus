@@ -112,8 +112,9 @@ nothing is hosted, and a machine that goes away simply drops off the map.
   host name. Every CLI-created, background, or unclassified session is hidden from the main UI;
   only the Argus UI and an explicit `--visible` create a user-facing panel. While Argus is open on the Mac,
   `ut browser` gives an agent on any machine hidden/visible WebKit tabs, DOM snapshots, screenshots,
-  coordinate or element-ref input, and page-local file upload; browser traffic and authenticated
-  state remain on that Mac, while uploaded files are read on the agent's machine.
+  coordinate or element-ref input, page-local file upload, real popup tabs, and authenticated
+  downloads into the Mac Downloads folder; browser traffic and authenticated state remain on that
+  Mac, while uploaded files are read on the agent's machine.
   The same Mac-hosted Credential Vault stores API keys without exposing a catalog to agents:
   `ut api-key request openai-research` resolves that saved key's configured environment variable,
   shows the exact requesting panel and absolute `.env` path, then appends the approved value without

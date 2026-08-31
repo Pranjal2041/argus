@@ -32,18 +32,21 @@ final class BrowserControlService: ObservableObject {
     private let now: () -> Date
     private let webProcessUsage: (WKWebView) -> BrowserWebProcessUsage?
     private let appWindowCapture: () throws -> CGImage
+    private let downloadDirectory: URL
 
     init(hiddenTabLifetime: TimeInterval = 12 * 60 * 60,
          hiddenTabMemoryLimit: UInt64 = 4 * 1_024 * 1_024 * 1_024,
          now: @escaping () -> Date = Date.init,
          webProcessUsage: @escaping (WKWebView) -> BrowserWebProcessUsage? = BrowserWebProcessMonitor.usage,
-         appWindowCapture: @escaping () throws -> CGImage = ArgusWindowCapture.captureMainWindow) {
+         appWindowCapture: @escaping () throws -> CGImage = ArgusWindowCapture.captureMainWindow,
+         downloadDirectory: URL = ArgusBrowserDownloads.defaultDirectory) {
         browserHostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         self.hiddenTabLifetime = hiddenTabLifetime
         self.hiddenTabMemoryLimit = hiddenTabMemoryLimit
         self.now = now
         self.webProcessUsage = webProcessUsage
         self.appWindowCapture = appWindowCapture
+        self.downloadDirectory = downloadDirectory
     }
 
     func start(dashboards: DashboardsModel, credentialVault: CredentialVaultStore) {
@@ -215,6 +218,13 @@ final class BrowserControlService: ObservableObject {
             await waitForLoad(webView)
             sync(tab, from: webView)
             return tabDescription(tab)
+        case "downloads.list":
+            let tab = try resolveTab(params)
+            return [
+                "tab_id": tab.id.uuidString.lowercased(),
+                "browser_host": browserHostName,
+                "downloads": tab.downloads.map(downloadDescription)
+            ]
         case "page.snapshot":
             let tab = try resolveTab(params)
             let managed = ensureManaged(tab)
@@ -393,6 +403,7 @@ final class BrowserControlService: ObservableObject {
         let tab = DashboardTab(title: url.host ?? url.absoluteString,
                                host: "Argus · \(browserHostName)", url: url)
         tab.persist = true
+        tab.downloadDirectory = downloadDirectory
         ownedTabIDs.insert(tab.id)
         let managed = makeOffscreenTab(tab, viewport: CGSize(width: width, height: height),
                                        createdAt: now())
@@ -431,6 +442,7 @@ final class BrowserControlService: ObservableObject {
         if let webView = tab.heldWebView ?? tab.webView {
             tab.persist = true
             tab.heldWebView = webView
+            installManagedPopupFactory(on: tab)
             let managed = BrowserManagedTab(tab: tab, webView: webView, window: nil,
                                             createdAt: now())
             managedTabs[tab.id] = managed
@@ -444,10 +456,15 @@ final class BrowserControlService: ObservableObject {
     }
 
     private func makeOffscreenTab(_ tab: DashboardTab, viewport: CGSize,
-                                  createdAt: Date) -> BrowserManagedTab {
-        let configuration = ArgusBrowserIdentity.persistentConfiguration()
-        let webView = WKWebView(frame: CGRect(origin: .zero, size: viewport), configuration: configuration)
+                                  createdAt: Date, existingWebView: WKWebView? = nil) -> BrowserManagedTab {
+        let webView = existingWebView ?? WKWebView(
+            frame: CGRect(origin: .zero, size: viewport),
+            configuration: ArgusBrowserIdentity.persistentConfiguration()
+        )
         webView.setFrameSize(viewport)
+        tab.persist = true
+        tab.downloadDirectory = downloadDirectory
+        installManagedPopupFactory(on: tab)
         tab.heldWebView = webView
         tab.webView = webView
         let window = BrowserOffscreenWindow(
@@ -472,6 +489,43 @@ final class BrowserControlService: ObservableObject {
         webView.navigationDelegate = managed
         webView.uiDelegate = managed
         return managed
+    }
+
+    private func installManagedPopupFactory(on tab: DashboardTab) {
+        tab.popupWebViewFactory = { [weak self, weak tab] configuration, action in
+            guard let self, let tab else { return nil }
+            return self.openPopup(from: tab, configuration: configuration, action: action)
+        }
+    }
+
+    /// A new browsing context inherits WebKit's supplied configuration and the
+    /// opener's Argus visibility. Hidden automation remains hidden; a popup from
+    /// a visible agent tab is added as a sibling without activating Argus.
+    private func openPopup(from parent: DashboardTab,
+                           configuration: WKWebViewConfiguration,
+                           action: WKNavigationAction) -> WKWebView {
+        let requestedURL = action.request.url
+        let title = requestedURL?.host
+            ?? (requestedURL?.absoluteString == "about:blank" ? "New tab" : nil)
+            ?? "New tab"
+        let tab = DashboardTab(title: title, host: parent.host, url: nil)
+        tab.downloadDirectory = downloadDirectory
+        ownedTabIDs.insert(tab.id)
+
+        let parentView = parent.heldWebView ?? parent.webView
+        let viewport = parentView?.bounds.size ?? CGSize(width: 1440, height: 900)
+        let webView = WKWebView(frame: CGRect(origin: .zero, size: viewport),
+                                configuration: configuration)
+        let managed = makeOffscreenTab(tab, viewport: viewport, createdAt: now(),
+                                       existingWebView: webView)
+        managedTabs[tab.id] = managed
+        hiddenTabs[tab.id] = managed
+        managedTabs[parent.id]?.openedTabIDs.append(tab.id)
+
+        if dashboards?.tabs.contains(where: { $0.id == parent.id }) == true {
+            show(tab)
+        }
+        return webView
     }
 
     private func reconcileManagedTabs() {
@@ -585,7 +639,26 @@ final class BrowserControlService: ObservableObject {
             )
             description["memory_limit_bytes"] = hiddenTabMemoryLimit
         }
+        if !tab.downloads.isEmpty {
+            description["downloads"] = tab.downloads.map(downloadDescription)
+        }
         return description
+    }
+
+    private func downloadDescription(_ record: BrowserDownloadRecord) -> [String: Any] {
+        var result: [String: Any] = [
+            "id": record.id.uuidString.lowercased(),
+            "filename": record.filename,
+            "path": record.fileURL.path,
+            "state": record.state.rawValue,
+            "started_at": ISO8601DateFormatter().string(from: record.startedAt)
+        ]
+        if let sourceURL = record.sourceURL { result["source_url"] = sourceURL.absoluteString }
+        if let finishedAt = record.finishedAt {
+            result["finished_at"] = ISO8601DateFormatter().string(from: finishedAt)
+        }
+        if let error = record.error { result["error"] = error }
+        return result
     }
 
     private func normalizedURL(_ raw: String) -> URL? {
@@ -659,6 +732,19 @@ final class BrowserControlService: ObservableObject {
             "url": managed.webView.url?.absoluteString ?? "",
             "image_base64": encoded.base64
         ]
+        let newDownloads = managed.tab.downloads.filter {
+            !managed.reportedDownloadIDs.contains($0.id)
+        }
+        if !newDownloads.isEmpty {
+            result["downloads"] = newDownloads.map(downloadDescription)
+            managed.reportedDownloadIDs.formUnion(newDownloads.map(\.id))
+        }
+        if !managed.openedTabIDs.isEmpty {
+            result["opened_tabs"] = managed.openedTabIDs.compactMap { id in
+                allTabs().first(where: { $0.id == id }).map(tabDescription)
+            }
+            managed.openedTabIDs.removeAll()
+        }
         if let mode = managed.lastInteractionMode { result["interaction_mode"] = mode }
         return result
     }
@@ -951,6 +1037,8 @@ private final class BrowserManagedTab: ArgusRemoteWebUIDelegate, WKNavigationDel
     var window: NSWindow?
     var generation = 0
     var lastInteractionMode: String?
+    var openedTabIDs: [UUID] = []
+    var reportedDownloadIDs: Set<UUID> = []
 
     init(tab: DashboardTab, webView: WKWebView, window: NSWindow?, createdAt: Date) {
         self.tab = tab
@@ -962,6 +1050,34 @@ private final class BrowserManagedTab: ArgusRemoteWebUIDelegate, WKNavigationDel
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         tab.isLoading = true
         tab.status = nil
+    }
+
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(ArgusBrowserNavigationPolicy.action(navigationAction))
+    }
+
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(ArgusBrowserNavigationPolicy.response(navigationResponse))
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction,
+                 didBecome download: WKDownload) {
+        tab.downloadHandler().attach(download)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse,
+                 didBecome download: WKDownload) {
+        tab.downloadHandler().attach(download)
+    }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        tab.popupWebViewFactory?(configuration, navigationAction)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

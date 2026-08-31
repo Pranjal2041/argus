@@ -38,6 +38,20 @@ type browserRPCResponse struct {
 	Error  string          `json:"error"`
 }
 
+type browserDownloadResult struct {
+	Filename string `json:"filename"`
+	Path     string `json:"path"`
+	State    string `json:"state"`
+	Error    string `json:"error"`
+}
+
+type browserOpenedTabResult struct {
+	ID        string                  `json:"id"`
+	Title     string                  `json:"title"`
+	URL       string                  `json:"url"`
+	Downloads []browserDownloadResult `json:"downloads"`
+}
+
 // A local-mode Windows broker may need one discovery pass before it can relay
 // to the Mac's native HTTP broker. That path is consistently a little over
 // eight seconds on the live tailnet, so an eight-second client deadline races
@@ -257,6 +271,12 @@ func parseBrowserCommand(args []string) (method string, params map[string]any, s
 			return "", nil, "", fmt.Errorf("usage: ut browser tabs")
 		}
 		return "tabs.list", params, "", nil
+	case "downloads":
+		if len(rest) != 1 {
+			return "", nil, "", fmt.Errorf("usage: ut browser downloads <tab-id>")
+		}
+		params["tab_id"] = rest[0]
+		return "downloads.list", params, "", nil
 	case "open":
 		if len(rest) == 0 {
 			return "", nil, "", fmt.Errorf("usage: ut browser open <url> [--visible] [--width N] [--height N]")
@@ -603,15 +623,17 @@ func printBrowserResult(raw json.RawMessage) {
 
 func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, observation bool) int {
 	var result struct {
-		ImageBase64     string   `json:"image_base64"`
-		MimeType        string   `json:"mime_type"`
-		TabID           string   `json:"tab_id"`
-		Scope           string   `json:"scope"`
-		Width           float64  `json:"width"`
-		Height          float64  `json:"height"`
-		Generation      int      `json:"generation"`
-		InteractionMode string   `json:"interaction_mode"`
-		Uploaded        []string `json:"uploaded"`
+		ImageBase64     string                   `json:"image_base64"`
+		MimeType        string                   `json:"mime_type"`
+		TabID           string                   `json:"tab_id"`
+		Scope           string                   `json:"scope"`
+		Width           float64                  `json:"width"`
+		Height          float64                  `json:"height"`
+		Generation      int                      `json:"generation"`
+		InteractionMode string                   `json:"interaction_mode"`
+		Uploaded        []string                 `json:"uploaded"`
+		Downloads       []browserDownloadResult  `json:"downloads"`
+		OpenedTabs      []browserOpenedTabResult `json:"opened_tabs"`
 	}
 	if err := json.Unmarshal(response.Result, &result); err != nil || result.ImageBase64 == "" {
 		fmt.Fprintln(os.Stderr, "ut browser screenshot: Argus returned no image")
@@ -655,6 +677,15 @@ func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, o
 	if len(result.Uploaded) > 0 {
 		fmt.Printf("uploaded %s\n", strings.Join(result.Uploaded, ", "))
 	}
+	for _, opened := range result.OpenedTabs {
+		fmt.Printf("opened tab %s · %s\n", opened.ID, opened.URL)
+		for _, download := range opened.Downloads {
+			printBrowserDownload(download)
+		}
+	}
+	for _, download := range result.Downloads {
+		printBrowserDownload(download)
+	}
 	if result.Scope == "argus-window" {
 		fmt.Printf("Argus window · %.0fx%.0f\n", result.Width, result.Height)
 		return 0
@@ -667,6 +698,14 @@ func writeBrowserScreenshot(response browserRPCResponse, requestedPath string, o
 	return 0
 }
 
+func printBrowserDownload(download browserDownloadResult) {
+	if download.State == "failed" {
+		fmt.Printf("download failed %s · %s\n", download.Filename, download.Error)
+		return
+	}
+	fmt.Printf("%s %s → %s\n", download.State, download.Filename, download.Path)
+}
+
 const browserHelpText = `ut browser — control the browser hosted by Argus on your Mac.
 
 The requesting agent may run on any machine. Rendering, cookies, JavaScript, and
@@ -675,6 +714,7 @@ ordinary Internet traffic remain on the Mac that is running Argus.
 USAGE
   ut browser status
   ut browser tabs
+  ut browser downloads <tab-id>
   ut browser open <url> [--visible] [--width N] [--height N]
   ut browser show <tab-id>
   ut browser close <tab-id>
@@ -702,7 +742,9 @@ UT_BROWSER_PROVIDER when more than one Argus browser provider is available.
 
 Clicks, typing, scrolling, and uploads are injected into the addressed WebKit tab.
 They do not activate Argus, move macOS focus, open native pickers, or send input
-to another application.
+to another application. Page-requested downloads keep the current WebKit session
+and are written to the Argus Mac's Downloads folder; interaction output reports
+new paths, and ` + "`downloads <tab-id>`" + ` reports their current state.
 
 Credential grants are opaque permissions, not passwords. The request command waits for an
 Argus approval (or resolves immediately under a saved/unattended policy). The fill command

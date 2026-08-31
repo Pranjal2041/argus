@@ -4,6 +4,23 @@ import WebKit
 
 // MARK: - one dashboard tab (a host + a web view)
 
+enum BrowserDownloadState: String, Equatable {
+    case downloading
+    case finished
+    case failed
+}
+
+struct BrowserDownloadRecord: Identifiable, Equatable {
+    let id: UUID
+    let filename: String
+    let fileURL: URL
+    let sourceURL: URL?
+    let startedAt: Date
+    var state: BrowserDownloadState
+    var finishedAt: Date?
+    var error: String?
+}
+
 /// A single embedded dashboard. Holds the target URL + live navigation state; the
 /// WKWebView is owned by the view layer and handed back here (weak) so the chrome
 /// buttons can drive back/forward/reload.
@@ -37,6 +54,15 @@ final class DashboardTab: ObservableObject, Identifiable {
     var heldWebView: WKWebView?
     var forwardKey: String?            // "brokerHost:remotePort" if backed by a forward
     weak var webView: WKWebView?       // set by WebTabView; drives the chrome buttons
+    /// A page-requested new browsing context must be created with WebKit's exact
+    /// supplied configuration. Agent-owned tabs install a factory that preserves
+    /// hidden/visible ownership; ordinary tabs fall back to DashboardsModel.
+    var popupWebViewFactory: ((WKWebViewConfiguration, WKNavigationAction) -> WKWebView?)?
+    /// Keeps a delegate alive between WebKit creating a popup and SwiftUI hosting it.
+    var retainedWebDelegate: AnyObject?
+    var downloadDirectory = ArgusBrowserDownloads.defaultDirectory
+    var browserDownloadHandler: BrowserDownloadHandler?
+    @Published private(set) var downloads: [BrowserDownloadRecord] = []
 
     /// What the tab chip shows: the user's name if set, else the live page title.
     var displayTitle: String { customTitle?.isEmpty == false ? customTitle! : title }
@@ -102,6 +128,36 @@ final class DashboardTab: ObservableObject, Identifiable {
         wv.find(q, configuration: cfg) { _ in }
     }
     func clearFind() { webView?.evaluateJavaScript("window.getSelection().removeAllRanges()", completionHandler: nil) }
+
+    func downloadHandler() -> BrowserDownloadHandler {
+        if let browserDownloadHandler { return browserDownloadHandler }
+        let handler = BrowserDownloadHandler(tab: self, directory: downloadDirectory)
+        browserDownloadHandler = handler
+        return handler
+    }
+
+    func beginDownload(id: UUID, filename: String, fileURL: URL,
+                       sourceURL: URL?, at date: Date = Date()) {
+        downloads.insert(BrowserDownloadRecord(
+            id: id, filename: filename, fileURL: fileURL, sourceURL: sourceURL,
+            startedAt: date, state: .downloading, finishedAt: nil, error: nil
+        ), at: 0)
+        if downloads.count > 20 { downloads.removeLast(downloads.count - 20) }
+    }
+
+    func finishDownload(id: UUID, at date: Date = Date()) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+        downloads[index].state = .finished
+        downloads[index].finishedAt = date
+        downloads[index].error = nil
+    }
+
+    func failDownload(id: UUID, error: String, at date: Date = Date()) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+        downloads[index].state = .failed
+        downloads[index].finishedAt = date
+        downloads[index].error = error
+    }
 }
 
 // MARK: - the window's model (a set of tabs)
@@ -173,6 +229,7 @@ final class DashboardsModel: ObservableObject {
                                  host: st.host, url: URL(string: st.url),
                                  lastViewedAt: st.lastViewedAt ?? migrationDate)
             t.customTitle = st.title
+            installPopupFactory(on: t)
             tabs.append(t)
         }
         activeID = tabs.first?.id
@@ -235,6 +292,7 @@ final class DashboardsModel: ObservableObject {
             let t = DashboardTab(title: "\(f.brokerName):\(f.remotePort)", host: f.brokerName,
                                  url: URL(string: "http://127.0.0.1:\(f.localPort)"))
             t.forwardKey = key
+            installPopupFactory(on: t)
             tabs.append(t)
             addedAny = true
         }
@@ -377,6 +435,7 @@ final class DashboardsModel: ObservableObject {
     }
 
     private func add(_ t: DashboardTab) {
+        installPopupFactory(on: t)
         tabs.append(t)
         activeID = t.id
         t.lastViewedAt = Date()
@@ -387,12 +446,51 @@ final class DashboardsModel: ObservableObject {
     /// dashboard UI. The tab is adopted rather than recreated, preserving cookies,
     /// JavaScript state, scroll position, and the page the agent actually observed.
     func adoptBrowserTab(_ tab: DashboardTab, select shouldSelect: Bool) {
+        installPopupFactory(on: tab)
         if !tabs.contains(where: { $0.id == tab.id }) { tabs.append(tab) }
         if shouldSelect {
             activeID = tab.id
             tab.lastViewedAt = Date()
         }
         saveTabs()
+    }
+
+    private func installPopupFactory(on tab: DashboardTab) {
+        guard tab.popupWebViewFactory == nil else { return }
+        tab.popupWebViewFactory = { [weak self, weak tab] configuration, action in
+            guard let self, let tab else { return nil }
+            return self.openPopup(from: tab, configuration: configuration, action: action)
+        }
+    }
+
+    /// Honor WebKit's new-window contract with a real sibling tab. The returned
+    /// web view uses WebKit's supplied configuration, so opener state, POST
+    /// targets, blob URLs, cookies, and blank-first document flows survive.
+    private func openPopup(from parent: DashboardTab,
+                           configuration: WKWebViewConfiguration,
+                           action: WKNavigationAction) -> WKWebView {
+        let requestedURL = action.request.url
+        let title = requestedURL?.host
+            ?? (requestedURL?.absoluteString == "about:blank" ? "New tab" : nil)
+            ?? "New tab"
+        let popup = DashboardTab(title: title, host: parent.host, url: nil)
+        popup.persist = true
+        popup.downloadDirectory = parent.downloadDirectory
+        installPopupFactory(on: popup)
+
+        let size = (parent.heldWebView ?? parent.webView)?.bounds.size
+            ?? CGSize(width: 1200, height: 800)
+        let webView = WKWebView(frame: CGRect(origin: .zero, size: size),
+                                configuration: configuration)
+        webView.allowsBackForwardNavigationGestures = true
+        popup.heldWebView = webView
+        popup.webView = webView
+        let delegate = WebTabView.Coordinator(tab: popup)
+        popup.retainedWebDelegate = delegate
+        webView.navigationDelegate = delegate
+        webView.uiDelegate = delegate
+        add(popup)
+        return webView
     }
 
     // MARK: forwards (talk to the local broker's forward agent)
