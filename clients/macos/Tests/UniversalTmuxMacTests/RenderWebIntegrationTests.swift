@@ -184,6 +184,39 @@ final class RenderWebIntegrationTests: XCTestCase {
         XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
     }
 
+    func testProcessOwnedTranscriptRendersAsAuthoredDocumentInsteadOfTerminalFallback() async throws {
+        let webView = try await loadRenderer()
+        webView.frame = .init(x: 0, y: 0, width: 1_200, height: 760)
+        let source = #"""
+        # Completed report
+
+        The exact process-owned transcript preserves the authored response.
+
+        - Every progress fragment belongs to one logical turn.
+        - Tool results do not split that turn.
+        - The terminal grid remains an independent fallback.
+
+        ```text
+        provider-independent source selection
+        ```
+        """#
+        try await setDocument(webView, source: source, origin: "claude-transcript",
+                              presentation: "rendered")
+
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.int("headings"), 1)
+        XCTAssertEqual(report.int("codeBlocks"), 1)
+        XCTAssertEqual(report.int("terminalRows"), 0)
+        XCTAssertEqual(report.string("sourceOrigin"), "claude-transcript")
+        XCTAssertTrue(report.string("text").contains("Every progress fragment"))
+        XCTAssertFalse(report.string("text").contains("ANSI heading"))
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+
+        if let path = ProcessInfo.processInfo.environment["UT_CAPTURE_TRANSCRIPT_RENDER"] {
+            try await capture(webView, to: path)
+        }
+    }
+
     func testRenderedFallbackRecoversOnlyTeXShapedStrippedDelimiters() async throws {
         let webView = try await loadRenderer()
         let source = #"""

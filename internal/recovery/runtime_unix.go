@@ -403,12 +403,13 @@ func inspectCodex(pid int, state processState) (string, string, error) {
 	return inspectCodexRollouts(codexRollouts(files, state))
 }
 
-// InspectCodexSession identifies the foreground Codex conversation in a tmux
-// session from kernel-owned process state and its open rollout file.
-func InspectCodexSession(socket, name string) (CodexSession, error) {
+// InspectAgentSession identifies the foreground agent conversation in a tmux
+// session from kernel-owned process state. Provider-specific discovery stays
+// here; consumers receive the same process-proven transcript contract.
+func InspectAgentSession(socket, name string) (AgentSession, error) {
 	panes, err := listPanes(socket)
 	if err != nil {
-		return CodexSession{}, err
+		return AgentSession{}, err
 	}
 	for _, pane := range panes {
 		if pane.Name != name {
@@ -416,23 +417,34 @@ func InspectCodexSession(socket, name string) (CodexSession, error) {
 		}
 		processes, err := readProcessTable()
 		if err != nil {
-			return CodexSession{}, err
+			return AgentSession{}, err
 		}
 		agent, process, ok := findAgent(pane.PanePID, processes)
-		if !ok || agent != AgentCodex {
-			return CodexSession{}, fmt.Errorf("session %q has no foreground Codex process", name)
+		if !ok {
+			return AgentSession{}, fmt.Errorf("session %q has no supported foreground agent process", name)
 		}
 		state, err := platformProcessState(process.PID)
 		if err != nil {
-			return CodexSession{}, err
+			return AgentSession{}, err
 		}
-		id, path, err := inspectCodex(process.PID, state)
+		var id, path string
+		switch agent {
+		case AgentCodex:
+			id, path, err = inspectCodex(process.PID, state)
+		case AgentClaude:
+			id, path, _, err = inspectClaude(process.PID, state)
+		default:
+			err = fmt.Errorf("unsupported foreground agent %q", agent)
+		}
 		if err != nil {
-			return CodexSession{}, err
+			return AgentSession{}, err
 		}
-		return CodexSession{ID: id, Path: path}, nil
+		if path == "" {
+			return AgentSession{}, fmt.Errorf("%s process has no exact transcript file", agent)
+		}
+		return AgentSession{Agent: agent, ID: id, Path: path}, nil
 	}
-	return CodexSession{}, fmt.Errorf("no such session: %q", name)
+	return AgentSession{}, fmt.Errorf("no such session: %q", name)
 }
 
 func uniqueStrings(values []string) []string {

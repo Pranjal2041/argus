@@ -21,11 +21,13 @@ const (
 	AgentCodex  = "codex"
 )
 
-// CodexSession is the conversation identity proven from the rollout file held
-// open by a live Codex process.
-type CodexSession struct {
-	ID   string
-	Path string
+// AgentSession is the conversation identity proven from process-owned state for
+// the live agent in one pane. Agent selects a transcript-format adapter; Path
+// is the exact conversation file, never a directory-scan guess.
+type AgentSession struct {
+	Agent string
+	ID    string
+	Path  string
 }
 
 // Entry is one user-owned tmux session in a recovery snapshot. Argv is the

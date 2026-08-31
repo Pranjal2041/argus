@@ -140,10 +140,11 @@ private struct RenderSourceResponse: Decodable {
     let confidence: Double
 }
 
-/// One entry point for every ⇧⌘M surface. Open immediately from the lossless
-/// terminal frame, then upgrade to screen-matched transcript Markdown when the
-/// broker can prove it belongs to this exact pane. Explicit selections always
-/// win and are never replaced behind the user's back.
+/// One entry point for every ⇧⌘M surface. Open immediately in lossless Terminal
+/// mode, then upgrade to screen-matched transcript Markdown when the broker can
+/// prove it belongs to this exact pane. This prevents a partial local terminal
+/// history from being presented as if it were authored Markdown. Explicit
+/// selections always win and are never replaced behind the user's back.
 @MainActor
 enum RenderLauncher {
     static func open(state: AppState, terminals: TerminalController) {
@@ -279,6 +280,12 @@ private enum RenderPDFError: LocalizedError {
     }
 }
 
+enum RenderPresentation {
+    static func initial(sourceOrigin: String) -> String {
+        sourceOrigin == "terminal" ? "terminal" : "rendered"
+    }
+}
+
 /// The overlay panel: header (source hint, zoom, close) + the render webview.
 /// Esc and ⌘+/−/0 are handled by a local key monitor while the panel is up.
 struct RenderPanel: View {
@@ -287,7 +294,7 @@ struct RenderPanel: View {
     let document: RenderDocument
 
     @AppStorage("ut.renderFontSize") private var fontSize = 16.0
-    @State private var presentation = "rendered"
+    @State private var presentation: String
     @State private var copied = false
     @State private var savingPDF = false
     @State private var savedArtifact: ArtifactRecord?
@@ -298,6 +305,12 @@ struct RenderPanel: View {
     // "page" floating over the dark app, not more dark UI.
     private let paper = Color(hex: "#FBFBFA")
     private let inkDim = Color(hex: "#6E7681")
+
+    init(document: RenderDocument) {
+        self.document = document
+        _presentation = State(initialValue: RenderPresentation.initial(
+            sourceOrigin: document.sourceOrigin))
+    }
 
     var body: some View {
         ZStack {
@@ -396,6 +409,14 @@ struct RenderPanel: View {
             .padding(.vertical, 28)
         }
         .onAppear { installMonitor() }
+        .onChange(of: document.sourceOrigin) { origin in
+            // The initial pane snapshot is deliberately shown as a terminal.
+            // Once the same document is upgraded from an authoritative
+            // transcript, reveal its semantic Rendered representation.
+            if origin.hasSuffix("-transcript") && presentation == "terminal" {
+                presentation = "rendered"
+            }
+        }
         .onDisappear { removeMonitor() }
         .alert("Couldn’t save PDF", isPresented: Binding(
             get: { pdfError != nil },

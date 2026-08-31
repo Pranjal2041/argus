@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-func InspectCodexSession(socket, name string) (CodexSession, error) {
-	return CodexSession{}, fmt.Errorf("live Codex session inspection is not yet supported on Windows")
+func InspectAgentSession(socket, name string) (AgentSession, error) {
+	return AgentSession{}, fmt.Errorf("live agent session inspection is not yet supported on Windows")
 }
 
 // Windows sessions are ConPTY-backed and do not survive a reboot. Conversation
