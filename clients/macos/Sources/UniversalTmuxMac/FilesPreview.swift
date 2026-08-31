@@ -462,17 +462,20 @@ struct TablePreviewView: View {
         }
     }
 
-    private var totalWidth: CGFloat { max(widths.reduce(0, +), 60) }
     private var colRange: [Int] { Array(0..<cols) }
 
-    private var headerRow: some View {
-        HStack(spacing: 0) { ForEach(colRange, id: \.self) { c in headerCell(c) } }
+    private func headerRow(_ fittedWidths: [CGFloat]) -> some View {
+        HStack(spacing: 0) { ForEach(colRange, id: \.self) { c in headerCell(c, fittedWidths) } }
             .background(Flat.sidebar)
             .overlay(alignment: .bottom) { Rectangle().fill(Flat.hairline).frame(height: 1) }
     }
 
-    private func rowView(_ idx: Int, _ r: [String]) -> some View {
-        HStack(spacing: 0) { ForEach(colRange, id: \.self) { c in cell(c < r.count ? r[c] : "", width: width(c)) } }
+    private func rowView(_ idx: Int, _ r: [String], _ fittedWidths: [CGFloat]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(colRange, id: \.self) { c in
+                cell(c < r.count ? r[c] : "", width: width(c, fittedWidths))
+            }
+        }
             .background(idx % 2 == 0 ? Color.clear : Flat.sidebar.opacity(0.4))
     }
 
@@ -493,18 +496,22 @@ struct TablePreviewView: View {
                     // inner vertical scroll, so it stays put while rows scroll and moves
                     // sideways with the columns. (A 2-axis scroll + pinned section header
                     // mispositioned the header — this is the robust spreadsheet layout.)
-                    ScrollView(.horizontal, showsIndicators: true) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            headerRow
-                            ScrollView(.vertical, showsIndicators: true) {
-                                LazyVStack(alignment: .leading, spacing: 0) {
-                                    ForEach(Array(sortedRows.enumerated()), id: \.offset) { idx, r in
-                                        rowView(idx, r)
+                    GeometryReader { geo in
+                        let fittedWidths = FileTableColumnLayout.fitted(widths, viewportWidth: geo.size.width)
+                        let fittedTotal = max(fittedWidths.reduce(0, +), geo.size.width)
+                        ScrollView(.horizontal, showsIndicators: true) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                headerRow(fittedWidths)
+                                ScrollView(.vertical, showsIndicators: true) {
+                                    LazyVStack(alignment: .leading, spacing: 0) {
+                                        ForEach(Array(sortedRows.enumerated()), id: \.offset) { idx, r in
+                                            rowView(idx, r, fittedWidths)
+                                        }
                                     }
                                 }
                             }
+                            .frame(width: fittedTotal, alignment: .leading)
                         }
-                        .frame(width: totalWidth, alignment: .leading)
                     }
                 }
             }
@@ -519,7 +526,7 @@ struct TablePreviewView: View {
         }
     }
 
-    private func headerCell(_ c: Int) -> some View {
+    private func headerCell(_ c: Int, _ fittedWidths: [CGFloat]) -> some View {
         Button {
             if sortCol == c { sortAsc.toggle() } else { sortCol = c; sortAsc = true }
         } label: {
@@ -531,7 +538,8 @@ struct TablePreviewView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8).padding(.vertical, 6).frame(width: width(c), alignment: .leading)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .frame(width: width(c, fittedWidths), alignment: .leading)
         }
         .buttonStyle(.plain)
         .overlay(alignment: .trailing) { Rectangle().fill(Flat.hairline).frame(width: 1) }
@@ -547,7 +555,9 @@ struct TablePreviewView: View {
             .overlay(alignment: .trailing) { Rectangle().fill(Flat.hairline.opacity(0.5)).frame(width: 1) }
     }
 
-    private func width(_ c: Int) -> CGFloat { c < widths.count ? widths[c] : 120 }
+    private func width(_ c: Int, _ fittedWidths: [CGFloat]) -> CGFloat {
+        c < fittedWidths.count ? fittedWidths[c] : 120
+    }
 
     private func reparse(_ t: String) {
         let rows = DelimitedParser.parse(t, delimiter: isTSV ? "\t" : ",")
@@ -563,6 +573,20 @@ struct TablePreviewView: View {
         for r in sample { for c in 0..<min(r.count, w.count) { w[c] = max(w[c], CGFloat(r[c].count)) } }
         widths = w.map { min(360, max(60, $0 * charW + 18)) }
         sortCol = nil; sortAsc = true
+    }
+}
+
+enum FileTableColumnLayout {
+    /// Preserve content-driven widths when the table must scroll. When it is
+    /// narrower than the live preview, distribute only the spare room so the
+    /// table reaches the viewport instead of leaving a dead canvas beside it.
+    static func fitted(_ widths: [CGFloat], viewportWidth: CGFloat) -> [CGFloat] {
+        guard !widths.isEmpty else { return [] }
+        let available = max(0, viewportWidth)
+        let total = widths.reduce(0, +)
+        guard total > 0, total < available else { return widths }
+        let extra = (available - total) / CGFloat(widths.count)
+        return widths.map { $0 + extra }
     }
 }
 
