@@ -285,7 +285,7 @@ func TestBabelCrossNodeRestoreUsesSharedSnapshotAndConsumesEachPanel(t *testing.
 	}
 }
 
-func TestBabelLiveSourceIsNotOfferedForCrossNodeRestore(t *testing.T) {
+func TestBabelLiveSourceIsOfferedForCrossNodeMigration(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 8, 28, 15, 0, 0, 0, time.UTC)
 	source := babelTestStore(root, "babel-p9-28", "definitely-no-server", now.Add(-30*time.Second))
@@ -299,12 +299,12 @@ func TestBabelLiveSourceIsNotOfferedForCrossNodeRestore(t *testing.T) {
 	}
 	target := babelTestStore(root, "babel-q9-16", source.Socket, now)
 	status := target.Status("")
-	if status.Available || status.Snapshot != nil || len(status.Candidates) != 0 {
-		t.Fatalf("live Babel node was offered as a recovery source: %#v", status)
+	if !status.Available || status.Snapshot == nil || status.Snapshot.ID != snapshot.ID || len(status.Candidates) != 1 {
+		t.Fatalf("live Babel node was not offered as a migration source: %#v", status)
 	}
 	explicit := target.Status(snapshot.ID)
-	if explicit.Snapshot != nil || explicit.Error == "" {
-		t.Fatalf("explicit snapshot bypassed the live-node guard: %#v", explicit)
+	if !explicit.Available || explicit.Snapshot == nil || explicit.Snapshot.ID != snapshot.ID || explicit.Error != "" {
+		t.Fatalf("explicit live migration source was unavailable: %#v", explicit)
 	}
 }
 
@@ -329,7 +329,7 @@ func TestBabelExpiredSourceIsOutsideTheRecoveryWindow(t *testing.T) {
 	}
 }
 
-func TestCaptureEnabledOnBabelOnlyByDefault(t *testing.T) {
+func TestCaptureEnabledOnSupportedUnixByDefault(t *testing.T) {
 	for _, test := range []struct {
 		goos, host, override string
 		want                 bool
@@ -337,8 +337,10 @@ func TestCaptureEnabledOnBabelOnlyByDefault(t *testing.T) {
 		{"darwin", "macbook", "", true},
 		{"linux", "babel-p9-28", "", true},
 		{"linux", "ut-babel-q9-16.example.ts.net", "", true},
-		{"linux", "orchard-login", "", false},
+		{"linux", "orchard-login", "", true},
 		{"linux", "orchard-login", "1", true},
+		{"linux", "orchard-login", "0", false},
+		{"windows", "pranjala-win", "", false},
 	} {
 		if got := CaptureEnabled(test.goos, test.host, test.override); got != test.want {
 			t.Fatalf("CaptureEnabled(%q, %q, %q) = %v, want %v", test.goos, test.host, test.override, got, test.want)

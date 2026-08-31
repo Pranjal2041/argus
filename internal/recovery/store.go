@@ -62,11 +62,19 @@ func recoveryCluster(host string) string {
 	return ""
 }
 
-// CaptureEnabled keeps process inspection off generic Linux brokers while
-// enabling it automatically on Babel, where snapshots are needed before a
-// scheduler allocation disappears.
-func CaptureEnabled(goos, host, override string) bool {
-	return goos == "darwin" || override == "1" || recoveryCluster(host) == "babel"
+// CaptureEnabled follows runtime capability, not a hostname convention. Unix
+// tmux brokers can inspect and reconstruct their process trees; unsupported
+// backends (currently Windows/ConPTY) cannot. Operators may explicitly disable
+// or enable capture when a host has unusual constraints.
+func CaptureEnabled(goos, _ string, override string) bool {
+	switch strings.ToLower(strings.TrimSpace(override)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return goos == "darwin" || goos == "linux"
+	}
 }
 
 func safeComponent(value string) string {
