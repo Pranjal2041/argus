@@ -224,6 +224,60 @@ func TestAgentRestorePassesArgvWithoutShellReparsing(t *testing.T) {
 	t.Fatal("restored command did not run")
 }
 
+func TestReviewedCapturedLaunchRunsServerStoredArgvAndVerifiesAgent(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	compiler, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("a C compiler is required for the foreground-agent fixture")
+	}
+	socket := fmt.Sprintf("ut-recovery-reviewed-%d", os.Getpid())
+	cleanup := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
+	cleanup()
+	t.Cleanup(cleanup)
+	if err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "_ut-test").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "codex")
+	source := filepath.Join(directory, "agent.c")
+	if err := os.WriteFile(source, []byte("#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(compiler, source, "-o", executable).CombinedOutput(); err != nil {
+		t.Fatalf("compile foreground-agent fixture: %v: %s", err, out)
+	}
+	store := NewStore(socket)
+	store.Dir = filepath.Join(t.TempDir(), "snapshots")
+	store.Now = func() time.Time { return time.Date(2026, 9, 1, 18, 0, 0, 0, time.UTC) }
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: "reviewed-captured-launch", Host: "test-host", Socket: socket,
+		ServerID: "old-server", CapturedAt: store.Now(),
+		Entries: []Entry{{
+			Name: "manual-agent", Directory: directory, Agent: AgentCodex,
+			Argv:         []string{executable, "--future-option", "value with spaces"},
+			CaptureError: "unknown future launch format",
+		}},
+	}
+	if err := store.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	status := store.Status(snapshot.ID)
+	if len(status.Panels) != 1 || status.Panels[0].State != PanelUnsupported || !status.Panels[0].CapturedLaunchReviewable {
+		t.Fatalf("reviewed status = %#v", status)
+	}
+	response := store.RestoreCapturedLaunch(snapshot.ID, []string{"manual-agent"}, 1)
+	if len(response.Results) != 1 || response.Results[0].State != RestoreRestored {
+		t.Fatalf("reviewed restore = %#v", response)
+	}
+	live, ok := currentEntry(socket, "manual-agent")
+	if !ok || live.Agent != AgentCodex || !equivalentDirectory(live.Directory, directory) {
+		t.Fatalf("reviewed live entry = %#v, %v", live, ok)
+	}
+}
+
 func babelTestStore(root, host, socket string, now time.Time) *Store {
 	return &Store{
 		Socket: socket,

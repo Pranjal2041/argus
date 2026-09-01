@@ -29,20 +29,24 @@ type AgentSession struct {
 // Entry is one user-owned tmux session in a recovery snapshot. Argv is the
 // kernel-owned argument vector, not a transcript-derived reconstruction.
 type Entry struct {
-	Name          string   `json:"name"`
-	Directory     string   `json:"directory"`
-	Agent         string   `json:"agent"`
-	AgentPID      int      `json:"agentPid,omitempty"`
-	Executable    string   `json:"executable,omitempty"`
-	Argv          []string `json:"argv,omitempty"`
-	SessionID     string   `json:"sessionId,omitempty"`
-	SessionPath   string   `json:"sessionPath,omitempty"`
-	CodexHome     string   `json:"codexHome,omitempty"`
-	ClaudeConfig  string   `json:"claudeConfig,omitempty"`
-	Windows       int      `json:"windows"`
-	Panes         int      `json:"panes"`
-	CaptureError  string   `json:"captureError,omitempty"`
-	CaptureNotice string   `json:"captureNotice,omitempty"`
+	Name        string   `json:"name"`
+	Directory   string   `json:"directory"`
+	Agent       string   `json:"agent"`
+	AgentPID    int      `json:"agentPid,omitempty"`
+	Executable  string   `json:"executable,omitempty"`
+	Argv        []string `json:"argv,omitempty"`
+	SessionID   string   `json:"sessionId,omitempty"`
+	SessionPath string   `json:"sessionPath,omitempty"`
+	// SessionEvidence records the process-owned source used to identify the
+	// conversation when no transcript file is currently open. Today the only
+	// alternate source is an unambiguous `resume <UUID>` selector in kernel argv.
+	SessionEvidence string `json:"sessionEvidence,omitempty"`
+	CodexHome       string `json:"codexHome,omitempty"`
+	ClaudeConfig    string `json:"claudeConfig,omitempty"`
+	Windows         int    `json:"windows"`
+	Panes           int    `json:"panes"`
+	CaptureError    string `json:"captureError,omitempty"`
+	CaptureNotice   string `json:"captureNotice,omitempty"`
 }
 
 // RecoveryCandidate is one prior workspace that can be inspected or restored
@@ -91,11 +95,12 @@ const (
 // display-only; restoration executes ResumeArgv directly through tmux.
 type PanelStatus struct {
 	Entry
-	State          string   `json:"state"`
-	Detail         string   `json:"detail,omitempty"`
-	ResumeArgv     []string `json:"resumeArgv,omitempty"`
-	RestoreCommand string   `json:"restoreCommand,omitempty"`
-	Selected       bool     `json:"selected"`
+	State                    string   `json:"state"`
+	Detail                   string   `json:"detail,omitempty"`
+	ResumeArgv               []string `json:"resumeArgv,omitempty"`
+	RestoreCommand           string   `json:"restoreCommand,omitempty"`
+	CapturedLaunchReviewable bool     `json:"capturedLaunchReviewable,omitempty"`
+	Selected                 bool     `json:"selected"`
 }
 
 // Status is the startup offer. Available means at least one panel can be

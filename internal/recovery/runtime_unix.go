@@ -484,12 +484,15 @@ func captureEntry(pane paneInfo, processes map[int]processInfo) Entry {
 		entry.ClaudeConfig = strings.TrimSpace(state.Environment["CLAUDE_CONFIG_DIR"])
 	case AgentCodex:
 		entry.SessionID, entry.SessionPath, err = inspectCodex(process.PID, state)
-		entry.CodexHome = codexHomeFromTranscript(entry.SessionPath)
+		entry.CodexHome = strings.TrimSpace(state.Environment["CODEX_HOME"])
+		if entry.CodexHome == "" {
+			entry.CodexHome = codexHomeFromTranscript(entry.SessionPath)
+		}
 	}
 	if err != nil {
 		entry.CaptureError = err.Error()
 	}
-	return entry
+	return enrichProcessOwnedSessionEvidence(entry)
 }
 
 // Capture records the latest valid state for the current tmux server lifetime.
@@ -612,6 +615,7 @@ func currentEntry(socket, name string) (Entry, bool) {
 }
 
 func preflight(entry Entry, current map[string]Entry) PanelStatus {
+	entry = enrichProcessOwnedSessionEvidence(entry)
 	panel := PanelStatus{Entry: entry}
 	if live, exists := current[entry.Name]; exists {
 		if entriesMatch(entry, live) {
@@ -623,31 +627,43 @@ func preflight(entry Entry, current map[string]Entry) PanelStatus {
 		panel.Detail = "A different live session already uses this panel name."
 		return panel
 	}
-	if entry.CaptureError != "" {
-		panel.State = PanelUnsupported
-		panel.Detail = entry.CaptureError
-		return panel
-	}
 	if info, err := os.Stat(entry.Directory); err != nil || !info.IsDir() {
 		panel.State = PanelMissingDirectory
 		panel.Detail = "The original working directory is no longer available."
 		return panel
 	}
+	if entry.CaptureError != "" {
+		panel.State = PanelUnsupported
+		panel.Detail = entry.CaptureError
+		panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
+		return panel
+	}
 	if entry.Agent != AgentShell {
-		if entry.SessionPath == "" {
+		if entry.SessionPath == "" && entry.SessionEvidence != "resume-argv" {
+			panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
 			panel.State = PanelMissingSession
+			if panel.CapturedLaunchReviewable {
+				panel.State = PanelUnsupported
+			}
 			panel.Detail = "The conversation transcript was not found when this snapshot was recorded."
 			return panel
 		}
-		if _, err := os.Stat(entry.SessionPath); err != nil {
-			panel.State = PanelMissingSession
-			panel.Detail = "The saved conversation is no longer present on disk."
-			return panel
+		if entry.SessionEvidence != "resume-argv" {
+			if _, err := os.Stat(entry.SessionPath); err != nil {
+				panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
+				panel.State = PanelMissingSession
+				if panel.CapturedLaunchReviewable {
+					panel.State = PanelUnsupported
+				}
+				panel.Detail = "The saved conversation is no longer present on disk."
+				return panel
+			}
 		}
 		argv, err := resumeArgv(entry)
 		if err != nil {
 			panel.State = PanelUnsupported
 			panel.Detail = err.Error()
+			panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
 			return panel
 		}
 		panel.ResumeArgv = argv
@@ -853,8 +869,58 @@ func verifyRestored(socket string, expected Entry, timeout time.Duration) error 
 	return errors.New(last)
 }
 
-func (s *Store) restoreOne(panel PanelStatus) RestoreResult {
+func prepareCapturedLaunch(panel PanelStatus) PanelStatus {
+	if panel.State != PanelUnsupported || !panel.CapturedLaunchReviewable {
+		return panel
+	}
+	argv, err := capturedLaunchArgv(panel.Entry)
+	if err != nil {
+		panel.Detail = err.Error()
+		return panel
+	}
+	panel.ResumeArgv = argv
+	panel.State = PanelReady
+	panel.Detail = "Launch the exact captured command after explicit review."
+	return panel
+}
+
+func verifyCapturedLaunch(socket string, expected Entry, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		entry, ok := currentEntry(socket, expected.Name)
+		if ok {
+			sameDirectory := equivalentDirectory(entry.Directory, expected.Directory)
+			if sameDirectory && entry.Agent == expected.Agent {
+				return nil
+			}
+			last = fmt.Sprintf("observed %s session in %s", entry.Agent, entry.Directory)
+		}
+		time.Sleep(350 * time.Millisecond)
+	}
+	if last == "" {
+		last = "captured agent command did not remain active before the verification deadline"
+	}
+	return errors.New(last)
+}
+
+func equivalentDirectory(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if resolved, err := filepath.EvalSymlinks(left); err == nil {
+		left = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(right); err == nil {
+		right = resolved
+	}
+	return left == right
+}
+
+func (s *Store) restoreOne(panel PanelStatus, useCapturedLaunch bool) RestoreResult {
 	result := RestoreResult{Name: panel.Name, SessionID: panel.SessionID}
+	if useCapturedLaunch {
+		panel = prepareCapturedLaunch(panel)
+	}
 	if panel.State == PanelAlreadyRunning {
 		result.State = RestoreAlreadyRunning
 		result.Detail = panel.Detail
@@ -877,6 +943,9 @@ func (s *Store) restoreOne(panel PanelStatus) RestoreResult {
 		result.Detail = fresh.Detail
 		return result
 	}
+	if useCapturedLaunch {
+		fresh = prepareCapturedLaunch(fresh)
+	}
 	if fresh.State != PanelReady {
 		result.State = RestoreFailed
 		result.Detail = fresh.Detail
@@ -887,17 +956,43 @@ func (s *Store) restoreOne(panel PanelStatus) RestoreResult {
 		result.Detail = err.Error()
 		return result
 	}
-	if err := verifyRestored(s.Socket, panel.Entry, 25*time.Second); err != nil {
+	verify := verifyRestored
+	if useCapturedLaunch {
+		verify = verifyCapturedLaunch
+	}
+	if err := verify(s.Socket, panel.Entry, 25*time.Second); err != nil {
 		result.State = RestoreFailed
 		result.Detail = "Created, but identity verification failed: " + err.Error()
 		return result
 	}
 	result.State = RestoreRestored
-	result.Detail = "Working directory and session identity verified."
+	if useCapturedLaunch {
+		result.Detail = "Captured launch started after explicit review; working directory and agent process verified."
+	} else {
+		result.Detail = "Working directory and session identity verified."
+	}
 	return result
 }
 
 func (s *Store) Restore(snapshotID string, names []string, concurrency int) RestoreResponse {
+	return s.restore(snapshotID, names, concurrency, false)
+}
+
+// RestoreCapturedLaunch is the explicit-review escape hatch for a panel whose
+// conversation cannot be reconstructed automatically. It reloads argv from the
+// server-owned snapshot and executes it as argv—not a client-provided command
+// string—while retaining the normal directory and name-conflict checks.
+func (s *Store) RestoreCapturedLaunch(snapshotID string, names []string, concurrency int) RestoreResponse {
+	if len(names) == 0 {
+		return RestoreResponse{
+			SnapshotID: snapshotID,
+			Results:    []RestoreResult{{State: RestoreFailed, Detail: "An explicitly reviewed panel name is required."}},
+		}
+	}
+	return s.restore(snapshotID, names, concurrency, true)
+}
+
+func (s *Store) restore(snapshotID string, names []string, concurrency int, useCapturedLaunch bool) RestoreResponse {
 	status := s.Status(snapshotID)
 	response := RestoreResponse{SnapshotID: snapshotID}
 	if status.Error != "" || status.Snapshot == nil {
@@ -915,6 +1010,11 @@ func (s *Store) Restore(snapshotID string, names []string, concurrency int) Rest
 	found := map[string]bool{}
 	for _, panel := range status.Panels {
 		if (len(wanted) == 0 && panel.State == PanelReady) || wanted[panel.Name] {
+			if useCapturedLaunch && (panel.State != PanelUnsupported || !panel.CapturedLaunchReviewable) {
+				panel.State = PanelUnsupported
+				panel.Detail = "This panel does not have an explicitly reviewable captured launch."
+				panel.CapturedLaunchReviewable = false
+			}
 			panels = append(panels, panel)
 			found[panel.Name] = true
 		}
@@ -931,7 +1031,7 @@ func (s *Store) Restore(snapshotID string, names []string, concurrency int) Rest
 		// Starting several `tmux new-session` processes against a nonexistent
 		// socket can race server creation. Establish the first session
 		// synchronously, then use bounded parallelism for the rest.
-		results[0] = s.restoreOne(panels[0])
+		results[0] = s.restoreOne(panels[0], useCapturedLaunch)
 		startAt = 1
 	}
 	sem := make(chan struct{}, concurrency)
@@ -943,7 +1043,7 @@ func (s *Store) Restore(snapshotID string, names []string, concurrency int) Rest
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[index] = s.restoreOne(panel)
+			results[index] = s.restoreOne(panel, useCapturedLaunch)
 		}(index, panel)
 	}
 	wg.Wait()

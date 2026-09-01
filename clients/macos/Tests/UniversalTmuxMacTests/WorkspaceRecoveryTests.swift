@@ -123,11 +123,13 @@ final class WorkspaceRecoveryTests: XCTestCase {
           "argv":["codex","--future-option"],
           "state":"unsupported",
           "detail":"unknown startup option \"--future-option\" requires manual review",
+          "capturedLaunchReviewable":true,
           "selected":false
         }
         """#.data(using: .utf8)!
         let panel = try JSONDecoder().decode(WorkspaceRecoveryPanel.self, from: json)
         XCTAssertTrue(panel.requiresReview)
+        XCTAssertTrue(panel.canUseCapturedLaunch)
         XCTAssertFalse(panel.isReady)
         XCTAssertEqual(panel.detail, "unknown startup option \"--future-option\" requires manual review")
     }
@@ -242,15 +244,42 @@ final class WorkspaceRecoveryTests: XCTestCase {
           "argv":["/home/pranjala/bin/codex","--future-option"],
           "state":"unsupported",
           "detail":"Unknown startup option --future-option cannot be replayed safely.",
+          "capturedLaunchReviewable":true,
           "selected":false
         }
         """#.data(using: .utf8)!
         let panel = try JSONDecoder().decode(WorkspaceRecoveryPanel.self, from: json)
-        let host = NSHostingView(rootView: WorkspaceRecoveryReviewView(panel: panel, scale: 1))
+        var launchCount = 0
+        let host = NSHostingView(rootView: WorkspaceRecoveryReviewView(
+            panel: panel, scale: 1, launchCapturedAction: { launchCount += 1 }
+        ))
         host.frame = NSRect(x: 0, y: 0, width: 560, height: 590)
         host.layoutSubtreeIfNeeded()
         XCTAssertGreaterThan(host.fittingSize.width, 0)
         XCTAssertGreaterThan(host.fittingSize.height, 0)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 590),
+            styleMask: .borderless, backing: .buffered, defer: false
+        )
+        window.contentView = host
+        window.orderBack(nil)
+        let launchPoint = NSPoint(x: 430, y: 72)
+        let down = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: launchPoint, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+            clickCount: 1, pressure: 1
+        ))
+        let up = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseUp, location: launchPoint, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+            clickCount: 1, pressure: 0
+        ))
+        window.sendEvent(down)
+        window.sendEvent(up)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(launchCount, 1)
+        window.orderOut(nil)
+        window.contentView = nil
         if let path = ProcessInfo.processInfo.environment["UT_RECOVERY_REVIEW_SCREENSHOT"],
            let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
             host.cacheDisplay(in: host.bounds, to: bitmap)
@@ -258,4 +287,5 @@ final class WorkspaceRecoveryTests: XCTestCase {
                 .write(to: URL(fileURLWithPath: path))
         }
     }
+
 }
