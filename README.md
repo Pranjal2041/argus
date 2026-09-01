@@ -140,9 +140,10 @@ nothing is hosted, and a machine that goes away simply drops off the map.
 
 The unit is the **tmux server (its socket)** — not a SLURM/PBS job — so the same binary
 works identically on the cluster, a plain SSH box, or your Mac. The first `ut` on a socket
-lazily starts **one broker** that every later `ut` reuses; it embeds `tsnet` (rootless, no
-TUN) to join the tailnet, and exits when its host process tree is torn down so its device
-auto-removes. Discovery is **capability-based, never by hostname**: the client probes each
+lazily starts **one broker** that every later `ut` reuses. A host already connected through
+system Tailscale publishes through that identity; otherwise the broker embeds `tsnet`
+(rootless, no TUN) and exits with its host process tree so its device auto-removes.
+Discovery is **capability-based, never by hostname**: the client probes each
 online tailnet peer on `:8722` and trusts only those that return the broker identity
 handshake. Full design in **[DESIGN.md](DESIGN.md)**.
 
