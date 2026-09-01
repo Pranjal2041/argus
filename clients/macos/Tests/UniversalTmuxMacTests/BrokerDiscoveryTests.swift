@@ -11,6 +11,27 @@ private final class WeakReference<Object: AnyObject> {
 }
 
 final class BrokerDiscoveryTests: XCTestCase {
+    func testSameLogicalBrokerDeduplicatesRoutesButNotDistinctBrokerInstances() throws {
+        let local = try XCTUnwrap(brokerLogicalIdentity(
+            host: "Workstation.local.",
+            socket: "Research"
+        ))
+
+        XCTAssertTrue(sameLogicalBroker(
+            local,
+            brokerLogicalIdentity(host: "workstation.local", socket: "research")
+        ))
+        XCTAssertFalse(sameLogicalBroker(
+            local,
+            brokerLogicalIdentity(host: "workstation.local", socket: "scratch")
+        ))
+        XCTAssertFalse(sameLogicalBroker(
+            local,
+            brokerLogicalIdentity(host: "another-host.local", socket: "research")
+        ))
+        XCTAssertFalse(sameLogicalBroker(local, nil))
+    }
+
     func testProbeOrderBypassesStaleDNSWithoutSendingHTTPToDNSName() {
         let attempts = brokerProbeAttempts(
             dns: "ut-babel-p9-16.example.ts.net",

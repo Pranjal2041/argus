@@ -1878,6 +1878,11 @@ func discoverMachines() -> [Machine] {
         Machine(id: "local", name: "this mac", isLocal: true,
                 httpBase: "http://127.0.0.1:8722", wsBase: "ws://127.0.0.1:8722"),
     ]
+    // A broker can be reachable through both loopback and a tailnet peer during
+    // transport migration. Identify the logical local broker before probing peer
+    // routes so the same host+socket is represented once, while another tmux
+    // socket on the same host remains a distinct broker.
+    let localIdentity = probeWhoami("http://127.0.0.1:8722/whoami")?.logicalIdentity
     let candidates = [
         "/usr/local/bin/tailscale",
         "/opt/homebrew/bin/tailscale",
@@ -1924,6 +1929,7 @@ func discoverMachines() -> [Machine] {
     DispatchQueue.concurrentPerform(iterations: brokerCandidates.count) { i in
         let candidate = brokerCandidates[i]
         guard let probe = probeBroker(dns: candidate.dns, ips: candidate.ips) else { return }
+        guard !sameLogicalBroker(localIdentity, probe.logicalIdentity) else { return }
         // Use the scheme that actually answered: tsnet brokers serve real TLS
         // (https/wss), but a broker on a host's own tailnet IP (e.g. Windows via
         // the Tailscale app) serves plain http/ws. Hardcoding https made those
@@ -1943,14 +1949,32 @@ func discoverMachines() -> [Machine] {
 /// that port is never treated as a broker. HTTPS keeps the peer's DNS identity while
 /// the broker session routes its socket to the peer IP from Tailscale status. Plain
 /// HTTP is tried only against peer IPs, for native Windows/Mac brokers that serve it.
-private func probeBroker(dns: String, ips: [String]) -> (name: String, host: String, os: String, scheme: String, address: String)? {
+private func probeBroker(dns: String, ips: [String]) -> (name: String, host: String, os: String, socket: String, scheme: String, address: String, logicalIdentity: BrokerLogicalIdentity?)? {
     for attempt in brokerProbeAttempts(dns: dns, ips: ips) {
         let endpoint = brokerURLHost(attempt.address)
         if let r = probeWhoami("\(attempt.scheme)://\(endpoint):8722/whoami") {
-            return (r.name, r.host, r.os, attempt.scheme, attempt.address)
+            return (r.name, r.host, r.os, r.socket, attempt.scheme, attempt.address, r.logicalIdentity)
         }
     }
     return nil
+}
+
+struct BrokerLogicalIdentity: Equatable {
+    let host: String
+    let socket: String
+}
+
+func brokerLogicalIdentity(host: String, socket: String) -> BrokerLogicalIdentity? {
+    let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    let normalizedSocket = socket.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !normalizedHost.isEmpty, !normalizedSocket.isEmpty else { return nil }
+    return BrokerLogicalIdentity(host: normalizedHost, socket: normalizedSocket)
+}
+
+func sameLogicalBroker(_ lhs: BrokerLogicalIdentity?, _ rhs: BrokerLogicalIdentity?) -> Bool {
+    guard let lhs, let rhs else { return false }
+    return lhs == rhs
 }
 
 struct BrokerProbeAttempt: Equatable {
@@ -1979,12 +2003,12 @@ func brokerURLHost(_ address: String) -> String {
     address.contains(":") && !address.hasPrefix("[") ? "[\(address)]" : address
 }
 
-private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String)? {
+private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?)? {
     guard let url = URL(string: urlString) else { return nil }
     var req = URLRequest(url: url)
     req.timeoutInterval = 2.5
     let sem = DispatchSemaphore(value: 0)
-    var result: (name: String, host: String, os: String)?
+    var result: (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?)?
     brokerSession.dataTask(with: req) { data, _, err in
         defer { sem.signal() }
         guard err == nil, let data,
@@ -1993,7 +2017,8 @@ private func probeWhoami(_ urlString: String) -> (name: String, host: String, os
         let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "broker"
         let host = (obj["host"] as? String) ?? ""  // older brokers omit it; host-match just won't fire
         let os = (obj["os"] as? String) ?? ""      // older brokers: server-side path repair still applies
-        result = (name, host, os)
+        let socket = (obj["socket"] as? String) ?? ""
+        result = (name, host, os, socket, brokerLogicalIdentity(host: host, socket: socket))
     }.resume()
     _ = sem.wait(timeout: .now() + 3)
     return result
