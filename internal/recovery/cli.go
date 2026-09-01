@@ -68,6 +68,10 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 		snapshot := flags.String("snapshot", "", "snapshot ID to restore")
 		parallel := flags.Int("parallel", 3, "maximum simultaneous agent starts")
 		bootstrap := flags.Bool("bootstrap", true, "start the normal broker supervisor after restoration")
+		useCapturedLaunch := flags.Bool(
+			"use-captured-launch", false,
+			"run the exact snapshot argv for explicitly reviewed panels",
+		)
 		var sessions stringList
 		flags.Var(&sessions, "session", "panel name to restore (repeatable; default all ready panels)")
 		if flags.Parse(args[1:]) != nil {
@@ -78,7 +82,16 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		store := NewStore(*socket)
-		response := store.Restore(*snapshot, sessions, *parallel)
+		var response RestoreResponse
+		if *useCapturedLaunch {
+			if len(sessions) == 0 {
+				fmt.Fprintln(stderr, "recovery restore: --use-captured-launch requires at least one --session")
+				return 2
+			}
+			response = store.RestoreCapturedLaunch(*snapshot, sessions, *parallel)
+		} else {
+			response = store.Restore(*snapshot, sessions, *parallel)
+		}
 		if *bootstrap {
 			bootstrapSession := ""
 			for _, result := range response.Results {

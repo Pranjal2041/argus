@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import SwiftUI
@@ -35,11 +36,13 @@ struct WorkspaceRecoveryPanel: Decodable, Identifiable {
     let state: String
     let detail: String?
     let restoreCommand: String?
+    let capturedLaunchReviewable: Bool?
     let selected: Bool
 
     var id: String { name }
     var isReady: Bool { state == "ready" }
     var requiresReview: Bool { state == "unsupported" }
+    var canUseCapturedLaunch: Bool { requiresReview && capturedLaunchReviewable == true }
     var permissionLabel: String? {
         let args = argv ?? []
         if args.contains("--yolo") || args.contains("--dangerously-bypass-approvals-and-sandbox") {
@@ -102,6 +105,7 @@ final class WorkspaceRecoveryController: ObservableObject {
     @Published var selectedTargetID = "local"
     @Published var selectedSourceID = ""
     @Published var targetIssues: [String: String] = [:]
+    @Published var reviewedRestoreName: String?
 
     private weak var appState: AppState?
     private var machineObservation: AnyCancellable?
@@ -221,6 +225,7 @@ final class WorkspaceRecoveryController: ObservableObject {
               let snapshot = status?.snapshot,
               selectedCount > 0 else { return }
         phase = .restoring
+        reviewedRestoreName = nil
         errorMessage = nil
         results = [:]
         var arguments = [
@@ -252,6 +257,45 @@ final class WorkspaceRecoveryController: ObservableObject {
             }
             // The supervisor needs a moment to bind :8722 before the normal
             // discovery pass. A second pass covers slower launchd/tmux startup.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.appState?.refreshAll() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { self.appState?.refreshAll() }
+        }
+    }
+
+    func restoreCapturedLaunch(_ panel: WorkspaceRecoveryPanel) {
+        guard phase != .restoring,
+              panel.canUseCapturedLaunch,
+              let snapshot = status?.snapshot else { return }
+        phase = .restoring
+        reviewedRestoreName = panel.name
+        errorMessage = nil
+        results.removeValue(forKey: panel.name)
+        var arguments = [
+            "recovery", "restore",
+            "--tmux-socket", socket,
+            "--snapshot", snapshot.id,
+            "--parallel", "1",
+            "--use-captured-launch",
+            "--session", panel.name,
+        ]
+        if !selectedTarget.isLocal { arguments += ["--bootstrap=false"] }
+        runRecovery(arguments, on: selectedTarget, timeout: 180) { [weak self] output in
+            guard let self else { return }
+            self.reviewedRestoreName = nil
+            guard let decoded = try? JSONDecoder().decode(WorkspaceRestoreResponse.self, from: output.data) else {
+                self.phase = .finished
+                self.errorMessage = output.stderr.isEmpty
+                    ? "The captured launch ended without a readable result."
+                    : output.stderr
+                return
+            }
+            for result in decoded.results { self.results[result.name] = result }
+            self.phase = .finished
+            if let failure = decoded.results.first(where: { $0.state == "failed" }) {
+                self.errorMessage = failure.detail ?? "The captured launch could not be restored."
+            } else if let bootstrap = decoded.bootstrap, bootstrap != "started" {
+                self.errorMessage = "The panel was restored, but the broker could not restart: \(bootstrap)"
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.appState?.refreshAll() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { self.appState?.refreshAll() }
         }
@@ -332,6 +376,7 @@ final class WorkspaceRecoveryController: ObservableObject {
         selectedSourceID = decoded.snapshot?.id ?? ""
         selected = Set(decoded.panels.filter(\.isReady).map(\.name))
         results = [:]
+        reviewedRestoreName = nil
         phase = .idle
         errorMessage = decoded.error
     }
@@ -538,7 +583,11 @@ struct WorkspaceRecoveryView: View {
         .frame(width: 720 * uiScale, height: 620 * uiScale)
         .background(Theme.appBackground)
         .sheet(item: $panelUnderReview) { panel in
-            WorkspaceRecoveryReviewView(panel: panel, scale: uiScale)
+            WorkspaceRecoveryReviewView(
+                panel: panel,
+                scale: uiScale,
+                launchCapturedAction: { recovery.restoreCapturedLaunch(panel) }
+            )
         }
     }
 
@@ -726,6 +775,7 @@ struct WorkspaceRecoveryView: View {
                         isSelected: recovery.selected.contains(panel.name),
                         result: recovery.results[panel.name],
                         isRestoring: recovery.phase == .restoring,
+                        isReviewedRestore: recovery.reviewedRestoreName == panel.name,
                         scale: uiScale,
                         action: { recovery.toggle(panel.name) },
                         reviewAction: { panelUnderReview = panel }
@@ -844,6 +894,7 @@ private struct WorkspaceRecoveryRow: View {
     let isSelected: Bool
     let result: WorkspaceRestoreResult?
     let isRestoring: Bool
+    let isReviewedRestore: Bool
     let scale: Double
     let action: () -> Void
     let reviewAction: () -> Void
@@ -930,7 +981,7 @@ private struct WorkspaceRecoveryRow: View {
                   systemImage: result.state == "failed" ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(result.state == "failed" ? Theme.unreachable : Theme.attached)
                 .help(result.detail ?? "")
-        } else if isRestoring && isSelected {
+        } else if isRestoring && (isSelected || isReviewedRestore) {
             HStack(spacing: 6 * scale) {
                 ProgressView().controlSize(.mini)
                 Text("Starting")
@@ -977,6 +1028,7 @@ private struct WorkspaceRecoveryRow: View {
 struct WorkspaceRecoveryReviewView: View {
     let panel: WorkspaceRecoveryPanel
     let scale: Double
+    let launchCapturedAction: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1014,15 +1066,29 @@ struct WorkspaceRecoveryReviewView: View {
 
             if let argv = panel.argv, !argv.isEmpty {
                 reviewSection("CAPTURED LAUNCH") {
-                    Text(argv.map(WorkspaceRecoveryController.shellQuote).joined(separator: " "))
-                        .font(.system(size: 11 * scale, design: .monospaced))
-                        .foregroundStyle(Theme.textSecondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    let command = argv.map(WorkspaceRecoveryController.shellQuote).joined(separator: " ")
+                    HStack(alignment: .top, spacing: 10 * scale) {
+                        Text(command)
+                            .font(.system(size: 11 * scale, design: .monospaced))
+                            .foregroundStyle(Theme.textSecondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4 * scale)
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(command, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Copy captured command")
+                    }
                 }
             }
 
-            Text("Nothing was started or overwritten. Correct the saved launch command, or reopen this conversation manually using the verified session above.")
+            Text(panel.canUseCapturedLaunch
+                 ? "Automatic reconstruction was unavailable. You can explicitly launch this exact server-stored argv in the captured folder; Argus will still refuse name conflicts and verify that the agent remains active."
+                 : "Nothing was started or overwritten. Correct the saved launch command, or reopen this conversation manually using the verified session above.")
                 .font(.system(size: 11 * scale))
                 .foregroundStyle(Theme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1030,8 +1096,17 @@ struct WorkspaceRecoveryReviewView: View {
             HStack {
                 Spacer()
                 Button("Done") { dismiss() }
+                    .buttonStyle(RecoverySecondaryButtonStyle(scale: scale))
+                if panel.canUseCapturedLaunch {
+                    Button {
+                        launchCapturedAction()
+                        dismiss()
+                    } label: {
+                        Label("Launch captured command", systemImage: "play.fill")
+                    }
                     .buttonStyle(RecoveryPrimaryButtonStyle(enabled: true, scale: scale))
                     .keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(24 * scale)

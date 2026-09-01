@@ -46,6 +46,55 @@ func TestCodexResumeDropsVerifiedDuplicateLauncherMarker(t *testing.T) {
 	}
 }
 
+func TestCodexExplicitResumeArgvIsProcessOwnedSessionEvidence(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := Entry{
+		Agent: AgentCodex, Directory: t.TempDir(), Executable: "/stale/captured/executable",
+		Argv:         []string{exe, "--yolo", "resume", testSessionID},
+		CaptureError: "Codex process has no open rollout files",
+	}
+	panel := preflight(entry, map[string]Entry{})
+	if panel.State != PanelReady || panel.SessionID != testSessionID || panel.SessionEvidence != "resume-argv" {
+		t.Fatalf("explicit resume preflight = %#v", panel)
+	}
+	want := []string{exe, "--yolo", "resume", testSessionID}
+	if !reflect.DeepEqual(panel.ResumeArgv, want) {
+		t.Fatalf("resume argv = %#v, want %#v", panel.ResumeArgv, want)
+	}
+}
+
+func TestCodexResumeArgvEvidenceFailsClosedWhenAmbiguous(t *testing.T) {
+	other := "019f9bfd-86da-7133-8213-39aa87070000"
+	if id, ok := codexResumeSessionFromArgv([]string{
+		"codex", "resume", testSessionID, "resume", other,
+	}); ok || id != "" {
+		t.Fatalf("ambiguous resume selectors produced %q, %v", id, ok)
+	}
+}
+
+func TestUnsupportedCaptureOffersExactReviewedLaunch(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "codex")
+	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := Entry{
+		Name: "manual", Directory: t.TempDir(), Agent: AgentCodex,
+		Argv:         []string{exe, "--future-option", "value with spaces"},
+		CaptureError: "unknown future launch format",
+	}
+	panel := preflight(entry, map[string]Entry{})
+	if panel.State != PanelUnsupported || !panel.CapturedLaunchReviewable {
+		t.Fatalf("unsupported preflight = %#v", panel)
+	}
+	prepared := prepareCapturedLaunch(panel)
+	if prepared.State != PanelReady || !reflect.DeepEqual(prepared.ResumeArgv, entry.Argv) {
+		t.Fatalf("prepared captured launch = %#v", prepared)
+	}
+}
+
 func TestCodexResumeDoesNotDropUnverifiedLauncherMarker(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "codex")
 	if err := writeAtomic(exe, []byte("binary"), 0o700); err != nil {

@@ -110,9 +110,11 @@ func normalizeCodexResumeArgs(args []string, sessionID string) []string {
 }
 
 func effectiveExecutable(entry Entry) (string, error) {
-	if entry.Executable != "" {
-		if info, err := os.Stat(entry.Executable); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return entry.Executable, nil
+	for _, candidate := range []string{entry.Executable, firstArg(entry.Argv)} {
+		if candidate != "" {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				return candidate, nil
+			}
 		}
 	}
 	name := entry.Agent
@@ -124,6 +126,73 @@ func effectiveExecutable(entry Entry) (string, error) {
 		return "", fmt.Errorf("%s executable is no longer installed", entry.Agent)
 	}
 	return path, nil
+}
+
+func firstArg(argv []string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(argv[0])
+}
+
+// codexResumeSessionFromArgv accepts only an explicit, unambiguous
+// `resume <UUID>` selector from the kernel-owned process argv. This is not a
+// transcript scan or a command-name convention: it is the exact conversation
+// selector the running Codex process was launched with. Multiple different
+// selectors fail closed.
+func codexResumeSessionFromArgv(argv []string) (string, bool) {
+	unique := map[string]bool{}
+	for index := 1; index+1 < len(argv); index++ {
+		if argv[index] == "resume" && uuidPattern.MatchString(argv[index+1]) {
+			unique[strings.ToLower(argv[index+1])] = true
+		}
+	}
+	if len(unique) != 1 {
+		return "", false
+	}
+	for id := range unique {
+		return id, true
+	}
+	return "", false
+}
+
+func enrichProcessOwnedSessionEvidence(entry Entry) Entry {
+	if entry.Agent != AgentCodex || entry.SessionID != "" {
+		return entry
+	}
+	id, ok := codexResumeSessionFromArgv(entry.Argv)
+	if !ok {
+		return entry
+	}
+	entry.SessionID = id
+	entry.SessionEvidence = "resume-argv"
+	entry.CaptureError = ""
+	return entry
+}
+
+// capturedLaunchArgv returns the exact argv stored in the recovery snapshot
+// after proving only that its executable is still available on this target.
+// The caller must require an explicit user review; arguments are never parsed,
+// rewritten, or passed through a shell.
+func capturedLaunchArgv(entry Entry) ([]string, error) {
+	if len(entry.Argv) == 0 || firstArg(entry.Argv) == "" {
+		return nil, fmt.Errorf("no captured launch command is available")
+	}
+	executable := firstArg(entry.Argv)
+	if strings.ContainsRune(executable, os.PathSeparator) {
+		info, err := os.Stat(executable)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			return nil, fmt.Errorf("captured executable %q is not available", executable)
+		}
+	} else if _, err := exec.LookPath(executable); err != nil {
+		return nil, fmt.Errorf("captured executable %q is not available", executable)
+	}
+	return append([]string(nil), entry.Argv...), nil
+}
+
+func capturedLaunchAvailable(entry Entry) bool {
+	_, err := capturedLaunchArgv(entry)
+	return err == nil
 }
 
 func environmentExecutable() string {
