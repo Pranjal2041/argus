@@ -18,6 +18,13 @@ struct WorkspaceRecoveryCandidate: Decodable, Identifiable, Equatable {
     let readyCount: Int
 }
 
+struct WorkspaceRecoverySource: Identifiable, Equatable {
+    let candidate: WorkspaceRecoveryCandidate
+    let originTargetID: String
+
+    var id: String { candidate.id }
+}
+
 struct WorkspaceRecoveryTarget: Identifiable, Equatable {
     let id: String
     let name: String
@@ -106,6 +113,7 @@ final class WorkspaceRecoveryController: ObservableObject {
     @Published var selectedSourceID = ""
     @Published var targetIssues: [String: String] = [:]
     @Published var reviewedRestoreName: String?
+    @Published private(set) var sources: [WorkspaceRecoverySource] = []
 
     private weak var appState: AppState?
     private var machineObservation: AnyCancellable?
@@ -121,6 +129,7 @@ final class WorkspaceRecoveryController: ObservableObject {
         targets.first(where: { $0.id == selectedTargetID }) ?? Self.localTarget
     }
     var sourceCandidates: [WorkspaceRecoveryCandidate] {
+        if !sources.isEmpty { return sources.map(\.candidate) }
         if let candidates = status?.candidates, !candidates.isEmpty { return candidates }
         guard let snapshot = status?.snapshot else { return [] }
         return [WorkspaceRecoveryCandidate(
@@ -164,6 +173,10 @@ final class WorkspaceRecoveryController: ObservableObject {
             }
             self.status = decoded
             self.statusByTarget[Self.localTarget.id] = decoded
+            self.sources = Self.recoverySources(
+                statusByTarget: self.statusByTarget,
+                targets: [Self.localTarget]
+            )
             self.selectedTargetID = Self.localTarget.id
             self.selectedSourceID = decoded.snapshot?.id ?? ""
             self.selected = Set(decoded.panels.filter(\.isReady).map(\.name))
@@ -199,17 +212,13 @@ final class WorkspaceRecoveryController: ObservableObject {
               targetIssues[id] == nil,
               targets.contains(where: { $0.id == id }) else { return }
         selectedTargetID = id
-        if let cached = statusByTarget[id] {
-            apply(cached)
-        } else {
-            checkSelectedTarget()
-        }
+        prepareSelectedSource()
     }
 
     func selectSource(_ id: String) {
         guard id != selectedSourceID, sourceCandidates.contains(where: { $0.id == id }) else { return }
         selectedSourceID = id
-        checkSelectedTarget(snapshot: id)
+        prepareSelectedSource()
     }
 
     func toggle(_ name: String) {
@@ -310,6 +319,7 @@ final class WorkspaceRecoveryController: ObservableObject {
         selected = []
         errorMessage = nil
         statusByTarget = [:]
+        sources = []
         targetIssues = [:]
 
         let group = DispatchGroup()
@@ -330,6 +340,7 @@ final class WorkspaceRecoveryController: ObservableObject {
             guard let self, generation == self.checkGeneration else { return }
             self.statusByTarget = discovered
             self.targetIssues = issues
+            self.sources = Self.recoverySources(statusByTarget: discovered, targets: self.targets)
             let supported = self.targets.filter { issues[$0.id] == nil }
             let chosen = supported.first(where: { discovered[$0.id]?.available == true })
                 ?? supported.first(where: { discovered[$0.id]?.snapshot != nil })
@@ -337,7 +348,13 @@ final class WorkspaceRecoveryController: ObservableObject {
                 ?? Self.localTarget
             self.selectedTargetID = chosen.id
             if let status = discovered[chosen.id] {
-                self.apply(status)
+                let sourceID = status.snapshot?.id ?? self.sources.first?.id ?? ""
+                self.selectedSourceID = sourceID
+                if sourceID.isEmpty || status.snapshot?.id == sourceID {
+                    self.apply(status, sourceID: sourceID)
+                } else {
+                    self.prepareSelectedSource()
+                }
             } else {
                 self.status = nil
                 self.selected = []
@@ -349,14 +366,58 @@ final class WorkspaceRecoveryController: ObservableObject {
         }
     }
 
-    private func checkSelectedTarget(snapshot: String? = nil) {
+    private func prepareSelectedSource() {
         checkGeneration &+= 1
         let generation = checkGeneration
         phase = .checking
         errorMessage = nil
+        let target = selectedTarget
+        let snapshotID = selectedSourceID
+        guard !snapshotID.isEmpty else {
+            if let cached = statusByTarget[target.id] {
+                apply(cached)
+            } else {
+                querySelectedTarget(snapshot: nil, target: target, generation: generation)
+            }
+            return
+        }
+        if Self.status(statusByTarget[target.id], canRead: snapshotID) {
+            querySelectedTarget(snapshot: snapshotID, target: target, generation: generation)
+            return
+        }
+        guard let source = sources.first(where: { $0.id == snapshotID }),
+              let origin = targets.first(where: { $0.id == source.originTargetID }) else {
+            phase = .idle
+            errorMessage = "The selected recovery source is no longer reachable. Refresh and try again."
+            return
+        }
+        let arguments = [
+            "recovery", "transfer",
+            "--source", origin.route ?? ".",
+            "--target", target.route ?? ".",
+            "--snapshot", snapshotID,
+            "--tmux-socket", socket,
+        ]
+        Self.runTool(arguments, timeout: 60) { [weak self] output in
+            guard let self, generation == self.checkGeneration else { return }
+            guard output.exitCode == 0 else {
+                self.phase = .idle
+                self.errorMessage = output.stderr.isEmpty
+                    ? "The recovery snapshot could not be transferred to \(target.name)."
+                    : output.stderr
+                return
+            }
+            self.querySelectedTarget(snapshot: snapshotID, target: target, generation: generation)
+        }
+    }
+
+    private func querySelectedTarget(
+        snapshot: String?,
+        target: WorkspaceRecoveryTarget,
+        generation: Int
+    ) {
         var arguments = ["recovery", "status", "--tmux-socket", socket]
         if let snapshot, !snapshot.isEmpty { arguments += ["--snapshot", snapshot] }
-        let target = selectedTarget
         runRecovery(arguments, on: target) { [weak self] output in
             guard let self, generation == self.checkGeneration else { return }
             guard let decoded = try? JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: output.data) else {
@@ -367,13 +428,13 @@ final class WorkspaceRecoveryController: ObservableObject {
                 return
             }
             self.statusByTarget[target.id] = decoded
-            self.apply(decoded)
+            self.apply(decoded, sourceID: snapshot)
         }
     }
 
-    private func apply(_ decoded: WorkspaceRecoveryStatus) {
+    private func apply(_ decoded: WorkspaceRecoveryStatus, sourceID: String? = nil) {
         status = decoded
-        selectedSourceID = decoded.snapshot?.id ?? ""
+        selectedSourceID = sourceID ?? decoded.snapshot?.id ?? ""
         selected = Set(decoded.panels.filter(\.isReady).map(\.name))
         results = [:]
         reviewedRestoreName = nil
@@ -404,6 +465,77 @@ final class WorkspaceRecoveryController: ObservableObject {
             $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
         return [localTarget] + remotes
+    }
+
+    /// Recovery source discovery is a fabric-wide operation. Each successful
+    /// target probe contributes every manifest it can actually export; duplicate
+    /// manifests from shared stores collapse to one source while retaining a
+    /// concrete origin route for transport.
+    static func recoverySources(
+        statusByTarget: [String: WorkspaceRecoveryStatus],
+        targets: [WorkspaceRecoveryTarget]
+    ) -> [WorkspaceRecoverySource] {
+        struct Choice {
+            let source: WorkspaceRecoverySource
+            let ownsSnapshot: Bool
+            let targetOrder: Int
+        }
+        var byID: [String: Choice] = [:]
+        for (targetOrder, target) in targets.enumerated() {
+            guard let status = statusByTarget[target.id] else { continue }
+            var candidates = status.candidates ?? []
+            if candidates.isEmpty, let snapshot = status.snapshot {
+                candidates = [WorkspaceRecoveryCandidate(
+                    id: snapshot.id,
+                    host: snapshot.host,
+                    capturedAt: snapshot.capturedAt,
+                    panelCount: status.panels.count,
+                    readyCount: status.readyCount
+                )]
+            }
+            let originHost = status.targetHost ?? target.host
+            for candidate in candidates where !candidate.id.isEmpty {
+                let choice = Choice(
+                    source: WorkspaceRecoverySource(candidate: candidate, originTargetID: target.id),
+                    ownsSnapshot: canonicalRecoveryHost(originHost) == canonicalRecoveryHost(candidate.host),
+                    targetOrder: targetOrder
+                )
+                if let existing = byID[candidate.id] {
+                    if (choice.ownsSnapshot && !existing.ownsSnapshot)
+                        || (choice.ownsSnapshot == existing.ownsSnapshot
+                            && choice.targetOrder < existing.targetOrder) {
+                        byID[candidate.id] = choice
+                    }
+                } else {
+                    byID[candidate.id] = choice
+                }
+            }
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fallbackFormatter = ISO8601DateFormatter()
+        func date(_ value: String) -> Date {
+            formatter.date(from: value) ?? fallbackFormatter.date(from: value) ?? .distantPast
+        }
+        return byID.values.map(\.source).sorted {
+            let lhsDate = date($0.candidate.capturedAt)
+            let rhsDate = date($1.candidate.capturedAt)
+            if lhsDate != rhsDate { return lhsDate > rhsDate }
+            return $0.candidate.host.localizedStandardCompare($1.candidate.host) == .orderedAscending
+        }
+    }
+
+    private static func canonicalRecoveryHost(_ value: String) -> String {
+        var key = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let dot = key.firstIndex(of: ".") { key = String(key[..<dot]) }
+        if key.hasPrefix("ut-") { key.removeFirst(3) }
+        return key
+    }
+
+    private static func status(_ status: WorkspaceRecoveryStatus?, canRead snapshotID: String) -> Bool {
+        guard let status else { return false }
+        return status.snapshot?.id == snapshotID
+            || (status.candidates ?? []).contains(where: { $0.id == snapshotID })
     }
 
     private static func recoveryCapabilityIssue(_ output: RecoveryToolOutput) -> String {

@@ -688,17 +688,17 @@ func (s *Store) Status(requestedSnapshot string) Status {
 	if err != nil {
 		return Status{Error: err.Error()}
 	}
+	imported, err := s.loadImported()
+	if err != nil {
+		return Status{Error: err.Error()}
+	}
 	current, currentServerID := currentEntries(s.Socket)
 	var localSelected *Snapshot
 	requestedUnavailable := ""
 	if requestedSnapshot != "" {
-		for index := range allItems {
-			if allItems[index].ID == requestedSnapshot {
-				localSelected = &allItems[index]
-				break
-			}
-		}
-		if localSelected != nil && s.Cluster != "" && !sameRecoveryHost(localSelected.Host, s.Host) {
+		available := mergeSnapshots(items, allItems, imported)
+		localSelected = transportSnapshot(available, requestedSnapshot)
+		if localSelected != nil {
 			if localSelected.CapturedAt.Before(s.Now().Add(-RetentionDays * 24 * time.Hour)) {
 				requestedUnavailable = fmt.Sprintf("recovery snapshot %q is older than the %d-day retention window", requestedSnapshot, RetentionDays)
 				localSelected = nil
