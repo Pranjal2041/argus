@@ -66,3 +66,78 @@ func TestCmdRecoveryTransferRelaysExactManifestBetweenArbitraryPeers(t *testing.
 		t.Fatalf("target request = %#v", write)
 	}
 }
+
+func TestCmdRecoveryRemoteUsesBrokerProtocolForEveryTargetOS(t *testing.T) {
+	type request struct {
+		method string
+		host   string
+		path   string
+		query  url.Values
+		body   []byte
+	}
+	requests := make(chan request, 2)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/whoami", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"name": "hub"})
+	})
+	mux.HandleFunc("/mesh/proxy", func(w http.ResponseWriter, r *http.Request) {
+		body := new(bytes.Buffer)
+		_, _ = body.ReadFrom(r.Body)
+		requests <- request{
+			method: r.Method, host: r.URL.Query().Get("_mhost"), path: r.URL.Query().Get("_mpath"),
+			query: r.URL.Query(), body: body.Bytes(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"available":false,"readyCount":0,"panels":[]}`))
+		} else {
+			_, _ = w.Write([]byte(`{"snapshotId":"snapshot-1","results":[]}`))
+		}
+	})
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	t.Setenv("UT_PORT", strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))
+	selfNames = nil
+
+	if code := cmdRecovery([]string{
+		"remote", "--target", "windows-route", "status",
+		"--tmux-socket", "custom", "--snapshot", "snapshot-1",
+	}); code != 0 {
+		t.Fatalf("remote status exit = %d", code)
+	}
+	statusRequest := <-requests
+	if statusRequest.method != http.MethodGet || statusRequest.host != "windows-route" ||
+		statusRequest.path != "/recovery/status" || statusRequest.query.Get("socket") != "custom" ||
+		statusRequest.query.Get("snapshot") != "snapshot-1" {
+		t.Fatalf("remote status request = %#v", statusRequest)
+	}
+
+	if code := cmdRecovery([]string{
+		"remote", "--target", "windows-route", "restore",
+		"--tmux-socket", "custom", "--snapshot", "snapshot-1",
+		"--session", "panel with spaces", "--parallel", "2", "--bootstrap=false",
+	}); code != 0 {
+		t.Fatalf("remote restore exit = %d", code)
+	}
+	restoreRequest := <-requests
+	if restoreRequest.method != http.MethodPost || restoreRequest.host != "windows-route" ||
+		restoreRequest.path != "/recovery/restore" || restoreRequest.query.Get("socket") != "custom" {
+		t.Fatalf("remote restore request = %#v", restoreRequest)
+	}
+	var body struct {
+		SnapshotID  string   `json:"snapshotId"`
+		Sessions    []string `json:"sessions"`
+		Concurrency int      `json:"concurrency"`
+	}
+	if err := json.Unmarshal(restoreRequest.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SnapshotID != "snapshot-1" || len(body.Sessions) != 1 || body.Sessions[0] != "panel with spaces" || body.Concurrency != 2 {
+		t.Fatalf("remote restore body = %#v", body)
+	}
+}

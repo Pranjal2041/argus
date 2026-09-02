@@ -22,7 +22,28 @@ type Store struct {
 	Host    string
 	Cluster string
 	Now     func() time.Time
+	runtime WorkspaceRuntime
 	mu      sync.Mutex
+}
+
+// RuntimeIdentity identifies one lifetime of a session-owning backend. tmux
+// derives this from its server process; in-process backends such as ConPTY
+// generate it when their broker starts. The recovery store treats both alike.
+type RuntimeIdentity struct {
+	BootID        string
+	ServerID      string
+	ServerPID     int
+	ServerStarted int64
+}
+
+// WorkspaceRuntime is the backend-neutral recovery seam. Implementations expose
+// only user-visible sessions and create a replacement shell without overwriting
+// a live name. Agent-specific inspection remains an optional enrichment of the
+// resulting Entry rather than a prerequisite for durable workspace recovery.
+type WorkspaceRuntime interface {
+	RecoveryIdentity() (RuntimeIdentity, error)
+	RecoveryEntries() ([]Entry, error)
+	RestoreShell(name, directory string) error
 }
 
 func NewStore(socket string) *Store {
@@ -48,6 +69,15 @@ func NewStore(socket string) *Store {
 	}
 }
 
+// NewStoreWithRuntime binds recovery to the backend instance that actually owns
+// the live sessions. Server processes use this constructor; the standalone Unix
+// CLI continues to inspect tmux directly through NewStore.
+func NewStoreWithRuntime(socket string, runtime WorkspaceRuntime) *Store {
+	store := NewStore(socket)
+	store.runtime = runtime
+	return store
+}
+
 func recoveryCluster(host string) string {
 	short := strings.ToLower(strings.TrimSpace(host))
 	if index := strings.IndexByte(short, '.'); index >= 0 {
@@ -62,10 +92,9 @@ func recoveryCluster(host string) string {
 	return ""
 }
 
-// CaptureEnabled follows runtime capability, not a hostname convention. Unix
-// tmux brokers can inspect and reconstruct their process trees; unsupported
-// backends (currently Windows/ConPTY) cannot. Operators may explicitly disable
-// or enable capture when a host has unusual constraints.
+// CaptureEnabled follows runtime capability, not a hostname convention. Every
+// shipping backend now provides durable workspace capture; operators may still
+// explicitly disable it when a host has unusual constraints.
 func CaptureEnabled(goos, _ string, override string) bool {
 	switch strings.ToLower(strings.TrimSpace(override)) {
 	case "1", "true", "yes", "on":
@@ -73,7 +102,7 @@ func CaptureEnabled(goos, _ string, override string) bool {
 	case "0", "false", "no", "off":
 		return false
 	default:
-		return goos == "darwin" || goos == "linux"
+		return goos == "darwin" || goos == "linux" || goos == "windows"
 	}
 }
 

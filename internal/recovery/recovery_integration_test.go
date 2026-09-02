@@ -383,7 +383,7 @@ func TestBabelExpiredSourceIsOutsideTheRecoveryWindow(t *testing.T) {
 	}
 }
 
-func TestCaptureEnabledOnSupportedUnixByDefault(t *testing.T) {
+func TestCaptureEnabledOnEveryShippingBackendByDefault(t *testing.T) {
 	for _, test := range []struct {
 		goos, host, override string
 		want                 bool
@@ -394,7 +394,7 @@ func TestCaptureEnabledOnSupportedUnixByDefault(t *testing.T) {
 		{"linux", "orchard-login", "", true},
 		{"linux", "orchard-login", "1", true},
 		{"linux", "orchard-login", "0", false},
-		{"windows", "pranjala-win", "", false},
+		{"windows", "pranjala-win", "", true},
 	} {
 		if got := CaptureEnabled(test.goos, test.host, test.override); got != test.want {
 			t.Fatalf("CaptureEnabled(%q, %q, %q) = %v, want %v", test.goos, test.host, test.override, got, test.want)

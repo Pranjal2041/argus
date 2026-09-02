@@ -41,6 +41,25 @@ final class WorkspaceRecoveryTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveWindowsWorkspaceAppearsAsSourceWithoutBeingALocalFailure() throws {
+        let windows = WorkspaceRecoveryTarget(
+            id: "windows", name: "pranjala-win", host: "DESKTOP-EFJI6J4", route: "windows"
+        )
+        let status = try JSONDecoder().decode(
+            WorkspaceRecoveryStatus.self,
+            from: Data(#"{"available":false,"snapshot":null,"currentServerId":"conpty-current","targetHost":"DESKTOP-EFJI6J4","candidates":[{"id":"windows-live","host":"DESKTOP-EFJI6J4","capturedAt":"2026-09-02T20:00:00Z","panelCount":2,"readyCount":0}],"readyCount":0,"panels":[]}"#.utf8)
+        )
+
+        let sources = WorkspaceRecoveryController.recoverySources(
+            statusByTarget: [windows.id: status], targets: [windows]
+        )
+
+        XCTAssertEqual(sources.map(\.id), ["windows-live"])
+        XCTAssertEqual(sources.first?.originTargetID, windows.id)
+        XCTAssertEqual(sources.first?.candidate.panelCount, 2)
+    }
+
+    @MainActor
     func testRecoveryTargetsIncludeEveryRemoteAndReplaceStaleRouteByLogicalHost() {
         let old = Machine(
             id: "ut-babel-p9-28.tailnet.ts.net",
@@ -171,10 +190,16 @@ final class WorkspaceRecoveryTests: XCTestCase {
     }
 
     @MainActor
-    func testRemoteRecoveryCommandQuotingPreservesPanelNames() {
-        XCTAssertEqual(WorkspaceRecoveryController.shellQuote("plain-panel"), "plain-panel")
-        XCTAssertEqual(WorkspaceRecoveryController.shellQuote("panel with spaces"), "'panel with spaces'")
-        XCTAssertEqual(WorkspaceRecoveryController.shellQuote("it's-safe"), "'it'\"'\"'s-safe'")
+    func testRemoteRecoveryUsesBrokerProtocolWithoutPlatformShellSyntax() {
+        let arguments = WorkspaceRecoveryController.remoteRecoveryArguments([
+            "recovery", "restore", "--snapshot", "snapshot-1",
+            "--session", "panel with spaces", "--bootstrap=false",
+        ], target: "windows-route")
+        XCTAssertEqual(arguments, [
+            "recovery", "remote", "--target", "windows-route",
+            "restore", "--snapshot", "snapshot-1",
+            "--session", "panel with spaces", "--bootstrap=false",
+        ])
     }
 
     @MainActor
