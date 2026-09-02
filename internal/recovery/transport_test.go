@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -65,8 +66,47 @@ func TestSnapshotTransportAcrossIndependentStoresIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("imported manifest mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestStatusAdvertisesCurrentLiveWorkspaceAsFabricSource(t *testing.T) {
+	now := time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC)
+	directory := t.TempDir()
+	store := independentTransportStore(t.TempDir(), "independent-host", "ut", now)
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: snapshotID("live-server"), Host: store.Host, Socket: store.Socket,
+		ServerID: "live-server", CapturedAt: now,
+		Entries: []Entry{{Name: "dashboard", Directory: directory, Agent: AgentShell, Windows: 1, Panes: 1}},
+	}
+	if err := store.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	current := map[string]Entry{"dashboard": snapshot.Entries[0]}
+	status := store.statusWithCurrent("", current, snapshot.ServerID)
+	if status.Snapshot != nil || status.Available {
+		t.Fatalf("live source was incorrectly offered for local restoration: %#v", status)
+	}
+	if len(status.Candidates) != 1 || status.Candidates[0].ID != snapshot.ID || status.Candidates[0].Host != snapshot.Host {
+		t.Fatalf("live workspace was absent from fabric sources: %#v", status.Candidates)
+	}
+}
+
+func TestStatusDoesNotAdvertiseStaleCurrentSnapshotAfterIntentionalClose(t *testing.T) {
+	now := time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC)
+	store := independentTransportStore(t.TempDir(), "independent-host", "ut", now)
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: snapshotID("live-server"), Host: store.Host, Socket: store.Socket,
+		ServerID: "live-server", CapturedAt: now,
+		Entries: []Entry{{Name: "closed", Directory: t.TempDir(), Agent: AgentShell}},
+	}
+	if err := store.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	status := store.statusWithCurrent("", map[string]Entry{}, snapshot.ServerID)
+	if len(status.Candidates) != 0 {
+		t.Fatalf("stale live snapshot remained a fabric source: %#v", status.Candidates)
 	}
 }
 
@@ -112,6 +152,12 @@ func TestSnapshotTransportHTTPRouteRoundTrip(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	RegisterSnapshotRoutes(mux, store)
+	statusRequest := httptest.NewRequest(http.MethodGet, "/recovery/status?socket=ut&snapshot="+snapshot.ID, nil)
+	statusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), snapshot.ID) {
+		t.Fatalf("status response = %d %s", statusResponse.Code, statusResponse.Body.String())
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "/recovery/snapshot?id="+snapshot.ID+"&socket=ut", nil)
 	response := httptest.NewRecorder()

@@ -559,11 +559,23 @@ final class WorkspaceRecoveryController: ObservableObject {
             Self.runTool(arguments, timeout: timeout, completion: completion)
             return
         }
-        let command = "$HOME/.universal-tmux/ut-broker "
-            + arguments.map(Self.shellQuote).joined(separator: " ")
-        Self.runTool(["exec", "@" + route, command], timeout: timeout, completion: completion)
+        Self.runTool(
+            Self.remoteRecoveryArguments(arguments, target: route),
+            timeout: timeout,
+            completion: completion
+        )
     }
 
+    /// Remote recovery is a broker protocol operation, not a remote shell
+    /// command. This avoids assuming POSIX paths or quoting on Windows and keeps
+    /// the operation beside the backend instance that owns the live sessions.
+    static func remoteRecoveryArguments(_ arguments: [String], target: String) -> [String] {
+        let operation = arguments.first == "recovery" ? Array(arguments.dropFirst()) : arguments
+        return ["recovery", "remote", "--target", target] + operation
+    }
+
+    // Display-only rendering for the explicit captured-launch review. Remote
+    // execution never parses this string; it transports structured arguments.
     static func shellQuote(_ value: String) -> String {
         if !value.isEmpty && value.unicodeScalars.allSatisfy({ scalar in
             CharacterSet.alphanumerics.contains(scalar) || "_@%+=:,./-".unicodeScalars.contains(scalar)

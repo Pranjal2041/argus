@@ -93,7 +93,10 @@ The macOS and Android apps reach a Windows host like any other broker.
 
 <Callout type="warn">
 The Windows broker hosts its ConPTY sessions **in-process** (unlike tmux, which is a separate
-daemon). Restarting the broker ends its live sessions — check what's running before you redeploy.
+daemon). Restarting the broker ends the live processes, but the broker continuously records the
+user-visible workspace so Argus can recreate its named shells in their original folders afterward.
+This is workspace reconstruction, not process checkpointing: child-process RAM and conversations
+without authoritative resume evidence cannot be recovered.
 </Callout>
 
 **Windows Defender may quarantine the binaries.** Unsigned Go executables that spawn consoles

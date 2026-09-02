@@ -177,10 +177,63 @@ func mergeSnapshots(groups ...[]Snapshot) []Snapshot {
 	return items
 }
 
-// RegisterSnapshotRoutes exposes the transport boundary used by a local mesh
-// broker to move a manifest from any discovered source to any chosen target.
-// Restoration remains an explicit, separate operation.
+type restoreRequest struct {
+	SnapshotID        string   `json:"snapshotId"`
+	Sessions          []string `json:"sessions"`
+	Concurrency       int      `json:"concurrency"`
+	UseCapturedLaunch bool     `json:"useCapturedLaunch"`
+}
+
+// RegisterSnapshotRoutes exposes the recovery boundary on the running broker.
+// Status and restore execute beside the backend that owns the sessions, while
+// snapshot transfer remains portable across every transport and operating
+// system.
 func RegisterSnapshotRoutes(mux *http.ServeMux, store *Store) {
+	mux.HandleFunc("/recovery/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if socket := r.URL.Query().Get("socket"); socket != "" && socket != store.Socket {
+			http.Error(w, fmt.Sprintf("broker serves session socket %q, not %q", store.Socket, socket), http.StatusConflict)
+			return
+		}
+		// Make source discovery reflect the live workspace now rather than waiting
+		// for the periodic capture tick. A failed refresh never erases the last
+		// valid durable snapshot.
+		_, _ = store.Capture()
+		_ = json.NewEncoder(w).Encode(store.Status(r.URL.Query().Get("snapshot")))
+	})
+
+	mux.HandleFunc("/recovery/restore", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if socket := r.URL.Query().Get("socket"); socket != "" && socket != store.Socket {
+			http.Error(w, fmt.Sprintf("broker serves session socket %q, not %q", store.Socket, socket), http.StatusConflict)
+			return
+		}
+		var request restoreRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&request); err != nil {
+			http.Error(w, "invalid restore request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var response RestoreResponse
+		if request.UseCapturedLaunch {
+			response = store.RestoreCapturedLaunch(request.SnapshotID, request.Sessions, request.Concurrency)
+		} else {
+			response = store.Restore(request.SnapshotID, request.Sessions, request.Concurrency)
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	})
+
 	mux.HandleFunc("/recovery/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")

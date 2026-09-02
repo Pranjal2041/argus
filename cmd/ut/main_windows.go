@@ -61,7 +61,8 @@ var clientVerbs = map[string]bool{
 	"ls": true, "exec": true, "run": true, "sh": true, "spawn": true,
 	"tail": true, "send": true, "cp": true, "lab": true, "forward": true,
 	"browser": true, "web-artifacts": true, "api-key": true, "api_key": true,
-	"help": true, "--help": true, "-h": true,
+	"recovery": true,
+	"help":     true, "--help": true, "-h": true,
 }
 
 func main() {

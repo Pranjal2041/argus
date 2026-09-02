@@ -47,8 +47,11 @@ func main() {
 	// Recovery must work before the HTTP broker exists: immediately after a Mac
 	// restart the desktop app invokes this local CLI to inspect/restore the prior
 	// tmux server, then bootstraps the normal supervisor.
-	if len(os.Args) > 2 && os.Args[1] == "recovery" && os.Args[2] == "transfer" {
-		os.Exit(runClient(os.Args[1:]))
+	if len(os.Args) > 2 && os.Args[1] == "recovery" {
+		switch os.Args[2] {
+		case "transfer", "remote":
+			os.Exit(runClient(os.Args[1:]))
+		}
 	}
 	if len(os.Args) > 1 && os.Args[1] == "recovery" {
 		os.Exit(recovery.RunCLIForProcess(os.Args[2:]))
@@ -93,10 +96,11 @@ func main() {
 	go broker.RunDailyBackupLoop(ctx)
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
+	recoveryStore := recovery.NewStoreWithRuntime(*tmuxSock, newRecoveryRuntime(mgr))
 	// Mac restores after reboot; Babel restores the same logical workspace after
-	// a scheduler allocation moves it to a different node.
+	// a scheduler allocation moves it to a different node; Windows captures the
+	// ConPTY workspace owned by this broker before that process can disappear.
 	if recovery.CaptureEnabled(runtime.GOOS, hostName, os.Getenv("UT_RECOVERY_ENABLE")) {
-		recoveryStore := recovery.NewStore(*tmuxSock)
 		go recoveryStore.RunCaptureLoop(ctx, 30*time.Second, func(err error) {
 			log.Printf("warn: workspace recovery snapshot: %v", err)
 		})
@@ -223,7 +227,7 @@ func main() {
 	})
 	// Snapshot transport is separate from restore: it only stages a validated
 	// manifest so any discovered source can be inspected against any destination.
-	recovery.RegisterSnapshotRoutes(mux, recovery.NewStore(*tmuxSock))
+	recovery.RegisterSnapshotRoutes(mux, recoveryStore)
 	// /userdata — sync store for user-global app data (Workflows, Todo Maps, Notes, Planner). The user's
 	// Mac broker is the designated sync host; the macOS app and the phone both keep a local
 	// copy and sync here with last-write-wins (the blob carries its own `updatedAt`).

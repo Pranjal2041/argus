@@ -1,7 +1,7 @@
 // Package recovery records enough authoritative live state to reconstruct a
-// user's tmux workspace after the tmux server (normally the whole Mac) restarts.
-// It restores shells and resumable Claude/Codex conversations; it is not a
-// process checkpoint and never claims to restore child processes or RAM.
+// user's workspace after its owning backend restarts. It restores shells and,
+// where process evidence is available, resumable Claude/Codex conversations;
+// it is not a process checkpoint and never claims to restore RAM.
 package recovery
 
 import "time"
@@ -60,9 +60,9 @@ type RecoveryCandidate struct {
 	ReadyCount int       `json:"readyCount"`
 }
 
-// Snapshot is the latest valid workspace observed for one tmux server
-// lifetime. A new server receives a new ID, even within the same OS boot, so a
-// freshly-created empty server can never overwrite the workspace it replaced.
+// Snapshot is the latest valid workspace observed for one session-backend
+// lifetime. A new backend receives a new ID, even within the same OS boot, so a
+// freshly-created empty backend can never overwrite the workspace it replaced.
 type Snapshot struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	ID            string    `json:"id"`
