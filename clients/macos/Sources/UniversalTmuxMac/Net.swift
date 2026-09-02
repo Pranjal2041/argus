@@ -289,6 +289,11 @@ private final class BrokerProxyTunnel {
 }
 
 private func brokerConfiguration(_ configuration: URLSessionConfiguration) -> URLSessionConfiguration {
+    // A degraded route must apply backpressure instead of letting independent
+    // features accumulate transport attempts to the same broker. Long-lived
+    // WebSockets use their own disposable sessions, so this bound covers the
+    // shared HTTP control plane without limiting terminal panes.
+    configuration.httpMaximumConnectionsPerHost = 4
     BrokerHTTPSProxy.shared.apply(to: configuration)
     return configuration
 }

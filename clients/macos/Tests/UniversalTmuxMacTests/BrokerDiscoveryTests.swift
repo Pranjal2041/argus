@@ -11,6 +11,12 @@ private final class WeakReference<Object: AnyObject> {
 }
 
 final class BrokerDiscoveryTests: XCTestCase {
+    func testSharedBrokerHTTPTransportAppliesPerHostBackpressure() {
+        let session = makeBrokerSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        XCTAssertEqual(session.configuration.httpMaximumConnectionsPerHost, 4)
+    }
+
     func testSameLogicalBrokerDeduplicatesRoutesButNotDistinctBrokerInstances() throws {
         let local = try XCTUnwrap(brokerLogicalIdentity(
             host: "Workstation.local.",
@@ -32,27 +38,40 @@ final class BrokerDiscoveryTests: XCTestCase {
         XCTAssertFalse(sameLogicalBroker(local, nil))
     }
 
-    func testProbeOrderBypassesStaleDNSWithoutSendingHTTPToDNSName() {
-        let attempts = brokerProbeAttempts(
-            dns: "ut-babel-p9-16.example.ts.net",
-            ips: ["100.71.56.4", "fd7a:115c:a1e0::1"]
-        )
+    func testSharedMeshResultMapsTLSAndNativeHTTPPeersWithoutSpecialCases() throws {
+        let local = try XCTUnwrap(brokerLogicalIdentity(host: "mac.local", socket: "ut"))
+        let peers = [
+            DiscoveredMeshPeer(
+                name: "cluster-node", host: "ut-cluster.example.ts.net", scheme: "https",
+                os: "linux", tailnetName: "ut-cluster.example.ts.net",
+                address: "100.71.56.4", brokerHost: "cluster.internal", socket: "ut"
+            ),
+            DiscoveredMeshPeer(
+                name: "native-host", host: "100.80.90.10", scheme: "http",
+                os: "windows", tailnetName: "ut-native.example.ts.net",
+                address: nil, brokerHost: "NATIVE", socket: "ut"
+            ),
+            // A second tailnet route to this app's own logical broker is filtered.
+            DiscoveredMeshPeer(
+                name: "duplicate-local", host: "old-mac.example.ts.net", scheme: "https",
+                os: "darwin", tailnetName: "old-mac.example.ts.net",
+                address: "100.99.1.2", brokerHost: "MAC.local.", socket: "UT"
+            ),
+        ]
 
-        XCTAssertEqual(attempts, [
-            BrokerProbeAttempt(scheme: "https", address: "ut-babel-p9-16.example.ts.net"),
-            BrokerProbeAttempt(scheme: "http", address: "100.71.56.4"),
-            BrokerProbeAttempt(scheme: "http", address: "fd7a:115c:a1e0::1"),
-        ])
-        XCTAssertFalse(attempts.contains {
-            $0.scheme == "http" && $0.address == "ut-babel-p9-16.example.ts.net"
-        })
-    }
+        let machines = machinesFromMeshPeers(peers, localIdentity: local)
+        XCTAssertEqual(machines.map(\.name), ["cluster-node", "native-host"])
 
-    func testLegacyPeerWithoutIPsRetainsHTTPFallback() {
-        XCTAssertEqual(brokerProbeAttempts(dns: "old-peer.example.ts.net", ips: []), [
-            BrokerProbeAttempt(scheme: "https", address: "old-peer.example.ts.net"),
-            BrokerProbeAttempt(scheme: "http", address: "old-peer.example.ts.net"),
-        ])
+        let tls = try XCTUnwrap(machines.first { $0.name == "cluster-node" })
+        XCTAssertEqual(tls.id, "ut-cluster.example.ts.net")
+        XCTAssertEqual(tls.httpBase, "https://ut-cluster.example.ts.net:8722")
+        XCTAssertEqual(tls.wsBase, "wss://ut-cluster.example.ts.net:8722")
+        XCTAssertEqual(brokerRouteAddress(for: "ut-cluster.example.ts.net"), "100.71.56.4")
+
+        let native = try XCTUnwrap(machines.first { $0.name == "native-host" })
+        XCTAssertEqual(native.id, "ut-native.example.ts.net")
+        XCTAssertEqual(native.httpBase, "http://100.80.90.10:8722")
+        XCTAssertEqual(native.wsBase, "ws://100.80.90.10:8722")
     }
 
     func testBrokerRouteRegistryAndIPv6URLFormatting() {

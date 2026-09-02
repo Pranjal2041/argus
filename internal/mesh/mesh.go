@@ -24,12 +24,21 @@ import (
 
 const brokerPort = "8722"
 
+const (
+	peerDiscoveryTTL     = 10 * time.Second
+	peerDiscoveryTimeout = 8 * time.Second
+)
+
 // Peer is a reachable broker on the fabric.
 type Peer struct {
-	Name   string `json:"name"`   // display name from /whoami
-	Host   string `json:"host"`   // tailnet host:port-less address to reach it
-	Scheme string `json:"scheme"` // http | https
-	Os     string `json:"os"`     // runtime.GOOS — lets a client pick the Mac as sync host
+	Name        string `json:"name"`                  // display name from /whoami
+	Host        string `json:"host"`                  // host used in the broker URL (and TLS identity)
+	Scheme      string `json:"scheme"`                // http | https
+	Os          string `json:"os"`                    // runtime.GOOS — lets a client pick the Mac as sync host
+	TailnetName string `json:"tailnetName,omitempty"` // stable tailnet DNS identity, even for native HTTP
+	Address     string `json:"address,omitempty"`     // authoritative socket IP for Host when TLS is used
+	BrokerHost  string `json:"brokerHost,omitempty"`  // OS hostname reported by /whoami
+	Socket      string `json:"socket,omitempty"`      // tmux socket reported by /whoami
 
 	// A TLS broker remains named by Host (HTTP Host, SNI, and certificate), but
 	// can be dialed by its authoritative tailnet IP when MagicDNS is stale.
@@ -44,6 +53,19 @@ type Mesh struct {
 	self   string
 	client *http.Client // dials tailnet peers (over tsnet, or host net)
 	dial   func(context.Context, string, string) (net.Conn, error)
+
+	peerMu        sync.Mutex
+	peerCache     []Peer
+	peerCacheAt   time.Time
+	peerScan      *peerDiscovery
+	peerTTL       time.Duration
+	peerTimeout   time.Duration
+	discoverPeers func(context.Context) []Peer // test seam; nil uses scanPeers
+}
+
+type peerDiscovery struct {
+	done  chan struct{}
+	peers []Peer
 }
 
 func New(ts *tsnet.Server, selfName string) *Mesh {
@@ -54,7 +76,9 @@ func New(ts *tsnet.Server, selfName string) *Mesh {
 	transport := peerTransport(dial, "", "")
 	return &Mesh{
 		ts: ts, self: selfName, dial: dial,
-		client: &http.Client{Transport: transport, Timeout: 0},
+		client:      &http.Client{Transport: transport, Timeout: 0},
+		peerTTL:     peerDiscoveryTTL,
+		peerTimeout: peerDiscoveryTimeout,
 	}
 }
 
@@ -63,8 +87,12 @@ func peerTransport(dial func(context.Context, string, string) (net.Conn, error),
 		// Force HTTP/1.1: an h2 connection windows/buffers the response body, so a
 		// live feed (/stream behind `ut tail`) would arrive in batches instead of
 		// as each line is produced. HTTP/1.1 chunked streams promptly.
-		ForceAttemptHTTP2: false,
-		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 2,
+		MaxConnsPerHost:     8,
+		IdleConnTimeout:     30 * time.Second,
 	}
 	transport.DialContext = dial
 	if dialHost != "" {
@@ -96,9 +124,69 @@ type candidate struct {
 }
 
 // Peers discovers OTHER brokers on the tailnet (self excluded — the CLI reaches
-// the local broker directly). Each online tailnet device is probed for the
-// broker /whoami handshake, concurrently with a short timeout.
+// the local broker directly). Discovery is a shared, bounded operation: every
+// caller observes the same in-flight scan and a short-lived cached result. This
+// is important because UI refresh, Lab automation, mirroring, and CLI routing can
+// all request peers at once; independently probing the whole tailnet lets one
+// transport stall multiply into an unbounded connection storm.
 func (m *Mesh) Peers(ctx context.Context) []Peer {
+	m.peerMu.Lock()
+	ttl := m.peerTTL
+	if ttl <= 0 {
+		ttl = peerDiscoveryTTL
+	}
+	if m.peerScan == nil && !m.peerCacheAt.IsZero() && time.Since(m.peerCacheAt) < ttl {
+		peers := clonePeers(m.peerCache)
+		m.peerMu.Unlock()
+		return peers
+	}
+	scan := m.peerScan
+	if scan == nil {
+		scan = &peerDiscovery{done: make(chan struct{})}
+		m.peerScan = scan
+		go m.runPeerDiscovery(scan)
+	}
+	m.peerMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-scan.done:
+		return clonePeers(scan.peers)
+	}
+}
+
+func (m *Mesh) runPeerDiscovery(scan *peerDiscovery) {
+	timeout := m.peerTimeout
+	if timeout <= 0 {
+		timeout = peerDiscoveryTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	discover := m.discoverPeers
+	if discover == nil {
+		discover = m.scanPeers
+	}
+	peers := discover(ctx)
+
+	m.peerMu.Lock()
+	scan.peers = clonePeers(peers)
+	m.peerCache = clonePeers(peers)
+	m.peerCacheAt = time.Now()
+	if m.peerScan == scan {
+		m.peerScan = nil
+	}
+	close(scan.done)
+	m.peerMu.Unlock()
+}
+
+func clonePeers(peers []Peer) []Peer {
+	return append([]Peer(nil), peers...)
+}
+
+// scanPeers performs one physical tailnet scan. Callers must go through Peers
+// so this work remains single-flight and bounded.
+func (m *Mesh) scanPeers(ctx context.Context) []Peer {
 	cands := m.candidates(ctx)
 	out := make([]Peer, 0, len(cands))
 	var mu sync.Mutex
@@ -186,7 +274,15 @@ func (m *Mesh) candidates(ctx context.Context) []candidate {
 // hostTailscalePeers reads the host Tailscale daemon (local mode, e.g. the Mac).
 func hostTailscalePeers(ctx context.Context) []candidate {
 	bin := "tailscale"
-	for _, p := range []string{"/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale", "/usr/bin/tailscale"} {
+	// Prefer the CLI shipped with the active macOS Network Extension. A separately
+	// installed package-manager CLI can lag the running backend and should only be
+	// a fallback. Other platforms simply skip the app-bundle path.
+	for _, p := range []string{
+		"/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+		"/opt/homebrew/bin/tailscale",
+		"/usr/local/bin/tailscale",
+		"/usr/bin/tailscale",
+	} {
 		if _, err := exec.LookPath(p); err == nil {
 			bin = p
 			break
@@ -271,7 +367,9 @@ func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
 		var who struct {
 			Service string `json:"service"`
 			Name    string `json:"name"`
+			Host    string `json:"host"`
 			Os      string `json:"os"`
+			Socket  string `json:"socket"`
 		}
 		if json.Unmarshal(body, &who) == nil && who.Service == "universal-tmux-broker" {
 			name := who.Name
@@ -280,6 +378,8 @@ func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
 			}
 			return Peer{
 				Name: name, Host: a.host, Scheme: a.scheme, Os: who.Os,
+				TailnetName: c.dns, Address: a.dialHost,
+				BrokerHost: who.Host, Socket: who.Socket,
 				dialHost: a.dialHost, tlsServerName: a.tlsServerName,
 			}, true
 		}
