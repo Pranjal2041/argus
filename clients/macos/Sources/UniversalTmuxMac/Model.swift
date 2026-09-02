@@ -1382,6 +1382,8 @@ final class AppState: ObservableObject {
     var waitingCount: Int { waitingSessions.count }
 
     private var pollTimer: Timer?
+    private var brokerDiscoveryInFlight = false
+    private var pendingFullBrokerDiscovery = false
     private var prevState: [String: String] = [:]  // ref.id -> last agent state (for waiting-transition notifications)
     /// ref.ids whose agent just finished a turn (working → idle) while NOT the active
     /// selection — rendered as an ORANGE "done, unseen" dot until you open the pane.
@@ -1448,9 +1450,17 @@ final class AppState: ObservableObject {
     /// existing machine on a transient probe miss; a full re-discovery still runs on
     /// manual refresh, which also prunes dead ones).
     func discoverNewBrokers() {
+        guard !brokerDiscoveryInFlight else { return }
+        brokerDiscoveryInFlight = true
         DispatchQueue.global(qos: .utility).async {
             let found = discoverMachines()
             DispatchQueue.main.async {
+                self.brokerDiscoveryInFlight = false
+                if self.pendingFullBrokerDiscovery {
+                    self.pendingFullBrokerDiscovery = false
+                    self.applyFullBrokerDiscovery(found)
+                    return
+                }
                 for m in found where !self.machines.contains(where: { $0.id == m.id }) {
                     self.machines.append(m)
                     self.refresh(m, scope: .all)
@@ -1462,17 +1472,28 @@ final class AppState: ObservableObject {
     /// Discover ut-* brokers on the tailnet, then refresh every machine's sessions.
     func refreshAll() {
         isRefreshing = true
+        guard !brokerDiscoveryInFlight else {
+            pendingFullBrokerDiscovery = true
+            return
+        }
+        brokerDiscoveryInFlight = true
         DispatchQueue.global(qos: .userInitiated).async {
             let found = discoverMachines()
             DispatchQueue.main.async {
-                self.machines = found
-                let group = DispatchGroup()
-                for m in found { self.refresh(m, group: group, scope: .all, coalesce: false) }
-                group.notify(queue: .main) { self.isRefreshing = false }
-                // Safety: never leave the spinner stuck if a request hangs past timeout.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 9) { self.isRefreshing = false }
+                self.brokerDiscoveryInFlight = false
+                self.pendingFullBrokerDiscovery = false
+                self.applyFullBrokerDiscovery(found)
             }
         }
+    }
+
+    private func applyFullBrokerDiscovery(_ found: [Machine]) {
+        machines = found
+        let group = DispatchGroup()
+        for m in found { refresh(m, group: group, scope: .all, coalesce: false) }
+        group.notify(queue: .main) { self.isRefreshing = false }
+        // Safety: never leave the spinner stuck if a request hangs past timeout.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9) { self.isRefreshing = false }
     }
 
     /// Open-the-view entry (⇧⌘Y / the refresh button): show the durable cache instantly —
@@ -1870,93 +1891,72 @@ func relativeShort(_ unixSeconds: Int64) -> String {
     }
 }
 
-/// Reads the local tailnet (`tailscale status --json`) and returns the local
-/// broker plus every discovered `ut-*` broker. Spawns a process, so call off
-/// the main thread.
-func discoverMachines() -> [Machine] {
-    var machines = [
-        Machine(id: "local", name: "this mac", isLocal: true,
-                httpBase: "http://127.0.0.1:8722", wsBase: "ws://127.0.0.1:8722"),
-    ]
-    // A broker can be reachable through both loopback and a tailnet peer during
-    // transport migration. Identify the logical local broker before probing peer
-    // routes so the same host+socket is represented once, while another tmux
-    // socket on the same host remains a distinct broker.
-    let localIdentity = probeWhoami("http://127.0.0.1:8722/whoami")?.logicalIdentity
-    let candidates = [
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ]
-    guard let bin = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-        return machines
-    }
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: bin)
-    task.arguments = ["status", "--json"]
-    let out = Pipe()
-    task.standardOutput = out
-    task.standardError = Pipe()
-    do { try task.run() } catch { return machines }
-    let data = out.fileHandleForReading.readDataToEndOfFile()
-    task.waitUntilExit()
-    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return machines }
+private let localBrokerMachine = Machine(
+    id: "local", name: "this mac", isLocal: true,
+    httpBase: "http://127.0.0.1:8722", wsBase: "ws://127.0.0.1:8722"
+)
 
-    // Capability-based discovery: probe every ONLINE peer's :8722 for the broker
-    // identity handshake and accept only those that return it. No hostname or tag
-    // matching, so it works for cluster nodes, other Macs, and Windows with no
-    // renaming. `Self` is skipped — it is the hardcoded "local" entry above.
-    var peers: [[String: Any]] = []
-    if let p = json["Peer"] as? [String: [String: Any]] { peers.append(contentsOf: p.values) }
-
-    var brokerCandidates: [(dns: String, ips: [String])] = []
-    var seen = Set<String>()
-    for peer in peers {
-        guard (peer["Online"] as? Bool) == true else { continue }
-        var dns = (peer["DNSName"] as? String) ?? (peer["HostName"] as? String) ?? ""
-        if dns.hasSuffix(".") { dns.removeLast() }
-        guard !dns.isEmpty, !seen.contains(dns) else { continue }
-        seen.insert(dns)
-        let ips = peer["TailscaleIPs"] as? [String] ?? []
-        if let address = ips.first(where: { !$0.contains(":") }) ?? ips.first {
-            registerBrokerTLSAddress(address, dnsName: dns)
-        }
-        brokerCandidates.append((dns, ips))
-    }
-
-    let lock = NSLock()
-    var found: [Machine] = []
-    DispatchQueue.concurrentPerform(iterations: brokerCandidates.count) { i in
-        let candidate = brokerCandidates[i]
-        guard let probe = probeBroker(dns: candidate.dns, ips: candidate.ips) else { return }
-        guard !sameLogicalBroker(localIdentity, probe.logicalIdentity) else { return }
-        // Use the scheme that actually answered: tsnet brokers serve real TLS
-        // (https/wss), but a broker on a host's own tailnet IP (e.g. Windows via
-        // the Tailscale app) serves plain http/ws. Hardcoding https made those
-        // brokers discoverable but their /sessions + /ws unreachable.
-        let ws = probe.scheme == "https" ? "wss" : "ws"
-        let endpoint = brokerURLHost(probe.address)
-        let m = Machine(id: candidate.dns, name: probe.name, host: probe.host, os: probe.os, isLocal: false,
-                        httpBase: "\(probe.scheme)://\(endpoint):8722", wsBase: "\(ws)://\(endpoint):8722")
-        lock.lock(); found.append(m); lock.unlock()
-    }
-    machines.append(contentsOf: found.sorted { $0.name < $1.name })
-    return machines
+struct DiscoveredMeshPeer: Decodable, Equatable {
+    let name: String
+    let host: String
+    let scheme: String
+    let os: String
+    let tailnetName: String?
+    let address: String?
+    let brokerHost: String?
+    let socket: String?
 }
 
-/// Probe one tailnet peer for the universal_tmux broker handshake, returning its
-/// display name iff `:8722/whoami` returns our marker — so an unrelated service on
-/// that port is never treated as a broker. HTTPS keeps the peer's DNS identity while
-/// the broker session routes its socket to the peer IP from Tailscale status. Plain
-/// HTTP is tried only against peer IPs, for native Windows/Mac brokers that serve it.
-private func probeBroker(dns: String, ips: [String]) -> (name: String, host: String, os: String, socket: String, scheme: String, address: String, logicalIdentity: BrokerLogicalIdentity?)? {
-    for attempt in brokerProbeAttempts(dns: dns, ips: ips) {
-        let endpoint = brokerURLHost(attempt.address)
-        if let r = probeWhoami("\(attempt.scheme)://\(endpoint):8722/whoami") {
-            return (r.name, r.host, r.os, r.socket, attempt.scheme, attempt.address, r.logicalIdentity)
+private struct MeshPeersResponse: Decodable {
+    let peers: [DiscoveredMeshPeer]
+}
+
+/// Convert the broker's capability-verified mesh result into app routes. The
+/// broker owns discovery; the app only maps the common peer contract to native
+/// models, preserving both TLS-routed and native-HTTP implementations.
+func machinesFromMeshPeers(
+    _ peers: [DiscoveredMeshPeer],
+    localIdentity: BrokerLogicalIdentity?
+) -> [Machine] {
+    var seen = Set<String>()
+    var machines: [Machine] = []
+    for peer in peers {
+        let host = peer.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scheme = peer.scheme.lowercased()
+        guard !host.isEmpty, scheme == "http" || scheme == "https" else { continue }
+        let identity = brokerLogicalIdentity(host: peer.brokerHost ?? "", socket: peer.socket ?? "")
+        guard !sameLogicalBroker(localIdentity, identity) else { continue }
+
+        let stableID = (peer.tailnetName?.isEmpty == false ? peer.tailnetName : nil) ?? host
+        guard seen.insert(stableID.lowercased()).inserted else { continue }
+        if scheme == "https", let address = peer.address, !address.isEmpty {
+            registerBrokerTLSAddress(address, dnsName: host)
         }
+        let endpoint = brokerURLHost(host)
+        let wsScheme = scheme == "https" ? "wss" : "ws"
+        machines.append(Machine(
+            id: stableID,
+            name: peer.name.isEmpty ? host : peer.name,
+            host: peer.brokerHost ?? "",
+            os: peer.os,
+            isLocal: false,
+            httpBase: "\(scheme)://\(endpoint):8722",
+            wsBase: "\(wsScheme)://\(endpoint):8722"
+        ))
     }
-    return nil
+    return machines.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+}
+
+/// Ask the local broker for its shared, bounded discovery result. The macOS app
+/// deliberately does not run its own tailnet scan: UI refresh, Lab automation,
+/// mirroring, CLI routing, and future consumers must all share one lifecycle.
+func discoverMachines() -> [Machine] {
+    let localIdentity = probeWhoami("http://127.0.0.1:8722/whoami")?.logicalIdentity
+    guard let url = URL(string: "http://127.0.0.1:8722/mesh/peers"),
+          let data = blockingBrokerData(from: url, timeout: 9),
+          let response = try? JSONDecoder().decode(MeshPeersResponse.self, from: data)
+    else { return [localBrokerMachine] }
+    return [localBrokerMachine] + machinesFromMeshPeers(response.peers, localIdentity: localIdentity)
 }
 
 struct BrokerLogicalIdentity: Equatable {
@@ -1977,49 +1977,41 @@ func sameLogicalBroker(_ lhs: BrokerLogicalIdentity?, _ rhs: BrokerLogicalIdenti
     return lhs == rhs
 }
 
-struct BrokerProbeAttempt: Equatable {
-    let scheme: String
-    let address: String
-}
-
-/// Ordered separately from the network call so the compatibility contract is
-/// regression-testable: HTTPS keeps its TLS hostname while its socket uses the
-/// registered peer IP, and known TLS-only brokers are never sent a plain-HTTP
-/// request by DNS name.
-func brokerProbeAttempts(dns: String, ips: [String]) -> [BrokerProbeAttempt] {
-    var attempts = [BrokerProbeAttempt(scheme: "https", address: dns)]
-    for ip in ips {
-        attempts.append(BrokerProbeAttempt(scheme: "http", address: ip))
-    }
-    // Older `tailscale status` versions may omit TailscaleIPs. Preserve their
-    // legacy HTTP discovery behavior only when no authoritative IP is available.
-    if ips.isEmpty {
-        attempts.append(BrokerProbeAttempt(scheme: "http", address: dns))
-    }
-    return attempts
-}
-
 func brokerURLHost(_ address: String) -> String {
     address.contains(":") && !address.hasPrefix("[") ? "[\(address)]" : address
 }
 
-private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?)? {
-    guard let url = URL(string: urlString) else { return nil }
+private func blockingBrokerData(from url: URL, timeout: TimeInterval) -> Data? {
     var req = URLRequest(url: url)
-    req.timeoutInterval = 2.5
+    req.timeoutInterval = timeout
     let sem = DispatchSemaphore(value: 0)
-    var result: (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?)?
-    brokerSession.dataTask(with: req) { data, _, err in
+    let lock = NSLock()
+    var result: Data?
+    let task = brokerSession.dataTask(with: req) { data, response, error in
         defer { sem.signal() }
-        guard err == nil, let data,
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              obj["service"] as? String == "universal-tmux-broker" else { return }
-        let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "broker"
-        let host = (obj["host"] as? String) ?? ""  // older brokers omit it; host-match just won't fire
-        let os = (obj["os"] as? String) ?? ""      // older brokers: server-side path repair still applies
-        let socket = (obj["socket"] as? String) ?? ""
-        result = (name, host, os, socket, brokerLogicalIdentity(host: host, socket: socket))
-    }.resume()
-    _ = sem.wait(timeout: .now() + 3)
+        guard error == nil,
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              let data else { return }
+        lock.lock(); result = data; lock.unlock()
+    }
+    task.resume()
+    if sem.wait(timeout: .now() + timeout + 0.5) == .timedOut {
+        task.cancel()
+        return nil
+    }
+    lock.lock(); defer { lock.unlock() }
     return result
+}
+
+private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?)? {
+    guard let url = URL(string: urlString),
+          let data = blockingBrokerData(from: url, timeout: 2.5),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          obj["service"] as? String == "universal-tmux-broker" else { return nil }
+    let name = (obj["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "broker"
+    let host = (obj["host"] as? String) ?? ""
+    let os = (obj["os"] as? String) ?? ""
+    let socket = (obj["socket"] as? String) ?? ""
+    return (name, host, os, socket, brokerLogicalIdentity(host: host, socket: socket))
 }

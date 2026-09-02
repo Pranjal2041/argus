@@ -35,10 +35,10 @@ tailscale_bin() {
   fi
   local candidate
   for candidate in \
+    /Applications/Tailscale.app/Contents/MacOS/Tailscale \
     /opt/homebrew/bin/tailscale \
     /usr/local/bin/tailscale \
-    /usr/bin/tailscale \
-    /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+    /usr/bin/tailscale; do
     if [ -x "$candidate" ]; then printf '%s\n' "$candidate"; return; fi
   done
   command -v tailscale 2>/dev/null || true
