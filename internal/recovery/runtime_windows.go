@@ -28,7 +28,25 @@ func (s *Store) Status(requestedSnapshot string) Status {
 }
 
 func (s *Store) Restore(snapshotID string, names []string, concurrency int) RestoreResponse {
-	return RestoreResponse{SnapshotID: snapshotID, Results: []RestoreResult{{State: RestoreFailed, Detail: "workspace recovery is not yet supported on Windows"}}}
+	return unsupportedWindowsRestore(snapshotID)
+}
+
+// RestoreCapturedLaunch is part of the recovery Store contract on every
+// platform. Windows cannot capture or restore ConPTY-backed workspaces yet, so
+// the explicit-review path must report the same unsupported result as the
+// normal restore path instead of disappearing from the Windows build.
+func (s *Store) RestoreCapturedLaunch(snapshotID string, names []string, concurrency int) RestoreResponse {
+	return unsupportedWindowsRestore(snapshotID)
+}
+
+func unsupportedWindowsRestore(snapshotID string) RestoreResponse {
+	return RestoreResponse{
+		SnapshotID: snapshotID,
+		Results: []RestoreResult{{
+			State:  RestoreFailed,
+			Detail: "workspace recovery is not yet supported on Windows",
+		}},
+	}
 }
 
 func (s *Store) Bootstrap(sessionName string) error {
