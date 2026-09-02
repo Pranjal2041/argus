@@ -67,6 +67,8 @@ func runClient(args []string) int {
 		return cmdWebArtifacts(rest)
 	case "api-key", "api_key":
 		return cmdAPIKey(rest)
+	case "recovery":
+		return cmdRecovery(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ut: unknown command %q (try `ut help`)\n", verb)
 		return 2
@@ -730,6 +732,7 @@ USAGE
   ut browser <subcommand>               control Argus's Mac-hosted browser from any machine
   ut web-artifacts <subcommand>         save exact web-service recipes for one-click Argus launch
   ut api-key request <NAME>              ask Argus to add one saved API key to this folder's .env
+  ut recovery transfer ...               stage a recovery snapshot on another discovered machine
   ut lab   <subcommand>                 run experiments through the recorded, human-
                                         approved lab protocol (see ` + "`ut lab help`" + `)
 

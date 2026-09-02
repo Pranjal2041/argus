@@ -47,6 +47,9 @@ func main() {
 	// Recovery must work before the HTTP broker exists: immediately after a Mac
 	// restart the desktop app invokes this local CLI to inspect/restore the prior
 	// tmux server, then bootstraps the normal supervisor.
+	if len(os.Args) > 2 && os.Args[1] == "recovery" && os.Args[2] == "transfer" {
+		os.Exit(runClient(os.Args[1:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "recovery" {
 		os.Exit(recovery.RunCLIForProcess(os.Args[2:]))
 	}
@@ -218,6 +221,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": mgr.History()})
 	})
+	// Snapshot transport is separate from restore: it only stages a validated
+	// manifest so any discovered source can be inspected against any destination.
+	recovery.RegisterSnapshotRoutes(mux, recovery.NewStore(*tmuxSock))
 	// /userdata — sync store for user-global app data (Workflows, Todo Maps, Notes, Planner). The user's
 	// Mac broker is the designated sync host; the macOS app and the phone both keep a local
 	// copy and sync here with last-write-wins (the blob carries its own `updatedAt`).

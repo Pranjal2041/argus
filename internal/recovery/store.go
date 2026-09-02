@@ -408,7 +408,11 @@ func (s *Store) load(id string) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	for _, item := range items {
+	imported, err := s.loadImported()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	for _, item := range mergeSnapshots(items, imported) {
 		if item.ID == id {
 			return item, nil
 		}

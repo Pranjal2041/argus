@@ -5,6 +5,42 @@ import XCTest
 
 final class WorkspaceRecoveryTests: XCTestCase {
     @MainActor
+    func testRecoverySourcesAggregateEveryStoreAndPreferTheOwningOrigin() throws {
+        let relay = WorkspaceRecoveryTarget(id: "relay", name: "relay", host: "relay", route: "relay")
+        let owner = WorkspaceRecoveryTarget(id: "owner", name: "source-a", host: "source-a", route: "owner")
+        let independent = WorkspaceRecoveryTarget(
+            id: "independent", name: "source-b", host: "source-b", route: "independent"
+        )
+        func status(_ json: String) throws -> WorkspaceRecoveryStatus {
+            try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: Data(json.utf8))
+        }
+        let sharedThroughRelay = try status(#"""
+        {"available":true,"snapshot":{"id":"shared","host":"source-a","socket":"ut","capturedAt":"2026-09-02T17:00:00Z"},"targetHost":"relay","candidates":[{"id":"shared","host":"source-a","capturedAt":"2026-09-02T17:00:00Z","panelCount":6,"readyCount":6}],"readyCount":6,"panels":[]}
+        """#)
+        let sharedThroughOwner = try status(#"""
+        {"available":true,"snapshot":{"id":"shared","host":"source-a","socket":"ut","capturedAt":"2026-09-02T17:00:00Z"},"targetHost":"source-a","candidates":[{"id":"shared","host":"source-a","capturedAt":"2026-09-02T17:00:00Z","panelCount":6,"readyCount":6}],"readyCount":6,"panels":[]}
+        """#)
+        // This independent store exercises the snapshot fallback path rather
+        // than the shared-store candidates path above.
+        let standalone = try status(#"""
+        {"available":true,"snapshot":{"id":"standalone","host":"source-b","socket":"ut","capturedAt":"2026-09-02T18:00:00Z"},"targetHost":"source-b","readyCount":2,"panels":[{"name":"one","directory":"/tmp","agent":"shell","state":"ready","selected":true},{"name":"two","directory":"/tmp","agent":"shell","state":"ready","selected":true}]}
+        """#)
+
+        let sources = WorkspaceRecoveryController.recoverySources(
+            statusByTarget: [
+                relay.id: sharedThroughRelay,
+                owner.id: sharedThroughOwner,
+                independent.id: standalone,
+            ],
+            targets: [relay, owner, independent]
+        )
+
+        XCTAssertEqual(sources.map(\.id), ["standalone", "shared"])
+        XCTAssertEqual(sources.first(where: { $0.id == "shared" })?.originTargetID, owner.id)
+        XCTAssertEqual(sources.first(where: { $0.id == "standalone" })?.candidate.panelCount, 2)
+    }
+
+    @MainActor
     func testRecoveryTargetsIncludeEveryRemoteAndReplaceStaleRouteByLogicalHost() {
         let old = Machine(
             id: "ut-babel-p9-28.tailnet.ts.net",
