@@ -217,9 +217,11 @@ func (m *Mesh) matchesSelf(name string) bool {
 	return name == s || name == short || name == strings.TrimPrefix(short, "ut-")
 }
 
-// Resolve matches a user-given machine name (e.g. "babel-p9-16",
-// "ut-babel-p9-16", or a display name) to a broker — including THIS one (routed
-// over loopback), so targeting your own machine always works without discovery.
+// Resolve matches any identity advertised for a peer by /mesh/peers. Discovery
+// consumers commonly retain TailnetName as their stable UI key while native
+// brokers are reached through an IP address, so every serialized identity must
+// remain a valid routing key; identity and transport address are not the same
+// abstraction. THIS broker is also routed over loopback.
 func (m *Mesh) Resolve(ctx context.Context, name string) (Peer, bool) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if m.matchesSelf(name) {
@@ -233,18 +235,42 @@ func (m *Mesh) Resolve(ctx context.Context, name string) (Peer, bool) {
 		strings.Contains,
 	} {
 		for _, p := range peers {
-			host := strings.ToLower(p.Host)
-			short := host
-			if i := strings.Index(host, "."); i > 0 {
-				short = host[:i]
-			}
-			if match(short, name) || match(strings.TrimPrefix(short, "ut-"), name) ||
-				match(strings.ToLower(p.Name), name) || match(host, name) {
-				return p, true
+			for _, alias := range peerRoutingAliases(p) {
+				if match(alias, name) {
+					return p, true
+				}
 			}
 		}
 	}
 	return Peer{}, false
+}
+
+// peerRoutingAliases is the shared contract between discovery and routing: if
+// an identifier is serialized in Peer, clients may safely give it back to the
+// mesh. Short and non-ut spellings preserve the existing ergonomic CLI names.
+func peerRoutingAliases(p Peer) []string {
+	seen := make(map[string]struct{})
+	aliases := make([]string, 0, 12)
+	add := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(value, ".")))
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; !exists {
+			seen[value] = struct{}{}
+			aliases = append(aliases, value)
+		}
+	}
+	for _, identity := range []string{p.Name, p.Host, p.TailnetName, p.Address, p.BrokerHost} {
+		add(identity)
+		identity = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(identity, ".")))
+		if i := strings.Index(identity, "."); i > 0 {
+			identity = identity[:i]
+		}
+		add(identity)
+		add(strings.TrimPrefix(identity, "ut-"))
+	}
+	return aliases
 }
 
 // candidates lists online tailnet devices to probe — via this broker's tsnet

@@ -87,6 +87,47 @@ func TestPeerJSONCarriesStableIdentityAndRoutingMetadata(t *testing.T) {
 	}
 }
 
+func TestResolveAcceptsEveryAdvertisedIdentityAcrossTransports(t *testing.T) {
+	peers := []Peer{
+		{
+			Name: "pranjala-win", Host: "100.69.229.6", Scheme: "http", Os: "windows",
+			TailnetName: "pranjala-win.example.ts.net", BrokerHost: "DESKTOP-EFJI6J4", Socket: "ut",
+		},
+		{
+			Name: "babel-t5-24", Host: "ut-babel-t5-24.example.ts.net", Scheme: "https", Os: "linux",
+			TailnetName: "ut-babel-t5-24.example.ts.net", Address: "100.122.79.99",
+			BrokerHost: "babel-t5-24", Socket: "ut",
+		},
+	}
+	m := &Mesh{
+		self: "local", peerTTL: time.Minute, peerTimeout: time.Second,
+		discoverPeers: func(context.Context) []Peer { return peers },
+	}
+
+	tests := []struct {
+		query string
+		want  string
+	}{
+		// Native HTTP: stable tailnet identity and transport address differ.
+		{"pranjala-win.example.ts.net", "pranjala-win"},
+		{"100.69.229.6", "pranjala-win"},
+		{"DESKTOP-EFJI6J4", "pranjala-win"},
+		// TLS: DNS identity remains the URL host while the authoritative socket
+		// address is carried separately.
+		{"ut-babel-t5-24.example.ts.net", "babel-t5-24"},
+		{"100.122.79.99", "babel-t5-24"},
+		{"babel-t5-24", "babel-t5-24"},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			got, ok := m.Resolve(context.Background(), test.query)
+			if !ok || got.Name != test.want {
+				t.Fatalf("Resolve(%q) = %#v, %v; want peer %q", test.query, got, ok, test.want)
+			}
+		})
+	}
+}
+
 func TestPeersCoalescesConcurrentCallersAndCachesResult(t *testing.T) {
 	var scans atomic.Int32
 	started := make(chan struct{})
