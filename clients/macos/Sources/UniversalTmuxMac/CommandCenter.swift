@@ -3,7 +3,7 @@ import Foundation
 
 // MARK: - Status model
 
-/// A status for one agent session, produced by the status updater (claude -p).
+/// A status for one agent session, produced by the status updater.
 /// This is the inferred layer that sits on top of the deterministic dot.
 struct AgentStatus: Equatable, Codable {
     var label: String        // model token: needs-decision/stuck/drifting/working/look/milestone/idle (no-progress legacy)
@@ -41,7 +41,7 @@ struct AgentStatus: Equatable, Codable {
     }
 }
 
-// MARK: - Provider (swappable: claude -p now, Messages API later)
+// MARK: - Provider
 
 protocol AgentStatusProvider {
     /// Produce a status for `key` from its recent terminal `output`. `note`, if present,
@@ -55,14 +55,61 @@ protocol AgentStatusProvider {
     var callCount: Int { get }
 }
 
-/// Generates status updates by shelling out to `claude -p`. Keeps a claude session
-/// id per terminal session and `--resume`s it so the model carries a rolling
+enum CodexStatusCommand {
+    static let model = "gpt-5.6-luna"
+    static let reasoningEffort = "high"
+
+    static func initialArguments(finalMessageURL: URL) -> [String] {
+        [
+            "exec",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--sandbox", "read-only",
+            "--color", "never",
+            "-m", model,
+            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
+            "--json",
+            "-o", finalMessageURL.path,
+            "-",
+        ]
+    }
+
+    static func resumeArguments(sessionID: String, finalMessageURL: URL) -> [String] {
+        [
+            "exec", "resume",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "-m", model,
+            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
+            "--json",
+            "-o", finalMessageURL.path,
+            sessionID,
+            "-",
+        ]
+    }
+
+    static func sessionID(in jsonl: String) -> String? {
+        for line in jsonl.split(separator: "\n") {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["type"] as? String == "thread.started",
+                  let sessionID = object["thread_id"] as? String,
+                  !sessionID.isEmpty else { continue }
+            return sessionID
+        }
+        return nil
+    }
+}
+
+/// Generates status updates by shelling out to Codex CLI. Keeps a Codex session
+/// id per terminal session and resumes it so the model carries a rolling
 /// understanding; resets the id every `resetEvery` turns so the resumed conversation
-/// can't grow without bound. Swap this out for a Messages-API provider if cost bites.
-final class ClaudeStatusProvider: AgentStatusProvider {
-    private let model: String
+/// can't grow without bound.
+final class CodexStatusProvider: AgentStatusProvider {
     private let resetEvery = 20
-    private var sessions: [String: (uuid: String, turns: Int)] = [:]
+    private var sessions: [String: (id: String, turns: Int)] = [:]
     private let lock = NSLock()
 
     // Cumulative spend, persisted so cost can be assessed across launches.
@@ -71,8 +118,7 @@ final class ClaudeStatusProvider: AgentStatusProvider {
     var spendUSD: Double { lock.lock(); defer { lock.unlock() }; return _costUSD }
     var callCount: Int { lock.lock(); defer { lock.unlock() }; return _calls }
 
-    init(model: String = "haiku") {
-        self.model = model
+    init() {
         _costUSD = UserDefaults.standard.double(forKey: "ut.ccCostUSD")
         _calls = UserDefaults.standard.integer(forKey: "ut.ccCostCalls")
     }
@@ -120,26 +166,26 @@ final class ClaudeStatusProvider: AgentStatusProvider {
 
         """ + tail
 
-        // Resume the session's rolling conversation; reset the id every `resetEvery`
+        // Resume the session's rolling conversation; reset it every `resetEvery`
         // turns so it can't grow without bound.
-        lock.lock()
-        var entry = sessions[key]
+        var entry = lock.withLock { sessions[key] }
         if let e = entry, e.turns >= resetEvery { entry = nil }
-        let uuid: String
-        let resuming: Bool
-        if let e = entry { uuid = e.uuid; resuming = true; sessions[key] = (e.uuid, e.turns + 1) }
-        else { uuid = UUID().uuidString.lowercased(); resuming = false; sessions[key] = (uuid, 1) }
-        lock.unlock()
 
         // Up to 2 attempts: a transient API/connection error (ECONNRESET, overloaded)
         // shouldn't leave the card stale until the next 30s sweep. After the first
-        // attempt the claude session exists, so the retry --resume's it.
+        // attempt the Codex session exists, so the retry resumes it.
         for attempt in 0..<2 {
-            var args = ["-p", "--model", model, "--output-format", "json", "--system-prompt", Self.systemPrompt]
-            args += (resuming || attempt > 0) ? ["--resume", uuid] : ["--session-id", uuid]
-            if let out = await Self.runClaude(args: args, stdin: msg), let env = Self.envelope(out) {
-                recordCost(env.cost)
-                if let status = Self.parseStatus(env.result) { return status }
+            let resumingID = entry?.id
+            let prompt = resumingID == nil ? Self.systemPrompt + "\n\n" + msg : msg
+            if let run = await Self.runCodex(sessionID: resumingID, stdin: prompt) {
+                entry = (run.sessionID, entry?.turns ?? 0)
+                if let status = Self.parseStatus(run.finalMessage) {
+                    lock.withLock {
+                        sessions[key] = (run.sessionID, (entry?.turns ?? 0) + 1)
+                    }
+                    recordCost(0)
+                    return status
+                }
             }
             if attempt == 0 {
                 NSLog("[cc] %@ status attempt failed — retrying in 3s", key)
@@ -149,35 +195,44 @@ final class ClaudeStatusProvider: AgentStatusProvider {
         return nil
     }
 
-    // MARK: claude invocation
+    // MARK: Codex invocation
 
     /// GUI apps don't inherit a login shell's PATH, so resolve the binary explicitly.
-    private static let claudePath: String = {
-        let candidates = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude",
-                          NSHomeDirectory() + "/.claude/local/claude",
-                          NSHomeDirectory() + "/.local/bin/claude"]
+    private static let codexPath: String = {
+        let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex",
+                          NSHomeDirectory() + "/.local/bin/codex"]
         for c in candidates where FileManager.default.isExecutableFile(atPath: c) { return c }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", "command -v claude"]
+        p.arguments = ["-lc", "command -v codex"]
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
         try? p.run(); p.waitUntilExit()
         let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.isEmpty ? "/opt/homebrew/bin/claude" : out
+        return out.isEmpty ? "/opt/homebrew/bin/codex" : out
     }()
 
-    private static func runClaude(args: [String], stdin: String) async -> String? {
-        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+    private struct CodexRun {
+        let sessionID: String
+        let finalMessage: String
+    }
+
+    private static func runCodex(sessionID: String?, stdin: String) async -> CodexRun? {
+        await withCheckedContinuation { (cont: CheckedContinuation<CodexRun?, Never>) in
             DispatchQueue.global(qos: .utility).async {
+                let outputURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("argus-command-center-\(UUID().uuidString).txt")
+                defer { try? FileManager.default.removeItem(at: outputURL) }
                 let p = Process()
-                p.executableURL = URL(fileURLWithPath: claudePath)
-                p.arguments = args
-                p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory()) // no project CLAUDE.md
+                p.executableURL = URL(fileURLWithPath: codexPath)
+                p.arguments = sessionID.map {
+                    CodexStatusCommand.resumeArguments(sessionID: $0, finalMessageURL: outputURL)
+                } ?? CodexStatusCommand.initialArguments(finalMessageURL: outputURL)
+                p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
                 let inPipe = Pipe(), outPipe = Pipe()
                 p.standardInput = inPipe
                 p.standardOutput = outPipe
-                p.standardError = Pipe()
+                p.standardError = FileHandle.nullDevice
                 do { try p.run() } catch { cont.resume(returning: nil); return }
                 // Write stdin on a separate thread so a large prompt can't deadlock
                 // against us trying to read stdout from the same thread.
@@ -187,21 +242,22 @@ final class ClaudeStatusProvider: AgentStatusProvider {
                 }
                 let data = outPipe.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
-                cont.resume(returning: p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil)
+                let jsonl = String(decoding: data, as: UTF8.self)
+                guard p.terminationStatus == 0,
+                      let resolvedSessionID = CodexStatusCommand.sessionID(in: jsonl) ?? sessionID,
+                      let finalMessage = try? String(contentsOf: outputURL, encoding: .utf8) else {
+                    cont.resume(returning: nil)
+                    return
+                }
+                cont.resume(returning: CodexRun(
+                    sessionID: resolvedSessionID,
+                    finalMessage: finalMessage
+                ))
             }
         }
     }
 
     // MARK: parsing
-
-    /// Pull the `result` string + this call's cost out of `--output-format json`.
-    private static func envelope(_ outer: String) -> (result: String, cost: Double)? {
-        struct Outer: Decodable { let result: String?; let is_error: Bool?; let total_cost_usd: Double? }
-        guard let d = outer.data(using: .utf8),
-              let o = try? JSONDecoder().decode(Outer.self, from: d),
-              o.is_error != true, let r = o.result else { return nil }
-        return (r, o.total_cost_usd ?? 0)
-    }
 
     /// The model wraps the JSON in ```json fences and sometimes adds prose, so strip
     /// fences and parse the first {...} block. Falls back to nil (caller keeps the dot).
@@ -357,10 +413,10 @@ enum ManualStatusLog {
 final class CommandCenterModel: ObservableObject {
     @Published var statuses: [String: AgentStatus] = [:]   // keyed by SessionRef.id
     @Published var inflight: Set<String> = []              // sessions whose status is being regenerated (drives the spinner)
-    @Published var costUSD: Double = 0                     // cumulative claude -p spend
+    @Published var costUSD: Double = 0                     // cumulative tracked model spend
     @Published var costCalls: Int = 0
 
-    private let provider: AgentStatusProvider = ClaudeStatusProvider()
+    private let provider: AgentStatusProvider = CodexStatusProvider()
     private weak var app: AppState?
     private var timer: Timer?
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
@@ -392,9 +448,9 @@ final class CommandCenterModel: ObservableObject {
     }
     private var lastDot: [String: String] = [:] // last seen dot state — a flip forces a refresh
     private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
-    private var claudeInflight = 0              // concurrent model calls (the expensive part)
+    private var modelInflight = 0               // concurrent model calls (the expensive part)
     private var pulseN = 0
-    private let maxClaude = 5
+    private let maxModelCalls = 5
     private let storeKey = "ut.ccStatuses.v1"
 
     init() {
@@ -429,7 +485,7 @@ final class CommandCenterModel: ObservableObject {
         // as recordCost (this runs in the same resumed-continuation context).
         guard let d = try? JSONEncoder().encode(statuses) else { return }
         let key = storeKey
-        ClaudeStatusProvider.writeDefaults { UserDefaults.standard.set(d, forKey: key) }
+        CodexStatusProvider.writeDefaults { UserDefaults.standard.set(d, forKey: key) }
     }
 
     func bind(_ app: AppState) {
@@ -498,7 +554,7 @@ final class CommandCenterModel: ObservableObject {
                 }
             }
         }
-        // Fair scheduling: only `maxClaude` model calls run concurrently, so issue them
+        // Fair scheduling: only `maxModelCalls` model calls run concurrently, so issue them
         // LEAST-RECENTLY-SUMMARIZED first. Machine order put local sessions first, so they
         // grabbed every slot and remote (babel) sessions were perpetually `gated`/starved.
         candidates.sort { (lastOKAt[$0.ref.id] ?? 0) < (lastOKAt[$1.ref.id] ?? 0) }
@@ -593,13 +649,13 @@ final class CommandCenterModel: ObservableObject {
             // Output changed → needs a model call. Cap concurrent model calls only;
             // if full, bail WITHOUT setting lastHash so this session retries next tick
             // (no starvation — every session keeps getting fetched + a fair shot).
-            guard self.claudeInflight < self.maxClaude else { ccLog("gated \(key)"); return }
-            self.claudeInflight += 1
+            guard self.modelInflight < self.maxModelCalls else { ccLog("gated \(key)"); return }
+            self.modelInflight += 1
             self.inflight.insert(key)
             let generated = await self.provider.status(forKey: key, output: output, note: self.correction[key])
-            self.claudeInflight -= 1
+            self.modelInflight -= 1
             self.inflight.remove(key)
-            guard let generated else { ccLog("claude-nil \(key)"); NSLog("[cc] %@ claude returned nil", key); return }
+            guard let generated else { ccLog("model-nil \(key)"); NSLog("[cc] %@ model returned nil", key); return }
             // A model call can take several seconds, so reconcile against the CURRENT
             // broker state rather than the state captured when this sweep began.
             let liveState = self.app?.sessionsByMachine[ref.machineID]?
@@ -805,7 +861,7 @@ struct CommandCenterView: View {
             if cc.costCalls > 0 {
                 Text(String(format: "$%.2f · %d updates", cc.costUSD, cc.costCalls))
                     .font(cf(11)).foregroundStyle(Theme.textTertiary)
-                    .help("Cumulative claude -p spend (status updates) since first run")
+                    .help("Cumulative tracked model spend (status updates) since first run")
             }
             Button { state.presentWeeklyProgress() } label: {
                 HStack(spacing: 5) {

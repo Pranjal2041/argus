@@ -319,7 +319,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(state)
 	})
 	// /recent — a session's recent rendered scrollback as plain text, for the
-	// macOS command center's status updater (claude -p reads it). ?session=NAME
+	// macOS command center's status updater (the configured status model reads it). ?session=NAME
 	// &lines=N (default 400). Forks capture-pane per call, so clients must poll
 	// it sparingly (per active session, ~30s).
 	mux.HandleFunc("/recent", func(w http.ResponseWriter, r *http.Request) {
