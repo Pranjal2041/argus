@@ -178,10 +178,11 @@ func mergeSnapshots(groups ...[]Snapshot) []Snapshot {
 }
 
 type restoreRequest struct {
-	SnapshotID        string   `json:"snapshotId"`
-	Sessions          []string `json:"sessions"`
-	Concurrency       int      `json:"concurrency"`
-	UseCapturedLaunch bool     `json:"useCapturedLaunch"`
+	SnapshotID        string      `json:"snapshotId"`
+	Sessions          []string    `json:"sessions"`
+	Concurrency       int         `json:"concurrency"`
+	UseCapturedLaunch bool        `json:"useCapturedLaunch"`
+	Edits             []EntryEdit `json:"edits,omitempty"`
 }
 
 // RegisterSnapshotRoutes exposes the recovery boundary on the running broker.
@@ -228,6 +229,8 @@ func RegisterSnapshotRoutes(mux *http.ServeMux, store *Store) {
 		var response RestoreResponse
 		if request.UseCapturedLaunch {
 			response = store.RestoreCapturedLaunch(request.SnapshotID, request.Sessions, request.Concurrency)
+		} else if len(request.Edits) > 0 {
+			response = store.RestoreWithEdits(request.SnapshotID, request.Sessions, request.Concurrency, request.Edits)
 		} else {
 			response = store.Restore(request.SnapshotID, request.Sessions, request.Concurrency)
 		}

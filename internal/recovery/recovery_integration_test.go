@@ -154,6 +154,44 @@ func TestRestoreNeverOverwritesNameConflict(t *testing.T) {
 	}
 }
 
+func TestEditedRestoreRepairsMissingDirectoryWithoutChangingSnapshot(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	socket := fmt.Sprintf("ut-recovery-edit-%d", os.Getpid())
+	cleanup := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
+	cleanup()
+	t.Cleanup(cleanup)
+	store := NewStore(socket)
+	store.Host = "test-host"
+	store.Cluster = ""
+	store.Dir = filepath.Join(t.TempDir(), "snapshots")
+	missing := filepath.Join(t.TempDir(), "missing")
+	snapshot := Snapshot{
+		SchemaVersion: SchemaVersion, ID: snapshotID("edited-restore"), Host: store.Host, Socket: socket,
+		ServerID: "edited-restore", CapturedAt: time.Now().UTC(),
+		Entries: []Entry{{Name: "research", Directory: missing, Agent: AgentShell, Windows: 1, Panes: 1}},
+	}
+	if err := store.saveLocked(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	response := store.RestoreWithEdits(snapshot.ID, []string{"research"}, 1, []EntryEdit{{
+		Panel: "research", Directory: &directory,
+	}})
+	if len(response.Results) != 1 || response.Results[0].State != RestoreRestored {
+		t.Fatalf("edited restore response = %#v", response)
+	}
+	panes, err := listPanes(socket)
+	if err != nil || len(panes) != 1 || !equivalentDirectory(panes[0].Directory, directory) {
+		t.Fatalf("restored panes = %#v, err=%v", panes, err)
+	}
+	loaded, err := store.load(snapshot.ID)
+	if err != nil || loaded.Entries[0].Directory != missing {
+		t.Fatalf("source snapshot changed = %#v, err=%v", loaded, err)
+	}
+}
+
 func TestTmuxInspectionWorksWithoutParentLocale(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")

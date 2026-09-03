@@ -3,6 +3,7 @@
 package recovery
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -189,6 +190,48 @@ func TestClaudeResumePreservesCustomConfigDirectory(t *testing.T) {
 		"--dangerously-skip-permissions", "--resume", testSessionID}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resume argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestExplicitEntryEditCanRepairFolderAndConversationWithoutMutatingCapture(t *testing.T) {
+	original := Entry{
+		Name: "research", Directory: "/missing/captured/path", Agent: AgentCodex,
+		Executable: os.Args[0], Argv: []string{os.Args[0], "--yolo", "resume", "11111111-1111-1111-1111-111111111111"},
+		SessionID: "11111111-1111-1111-1111-111111111111", CaptureError: "old capture failure",
+	}
+	directory := t.TempDir()
+	sessionID := "22222222-2222-2222-2222-222222222222"
+	agent := AgentCodex
+	executable := os.Args[0]
+	arguments := []string{"--yolo"}
+	edited, err := applyEntryEdit(original, EntryEdit{
+		Panel: "research", Directory: &directory, Agent: &agent, SessionID: &sessionID,
+		Executable: &executable, Arguments: &arguments,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Directory != directory || edited.SessionID != sessionID ||
+		edited.SessionEvidence != SessionEvidenceUserEdit || edited.CaptureError != "" {
+		t.Fatalf("edited entry = %#v", edited)
+	}
+	if panel := preflight(edited, map[string]Entry{}); panel.State != PanelReady {
+		t.Fatalf("edited preflight = %#v", panel)
+	}
+	if original.Directory != "/missing/captured/path" || original.SessionID == sessionID {
+		t.Fatalf("source capture was mutated: %#v", original)
+	}
+}
+
+func TestExplicitEntryEditRejectsRelativeFolderAndUnknownAgent(t *testing.T) {
+	entry := Entry{Name: "research", Directory: t.TempDir(), Agent: AgentShell}
+	relative := "project"
+	if _, err := applyEntryEdit(entry, EntryEdit{Panel: entry.Name, Directory: &relative}); err == nil {
+		t.Fatal("relative recovery directory was accepted")
+	}
+	unknown := "website-specific-agent"
+	if _, err := applyEntryEdit(entry, EntryEdit{Panel: entry.Name, Agent: &unknown}); err == nil {
+		t.Fatal("unknown recovery agent was accepted")
 	}
 }
 

@@ -135,7 +135,8 @@ func listPanes(socket string) ([]paneInfo, error) {
 		chosen paneInfo
 		panes  int
 	}
-	byName := map[string]*aggregate{}
+	var parsed []paneInfo
+	var panePIDs []int
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		if line == "" {
 			continue
@@ -154,6 +155,13 @@ func listPanes(socket string) ([]paneInfo, error) {
 			AgentOwned: fields[4] == "1", Visible: fields[5] == "1",
 			Active: fields[6] == "1" && fields[7] == "1", Directory: fields[8],
 		}
+		parsed = append(parsed, pane)
+		panePIDs = append(panePIDs, pid)
+	}
+	directories := platformProcessDirectories(panePIDs)
+	byName := map[string]*aggregate{}
+	for _, pane := range parsed {
+		pane.Directory = authoritativePaneDirectory(pane.Directory, directories[pane.PanePID])
 		agg := byName[pane.Name]
 		if agg == nil {
 			agg = &aggregate{chosen: pane}
@@ -174,6 +182,16 @@ func listPanes(socket string) ([]paneInfo, error) {
 	}
 	sort.Slice(panes, func(i, j int) bool { return panes[i].Name < panes[j].Name })
 	return panes, nil
+}
+
+func authoritativePaneDirectory(terminalReported, processDirectory string) string {
+	// pane_current_path is display state updated by terminal OSC sequences.
+	// Sandboxes and remote tools may legitimately publish a virtual path there;
+	// recovery needs the kernel-owned cwd of the pane's shell process instead.
+	if filepath.IsAbs(processDirectory) {
+		return filepath.Clean(processDirectory)
+	}
+	return terminalReported
 }
 
 func readProcessTable() (map[int]processInfo, error) {
@@ -645,13 +663,15 @@ func verifyRestored(socket string, expected Entry, timeout time.Duration) error 
 	for time.Now().Before(deadline) {
 		entry, ok := currentEntry(socket, expected.Name)
 		if ok {
-			if entriesMatch(expected, entry) && filepath.Clean(entry.Directory) == filepath.Clean(expected.Directory) {
+			if entriesMatch(expected, entry) && equivalentDirectory(entry.Directory, expected.Directory) {
 				return nil
 			}
 			if entry.CaptureError != "" {
 				last = entry.CaptureError
 			} else {
-				last = fmt.Sprintf("observed %s session %s", entry.Agent, entry.SessionID)
+				last = fmt.Sprintf("observed %s session %s in %s; expected %s session %s in %s",
+					entry.Agent, entry.SessionID, entry.Directory,
+					expected.Agent, expected.SessionID, expected.Directory)
 			}
 		}
 		time.Sleep(350 * time.Millisecond)
@@ -695,18 +715,6 @@ func verifyCapturedLaunch(socket string, expected Entry, timeout time.Duration) 
 		last = "captured agent command did not remain active before the verification deadline"
 	}
 	return errors.New(last)
-}
-
-func equivalentDirectory(left, right string) bool {
-	left = filepath.Clean(left)
-	right = filepath.Clean(right)
-	if resolved, err := filepath.EvalSymlinks(left); err == nil {
-		left = resolved
-	}
-	if resolved, err := filepath.EvalSymlinks(right); err == nil {
-		right = resolved
-	}
-	return left == right
 }
 
 func (s *Store) restoreOne(panel PanelStatus, useCapturedLaunch bool) RestoreResult {
@@ -753,7 +761,7 @@ func (s *Store) restoreOne(panel PanelStatus, useCapturedLaunch bool) RestoreRes
 	if useCapturedLaunch {
 		verify = verifyCapturedLaunch
 	}
-	if err := verify(s.Socket, panel.Entry, 25*time.Second); err != nil {
+	if err := verify(s.Socket, fresh.Entry, 25*time.Second); err != nil {
 		result.State = RestoreFailed
 		result.Detail = "Created, but identity verification failed: " + err.Error()
 		return result
@@ -768,7 +776,14 @@ func (s *Store) restoreOne(panel PanelStatus, useCapturedLaunch bool) RestoreRes
 }
 
 func (s *Store) Restore(snapshotID string, names []string, concurrency int) RestoreResponse {
-	return s.restore(snapshotID, names, concurrency, false)
+	return s.restore(snapshotID, names, concurrency, false, nil)
+}
+
+// RestoreWithEdits applies explicit user corrections for this one restore. The
+// source snapshot remains immutable and restoreOne still repeats preflight
+// immediately before creating any session.
+func (s *Store) RestoreWithEdits(snapshotID string, names []string, concurrency int, edits []EntryEdit) RestoreResponse {
+	return s.restore(snapshotID, names, concurrency, false, edits)
 }
 
 // RestoreCapturedLaunch is the explicit-review escape hatch for a panel whose
@@ -782,10 +797,10 @@ func (s *Store) RestoreCapturedLaunch(snapshotID string, names []string, concurr
 			Results:    []RestoreResult{{State: RestoreFailed, Detail: "An explicitly reviewed panel name is required."}},
 		}
 	}
-	return s.restore(snapshotID, names, concurrency, true)
+	return s.restore(snapshotID, names, concurrency, true, nil)
 }
 
-func (s *Store) restore(snapshotID string, names []string, concurrency int, useCapturedLaunch bool) RestoreResponse {
+func (s *Store) restore(snapshotID string, names []string, concurrency int, useCapturedLaunch bool, edits []EntryEdit) RestoreResponse {
 	status := s.Status(snapshotID)
 	response := RestoreResponse{SnapshotID: snapshotID}
 	if status.Error != "" || status.Snapshot == nil {
@@ -801,8 +816,25 @@ func (s *Store) restore(snapshotID string, names []string, concurrency int, useC
 	}
 	var panels []PanelStatus
 	found := map[string]bool{}
+	editByPanel := map[string]EntryEdit{}
+	for _, edit := range edits {
+		editByPanel[edit.Panel] = edit
+	}
+	var invalidEdits []RestoreResult
 	for _, panel := range status.Panels {
 		if (len(wanted) == 0 && panel.State == PanelReady) || wanted[panel.Name] {
+			if edit, ok := editByPanel[panel.Name]; ok {
+				entry, err := applyEntryEdit(panel.Entry, edit)
+				if err != nil {
+					invalidEdits = append(invalidEdits, RestoreResult{Name: panel.Name, State: RestoreFailed, Detail: err.Error()})
+					found[panel.Name] = true
+					continue
+				}
+				panel.Entry = entry
+				// restoreOne performs authoritative preflight again against current
+				// state; this only allows an edited formerly-blocked row to reach it.
+				panel.State = PanelReady
+			}
 			if useCapturedLaunch && (panel.State != PanelUnsupported || !panel.CapturedLaunchReviewable) {
 				panel.State = PanelUnsupported
 				panel.Detail = "This panel does not have an explicitly reviewable captured launch."
@@ -840,6 +872,7 @@ func (s *Store) restore(snapshotID string, names []string, concurrency int, useC
 		}(index, panel)
 	}
 	wg.Wait()
+	results = append(results, invalidEdits...)
 	targetServer := ""
 	var targetCaptureErr error
 	if s.Cluster != "" && !sameRecoveryHost(status.Snapshot.Host, s.Host) {

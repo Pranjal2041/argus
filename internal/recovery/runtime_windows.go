@@ -156,6 +156,14 @@ func (s *Store) restoreOneRuntime(panel PanelStatus) RestoreResult {
 }
 
 func (s *Store) Restore(snapshotID string, names []string, concurrency int) RestoreResponse {
+	return s.restoreRuntime(snapshotID, names, concurrency, nil)
+}
+
+func (s *Store) RestoreWithEdits(snapshotID string, names []string, concurrency int, edits []EntryEdit) RestoreResponse {
+	return s.restoreRuntime(snapshotID, names, concurrency, edits)
+}
+
+func (s *Store) restoreRuntime(snapshotID string, names []string, concurrency int, edits []EntryEdit) RestoreResponse {
 	status := s.Status(snapshotID)
 	if status.Error != "" || status.Snapshot == nil {
 		detail := status.Error
@@ -170,8 +178,23 @@ func (s *Store) Restore(snapshotID string, names []string, concurrency int) Rest
 	}
 	var panels []PanelStatus
 	found := map[string]bool{}
+	editByPanel := map[string]EntryEdit{}
+	for _, edit := range edits {
+		editByPanel[edit.Panel] = edit
+	}
+	var invalidEdits []RestoreResult
 	for _, panel := range status.Panels {
 		if (len(wanted) == 0 && panel.State == PanelReady) || wanted[panel.Name] {
+			if edit, ok := editByPanel[panel.Name]; ok {
+				entry, err := applyEntryEdit(panel.Entry, edit)
+				if err != nil {
+					invalidEdits = append(invalidEdits, RestoreResult{Name: panel.Name, State: RestoreFailed, Detail: err.Error()})
+					found[panel.Name] = true
+					continue
+				}
+				panel.Entry = entry
+				panel.State = PanelReady
+			}
 			panels = append(panels, panel)
 			found[panel.Name] = true
 		}
@@ -195,6 +218,7 @@ func (s *Store) Restore(snapshotID string, names []string, concurrency int) Rest
 		}(index, panel)
 	}
 	wait.Wait()
+	results = append(results, invalidEdits...)
 	for _, name := range names {
 		if !found[name] {
 			results = append(results, RestoreResult{Name: name, State: RestoreFailed, Detail: "Panel is not present in this recovery snapshot."})

@@ -128,7 +128,9 @@ func cmdRecoveryRemote(args []string) int {
 		_ = restoreFlags.Bool("bootstrap", false, "broker is already running for remote restore")
 		captured := restoreFlags.Bool("use-captured-launch", false, "run explicitly reviewed captured launch")
 		var sessions recoverySessionList
+		var editJSON recoverySessionList
 		restoreFlags.Var(&sessions, "session", "panel name to restore")
+		restoreFlags.Var(&editJSON, "edit-json", "explicit JSON correction for one panel")
 		if restoreFlags.Parse(rest[1:]) != nil {
 			return 2
 		}
@@ -136,9 +138,19 @@ func cmdRecoveryRemote(args []string) int {
 			fmt.Fprintln(os.Stderr, "recovery remote restore: --snapshot is required")
 			return 2
 		}
+		edits := make([]json.RawMessage, 0, len(editJSON))
+		for _, value := range editJSON {
+			var edit json.RawMessage
+			if !json.Valid([]byte(value)) {
+				fmt.Fprintln(os.Stderr, "recovery restore: --edit-json must contain valid JSON")
+				return 2
+			}
+			edit = append(edit, value...)
+			edits = append(edits, edit)
+		}
 		body, err := json.Marshal(map[string]any{
 			"snapshotId": *snapshot, "sessions": []string(sessions),
-			"concurrency": *parallel, "useCapturedLaunch": *captured,
+			"concurrency": *parallel, "useCapturedLaunch": *captured, "edits": edits,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "recovery restore: %v\n", err)

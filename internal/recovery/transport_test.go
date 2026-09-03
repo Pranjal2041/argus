@@ -110,6 +110,36 @@ func TestStatusDoesNotAdvertiseStaleCurrentSnapshotAfterIntentionalClose(t *test
 	}
 }
 
+func TestMissingDirectorySuggestsOnlyAvailableFolderFromExplicitLineage(t *testing.T) {
+	now := time.Date(2026, 9, 3, 18, 0, 0, 0, time.UTC)
+	store := independentTransportStore(t.TempDir(), "destination", "ut", now)
+	available := t.TempDir()
+	ancestor := Snapshot{
+		SchemaVersion: SchemaVersion, ID: snapshotID("ancestor"), Host: "source", Socket: "ut",
+		ServerID: "ancestor", CapturedAt: now.Add(-time.Hour),
+		Entries: []Entry{{Name: "research", Directory: available, Agent: AgentShell}},
+	}
+	broken := Snapshot{
+		SchemaVersion: SchemaVersion, ID: snapshotID("broken"), Host: "source", Socket: "ut",
+		ServerID: "broken", CapturedAt: now, RecoverySourceID: ancestor.ID,
+		Entries: []Entry{{Name: "research", Directory: "/missing/virtualized/path", Agent: AgentShell}},
+	}
+	if err := store.saveLocked(ancestor); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.saveLocked(broken); err != nil {
+		t.Fatal(err)
+	}
+	status := store.statusWithCurrent(broken.ID, map[string]Entry{}, "current")
+	if len(status.Panels) != 1 || status.Panels[0].State != PanelMissingDirectory ||
+		status.Panels[0].SuggestedDirectory != available {
+		t.Fatalf("lineage suggestion = %#v", status.Panels)
+	}
+	if status.Panels[0].Directory != broken.Entries[0].Directory {
+		t.Fatalf("captured directory was silently rewritten: %#v", status.Panels[0])
+	}
+}
+
 func TestSnapshotTransportRejectsInvalidIdentitySocketAndAge(t *testing.T) {
 	now := time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC)
 	store := independentTransportStore(t.TempDir(), "destination", "ut", now)
