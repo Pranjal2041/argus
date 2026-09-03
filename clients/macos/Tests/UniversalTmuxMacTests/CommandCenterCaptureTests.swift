@@ -2,6 +2,32 @@ import XCTest
 @testable import UniversalTmuxMac
 
 final class CommandCenterCaptureTests: XCTestCase {
+    func testStatusCommandPinsLunaHighAndKeepsConversationDurable() {
+        let output = URL(fileURLWithPath: "/tmp/status.txt")
+        let initial = CodexStatusCommand.initialArguments(finalMessageURL: output)
+        let resumed = CodexStatusCommand.resumeArguments(
+            sessionID: "019f630d-5663-7722-bc65-5fd298a497ec",
+            finalMessageURL: output
+        )
+
+        XCTAssertTrue(initial.contains("gpt-5.6-luna"))
+        XCTAssertTrue(initial.contains("model_reasoning_effort=\"high\""))
+        XCTAssertTrue(initial.contains("read-only"))
+        XCTAssertFalse(initial.contains("--ephemeral"))
+        XCTAssertEqual(Array(resumed.prefix(2)), ["exec", "resume"])
+        XCTAssertTrue(resumed.contains("019f630d-5663-7722-bc65-5fd298a497ec"))
+        XCTAssertTrue(resumed.contains("gpt-5.6-luna"))
+    }
+
+    func testStatusCommandParsesCodexSessionID() {
+        let stream = #"{"type":"thread.started","thread_id":"019f630d-5663-7722-bc65-5fd298a497ec"}"#
+            + "\n" + #"{"type":"turn.started"}"#
+        XCTAssertEqual(
+            CodexStatusCommand.sessionID(in: stream),
+            "019f630d-5663-7722-bc65-5fd298a497ec"
+        )
+    }
+
     func testWorkingChromeOnlyCaptureIsTransient() {
         let chrome = """
         ◦                 •
