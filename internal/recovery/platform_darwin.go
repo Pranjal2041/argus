@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,43 @@ func platformProcessStart(pid int) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return time.Unix(process.Proc.P_starttime.Sec, int64(process.Proc.P_starttime.Usec)*1000), nil
+}
+
+func platformProcessDirectory(pid int) (string, error) {
+	directories := platformProcessDirectories([]int{pid})
+	if directory := directories[pid]; directory != "" {
+		return directory, nil
+	}
+	return "", fmt.Errorf("process %d has no reported working directory", pid)
+}
+
+func platformProcessDirectories(pids []int) map[int]string {
+	directories := make(map[int]string, len(pids))
+	if len(pids) == 0 {
+		return directories
+	}
+	values := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if pid > 0 {
+			values = append(values, strconv.Itoa(pid))
+		}
+	}
+	if len(values) == 0 {
+		return directories
+	}
+	out, err := exec.Command(toolPath("lsof"), "-a", "-p", strings.Join(values, ","), "-d", "cwd", "-FnP").Output()
+	if err != nil {
+		return directories
+	}
+	currentPID := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "p") {
+			currentPID, _ = strconv.Atoi(line[1:])
+		} else if currentPID > 0 && strings.HasPrefix(line, "n/") {
+			directories[currentPID] = filepath.Clean(line[1:])
+		}
+	}
+	return directories
 }
 
 func darwinProcArgs(pid int) ([]byte, error) {

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -226,9 +227,24 @@ func (s *Store) saveCaptured(snapshot *Snapshot) error {
 
 func entriesMatch(expected, live Entry) bool {
 	if expected.Agent == AgentShell {
-		return live.Agent == AgentShell && filepath.Clean(live.Directory) == filepath.Clean(expected.Directory)
+		return live.Agent == AgentShell && equivalentDirectory(live.Directory, expected.Directory)
 	}
 	return expected.SessionID != "" && live.Agent == expected.Agent && live.SessionID == expected.SessionID
+}
+
+func equivalentDirectory(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if resolved, err := filepath.EvalSymlinks(left); err == nil {
+		left = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(right); err == nil {
+		right = resolved
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func entriesSatisfied(expected, live []Entry) bool {

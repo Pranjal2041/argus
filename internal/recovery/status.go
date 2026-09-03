@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -149,6 +150,7 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 	}
 	for _, entry := range s.remainingEntries(*selected) {
 		panel := preflight(entry, current)
+		panel.SuggestedDirectory, panel.SuggestedSessionID = recoverySuggestions(*selected, entry, allSnapshots)
 		if panel.State == PanelReady {
 			status.ReadyCount++
 		}
@@ -156,4 +158,47 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 	}
 	status.Available = status.ReadyCount > 0
 	return status
+}
+
+// recoverySuggestions follows only explicit recovery lineage. It never guesses
+// from an unrelated host or similarly named panel. This lets a user repair an
+// old snapshot affected by bad terminal-reported metadata while keeping the
+// captured entry immutable and making the correction explicit.
+func recoverySuggestions(snapshot Snapshot, entry Entry, all []Snapshot) (directory, sessionID string) {
+	needsDirectory := false
+	if info, err := os.Stat(entry.Directory); err != nil || !info.IsDir() {
+		needsDirectory = true
+	}
+	needsSessionID := entry.Agent != AgentShell && entry.SessionID == ""
+	if !needsDirectory && !needsSessionID {
+		return "", ""
+	}
+	byID := make(map[string]Snapshot, len(all))
+	for _, item := range all {
+		byID[item.ID] = item
+	}
+	seen := map[string]bool{snapshot.ID: true}
+	for sourceID := snapshot.RecoverySourceID; sourceID != "" && !seen[sourceID]; {
+		seen[sourceID] = true
+		source, ok := byID[sourceID]
+		if !ok {
+			break
+		}
+		for _, candidate := range source.Entries {
+			if candidate.Name != entry.Name {
+				continue
+			}
+			if needsDirectory && directory == "" && candidate.Directory != "" && candidate.Directory != entry.Directory {
+				if info, err := os.Stat(candidate.Directory); err == nil && info.IsDir() {
+					directory = candidate.Directory
+				}
+			}
+			if needsSessionID && sessionID == "" && candidate.Agent == entry.Agent && candidate.SessionID != "" {
+				sessionID = candidate.SessionID
+			}
+			break
+		}
+		sourceID = source.RecoverySourceID
+	}
+	return directory, sessionID
 }

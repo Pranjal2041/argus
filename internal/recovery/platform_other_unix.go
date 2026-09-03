@@ -18,6 +18,14 @@ func platformBootID() (string, error) {
 
 func platformProcessStart(pid int) (time.Time, error) { return processStartViaPS(pid) }
 
+func platformProcessDirectory(pid int) (string, error) {
+	return "", fmt.Errorf("exact process working directory is not implemented for pid %d", pid)
+}
+
+func platformProcessDirectories(pids []int) map[int]string {
+	return map[int]string{}
+}
+
 func platformProcessState(pid int) (processState, error) {
 	out, err := exec.Command(toolPath("ps"), "-ww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {

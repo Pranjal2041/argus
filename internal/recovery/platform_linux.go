@@ -23,6 +23,20 @@ func platformProcessStart(pid int) (time.Time, error) {
 	return processStartViaPS(pid)
 }
 
+func platformProcessDirectory(pid int) (string, error) {
+	return os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+}
+
+func platformProcessDirectories(pids []int) map[int]string {
+	directories := make(map[int]string, len(pids))
+	for _, pid := range pids {
+		if directory, err := platformProcessDirectory(pid); err == nil {
+			directories[pid] = directory
+		}
+	}
+	return directories
+}
+
 func platformProcessState(pid int) (processState, error) {
 	root := filepath.Join("/proc", strconv.Itoa(pid))
 	executable, err := os.Readlink(filepath.Join(root, "exe"))

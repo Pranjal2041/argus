@@ -15,6 +15,9 @@ const (
 	AgentShell  = "shell"
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
+	// Explicit user edits are authoritative restore input. They are never
+	// written back into the immutable captured snapshot.
+	SessionEvidenceUserEdit = "user-edit"
 )
 
 // AgentSession is the conversation identity proven from process-owned state for
@@ -100,7 +103,24 @@ type PanelStatus struct {
 	ResumeArgv               []string `json:"resumeArgv,omitempty"`
 	RestoreCommand           string   `json:"restoreCommand,omitempty"`
 	CapturedLaunchReviewable bool     `json:"capturedLaunchReviewable,omitempty"`
+	SuggestedDirectory       string   `json:"suggestedDirectory,omitempty"`
+	SuggestedSessionID       string   `json:"suggestedSessionId,omitempty"`
 	Selected                 bool     `json:"selected"`
+}
+
+// EntryEdit is an explicit, per-restore correction supplied by the user. Panel
+// identifies the immutable snapshot entry; all other fields are optional so a
+// client can change one fact without reconstructing hidden capture metadata.
+// Arguments excludes argv[0], which is represented by Executable.
+type EntryEdit struct {
+	Panel        string    `json:"panel"`
+	Directory    *string   `json:"directory,omitempty"`
+	Agent        *string   `json:"agent,omitempty"`
+	SessionID    *string   `json:"sessionId,omitempty"`
+	Executable   *string   `json:"executable,omitempty"`
+	Arguments    *[]string `json:"arguments,omitempty"`
+	CodexHome    *string   `json:"codexHome,omitempty"`
+	ClaudeConfig *string   `json:"claudeConfig,omitempty"`
 }
 
 // Status is the startup offer. Available means at least one panel can be

@@ -38,12 +38,17 @@ struct WorkspaceRecoveryPanel: Decodable, Identifiable {
     let name: String
     let directory: String
     let agent: String
+    let executable: String?
     let sessionId: String?
     let argv: [String]?
+    let codexHome: String?
+    let claudeConfig: String?
     let state: String
     let detail: String?
     let restoreCommand: String?
     let capturedLaunchReviewable: Bool?
+    let suggestedDirectory: String?
+    let suggestedSessionId: String?
     let selected: Bool
 
     var id: String { name }
@@ -60,6 +65,55 @@ struct WorkspaceRecoveryPanel: Decodable, Identifiable {
             return args[index + 1].uppercased()
         }
         return nil
+    }
+}
+
+struct WorkspaceRecoveryEdit: Codable, Equatable, Identifiable {
+    let panel: String
+    var directory: String
+    var agent: String
+    var sessionId: String?
+    var executable: String?
+    var arguments: [String]?
+    var codexHome: String?
+    var claudeConfig: String?
+
+    var id: String { panel }
+
+    init(panel: WorkspaceRecoveryPanel) {
+        self.panel = panel.name
+        directory = panel.suggestedDirectory ?? panel.directory
+        agent = panel.agent
+        sessionId = panel.suggestedSessionId ?? panel.sessionId
+        executable = panel.executable ?? panel.argv?.first
+        arguments = panel.argv.map { Array($0.dropFirst()) }
+        codexHome = panel.codexHome
+        claudeConfig = panel.claudeConfig
+    }
+
+    var validationError: String? {
+        let folder = directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folder.isEmpty else { return "Enter the working folder." }
+        guard Self.isAbsolutePath(folder) else { return "The working folder must be an absolute path." }
+        guard ["shell", "codex", "claude"].contains(agent) else { return "Choose a supported session type." }
+        if agent != "shell" {
+            let conversation = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard UUID(uuidString: conversation) != nil else {
+                return "Enter the exact Codex or Claude conversation UUID."
+            }
+            let command = executable?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !command.isEmpty else { return "Enter the agent executable." }
+        }
+        return nil
+    }
+
+    private static func isAbsolutePath(_ path: String) -> Bool {
+        if path.hasPrefix("/") || path.hasPrefix("\\\\") { return true }
+        let scalars = Array(path.unicodeScalars)
+        return scalars.count >= 3
+            && CharacterSet.letters.contains(scalars[0])
+            && scalars[1] == ":"
+            && (scalars[2] == "\\" || scalars[2] == "/")
     }
 }
 
@@ -114,6 +168,7 @@ final class WorkspaceRecoveryController: ObservableObject {
     @Published var targetIssues: [String: String] = [:]
     @Published var reviewedRestoreName: String?
     @Published private(set) var sources: [WorkspaceRecoverySource] = []
+    @Published private(set) var edits: [String: WorkspaceRecoveryEdit] = [:]
 
     private weak var appState: AppState?
     private var machineObservation: AnyCancellable?
@@ -123,7 +178,10 @@ final class WorkspaceRecoveryController: ObservableObject {
     private static let offeredSnapshotKey = "ut.recovery.lastOfferedSnapshot.v1"
 
     var readyPanels: [WorkspaceRecoveryPanel] { status?.panels.filter(\.isReady) ?? [] }
-    var selectedCount: Int { selected.intersection(Set(readyPanels.map(\.name))).count }
+    var restorablePanels: [WorkspaceRecoveryPanel] {
+        status?.panels.filter(isRestorable) ?? []
+    }
+    var selectedCount: Int { selected.intersection(Set(restorablePanels.map(\.name))).count }
     var hasOffer: Bool { status?.available == true && !readyPanels.isEmpty }
     var selectedTarget: WorkspaceRecoveryTarget {
         targets.first(where: { $0.id == selectedTargetID }) ?? Self.localTarget
@@ -180,6 +238,7 @@ final class WorkspaceRecoveryController: ObservableObject {
             self.selectedTargetID = Self.localTarget.id
             self.selectedSourceID = decoded.snapshot?.id ?? ""
             self.selected = Set(decoded.panels.filter(\.isReady).map(\.name))
+            self.edits = [:]
             self.results = [:]
             self.phase = .idle
             self.errorMessage = decoded.error
@@ -222,12 +281,36 @@ final class WorkspaceRecoveryController: ObservableObject {
     }
 
     func toggle(_ name: String) {
-        guard readyPanels.contains(where: { $0.name == name }) else { return }
+        guard restorablePanels.contains(where: { $0.name == name }) else { return }
         if selected.contains(name) { selected.remove(name) } else { selected.insert(name) }
     }
 
-    func selectAll() { selected = Set(readyPanels.map(\.name)) }
+    func selectAll() { selected = Set(restorablePanels.map(\.name)) }
     func selectNone() { selected.removeAll() }
+
+    func edit(for panel: WorkspaceRecoveryPanel) -> WorkspaceRecoveryEdit {
+        edits[panel.name] ?? WorkspaceRecoveryEdit(panel: panel)
+    }
+
+    func isRestorable(_ panel: WorkspaceRecoveryPanel) -> Bool {
+        if panel.isReady { return true }
+        guard isEditable(panel) else { return false }
+        guard let edit = edits[panel.name] else { return false }
+        return edit.validationError == nil
+    }
+
+    func isEditable(_ panel: WorkspaceRecoveryPanel) -> Bool {
+        ["ready", "missing-directory", "missing-session", "unsupported"].contains(panel.state)
+    }
+
+    func saveEdit(_ edit: WorkspaceRecoveryEdit) {
+        guard edit.validationError == nil,
+              let panel = status?.panels.first(where: { $0.name == edit.panel }),
+              isEditable(panel) else { return }
+        edits[edit.panel] = edit
+        selected.insert(edit.panel)
+        results.removeValue(forKey: edit.panel)
+    }
 
     func restoreSelected() {
         guard phase != .restoring,
@@ -245,6 +328,15 @@ final class WorkspaceRecoveryController: ObservableObject {
         ]
         for name in selected.sorted() {
             arguments += ["--session", name]
+            if let edit = edits[name] {
+                guard let data = try? JSONEncoder().encode(edit),
+                      let json = String(data: data, encoding: .utf8) else {
+                    phase = .idle
+                    errorMessage = "The edited recovery details for \(name) could not be encoded."
+                    return
+                }
+                arguments += ["--edit-json", json]
+            }
         }
         if !selectedTarget.isLocal { arguments += ["--bootstrap=false"] }
         runRecovery(arguments, on: selectedTarget, timeout: 180) { [weak self] output in
@@ -317,6 +409,7 @@ final class WorkspaceRecoveryController: ObservableObject {
         phase = .checking
         status = nil
         selected = []
+        edits = [:]
         errorMessage = nil
         statusByTarget = [:]
         sources = []
@@ -436,6 +529,7 @@ final class WorkspaceRecoveryController: ObservableObject {
         status = decoded
         selectedSourceID = sourceID ?? decoded.snapshot?.id ?? ""
         selected = Set(decoded.panels.filter(\.isReady).map(\.name))
+        edits = [:]
         results = [:]
         reviewedRestoreName = nil
         phase = .idle
@@ -700,6 +794,7 @@ struct WorkspaceRecoveryView: View {
     @ObservedObject var recovery: WorkspaceRecoveryController
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     @State private var panelUnderReview: WorkspaceRecoveryPanel?
+    @State private var panelUnderEdit: WorkspaceRecoveryPanel?
 
     private var snapshot: WorkspaceRecoverySnapshot? { recovery.status?.snapshot }
     private var panels: [WorkspaceRecoveryPanel] { recovery.status?.panels ?? [] }
@@ -731,6 +826,14 @@ struct WorkspaceRecoveryView: View {
                 panel: panel,
                 scale: uiScale,
                 launchCapturedAction: { recovery.restoreCapturedLaunch(panel) }
+            )
+        }
+        .sheet(item: $panelUnderEdit) { panel in
+            WorkspaceRecoveryEditView(
+                panel: panel,
+                edit: recovery.edit(for: panel),
+                scale: uiScale,
+                saveAction: recovery.saveEdit
             )
         }
     }
@@ -917,12 +1020,16 @@ struct WorkspaceRecoveryView: View {
                     WorkspaceRecoveryRow(
                         panel: panel,
                         isSelected: recovery.selected.contains(panel.name),
+                        edit: recovery.edits[panel.name],
+                        isRestorable: recovery.isRestorable(panel),
+                        isEditable: recovery.isEditable(panel),
                         result: recovery.results[panel.name],
                         isRestoring: recovery.phase == .restoring,
                         isReviewedRestore: recovery.reviewedRestoreName == panel.name,
                         scale: uiScale,
                         action: { recovery.toggle(panel.name) },
-                        reviewAction: { panelUnderReview = panel }
+                        reviewAction: { panelUnderReview = panel },
+                        editAction: { panelUnderEdit = panel }
                     )
                 }
             }
@@ -1036,31 +1143,29 @@ struct WorkspaceRecoveryView: View {
 private struct WorkspaceRecoveryRow: View {
     let panel: WorkspaceRecoveryPanel
     let isSelected: Bool
+    let edit: WorkspaceRecoveryEdit?
+    let isRestorable: Bool
+    let isEditable: Bool
     let result: WorkspaceRestoreResult?
     let isRestoring: Bool
     let isReviewedRestore: Bool
     let scale: Double
     let action: () -> Void
     let reviewAction: () -> Void
+    let editAction: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        Group {
-            if panel.isReady {
-                Button(action: action) { rowContent }
-                    .buttonStyle(.plain)
-                    .disabled(isRestoring || result != nil)
-            } else {
-                rowContent
-            }
-        }
+        rowContent
         .onHover { hovering = $0 }
         .help(panel.detail ?? "")
     }
 
     private var rowContent: some View {
         HStack(spacing: 12 * scale) {
-            selectionMark
+            Button(action: action) { selectionMark }
+                .buttonStyle(.plain)
+                .disabled(!isRestorable || isRestoring || result != nil)
             Circle().fill(agentColor).frame(width: 7 * scale, height: 7 * scale)
             VStack(alignment: .leading, spacing: 4 * scale) {
                 HStack(spacing: 7 * scale) {
@@ -1080,13 +1185,13 @@ private struct WorkspaceRecoveryRow: View {
                             .background(Capsule().fill(Theme.waiting.opacity(0.12)))
                     }
                 }
-                Text(panel.directory)
+                Text(edit?.directory ?? panel.directory)
                     .font(.system(size: 10.5 * scale, design: .monospaced))
                     .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if !panel.isReady, let detail = panel.detail, !detail.isEmpty {
-                    Text(detail)
+                    Text(edit == nil ? detail : "Edited details will be validated on the destination before launch.")
                         .font(.system(size: 10.5 * scale))
                         .foregroundStyle(stateColor)
                         .lineLimit(2)
@@ -1098,19 +1203,19 @@ private struct WorkspaceRecoveryRow: View {
         }
         .padding(.horizontal, 13 * scale)
         .padding(.vertical, 10 * scale)
-        .background(hovering && panel.isReady ? Theme.selection.opacity(0.48) : Color.clear)
+        .background(hovering && isRestorable ? Theme.selection.opacity(0.48) : Color.clear)
         .contentShape(Rectangle())
     }
 
     private var selectionMark: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 4 * scale, style: .continuous)
-                .fill(isSelected && panel.isReady ? Theme.accent : Theme.surface)
+                .fill(isSelected && isRestorable ? Theme.accent : Theme.surface)
                 .overlay(
                     RoundedRectangle(cornerRadius: 4 * scale, style: .continuous)
-                        .stroke(panel.isReady ? Theme.accent.opacity(isSelected ? 0 : 0.55) : Theme.border, lineWidth: 1)
+                        .stroke(isRestorable ? Theme.accent.opacity(isSelected ? 0 : 0.55) : Theme.border, lineWidth: 1)
                 )
-            if isSelected && panel.isReady {
+            if isSelected && isRestorable {
                 Image(systemName: "checkmark")
                     .font(.system(size: 9 * scale, weight: .bold))
                     .foregroundStyle(Theme.current.isLight ? Color.white : Theme.appBackground)
@@ -1131,12 +1236,24 @@ private struct WorkspaceRecoveryRow: View {
                 Text("Starting")
             }
             .foregroundStyle(Theme.accent)
-        } else if panel.requiresReview {
-            Button("Review", action: reviewAction)
-                .buttonStyle(RecoverySecondaryButtonStyle(scale: scale))
         } else {
-            Text(stateTitle)
-                .foregroundStyle(panel.isReady ? Theme.textSecondary : stateColor)
+            HStack(spacing: 8 * scale) {
+                if panel.requiresReview {
+                    Button("Review", action: reviewAction)
+                        .buttonStyle(RecoverySecondaryButtonStyle(scale: scale))
+                } else {
+                    Text(edit == nil ? stateTitle : "Edited · Ready")
+                        .foregroundStyle(edit == nil ? (panel.isReady ? Theme.textSecondary : stateColor) : Theme.attached)
+                }
+                if isEditable {
+                    Button(action: editAction) {
+                        Label(edit == nil ? "Edit" : "Edit details", systemImage: "pencil")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(RecoverySecondaryButtonStyle(scale: scale))
+                    .disabled(isRestoring)
+                }
+            }
         }
     }
 
@@ -1161,11 +1278,246 @@ private struct WorkspaceRecoveryRow: View {
     }
 
     private var agentTitle: String {
-        switch panel.agent { case "claude": return "CLAUDE"; case "codex": return "CODEX"; default: return "SHELL" }
+        switch edit?.agent ?? panel.agent { case "claude": return "CLAUDE"; case "codex": return "CODEX"; default: return "SHELL" }
     }
 
     private var agentColor: Color {
-        switch panel.agent { case "claude": return Theme.waiting; case "codex": return Theme.running; default: return Theme.textTertiary }
+        switch edit?.agent ?? panel.agent { case "claude": return Theme.waiting; case "codex": return Theme.running; default: return Theme.textTertiary }
+    }
+}
+
+struct WorkspaceRecoveryEditView: View {
+    let panel: WorkspaceRecoveryPanel
+    let scale: Double
+    let saveAction: (WorkspaceRecoveryEdit) -> Void
+    @State private var edit: WorkspaceRecoveryEdit
+    @Environment(\.dismiss) private var dismiss
+
+    init(
+        panel: WorkspaceRecoveryPanel,
+        edit: WorkspaceRecoveryEdit,
+        scale: Double,
+        saveAction: @escaping (WorkspaceRecoveryEdit) -> Void
+    ) {
+        self.panel = panel
+        self.scale = scale
+        self.saveAction = saveAction
+        _edit = State(initialValue: edit)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider().overlay(Theme.border)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18 * scale) {
+                    if let detail = panel.detail, !panel.isReady {
+                        notice(detail)
+                    }
+                    editSection("WORKING LOCATION") {
+                        editField("Absolute folder", text: $edit.directory, monospaced: true)
+                        if let suggestion = panel.suggestedDirectory,
+                           suggestion != panel.directory {
+                            VStack(alignment: .leading, spacing: 5 * scale) {
+                                Label("Available in this workspace’s snapshot lineage", systemImage: "clock.arrow.circlepath")
+                                    .font(.system(size: 10 * scale, weight: .medium))
+                                    .foregroundStyle(Theme.attached)
+                                Text(suggestion)
+                                    .font(.system(size: 10 * scale, design: .monospaced))
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .textSelection(.enabled)
+                                HStack {
+                                    Button("Use suggested folder") { edit.directory = suggestion }
+                                    Button("Use captured folder") { edit.directory = panel.directory }
+                                }
+                                .buttonStyle(RecoveryTextButtonStyle(scale: scale))
+                            }
+                        }
+                    }
+
+                    editSection("SESSION") {
+                        Text("Session type")
+                            .font(.system(size: 10 * scale, weight: .medium))
+                            .foregroundStyle(Theme.textTertiary)
+                        HStack(spacing: 3 * scale) {
+                            sessionTypeButton("shell", title: "Shell")
+                            sessionTypeButton("codex", title: "Codex")
+                            sessionTypeButton("claude", title: "Claude")
+                        }
+                        .padding(3 * scale)
+                        .frame(maxWidth: .infinity)
+                        .background(RoundedRectangle(cornerRadius: 7 * scale).fill(Theme.sidebarBackground))
+                        .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(Theme.border, lineWidth: 1))
+                        if edit.agent != "shell" {
+                            editField("Conversation UUID", text: optionalBinding(\.sessionId), monospaced: true)
+                            editField("Executable", text: optionalBinding(\.executable), monospaced: true)
+                            VStack(alignment: .leading, spacing: 6 * scale) {
+                                Text("Arguments · one per line")
+                                    .font(.system(size: 10 * scale, weight: .medium))
+                                    .foregroundStyle(Theme.textTertiary)
+                                TextEditor(text: argumentsBinding)
+                                    .font(.system(size: 11 * scale, design: .monospaced))
+                                    .scrollContentBackground(.hidden)
+                                    .padding(7 * scale)
+                                    .frame(minHeight: 74 * scale)
+                                    .background(RoundedRectangle(cornerRadius: 7 * scale).fill(Theme.sidebarBackground))
+                                    .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(Theme.border, lineWidth: 1))
+                            }
+                            if edit.agent == "codex" {
+                                editField("CODEX_HOME · optional", text: optionalBinding(\.codexHome), monospaced: true)
+                            } else {
+                                editField("Claude config directory · optional", text: optionalBinding(\.claudeConfig), monospaced: true)
+                            }
+                        }
+                    }
+
+                    if let error = edit.validationError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11 * scale, weight: .medium))
+                            .foregroundStyle(Theme.waiting)
+                    }
+                }
+                .padding(22 * scale)
+            }
+            Divider().overlay(Theme.border)
+            HStack {
+                Text("The saved snapshot is not modified.")
+                    .font(.system(size: 10.5 * scale))
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(RecoverySecondaryButtonStyle(scale: scale))
+                Button("Use these details") {
+                    saveAction(normalizedEdit)
+                    dismiss()
+                }
+                .buttonStyle(RecoveryPrimaryButtonStyle(enabled: edit.validationError == nil, scale: scale))
+                .disabled(edit.validationError != nil)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 22 * scale)
+            .padding(.vertical, 15 * scale)
+        }
+        .frame(width: 620 * scale, height: 640 * scale)
+        .background(Theme.appBackground)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12 * scale) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 17 * scale, weight: .medium))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 38 * scale, height: 38 * scale)
+                .background(RoundedRectangle(cornerRadius: 9 * scale).fill(Theme.accent.opacity(0.12)))
+            VStack(alignment: .leading, spacing: 2 * scale) {
+                Text("EDIT RESTORE DETAILS")
+                    .font(.system(size: 10 * scale, weight: .semibold, design: .monospaced))
+                    .tracking(1.0 * scale)
+                    .foregroundStyle(Theme.textTertiary)
+                Text(panel.name)
+                    .font(.system(size: 19 * scale, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            Spacer()
+        }
+        .padding(22 * scale)
+    }
+
+    private func notice(_ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 9 * scale) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(Theme.waiting)
+            Text(detail)
+                .font(.system(size: 11 * scale))
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(12 * scale)
+        .background(RoundedRectangle(cornerRadius: 8 * scale).fill(Theme.waiting.opacity(0.09)))
+    }
+
+    private func editSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10 * scale) {
+            Text(title)
+                .font(.system(size: 9 * scale, weight: .semibold, design: .monospaced))
+                .tracking(0.8 * scale)
+                .foregroundStyle(Theme.textTertiary)
+            VStack(alignment: .leading, spacing: 12 * scale, content: content)
+                .padding(13 * scale)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 9 * scale).fill(Theme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 9 * scale).stroke(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private func editField(_ title: String, text: Binding<String>, monospaced: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6 * scale) {
+            Text(title)
+                .font(.system(size: 10 * scale, weight: .medium))
+                .foregroundStyle(Theme.textTertiary)
+            TextField("", text: text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5 * scale, design: monospaced ? .monospaced : .default))
+                .padding(.horizontal, 9 * scale)
+                .frame(height: 32 * scale)
+                .background(RoundedRectangle(cornerRadius: 7 * scale).fill(Theme.sidebarBackground))
+                .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private func sessionTypeButton(_ agent: String, title: String) -> some View {
+        Button {
+            edit.agent = agent
+        } label: {
+            Text(title)
+                .font(.system(size: 11 * scale, weight: .semibold))
+                .foregroundStyle(edit.agent == agent ? Theme.textPrimary : Theme.textSecondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 27 * scale)
+                .background(
+                    RoundedRectangle(cornerRadius: 5 * scale)
+                        .fill(edit.agent == agent ? Theme.selection : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func optionalBinding(_ keyPath: WritableKeyPath<WorkspaceRecoveryEdit, String?>) -> Binding<String> {
+        Binding(
+            get: { edit[keyPath: keyPath] ?? "" },
+            set: { edit[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
+        )
+    }
+
+    private var argumentsBinding: Binding<String> {
+        Binding(
+            get: { edit.arguments?.joined(separator: "\n") ?? "" },
+            set: { value in
+                edit.arguments = value.isEmpty
+                    ? []
+                    : value.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            }
+        )
+    }
+
+    private var normalizedEdit: WorkspaceRecoveryEdit {
+        var value = edit
+        value.directory = value.directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.agent == "shell" {
+            value.sessionId = nil
+            value.executable = nil
+            value.arguments = nil
+            value.codexHome = nil
+            value.claudeConfig = nil
+        } else {
+            value.sessionId = value.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+            value.executable = value.executable?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
     }
 }
 

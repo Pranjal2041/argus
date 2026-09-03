@@ -229,6 +229,53 @@ final class WorkspaceRecoveryTests: XCTestCase {
     }
 
     @MainActor
+    func testMissingFolderBecomesRestorableOnlyAfterExplicitValidEdit() throws {
+        let json = #"""
+        {
+          "available": false,
+          "snapshot": {"id":"s","host":"babel-p9-28","socket":"ut","capturedAt":"2026-09-03T12:00:00Z"},
+          "readyCount": 0,
+          "panels": [
+            {
+              "name":"research",
+              "directory":"/sandbox/research",
+              "suggestedDirectory":"/data/user_data/pranjala/research",
+              "agent":"codex",
+              "executable":"/home/pranjala/.local/bin/codex",
+              "argv":["/home/pranjala/.local/bin/codex","--yolo","resume","019fb048-79c0-7600-827c-9400d729dbcb"],
+              "sessionId":"019fb048-79c0-7600-827c-9400d729dbcb",
+              "state":"missing-directory",
+              "detail":"The original working directory is no longer available.",
+              "selected":false
+            }
+          ]
+        }
+        """#.data(using: .utf8)!
+        let controller = WorkspaceRecoveryController()
+        controller.status = try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: json)
+        let panel = try XCTUnwrap(controller.status?.panels.first)
+
+        controller.selectAll()
+        XCTAssertTrue(controller.selected.isEmpty)
+        var edit = controller.edit(for: panel)
+        XCTAssertEqual(edit.directory, "/data/user_data/pranjala/research")
+        XCTAssertEqual(edit.agent, "codex")
+        XCTAssertEqual(edit.sessionId, "019fb048-79c0-7600-827c-9400d729dbcb")
+        XCTAssertEqual(edit.executable, "/home/pranjala/.local/bin/codex")
+        XCTAssertNil(edit.validationError)
+
+        edit.arguments = ["--yolo"]
+        controller.saveEdit(edit)
+        XCTAssertEqual(controller.selected, ["research"])
+        XCTAssertTrue(controller.isRestorable(panel))
+
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edit)) as? [String: Any]
+        XCTAssertEqual(encoded?["panel"] as? String, "research")
+        XCTAssertEqual(encoded?["directory"] as? String, "/data/user_data/pranjala/research")
+        XCTAssertEqual(encoded?["arguments"] as? [String], ["--yolo"])
+    }
+
+    @MainActor
     func testControllerKeepsUnsupportedMachineVisibleButCannotSelectIt() {
         let controller = WorkspaceRecoveryController()
         controller.targets = [
@@ -342,6 +389,43 @@ final class WorkspaceRecoveryTests: XCTestCase {
         window.orderOut(nil)
         window.contentView = nil
         if let path = ProcessInfo.processInfo.environment["UT_RECOVERY_REVIEW_SCREENSHOT"],
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    @MainActor
+    func testRecoveryEditorRendersEveryPortableCorrectionField() throws {
+        let json = #"""
+        {
+          "name":"research",
+          "directory":"/sandbox/research",
+          "suggestedDirectory":"/data/user_data/pranjala/research",
+          "agent":"codex",
+          "sessionId":"019fb048-79c0-7600-827c-9400d729dbcb",
+          "executable":"/home/pranjala/.local/bin/codex",
+          "argv":["/home/pranjala/.local/bin/codex","--yolo","resume","019fb048-79c0-7600-827c-9400d729dbcb"],
+          "codexHome":"/home/pranjala/.codex2",
+          "state":"missing-directory",
+          "detail":"The original working directory is no longer available.",
+          "selected":false
+        }
+        """#.data(using: .utf8)!
+        let panel = try JSONDecoder().decode(WorkspaceRecoveryPanel.self, from: json)
+        let host = NSHostingView(rootView: WorkspaceRecoveryEditView(
+            panel: panel,
+            edit: WorkspaceRecoveryEdit(panel: panel),
+            scale: 1,
+            saveAction: { _ in }
+        ))
+        host.frame = NSRect(x: 0, y: 0, width: 620, height: 640)
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThan(host.fittingSize.width, 0)
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+        if let path = ProcessInfo.processInfo.environment["UT_RECOVERY_EDIT_SCREENSHOT"],
            let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
             host.cacheDisplay(in: host.bounds, to: bitmap)
             try bitmap.representation(using: .png, properties: [:])?

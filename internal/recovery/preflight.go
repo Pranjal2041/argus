@@ -1,6 +1,11 @@
 package recovery
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // preflight defines restore safety once for every session backend. A backend
 // may supply richer agent evidence, but name conflicts, directories, transcript
@@ -30,7 +35,7 @@ func preflight(entry Entry, current map[string]Entry) PanelStatus {
 		return panel
 	}
 	if entry.Agent != AgentShell {
-		if entry.SessionPath == "" && entry.SessionEvidence != "resume-argv" {
+		if entry.SessionPath == "" && entry.SessionEvidence != "resume-argv" && entry.SessionEvidence != SessionEvidenceUserEdit {
 			panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
 			panel.State = PanelMissingSession
 			if panel.CapturedLaunchReviewable {
@@ -39,7 +44,7 @@ func preflight(entry Entry, current map[string]Entry) PanelStatus {
 			panel.Detail = "The conversation transcript was not found when this snapshot was recorded."
 			return panel
 		}
-		if entry.SessionEvidence != "resume-argv" {
+		if entry.SessionEvidence != "resume-argv" && entry.SessionEvidence != SessionEvidenceUserEdit {
 			if _, err := os.Stat(entry.SessionPath); err != nil {
 				panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
 				panel.State = PanelMissingSession
@@ -71,4 +76,69 @@ func preflight(entry Entry, current map[string]Entry) PanelStatus {
 		panel.Detail += " " + entry.CaptureNotice
 	}
 	return panel
+}
+
+func applyEntryEdit(entry Entry, edit EntryEdit) (Entry, error) {
+	if strings.TrimSpace(edit.Panel) == "" || edit.Panel != entry.Name {
+		return Entry{}, fmt.Errorf("recovery edit does not identify panel %q", entry.Name)
+	}
+	if edit.Directory != nil {
+		directory := strings.TrimSpace(*edit.Directory)
+		if directory == "" || !filepath.IsAbs(directory) {
+			return Entry{}, fmt.Errorf("edited working directory must be an absolute path")
+		}
+		entry.Directory = filepath.Clean(directory)
+	}
+	if edit.Agent != nil {
+		entry.Agent = strings.ToLower(strings.TrimSpace(*edit.Agent))
+	}
+	switch entry.Agent {
+	case AgentShell:
+		entry.AgentPID = 0
+		entry.Executable = ""
+		entry.Argv = nil
+		entry.SessionID = ""
+		entry.SessionPath = ""
+		entry.SessionEvidence = ""
+		entry.CodexHome = ""
+		entry.ClaudeConfig = ""
+		entry.CaptureError = ""
+		return entry, nil
+	case AgentCodex, AgentClaude:
+	default:
+		return Entry{}, fmt.Errorf("edited agent type %q is unsupported", entry.Agent)
+	}
+	if edit.SessionID != nil {
+		entry.SessionID = strings.TrimSpace(*edit.SessionID)
+		entry.SessionPath = ""
+		entry.SessionEvidence = SessionEvidenceUserEdit
+	}
+	if !uuidPattern.MatchString(entry.SessionID) {
+		return Entry{}, fmt.Errorf("edited %s conversation ID must be a UUID", entry.Agent)
+	}
+	if edit.Executable != nil {
+		entry.Executable = strings.TrimSpace(*edit.Executable)
+	}
+	executable := entry.Executable
+	if executable == "" {
+		executable = firstArg(entry.Argv)
+	}
+	if executable == "" {
+		executable = entry.Agent
+	}
+	if edit.Arguments != nil {
+		entry.Argv = append([]string{executable}, (*edit.Arguments)...)
+	} else if len(entry.Argv) == 0 {
+		entry.Argv = []string{executable}
+	} else if edit.Executable != nil {
+		entry.Argv = append([]string{executable}, entry.Argv[1:]...)
+	}
+	if edit.CodexHome != nil {
+		entry.CodexHome = strings.TrimSpace(*edit.CodexHome)
+	}
+	if edit.ClaudeConfig != nil {
+		entry.ClaudeConfig = strings.TrimSpace(*edit.ClaudeConfig)
+	}
+	entry.CaptureError = ""
+	return entry, nil
 }

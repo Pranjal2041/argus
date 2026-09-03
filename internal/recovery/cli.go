@@ -23,6 +23,21 @@ func writeJSON(writer io.Writer, value any) {
 	_ = encoder.Encode(value)
 }
 
+func decodeEntryEdits(values []string) ([]EntryEdit, error) {
+	edits := make([]EntryEdit, 0, len(values))
+	for _, value := range values {
+		var edit EntryEdit
+		if err := json.Unmarshal([]byte(value), &edit); err != nil {
+			return nil, fmt.Errorf("decode recovery edit: %w", err)
+		}
+		if strings.TrimSpace(edit.Panel) == "" {
+			return nil, fmt.Errorf("decode recovery edit: panel is required")
+		}
+		edits = append(edits, edit)
+	}
+	return edits, nil
+}
+
 func cliFlags(name string, stderr io.Writer) (*flag.FlagSet, *string) {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -73,7 +88,9 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 			"run the exact snapshot argv for explicitly reviewed panels",
 		)
 		var sessions stringList
+		var editJSON stringList
 		flags.Var(&sessions, "session", "panel name to restore (repeatable; default all ready panels)")
+		flags.Var(&editJSON, "edit-json", "explicit JSON correction for one panel (repeatable)")
 		if flags.Parse(args[1:]) != nil {
 			return 2
 		}
@@ -89,6 +106,11 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 				return 2
 			}
 			response = store.RestoreCapturedLaunch(*snapshot, sessions, *parallel)
+		} else if edits, err := decodeEntryEdits(editJSON); err != nil {
+			fmt.Fprintln(stderr, "recovery restore:", err)
+			return 2
+		} else if len(edits) > 0 {
+			response = store.RestoreWithEdits(*snapshot, sessions, *parallel, edits)
 		} else {
 			response = store.Restore(*snapshot, sessions, *parallel)
 		}
