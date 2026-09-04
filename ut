@@ -45,18 +45,36 @@ tailscale_bin() {
 }
 
 native_tailnet_ip() {
-  local bin
+  local bin ip octet
+  local -a octets
   bin="$(tailscale_bin)"
   [ -n "$bin" ] || return 0
-  "$bin" ip -4 2>/dev/null | head -1 || true
+  # A CLI may print diagnostics to stdout, including on failure. Only a
+  # successful, valid address is transport state; never treat prose as an IP.
+  ip="$("$bin" ip -4 2>/dev/null)" || return 1
+  [ -n "$ip" ] || return 0
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<< "$ip"
+  for octet in "${octets[@]}"; do
+    [ "$((10#$octet))" -le 255 ] || return 1
+    [ "$octet" = "$((10#$octet))" ] || return 1
+  done
+  # Never turn an unspecified address into a wildcard listener.
+  [ "$ip" != 0.0.0.0 ] || return 1
+  printf '%s\n' "$ip"
 }
 
 # Prints "native<TAB>ip" or "embedded<TAB>". Native wins whenever it is live;
 # embedded tsnet is the rootless fallback only when a key exists. With neither
 # transport ready, native mode still keeps the local broker available on loopback.
 transport_plan() {
-  local has_key="${1:-0}" ip
-  ip="$(native_tailnet_ip)"
+  local has_key="${1:-0}" previous="${2:-}" ip
+  if ! ip="$(native_tailnet_ip)"; then
+    # A failed lookup says nothing about whether the current transport changed.
+    # Keep it until a successful lookup provides new state.
+    if [ -n "$previous" ]; then printf '%s\n' "$previous"; return; fi
+    ip=""
+  fi
   if [ -n "$ip" ] || [ "$has_key" != 1 ]; then
     printf 'native\t%s\n' "$ip"
   else
@@ -66,7 +84,7 @@ transport_plan() {
 
 # Private seam used by the generated supervisor and launcher regression tests.
 if [ "${1:-}" = "__transport-plan" ]; then
-  transport_plan "${2:-0}"
+  transport_plan "${2:-0}" "${3:-}"
   exit 0
 fi
 
@@ -207,10 +225,11 @@ if ! broker_running; then
 exec >>'$LOGFILE' 2>&1
 KEY="\$(cat '$UT_HOME/authkey' 2>/dev/null || true)"
 [ -n "\$KEY" ] || KEY="\${TS_AUTHKEY:-}"
+PLAN=""
 while true; do
   WPID=""
   HAS_KEY=0; [ -n "\$KEY" ] && HAS_KEY=1
-  PLAN="\$('$SELF' __transport-plan "\$HAS_KEY")"
+  PLAN="\$('$SELF' __transport-plan "\$HAS_KEY" "\$PLAN")"
   MODE="\${PLAN%%\$'\\t'*}"
   TSIP="\${PLAN#*\$'\\t'}"
   if [ "\$MODE" = embedded ]; then
@@ -220,10 +239,10 @@ while true; do
       --listen ':${PORT}' --tsnet-host '$host' --tsnet-dir '$LOCAL/tsnet-$socket' &
     BPID=\$!
   else
-    # local mode: serve on loopback AND (best-effort) this host's own tailnet IP, so
+    # local mode: serve on loopback AND this host's own tailnet IP, so
     # other tailnet devices (phone, laptops) can reach it — a loopback-only bind is
-    # invisible from the tailnet. Never 0.0.0.0 (LAN exposure); a failed tailnet bind
-    # is logged and ignored by the broker, so this can't break local mode.
+    # invisible from the tailnet. Never 0.0.0.0 (LAN exposure); the broker retries
+    # failed tailnet binds while local service stays available.
     EXTRA=""; [ -n "\$TSIP" ] && EXTRA="--extra-listen \$TSIP:${PORT}"
     '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${PORT}' \$EXTRA &
     BPID=\$!
@@ -233,7 +252,7 @@ while true; do
   # fallback started; the next loop converges to the one native identity.
   ( while kill -0 "\$BPID" 2>/dev/null; do
       sleep 20
-      NOW_PLAN="\$('$SELF' __transport-plan "\$HAS_KEY")"
+      NOW_PLAN="\$('$SELF' __transport-plan "\$HAS_KEY" "\$PLAN")"
       if [ "\$NOW_PLAN" != "\$PLAN" ]; then
         echo "[supervisor \$(date '+%F %T')] transport [\$PLAN]->[\$NOW_PLAN], rebinding broker"
         kill "\$BPID" 2>/dev/null; break
