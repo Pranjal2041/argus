@@ -1189,26 +1189,17 @@ func main() {
 	// clients — the Android app — can reach an otherwise loopback-bound broker,
 	// WITHOUT exposing it on the LAN (bind a specific tailnet IP, never 0.0.0.0)
 	// and WITHOUT disturbing the primary listener the local app/forward-hub use.
-	// Best-effort: a bind failure here (e.g. Tailscale not up yet) is logged, not fatal.
+	// Recover independently when an interface appears after startup or a listener
+	// stops accepting. Local availability must not mask a failed network listener.
 	if *extraListen != "" && *extraListen != *listen {
-		if l2, e := net.Listen("tcp", *extraListen); e == nil {
-			log.Printf("also serving on http://%s", *extraListen)
-			go func() { _ = srv.Serve(l2) }()
-		} else {
-			log.Printf("warn: extra-listen %s failed (primary listener unaffected): %v", *extraListen, e)
-		}
+		go serveRecoveringListener(ctx, *extraListen, 5*time.Second, net.Listen, srv.Serve)
 	}
 	// ALWAYS serve on loopback too, so a CLI/agent running ON THIS HOST can reach
 	// its local broker (and relay out through the mesh). In tsnet mode the primary
 	// listener is the tailnet interface only — without this, the `ut` mesh client
 	// on a cluster compute node couldn't talk to its own broker.
 	if loopback := "127.0.0.1:" + portOf(*listen); loopback != *listen && loopback != *extraListen {
-		if l3, e := net.Listen("tcp", loopback); e == nil {
-			log.Printf("also serving on http://%s (local mesh client)", loopback)
-			go func() { _ = srv.Serve(l3) }()
-		} else {
-			log.Printf("warn: loopback listener %s failed: %v", loopback, e)
-		}
+		go serveRecoveringListener(ctx, loopback, 5*time.Second, net.Listen, srv.Serve)
 	}
 	log.Printf("universal_tmux broker → %s  (tmux -L %s, fallback session %q)", where, *tmuxSock, *session)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
