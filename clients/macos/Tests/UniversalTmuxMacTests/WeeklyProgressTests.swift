@@ -552,7 +552,7 @@ final class WeeklyProgressTests: XCTestCase {
         XCTAssertFalse(output.contains("2026-08-10"))
     }
 
-    func testCodexCommandPinsSolXHighAndKeepsConversationDurable() {
+    func testCodexCommandPinsAstraHighAndKeepsConversationDurable() {
         let initial = CodexWeeklyProgressCommand.initialArguments(
             directory: URL(fileURLWithPath: "/tmp/progress"),
             finalMessageURL: URL(fileURLWithPath: "/tmp/final.txt")
@@ -562,13 +562,14 @@ final class WeeklyProgressTests: XCTestCase {
             finalMessageURL: URL(fileURLWithPath: "/tmp/audit.txt")
         )
 
-        XCTAssertTrue(initial.contains("gpt-5.6-sol"))
-        XCTAssertTrue(initial.contains("model_reasoning_effort=\"xhigh\""))
+        XCTAssertTrue(initial.contains("gpt-6-astra"))
+        XCTAssertTrue(initial.contains("model_reasoning_effort=\"high\""))
         XCTAssertTrue(initial.contains("workspace-write"))
         XCTAssertFalse(initial.contains("--ephemeral"))
         XCTAssertEqual(Array(resumed.prefix(2)), ["exec", "resume"])
         XCTAssertTrue(resumed.contains("019f630d-5663-7722-bc65-5fd298a497ec"))
-        XCTAssertTrue(resumed.contains("gpt-5.6-sol"))
+        XCTAssertTrue(resumed.contains("gpt-6-astra"))
+        XCTAssertTrue(resumed.contains("model_reasoning_effort=\"high\""))
     }
 
     func testProjectCatalogAndSameWeekVersionsRemainDistinct() throws {

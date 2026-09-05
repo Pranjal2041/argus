@@ -13,8 +13,8 @@ protocol WeeklyProgressAgentRunning {
 }
 
 enum CodexWeeklyProgressCommand {
-    static let model = "gpt-5.6-sol"
-    static let reasoningEffort = "xhigh"
+    static let model = "gpt-6-astra"
+    static let reasoningEffort = "high"
 
     static func initialArguments(directory: URL, finalMessageURL: URL) -> [String] {
         [
