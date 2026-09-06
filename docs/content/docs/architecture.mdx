@@ -42,6 +42,32 @@ auto-removes.
 
 ## Protocol
 
+### macOS monitoring and reachability
+
+Session snapshots, discovery, and general HTTP work use separate bounded connection pools.
+Downloads, Git queries, and other slow operations cannot occupy the slots reserved for
+session monitoring. Monitoring and discovery bypass HTTP caches and have total request
+deadlines; HTTPS still uses the same routed transport and normal certificate validation.
+
+The timer, panel selection, and manual refresh share one in-flight session request per
+machine. Full refresh requests coalesce into one follow-up, and replies from a retired
+route cannot overwrite a newer route's state. Failed refreshes retain the last good
+session list and retry with a backoff capped at 30 seconds; manual refresh can retry sooner.
+
+The sidebar distinguishes **checking**, **refresh delayed**, and **offline**. One timeout,
+an HTTP error, or an invalid session response is not proof that a machine is offline.
+After a transport failure, a short identity-endpoint probe or recent received terminal
+traffic provides independent evidence of reachability. Offline requires at least three
+failed refreshes, a 30-second failure window, and no reachability evidence in that window.
+An idle socket's old connected flag is not treated as a heartbeat.
+
+Hover over a delayed/offline machine header for the refresh error. Bounded diagnostic
+events (`broker.session_refresh`) are recorded in
+`~/Library/Logs/Argus/terminal-connections.jsonl`; they do not include response bodies,
+credentials, or terminal content.
+
+### Terminal frames
+
 One binary **WebSocket** per client, with a 1-byte opcode framing two lanes on the same socket:
 
 - **raw** — `OUTPUT(pane, bytes)` down; `INPUT(pane, bytes)`, `RESIZE(pane, w, h)` up.

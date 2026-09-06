@@ -1190,9 +1190,10 @@ struct RootView: View {
     }
 
     private func machineHeader(_ m: Machine, sessionCount: Int) -> some View {
-        let status = state.statusByMachine[m.id]
-        let reachable = status != nil && status != "unreachable"
-        let dotColor: Color = status == nil ? Theme.textTertiary : (reachable ? Theme.attached : Theme.unreachable)
+        let status = state.statusByMachine[m.id] ?? .checking
+        let reachable = status.permitsInteraction
+        let dotColor: Color = status == .checking ? Theme.textTertiary
+            : status == .delayed ? Theme.waiting : (reachable ? Theme.attached : Theme.unreachable)
         return HStack(spacing: 7) {
             Circle().fill(dotColor).frame(width: 6, height: 6)
             Image(systemName: m.isLocal ? "laptopcomputer" : "server.rack")
@@ -1204,15 +1205,16 @@ struct RootView: View {
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            if reachable, let rtt = state.rttByMachine[m.id] {
+            if status == .reachable, let rtt = state.rttByMachine[m.id] {
                 Text("\(rtt)ms").font(cf(10)).monospacedDigit().foregroundStyle(Theme.textTertiary)
             }
-            countBadge(sessionCount: sessionCount, reachable: reachable, loading: status == nil)
+            MachineConnectionBadge(status: status, sessionCount: sessionCount, textScale: uiScale)
         }
         .padding(.horizontal, 6)
         .frame(height: 30)
         .frame(maxWidth: .infinity)
         .background(Theme.sidebarBackground.opacity(0.96))
+        .help(state.refreshIssueByMachine[m.id] ?? "Broker connection status")
         .contextMenu {
             Button {
                 dashboards.openJupyter(on: m)
@@ -1220,24 +1222,6 @@ struct RootView: View {
             } label: { Label("Open JupyterLab", systemImage: "book.closed") }
             .disabled(!reachable)
         }
-    }
-
-    private func countBadge(sessionCount: Int, reachable: Bool, loading: Bool) -> some View {
-        return Group {
-            if loading {
-                Text("…").foregroundStyle(Theme.textTertiary)
-            } else if !reachable {
-                Text("offline").foregroundStyle(Theme.unreachable)
-            } else {
-                Text("\(sessionCount)")
-                    .foregroundStyle(Theme.textSecondary)
-                    .monospacedDigit()
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Theme.surface))
-            }
-        }
-        .font(cf(10.5, .medium))
     }
 
     @ViewBuilder private func machineBody(_ m: Machine, groups: [FolderGroup]) -> some View {
@@ -1339,7 +1323,9 @@ struct RootView: View {
     }
 
     private func emptyLabel(_ m: Machine) -> String {
-        if state.statusByMachine[m.id] == "unreachable" { return "unreachable" }
+        if state.statusByMachine[m.id] == .unreachable { return "unreachable" }
+        if state.statusByMachine[m.id] == .delayed { return "session refresh delayed — retrying" }
+        if state.statusByMachine[m.id] == nil || state.statusByMachine[m.id] == .checking { return "checking sessions…" }
         if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "no matches" }
         return "no sessions"
     }
