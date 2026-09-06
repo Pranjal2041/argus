@@ -385,7 +385,8 @@ final class AppState: ObservableObject {
 
     @Published var machines: [Machine]
     @Published var sessionsByMachine: [String: [SessionInfo]] = [:]
-    @Published var statusByMachine: [String: String] = [:]
+    @Published var statusByMachine: [String: BrokerConnectionStatus] = [:]
+    @Published var refreshIssueByMachine: [String: String] = [:]
     @Published var rttByMachine: [String: Int] = [:]  // round-trip ms per machine
     @Published var selection: SessionRef? {
         didSet {
@@ -429,8 +430,7 @@ final class AppState: ObservableObject {
     @Published var searchFocusToken = 0   // bumped to request focusing the filter field
     @Published var isRefreshing = false
     private var lastRTTPublishedAt: [String: Date] = [:]
-    private var sessionRefreshesInFlight: [String: Int] = [:]
-    private var pendingFullSessionRefresh: [String: Machine] = [:]
+    private let sessionMonitor: BrokerSessionMonitor
 
     /// User-pinned working directory per session (`ref.id` → absolute path on the
     /// host). Used as the resolve base for a terminal cmd+click when the broker's
@@ -1389,7 +1389,8 @@ final class AppState: ObservableObject {
     /// selection — rendered as an ORANGE "done, unseen" dot until you open the pane.
     @Published var unseen: Set<String> = []
 
-    init(isolatedForTesting: Bool = false) {
+    init(isolatedForTesting: Bool = false, sessionMonitor: BrokerSessionMonitor? = nil) {
+        self.sessionMonitor = sessionMonitor ?? BrokerSessionMonitor()
         let isolated = isolatedForTesting || Self.isRunningTests
         persistenceEnabled = !isolated
         // Local (loopback) is fixed; cluster brokers are discovered from the tailnet.
@@ -1398,6 +1399,9 @@ final class AppState: ObservableObject {
                     httpBase: "http://127.0.0.1:8722", wsBase: "ws://127.0.0.1:8722"),
         ]
         selection = SessionRef(machineID: "local", session: "ut-demo")
+        self.sessionMonitor.onUpdate = { [weak self] machine, update in
+            self?.applySessionRefresh(machine, update: update)
+        }
         loadHistoryCache()
         if !isolated {
             applyKeepAwake()   // honor a persisted "keep awake" across relaunches
@@ -1489,6 +1493,7 @@ final class AppState: ObservableObject {
 
     private func applyFullBrokerDiscovery(_ found: [Machine]) {
         machines = found
+        sessionMonitor.retainMachines(found)
         let group = DispatchGroup()
         for m in found { refresh(m, group: group, scope: .all, coalesce: false) }
         group.notify(queue: .main) { self.isRefreshing = false }
@@ -1617,85 +1622,34 @@ final class AppState: ObservableObject {
         scope: SessionRefreshScope = .foreground,
         coalesce: Bool = true
     ) {
-        var components = URLComponents(string: m.httpBase + "/sessions")
-        if scope == .foreground {
-            components?.queryItems = [URLQueryItem(name: "scope", value: "foreground")]
-        }
-        guard let url = components?.url else { return }
-        if coalesce, sessionRefreshesInFlight[m.id, default: 0] > 0 {
-            // Never stack periodic requests behind a slow/offline broker. Preserve a
-            // skipped full refresh and run it as soon as the active request finishes.
-            if scope == .all { pendingFullSessionRefresh[m.id] = m }
-            return
-        }
-        sessionRefreshesInFlight[m.id, default: 0] += 1
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 8
-        let started = Date()
         group?.enter()
-        brokerSession.dataTask(with: req) { data, response, err in
-            let httpOK = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
-            let decoded = data.flatMap { try? JSONDecoder().decode(SessionsResponse.self, from: $0) }
-            let reachable = err == nil && httpOK && decoded != nil
-            let status = reachable ? "reachable" : "unreachable"
-            let rtt = Int(Date().timeIntervalSince(started) * 1000)
-            DispatchQueue.main.async {
-                if self.statusByMachine[m.id] != status {
-                    self.statusByMachine[m.id] = status
-                }
-
-                if reachable {
-                    let now = Date()
-                    let lastRTT = self.lastRTTPublishedAt[m.id] ?? .distantPast
-                    if self.rttByMachine[m.id] == nil || now.timeIntervalSince(lastRTT) >= 30 {
-                        let roundedRTT = max(0, Int((Double(rtt) / 5).rounded()) * 5)
-                        if self.rttByMachine[m.id] != roundedRTT {
-                            self.rttByMachine[m.id] = roundedRTT
-                        }
-                        self.lastRTTPublishedAt[m.id] = now
-                    }
-                }
-
-                if reachable, let fetched = decoded?.sessions {
-                    let current = self.sessionsByMachine[m.id] ?? []
-                    let merged = mergeSessionSnapshot(
-                        current: current,
-                        fetched: fetched,
-                        scope: scope,
-                        machineID: m.id,
-                        locallyHidden: self.hiddenSessions
-                    )
-                    let sessionsChanged = current != merged
-                    if sessionsChanged {
-                        self.sessionsByMachine[m.id] = merged
-                    }
-                    if scope == .all {
-                        self.syncHidden(machine: m, sessions: fetched)
-                    }
-                    if sessionsChanged {
-                        self.applySessionTransitions(
-                            machine: m,
-                            changedSessions: fetched,
-                            liveSessions: merged
-                        )
-                    }
-                }
-                self.finishSessionRefresh(machineID: m.id)
-                group?.leave()
-            }
-        }.resume()
+        // Manual refresh bypasses retry backoff, never the single-flight bound.
+        sessionMonitor.refresh(m, scope: scope, force: !coalesce,
+                               completion: group.map { group in { group.leave() } })
     }
 
-    private func finishSessionRefresh(machineID: String) {
-        let remaining = max(0, sessionRefreshesInFlight[machineID, default: 1] - 1)
-        if remaining > 0 {
-            sessionRefreshesInFlight[machineID] = remaining
-            return
+    private func applySessionRefresh(_ m: Machine, update: BrokerSessionUpdate) {
+        // Discovery can replace a route or remove a machine while a request is
+        // finishing. Never let that retired response overwrite the current view.
+        guard machines.contains(where: { $0.id == m.id && $0.httpBase == m.httpBase }) else { return }
+        if statusByMachine[m.id] != update.status { statusByMachine[m.id] = update.status }
+        if refreshIssueByMachine[m.id] != update.issue { refreshIssueByMachine[m.id] = update.issue }
+        guard let fetched = update.sessions else { return } // retain the last good snapshot
+        let now = Date()
+        let lastRTT = lastRTTPublishedAt[m.id] ?? .distantPast
+        if rttByMachine[m.id] == nil || now.timeIntervalSince(lastRTT) >= 30 {
+            let roundedRTT = max(0, Int((Double(update.roundTripMilliseconds) / 5).rounded()) * 5)
+            if rttByMachine[m.id] != roundedRTT { rttByMachine[m.id] = roundedRTT }
+            lastRTTPublishedAt[m.id] = now
         }
-        sessionRefreshesInFlight.removeValue(forKey: machineID)
-        guard let machine = pendingFullSessionRefresh.removeValue(forKey: machineID),
-              machines.contains(where: { $0.id == machineID }) else { return }
-        refresh(machine, scope: .all)
+        let current = sessionsByMachine[m.id] ?? []
+        let merged = mergeSessionSnapshot(current: current, fetched: fetched, scope: update.scope,
+                                          machineID: m.id, locallyHidden: hiddenSessions)
+        if current != merged { sessionsByMachine[m.id] = merged }
+        if update.scope == .all { syncHidden(machine: m, sessions: fetched) }
+        if current != merged {
+            applySessionTransitions(machine: m, changedSessions: fetched, liveSessions: merged)
+        }
     }
 
     /// Fold one changed broker snapshot into notification state using local copies,
@@ -1987,7 +1941,7 @@ private func blockingBrokerData(from url: URL, timeout: TimeInterval) -> Data? {
     let sem = DispatchSemaphore(value: 0)
     let lock = NSLock()
     var result: Data?
-    let task = brokerSession.dataTask(with: req) { data, response, error in
+    let task = brokerDiscoverySession.dataTask(with: req) { data, response, error in
         defer { sem.signal() }
         guard error == nil,
               let http = response as? HTTPURLResponse,

@@ -288,12 +288,29 @@ private final class BrokerProxyTunnel {
     }
 }
 
-private func brokerConfiguration(_ configuration: URLSessionConfiguration) -> URLSessionConfiguration {
+enum BrokerTrafficClass {
+    case general, monitoring, discovery
+}
+
+private func brokerConfiguration(
+    _ configuration: URLSessionConfiguration,
+    traffic: BrokerTrafficClass = .general
+) -> URLSessionConfiguration {
     // A degraded route must apply backpressure instead of letting independent
     // features accumulate transport attempts to the same broker. Long-lived
     // WebSockets use their own disposable sessions, so this bound covers the
     // shared HTTP control plane without limiting terminal panes.
-    configuration.httpMaximumConnectionsPerHost = 4
+    configuration.httpMaximumConnectionsPerHost = traffic == .general ? 4 : (traffic == .monitoring ? 2 : 1)
+    if traffic != .general {
+        // Liveness and mutable session snapshots must neither queue behind bulk
+        // work nor be satisfied by an old URLCache response. Bound the complete
+        // operation too, including a server that keeps trickling response bytes.
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = traffic == .discovery ? 12 : 8
+        configuration.waitsForConnectivity = false
+    }
     BrokerHTTPSProxy.shared.apply(to: configuration)
     return configuration
 }
@@ -302,8 +319,17 @@ private func brokerConfiguration(_ configuration: URLSessionConfiguration) -> UR
 /// through the loopback tunnel above; plain loopback/native-broker HTTP is direct.
 let brokerSession = URLSession(configuration: brokerConfiguration(.default))
 
-func makeBrokerSession(configuration: URLSessionConfiguration) -> URLSession {
-    URLSession(configuration: brokerConfiguration(configuration))
+// Reserved capacity for short monitoring requests, independent of file transfers,
+// Git operations, command-center captures, and all other general-purpose traffic.
+let brokerMonitoringSession = makeBrokerSession(configuration: .ephemeral, traffic: .monitoring)
+// Discovery can wait on a mesh scan, so it must not consume session-refresh slots.
+let brokerDiscoverySession = makeBrokerSession(configuration: .ephemeral, traffic: .discovery)
+
+func makeBrokerSession(
+    configuration: URLSessionConfiguration,
+    traffic: BrokerTrafficClass = .general
+) -> URLSession {
+    URLSession(configuration: brokerConfiguration(configuration, traffic: traffic))
 }
 
 func registerBrokerTLSAddress(_ address: String, dnsName: String) {

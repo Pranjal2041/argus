@@ -359,6 +359,7 @@ final class BrokerClient {
     }
 
     private func receiveLoop(_ myEpoch: Int) {
+        let connectedURL = task?.originalRequest?.url
         task?.receive { [weak self] result in
             // A reconnect (or updateURL) bumps `epoch`; a callback from a superseded
             // socket bails so we never run two receive loops at once.
@@ -369,6 +370,7 @@ final class BrokerClient {
             }
             switch result {
             case .success(let message):
+                if let connectedURL { BrokerReachabilityEvidence.shared.record(url: connectedURL) }
                 if !self.live {
                     self.live = true
                     self.everConnected = true
