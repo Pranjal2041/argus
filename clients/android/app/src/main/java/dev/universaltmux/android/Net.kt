@@ -301,6 +301,12 @@ object Net {
         } catch (_: Exception) {}
     }
 
+    fun mergeUserData(b: Broker, key: String, body: String): Pair<Int, String>? = try {
+        val req = Request.Builder().url("${b.httpBase}/userdata/merge?key=${enc(key)}")
+            .post(RequestBody.create(null, body.toByteArray())).build()
+        client.newCall(req).execute().use { it.code to (it.body?.string() ?: "") }
+    } catch (_: Exception) { null }
+
     /** Append phone-journal events (JSONL) to the sync host's inbox. True on 200. */
     fun postJournal(b: Broker, jsonl: String): Boolean = try {
         val req = Request.Builder().url("${b.httpBase}/journal/append")

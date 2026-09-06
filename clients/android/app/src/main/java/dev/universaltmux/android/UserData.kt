@@ -55,6 +55,34 @@ data class Note(
 
 /** JSON for the /userdata sync envelopes — kept byte-compatible with the Mac's Codable. */
 object UserDataJson {
+    /** Reject lossy/invalid review documents before changing either data or sync baseline. */
+    fun validateWorkspace(key: String, data: JSONArray) {
+        val ids = mutableSetOf<String>()
+        val itemIds = mutableSetOf<String>()
+        fun requireId(record: JSONObject, seen: MutableSet<String>) {
+            val id = record.getString("id")
+            java.util.UUID.fromString(id)
+            require(seen.add(id.lowercase())) { "Duplicate record ID: $id" }
+        }
+        for (i in 0 until data.length()) {
+            val record = data.getJSONObject(i)
+            requireId(record, ids)
+            if (key == "todos") {
+                val items = record.getJSONArray("items")
+                for (j in 0 until items.length()) requireId(items.getJSONObject(j), itemIds)
+            }
+        }
+        val envelope = JSONObject().put("updatedAt", 1L).put("data", data).toString()
+        val decoded = when (key) {
+            "notes" -> notesEnvelope(1L, requireNotNull(parseNotes(envelope)).second)
+            "todos" -> todosEnvelope(1L, requireNotNull(parseTodos(envelope)).second)
+            "workflows" -> workflowsEnvelope(1L, requireNotNull(parseWorkflows(envelope)).second)
+            else -> error("Unknown workspace collection")
+        }
+        require(WorkspaceMerge.equal(data, JSONObject(decoded).getJSONArray("data"))) {
+            "Document contains unsupported fields or invalid values. Both copies are retained."
+        }
+    }
     private fun envelope(updatedAt: Long, data: JSONArray, allowDestructive: Boolean): String {
         val out = JSONObject().put("updatedAt", updatedAt).put("data", data)
         if (allowDestructive) out.put("allowDestructive", true)

@@ -68,6 +68,7 @@ fun WorkflowsScreen(vm: AppViewModel, onRan: () -> Unit) {
             IconButton(onClick = { creating = true }) { Icon(Icons.Filled.Add, "New workflow", tint = wfAccent) }
         }
         Divider(color = wfFaint.copy(alpha = 0.2f))
+        WorkspaceSyncBanner(vm, "workflows")
         if (vm.workflows.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("No workflows yet. Tap + to add one.", color = wfDim, fontSize = 15.sp)

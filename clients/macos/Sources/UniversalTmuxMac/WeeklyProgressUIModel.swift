@@ -1,4 +1,5 @@
 import AppKit
+import ArgusProtocol
 import Foundation
 import SwiftUI
 
@@ -250,7 +251,11 @@ final class WeeklyProgressController: ObservableObject {
         selectWeek(WeeklyProgressWeekNavigation.shifted(selectedWeek, byWeeks: amount))
     }
 
-    func saveProject(_ project: WeeklyProgressProject) throws {
+    func saveProject(_ project: WeeklyProgressProject, selectAfterSaving: Bool = true) throws {
+        guard !project.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !project.panels.isEmpty || !project.workspaceRoots.isEmpty else {
+            throw ArgusFailure("invalid_arguments", "A Weekly Progress project needs a name and at least one panel or workspace root.")
+        }
         var updated = project
         updated.updatedAt = Date()
         try store.saveProject(updated)
@@ -262,7 +267,7 @@ final class WeeklyProgressController: ObservableObject {
             "workspaceRoots": updated.workspaceRoots,
         ])
         projects = store.loadProjects()
-        selectedProjectID = updated.id
+        if selectAfterSaving { selectedProjectID = updated.id }
         reloadGenerations()
     }
 

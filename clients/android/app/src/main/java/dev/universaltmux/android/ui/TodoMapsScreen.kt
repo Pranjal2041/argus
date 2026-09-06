@@ -63,6 +63,7 @@ fun TodoMapsScreen(vm: AppViewModel, onOpenSession: () -> Unit) {
             IconButton(onClick = { adding = true }) { Icon(Icons.Filled.Add, "New panel", tint = tAccent) }
         }
         Divider(color = tFaint.copy(alpha = 0.2f))
+        WorkspaceSyncBanner(vm, "todos")
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(boards, key = { it.id }) { board -> TodoBoardCard(vm, board, onOpenSession) }
         }

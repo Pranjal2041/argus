@@ -179,6 +179,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var workflowsDestructive = prefs.getBoolean("ut.workflows.pendingDestructive", false)
     private var todosDestructive = prefs.getBoolean("ut.todos.pendingDestructive", false)
     private var notesDestructive = prefs.getBoolean("ut.notes.pendingDestructive", false)
+    val workspaceSyncIssues = mutableStateMapOf<String, String>()
+    private val workspaceSyncInflight = mutableSetOf<String>()
 
     // --- Argus Lab ----------------------------------------------------------
     // Store-owned records are reduced through LabAggregator before reaching
@@ -976,9 +978,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             prefs.edit().putBoolean("ut.workflows.pendingDestructive", true).apply()
         }
         workflowsTs = now(); saveWorkflowsLocal()
-        val h = syncHost() ?: return
-        val body = UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList(), workflowsDestructive)
-        viewModelScope.launch { withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", body) } }
+        syncUserData()
     }
     private fun touchTodos(destructive: Boolean = false) {
         if (destructive) {
@@ -986,9 +986,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             prefs.edit().putBoolean("ut.todos.pendingDestructive", true).apply()
         }
         todosTs = now(); saveTodosLocal()
-        val h = syncHost() ?: return
-        val body = UserDataJson.todosEnvelope(todosTs, todoBoards.toList(), todosDestructive)
-        viewModelScope.launch { withContext(Dispatchers.IO) { Net.postUserData(h, "todos", body) } }
+        syncUserData()
     }
 
     fun upsertWorkflow(w: Workflow) {
@@ -1129,49 +1127,91 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun workspaceData(key: String): JSONArray {
+        val raw = when (key) {
+            "notes" -> UserDataJson.notesEnvelope(notesTs, notes.toList())
+            "todos" -> UserDataJson.todosEnvelope(todosTs, todoBoards.toList())
+            else -> UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())
+        }
+        return JSONObject(raw).getJSONArray("data")
+    }
+    private fun applyWorkspaceData(key: String, data: JSONArray, ts: Long) {
+        val envelope = JSONObject().put("updatedAt", ts).put("data", data).toString()
+        when (key) {
+            "notes" -> {
+                val parsed = UserDataJson.parseNotes(envelope) ?: error("Invalid notes")
+                notes.clear(); notes.addAll(parsed.second); notesTs = ts; saveNotesLocal()
+            }
+            "todos" -> {
+                val parsed = UserDataJson.parseTodos(envelope) ?: error("Invalid todos")
+                todoBoards.clear(); todoBoards.addAll(parsed.second); todosTs = ts; saveTodosLocal()
+            }
+            "workflows" -> {
+                val parsed = UserDataJson.parseWorkflows(envelope) ?: error("Invalid workflows")
+                workflows.clear(); workflows.addAll(parsed.second); workflowsTs = ts; saveWorkflowsLocal()
+            }
+        }
+    }
+    private fun commitWorkspaceData(key: String, data: JSONArray, base: JSONArray, ts: Long) {
+        UserDataJson.validateWorkspace(key, data)
+        val localKey = when(key) { "notes" -> "ut.notes.v1"; "todos" -> "ut.todoBoards.v1"; else -> "ut.workflows.v1" }
+        val envelope = JSONObject().put("updatedAt", ts).put("data", data).toString()
+        check(prefs.edit().putString(localKey, envelope).putString("ut.sync.base.$key", base.toString())
+            .remove("ut.sync.conflict.$key").commit()) { "Could not persist synchronized workspace." }
+        applyWorkspaceData(key, data, ts)
+    }
+    fun workspaceConflict(key: String): String? = prefs.getString("ut.sync.conflict.$key", null)
+    fun resolveWorkspaceConflict(key: String, expected: String, document: String) {
+        check(workspaceConflict(key) == expected) { "Conflict changed. Review it again." }
+        val conflict = JSONObject(expected)
+        check(WorkspaceMerge.equal(workspaceData(key), conflict.getJSONArray("local"))) { "Local data changed. Review it again." }
+        val result = JSONArray(document)
+        commitWorkspaceData(key, result, conflict.getJSONArray("remote"), now())
+        workspaceSyncIssues.remove(key); syncUserData()
+    }
     fun syncUserData() {
         val h = syncHost() ?: return
-        viewModelScope.launch {
-            val rawW = withContext(Dispatchers.IO) { Net.getUserData(h, "workflows") }
-            val remoteW = UserDataJson.parseWorkflows(rawW); val rwTs = remoteW?.first ?: 0L
-            var lw = workflowsTs
-            if (lw == 0L && workflows.isNotEmpty()) { lw = now(); workflowsTs = lw; saveWorkflowsLocal() }
-            if (remoteW != null && rwTs > lw) {
-                workflows.clear(); workflows.addAll(remoteW.second); workflowsTs = rwTs; saveWorkflowsLocal()
-                workflowsDestructive = false; prefs.edit().remove("ut.workflows.pendingDestructive").apply()
-            } else if (lw > rwTs) {
-                withContext(Dispatchers.IO) { Net.postUserData(h, "workflows", UserDataJson.workflowsEnvelope(lw, workflows.toList(), workflowsDestructive)) }
-            } else if (lw != 0L && workflowsDestructive) {
-                workflowsDestructive = false; prefs.edit().remove("ut.workflows.pendingDestructive").apply()
+        for (key in listOf("workflows", "todos", "notes")) {
+            if (key in workspaceSyncInflight) continue
+            val conflict = workspaceConflict(key)
+            if (conflict != null) {
+                val refreshed = JSONObject(conflict).put("local", workspaceData(key))
+                prefs.edit().putString("ut.sync.conflict.$key", refreshed.toString()).apply()
+                workspaceSyncIssues[key] = "Concurrent edits need review; both copies are preserved."
+                continue
             }
-
-            val rawT = withContext(Dispatchers.IO) { Net.getUserData(h, "todos") }
-            val remoteT = UserDataJson.parseTodos(rawT); val rtTs = remoteT?.first ?: 0L
-            val hasData = todoBoards.any { !it.isMisc || it.items.isNotEmpty() }
-            var lt = todosTs
-            if (lt == 0L && hasData) { lt = now(); todosTs = lt; saveTodosLocal() }
-            if (remoteT != null && rtTs > lt) {
-                val boards = remoteT.second.toMutableList()
-                if (boards.none { it.isMisc }) boards.add(TodoBoard(isMisc = true))
-                todoBoards.clear(); todoBoards.addAll(boards); todosTs = rtTs; saveTodosLocal()
-                todosDestructive = false; prefs.edit().remove("ut.todos.pendingDestructive").apply()
-            } else if (lt > rtTs) {
-                withContext(Dispatchers.IO) { Net.postUserData(h, "todos", UserDataJson.todosEnvelope(lt, todoBoards.toList(), todosDestructive)) }
-            } else if (lt != 0L && todosDestructive) {
-                todosDestructive = false; prefs.edit().remove("ut.todos.pendingDestructive").apply()
-            }
-
-            val rawN = withContext(Dispatchers.IO) { Net.getUserData(h, "notes") }
-            val remoteN = UserDataJson.parseNotes(rawN); val rnTs = remoteN?.first ?: 0L
-            var ln = notesTs
-            if (ln == 0L && notes.isNotEmpty()) { ln = now(); notesTs = ln; saveNotesLocal() }
-            if (remoteN != null && rnTs > ln) {
-                notes.clear(); notes.addAll(remoteN.second); notesTs = rnTs; saveNotesLocal()
-                notesDestructive = false; prefs.edit().remove("ut.notes.pendingDestructive").apply()
-            } else if (ln > rnTs) {
-                withContext(Dispatchers.IO) { Net.postUserData(h, "notes", UserDataJson.notesEnvelope(ln, notes.toList(), notesDestructive)) }
-            } else if (ln != 0L && notesDestructive) {
-                notesDestructive = false; prefs.edit().remove("ut.notes.pendingDestructive").apply()
+            workspaceSyncInflight.add(key)
+            val base = JSONArray(prefs.getString("ut.sync.base.$key", null) ?: "[]")
+            val sent = workspaceData(key)
+            viewModelScope.launch {
+                try {
+                    val body = JSONObject().put("base", base).put("data", sent).toString()
+                    val response = withContext(Dispatchers.IO) { Net.mergeUserData(h, key, body) }
+                        ?: error("Sync host unavailable; local changes are retained.")
+                    val value = JSONObject(response.second)
+                    var remote: JSONArray
+                    var merged: JSONArray? = null
+                    if (response.first == 409 && value.has("current")) {
+                        remote = value.getJSONArray("current")
+                    } else {
+                        check(response.first == 200) { "Sync requires an updated broker (HTTP ${response.first}). Local edits are retained." }
+                        remote = value.getJSONArray("data")
+                        try { merged = WorkspaceMerge.merge(sent, workspaceData(key), remote) as JSONArray }
+                        catch (_: IllegalStateException) { }
+                    }
+                    if (merged == null) {
+                        val preserved = JSONObject().put("base", base).put("local", workspaceData(key)).put("remote", remote)
+                        check(prefs.edit().putString("ut.sync.conflict.$key", preserved.toString()).commit())
+                        workspaceSyncIssues[key] = "Concurrent edits need review; both copies are preserved."
+                    } else {
+                        val oldBase = prefs.getString("ut.sync.base.$key", null)
+                        if (oldBase == null || !WorkspaceMerge.equal(JSONArray(oldBase), remote) || !WorkspaceMerge.equal(workspaceData(key), merged)) {
+                            commitWorkspaceData(key, merged, remote, value.optLong("updatedAt", now()))
+                        }
+                        workspaceSyncIssues.remove(key)
+                    }
+                } catch (e: Exception) { workspaceSyncIssues[key] = e.message ?: "Sync failed; local changes are retained." }
+                finally { workspaceSyncInflight.remove(key) }
             }
         }
     }

@@ -3,12 +3,21 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-swift build -c release
+swift build -c release --jobs "${UT_BUILD_JOBS:-4}"
 
 APP="Argus.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ".build/release/UniversalTmuxMac" "$APP/Contents/MacOS/Argus"
+# The default macOS filesystem is case-insensitive: Argus and argus are
+# the SAME path. Keep the bundled CLI distinct from the app executable.
+cp ".build/release/argus" "$APP/Contents/MacOS/argus-cli"
+if [ "$APP/Contents/MacOS/Argus" -ef "$APP/Contents/MacOS/argus-cli" ]; then
+    echo "Error: app and CLI executables resolve to the same file." >&2
+    exit 1
+fi
+cmp -s ".build/release/UniversalTmuxMac" "$APP/Contents/MacOS/Argus"
+cmp -s ".build/release/argus" "$APP/Contents/MacOS/argus-cli"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/Argus.icns "$APP/Contents/Resources/" 2>/dev/null || true
 cp Resources/fonts/*.ttf "$APP/Contents/Resources/" 2>/dev/null || true
@@ -88,5 +97,15 @@ EOF
     fi
     rm -rf /Applications/Argus.app
     ditto "$APP" /Applications/Argus.app && echo "Installed to /Applications/Argus.app"
+    CLI_DIR="$HOME/.local/bin"
+    CLI_TARGET="/Applications/Argus.app/Contents/MacOS/argus-cli"
+    mkdir -p "$CLI_DIR"
+    if [ -e "$CLI_DIR/argus" ] && { [ ! -L "$CLI_DIR/argus" ] || [ "$(readlink "$CLI_DIR/argus")" != "$CLI_TARGET" ]; }; then
+        echo "CLI not linked: $CLI_DIR/argus already belongs to another installation."
+        echo "The bundled CLI is available at $CLI_TARGET"
+    else
+        ln -sfn "$CLI_TARGET" "$CLI_DIR/argus"
+        echo "CLI: $CLI_DIR/argus (add $CLI_DIR to PATH if needed)"
+    fi
 fi
 echo "Run it with:  open -a Argus    (launches the /Applications copy)"
