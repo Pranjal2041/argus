@@ -20,6 +20,8 @@ enum WeeklyProgressCoordinatorError: LocalizedError {
     case generationNotFound
     case busy(WeeklyProgressOperationSnapshot)
     case invalidRequestID
+    case preparing
+    case requestIDReused
 
     var errorDescription: String? {
         switch self {
@@ -31,6 +33,10 @@ enum WeeklyProgressCoordinatorError: LocalizedError {
             return "A review for \(operation.projectName) is already running."
         case .invalidRequestID:
             return "The request id is missing or invalid."
+        case .preparing:
+            return "A Weekly Progress generation is being prepared."
+        case .requestIDReused:
+            return "This request ID was used for a different project or week."
         }
     }
 }
@@ -47,6 +53,7 @@ actor WeeklyProgressCoordinator {
     private var lastError: String?
     private var revision: UInt64 = 0
     private var transientRequests: [String: UUID] = [:]
+    private var preparing = false
 
     init(
         store: WeeklyProgressDiskStore = WeeklyProgressDiskStore(),
@@ -94,8 +101,12 @@ actor WeeklyProgressCoordinator {
         if let existing = store.allGenerations().first(where: {
             $0.manifest.remoteRequestID == cleanRequestID
         }) {
+            guard existing.manifest.project.id == projectID, existing.manifest.week == week else {
+                throw WeeklyProgressCoordinatorError.requestIDReused
+            }
             return existing
         }
+        guard !preparing else { throw WeeklyProgressCoordinatorError.preparing }
         if let activeOperation {
             throw WeeklyProgressCoordinatorError.busy(activeOperation)
         }
@@ -103,6 +114,8 @@ actor WeeklyProgressCoordinator {
             throw WeeklyProgressCoordinatorError.projectNotFound
         }
 
+        preparing = true
+        defer { preparing = false }
         let generation = try await pipeline.prepare(
             project: project,
             week: week,
@@ -119,8 +132,10 @@ actor WeeklyProgressCoordinator {
         }
         if let remembered = transientRequests[cleanRequestID],
            let existing = generation(id: remembered) {
+            guard remembered == generationID else { throw WeeklyProgressCoordinatorError.requestIDReused }
             return existing
         }
+        guard !preparing else { throw WeeklyProgressCoordinatorError.preparing }
         guard let generation = generation(id: generationID) else {
             throw WeeklyProgressCoordinatorError.generationNotFound
         }

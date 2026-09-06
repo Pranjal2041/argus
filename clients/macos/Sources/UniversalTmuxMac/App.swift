@@ -23,6 +23,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
     @StateObject private var weeklyProgress: WeeklyProgressController // manual research-review generations
     @StateObject private var weeklyProgressRemote: WeeklyProgressRemoteService
+    @StateObject private var argusControl: ArgusControlService
     @FocusedValue(\.fileCopyCommand) private var fileCopyCommand
     @AppStorage(ClipboardScreenshotArtifactPrefs.enabledKey)
     private var screenshotArtifactsEnabled = ClipboardScreenshotArtifactPrefs.defaultEnabled
@@ -31,6 +32,7 @@ struct UniversalTmuxApp: App {
         let coordinator = WeeklyProgressCoordinator()
         _weeklyProgress = StateObject(wrappedValue: WeeklyProgressController(coordinator: coordinator))
         _weeklyProgressRemote = StateObject(wrappedValue: WeeklyProgressRemoteService(coordinator: coordinator))
+        _argusControl = StateObject(wrappedValue: ArgusControlService(coordinator: coordinator))
     }
 
     var body: some Scene {
@@ -52,12 +54,14 @@ struct UniversalTmuxApp: App {
                 .environmentObject(themeStore)
                 .environmentObject(recovery)
                 .environmentObject(weeklyProgress)
+                .environmentObject(argusControl)
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
                     browserControl.start(dashboards: dashboards, credentialVault: credentialVault)
                     credentialVault.unattendedModeActive = lab.unattendedMode
                     weeklyProgressRemote.start()
+                    argusControl.start(state: state, commandCenter: commandCenter, weekly: weeklyProgress, lab: lab)
                     screenshotArtifacts.bind(
                         state: state,
                         notebooks: notebooks,
@@ -100,6 +104,7 @@ struct UniversalTmuxApp: App {
                 Button("Files…") { state.openWindowRequest = "files" }
                     .keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Credential Vault…") { state.openWindowRequest = "vault" }
+                Button("Local Automation Activity…") { state.openWindowRequest = "automation" }
                 Button("Hidden Panels…") { state.showHiddenPicker = true }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Session History…") { state.showHistory = true; state.loadHistory() }
@@ -195,6 +200,12 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("k", modifiers: .command)
             }
         }
+
+        Window("Local Automation Activity", id: "automation") {
+            AutomationActivityView().environmentObject(state).environmentObject(argusControl)
+                .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
+        }
+        .defaultSize(width: 900, height: 700)
 
         Window("Port forwards", id: "ports") {
             PortsView()
@@ -923,6 +934,9 @@ struct RootView: View {
             notebooks.activeID = nil
             state.showWebArtifacts = false
         }   // selecting a terminal leaves top-level libraries and the notebook view
+        .onChange(of: state.navigationRevision) { _ in
+            if state.workspaceDestination == .session { notebooks.activeID = nil }
+        }
         // When an overlay dismisses, the keyboard goes back to the visible
         // TERMINAL — never stranded on whatever AppKit picks next (the
         // sidebar filter). One central place so every close path is covered.

@@ -66,7 +66,6 @@ private struct NoteRow: View {
     @FocusState.Binding var focused: UUID?
     @EnvironmentObject var state: AppState
     @AppStorage("ut.uiScale") private var uiScale = 1.0
-    @State private var text = ""
     @State private var height: CGFloat = 22
     @State private var hover = false
 
@@ -91,17 +90,15 @@ private struct NoteRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 ZStack(alignment: .topLeading) {
-                    if text.isEmpty {
+                    if note.text.isEmpty {
                         Text("Write a note…").font(cf(15)).foregroundStyle(Theme.textTertiary)
                     }
-                    NoteEditor(text: $text, height: $height, fontSize: 15 * uiScale,
+                    NoteEditor(text: Binding(
+                        get: { state.notes.first(where: { $0.id == note.id })?.text ?? note.text },
+                        set: { state.updateNoteText(note.id, $0) }
+                    ), height: $height, fontSize: 15 * uiScale,
                                color: NSColor(Theme.textPrimary), isFocused: focused == note.id)
                         .frame(height: max(22, height))
-                        // Only a REAL edit (text diverged from the model) bumps editedAt.
-                        // The .onAppear sync below sets `text = note.text`, which also fires
-                        // this onChange — without the guard, just OPENING the panel re-stamped
-                        // every note's editedAt to now (jumping old notes to "Today").
-                        .onChange(of: text) { v in if v != note.text { state.updateNoteText(note.id, v) } }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -116,7 +113,6 @@ private struct NoteRow: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(Theme.surface.opacity(0.35)))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border, lineWidth: 1))
         .onHover { hover = $0 }
-        .onAppear { if text != note.text { text = note.text } }
     }
 }
 

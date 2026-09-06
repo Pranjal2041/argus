@@ -30,6 +30,8 @@ final class ActivityJournal {
     /// by AppState. Called on the main thread at event time.
     var nameResolver: ((String) -> String?)?
     var folderResolver: ((String, String) -> String?)?
+    /// Scoped by the main-actor action dispatcher; never represents authentication.
+    var actionActor: String?
 
     private let q = DispatchQueue(label: "ut.journal", qos: .utility)
 
@@ -45,8 +47,9 @@ final class ActivityJournal {
     // MARK: writing
 
     func log(_ kind: String, _ fields: [String: Any], date: Date = Date()) {
-        guard Self.isEnabled else { return }
+        guard Self.isEnabled, NSClassFromString("XCTestCase") == nil else { return }
         var f = fields
+        if let actionActor { f["actor"] = actionActor }
         if let mid = f["machineID"] as? String, f["machine"] == nil, let n = nameResolver?(mid) {
             f["machine"] = n
         }

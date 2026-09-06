@@ -283,6 +283,11 @@ func main() {
 			return
 		}
 		if r.Method == http.MethodPost {
+			if broker.UserDataMergeProtected(broker.UserData(key)) {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "merge_required", "message": "Update this client to use /userdata/merge. Its local edits have not been applied."})
+				return
+			}
 			body, _ := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024))
 			_, _ = w.Write(broker.SetUserData(key, body))
 			return
@@ -292,6 +297,26 @@ func main() {
 		} else {
 			_, _ = w.Write([]byte("{}"))
 		}
+	})
+	mux.HandleFunc("/userdata/merge", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		key := r.URL.Query().Get("key")
+		if key != "notes" && key != "todos" && key != "planner" && key != "workflows" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024+1))
+		if err != nil || len(body) > 8*1024*1024 {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		response, status := broker.MergeUserData(key, body)
+		w.WriteHeader(status)
+		_, _ = w.Write(response)
 	})
 	// /automation/unattended is the one durable cross-device switch for work
 	// that may proceed without the user present. The first capability is narrow:

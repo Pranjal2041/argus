@@ -427,7 +427,7 @@ final class CommandCenterModel: ObservableObject {
     /// The user manually set a card's status. Show it immediately and queue a one-time
     /// note so the NEXT model call is told the user corrected it (and reasons about why) —
     /// it then re-decides on its own. Nothing is persisted or learned; the label is not locked.
-    func setManualLabel(ref: SessionRef, label: String) {
+    func setManualLabel(ref: SessionRef, label: String, actor: String = "human") {
         let key = ref.id
         let prev = statuses[key]
         let old = prev?.label ?? "idle"
@@ -436,13 +436,13 @@ final class CommandCenterModel: ObservableObject {
         // This is the accumulating record of which auto-statuses you correct — what the
         // status prompt should be tuned on. (The status model's transcripts also carry it,
         // but they rotate; this doesn't.)
-        ManualStatusLog.record(machineID: ref.machineID,
+        if actor == "human" { ManualStatusLog.record(machineID: ref.machineID,
                                machine: app?.machines.first { $0.id == ref.machineID }?.name ?? ref.machineID,
-                               session: ref.session, from: old, to: label)
+                               session: ref.session, from: old, to: label) }
         ActivityJournal.shared.log("manualStatus", ActivityJournal.shared.ctx(ref)
-            .merging(["from": old, "to": label]) { a, _ in a })
+            .merging(["from": old, "to": label, "actor": actor]) { a, _ in a })
         statuses[key] = AgentStatus(label: label, oneLiner: prev?.oneLiner ?? "", lookAtThis: prev?.lookAtThis, updatedAt: Date())
-        correction[key] = "[USER STATUS CORRECTION] The user just changed this session's status from \"\(old)\" to \"\(label)\" — they judged \"\(old)\" wrong for what's actually happening. Work out why and weigh it."
+        correction[key] = "[STATUS CORRECTION] A \(actor == "human" ? "human" : "local automation client") changed this session's status from \"\(old)\" to \"\(label)\". Treat this as a correction, not a permanent lock."
         lastHash[key] = nil   // force the next sweep to re-summarize (and deliver the note) even if the screen is unchanged
         persist(); publish()
     }
@@ -523,6 +523,13 @@ final class CommandCenterModel: ObservableObject {
     }
 
     func stop() { timer?.invalidate(); timer = nil }
+
+    /// Invalidate cached scheduling evidence; the normal bounded scheduler owns
+    /// the work. Repeated refresh commands cannot bypass its concurrency limits.
+    func requestRefresh(ref: SessionRef? = nil) {
+        if let ref { lastHash[ref.id] = nil; lastDot[ref.id] = nil }
+        else { lastHash.removeAll(); lastDot.removeAll() }
+    }
 
     private func pulse() {
         guard let app else { ccLog("pulse: app nil (not bound)"); return }

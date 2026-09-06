@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import ArgusProtocol
 
 /// A host running a broker (one entry in the sidebar).
 struct Machine: Identifiable, Hashable {
@@ -376,6 +377,17 @@ final class AppState: ObservableObject {
     /// at the real app domain. Keep every persistence/network side effect disabled under
     /// XCTest even if a future test forgets to request isolation explicitly.
     private var persistenceEnabled = true
+    private var restoringWorkspace = false
+    private var workspaceRestoreFailed = false
+    @Published var workspaceStorageError: String?
+    lazy var workspaceSync: WorkspaceSync = {
+        let sync = WorkspaceSync(url: persistenceEnabled ? Self.workspaceDirectory.appendingPathComponent("sync.json") : nil)
+        sync.onChange = { [weak self] in self?.objectWillChange.send() }
+        return sync
+    }()
+    static var workspaceDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Argus/workspace")
+    }
     private var pendingDestructiveSync: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "ut.pendingDestructiveSync") ?? [])
     static var isRunningTests: Bool {
@@ -385,11 +397,20 @@ final class AppState: ObservableObject {
 
     @Published var machines: [Machine]
     @Published var sessionsByMachine: [String: [SessionInfo]] = [:]
+    var foregroundSnapshotAt: [String: Date] = [:]
+    var fullSnapshotAt: [String: Date] = [:]
     @Published var statusByMachine: [String: BrokerConnectionStatus] = [:]
     @Published var refreshIssueByMachine: [String: String] = [:]
     @Published var rttByMachine: [String: Int] = [:]  // round-trip ms per machine
+    var navigationOrigin: WorkspaceActionOrigin = .human
+    @Published var navigationRevision: UInt64 = 0
     @Published var selection: SessionRef? {
         didSet {
+            if navigationOrigin != .human {
+                if !Self.isRunningTests { ActivityJournal.shared.selectionChanged(to: nil) }
+                showWeeklyProgress = false
+                return // Agent navigation is not evidence that the human saw/acknowledged a card.
+            }
             // Activity journal dwell: attention moved (nil selection closes it too).
             ActivityJournal.shared.selectionChanged(to: selection)
             guard let ref = selection else { return }
@@ -490,6 +511,7 @@ final class AppState: ObservableObject {
         didSet {
             guard persistenceEnabled else { return }
             AppState.saveWorkflows(workflows)
+            persistWorkspace()
             if !applyingRemoteWorkflows {       // a local edit → stamp + push to the sync host
                 workflowsUpdatedAt = nowMs()
                 pushUserData("workflows", workflows, workflowsUpdatedAt,
@@ -615,6 +637,7 @@ final class AppState: ObservableObject {
         didSet {
             guard persistenceEnabled else { return }
             AppState.saveTodoBoards(todoBoards)
+            persistWorkspace()
             if !applyingRemoteTodos {           // a local edit → stamp + push to the sync host
                 todosUpdatedAt = nowMs()
                 pushUserData("todos", todoBoards, todosUpdatedAt,
@@ -651,9 +674,14 @@ final class AppState: ObservableObject {
         ActivityJournal.shared.log("todo", todoFields(todoBoards[i], action: "add", text: t))
     }
     func toggleTodo(_ boardID: UUID, _ itemID: UUID) {
+        guard let item = todoBoards.first(where: { $0.id == boardID })?.items.first(where: { $0.id == itemID }) else { return }
+        setTodoCompleted(boardID, itemID, completed: !item.done)
+    }
+    func setTodoCompleted(_ boardID: UUID, _ itemID: UUID, completed: Bool) {
         guard let bi = todoBoards.firstIndex(where: { $0.id == boardID }),
               let ii = todoBoards[bi].items.firstIndex(where: { $0.id == itemID }) else { return }
-        todoBoards[bi].items[ii].done.toggle()
+        guard todoBoards[bi].items[ii].done != completed else { return }
+        todoBoards[bi].items[ii].done = completed
         todoBoards[bi].items[ii].completedAt = todoBoards[bi].items[ii].done ? Date() : nil
         ActivityJournal.shared.log("todo", todoFields(
             todoBoards[bi],
@@ -713,6 +741,7 @@ final class AppState: ObservableObject {
         didSet {
             guard persistenceEnabled else { return }
             AppState.saveNotes(notes)
+            persistWorkspace()
             if !applyingRemoteNotes { notesUpdatedAt = nowMs() }
         }
     }
@@ -732,20 +761,26 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func addNote() -> UUID {
-        let n = Note()
+    func addNote(text: String = "") -> UUID {
+        var n = Note(); n.text = text
         notes.append(n)
         ActivityJournal.shared.log("note", ["action": "add", "noteID": n.id.uuidString])
         return n.id
     }
     func updateNoteText(_ id: UUID, _ text: String) {
-        guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[i].text = text
-        notes[i].editedAt = Date()       // last edit drives time grouping/sort
+        guard let i = notes.firstIndex(where: { $0.id == id }), notes[i].text != text else { return }
+        var updated = notes[i]
+        updated.text = text
+        updated.editedAt = Date()       // last edit drives time grouping/sort
+        notes[i] = updated
     }
     func toggleNote(_ id: UUID) {
         guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[i].done.toggle()
+        setNoteCompleted(id, completed: !notes[i].done)
+    }
+    func setNoteCompleted(_ id: UUID, completed: Bool) {
+        guard let i = notes.firstIndex(where: { $0.id == id }), notes[i].done != completed else { return }
+        notes[i].done = completed
     }
     func deleteNote(_ id: UUID) {
         guard notes.contains(where: { $0.id == id }) else { return }
@@ -759,6 +794,7 @@ final class AppState: ObservableObject {
         didSet {
             guard persistenceEnabled else { return }
             AppState.savePlannerCommitments(plannerCommitments)
+            persistWorkspace()
             if !applyingRemotePlanner {
                 plannerUpdatedAt = nowMs()
                 pushUserData("planner", plannerCommitments, plannerUpdatedAt,
@@ -821,8 +857,13 @@ final class AppState: ObservableObject {
     }
 
     func togglePlannerCommitment(_ id: UUID) {
+        guard let item = plannerCommitments.first(where: { $0.id == id }) else { return }
+        setPlannerCompleted(id, completed: !item.isCompleted)
+    }
+    func setPlannerCompleted(_ id: UUID, completed: Bool) {
         guard let index = plannerCommitments.firstIndex(where: { $0.id == id }) else { return }
-        plannerCommitments[index].completedAt = plannerCommitments[index].isCompleted ? nil : Date()
+        guard plannerCommitments[index].isCompleted != completed else { return }
+        plannerCommitments[index].completedAt = completed ? Date() : nil
         plannerCommitments[index].editedAt = Date()
         if persistenceEnabled {
             ActivityJournal.shared.log(
@@ -933,144 +974,24 @@ final class AppState: ObservableObject {
 
     private func pushUserData<T: Codable>(_ key: String, _ data: T, _ ts: Int64,
                                           allowDestructive: Bool = false) {
-        guard persistenceEnabled, let base = syncHostBase,
-              let url = URL(string: "\(base)/userdata?key=\(key)") else { return }
-        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
-        guard let body = try? enc.encode(SyncEnvelope(updatedAt: ts, data: data,
-                                                      allowDestructive: allowDestructive)) else { return }
-        var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 8
-        brokerSession.dataTask(with: req).resume()
+        // No snapshot LWW writes. The regular bounded reconcile also handles
+        // immediate UI/CLI mutations through the same merge contract.
+        guard persistenceEnabled else { return }
+        syncUserData()
     }
 
     /// Reconcile both keys with the sync store: adopt the remote when it's newer, push the
     /// local copy up when it's newer (or to bootstrap pre-existing data). Runs on the poll
     /// timer + at launch.
     func syncUserData() {
-        guard persistenceEnabled else { return }
-        syncWorkflows()
-        syncTodos()
-        syncNotes()
-        syncPlanner()
+        guard persistenceEnabled, !restoringWorkspace, workspaceStorageError == nil, let host = syncHostBase else { return }
+        for key in ["workflows", "todos", "notes", "planner"] {
+            workspaceSync.sync(key: key, host: host, read: { [weak self] in
+                self?.workspaceCollections()[key] ?? .array([])
+            }, apply: { [weak self] value in try self?.applyWorkspaceCollection(key, value) })
+        }
     }
 
-    private func syncWorkflows() {
-        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=workflows") else { return }
-        brokerSession.dataTask(with: url) { data, _, _ in
-            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-            var remoteTs: Int64 = 0; var remote: [Workflow]?
-            if let data, let env = try? dec.decode(SyncEnvelope<[Workflow]>.self, from: data) {
-                remoteTs = env.updatedAt; remote = env.data
-            }
-            DispatchQueue.main.async {
-                var localTs = self.workflowsUpdatedAt
-                if localTs == 0, !self.workflows.isEmpty { localTs = self.nowMs(); self.workflowsUpdatedAt = localTs }
-                if remoteTs > localTs, let remote {
-                    self.applyingRemoteWorkflows = true
-                    self.workflows = remote
-                    self.applyingRemoteWorkflows = false
-                    self.workflowsUpdatedAt = remoteTs
-                    self.clearDestructiveSync("workflows")
-                } else if localTs > remoteTs {
-                    self.pushUserData("workflows", self.workflows, localTs,
-                                      allowDestructive: self.pendingDestructiveSync.contains("workflows"))
-                } else if localTs != 0 {
-                    self.clearDestructiveSync("workflows")
-                }
-            }
-        }.resume()
-    }
-
-    private func syncTodos() {
-        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=todos") else { return }
-        brokerSession.dataTask(with: url) { data, _, _ in
-            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-            var remoteTs: Int64 = 0; var remote: [TodoBoard]?
-            if let data, let env = try? dec.decode(SyncEnvelope<[TodoBoard]>.self, from: data) {
-                remoteTs = env.updatedAt; remote = env.data
-            }
-            DispatchQueue.main.async {
-                let hasData = self.todoBoards.contains { !$0.isMisc || !$0.items.isEmpty }
-                var localTs = self.todosUpdatedAt
-                if localTs == 0, hasData { localTs = self.nowMs(); self.todosUpdatedAt = localTs }
-                if remoteTs > localTs, var remote {
-                    if !remote.contains(where: { $0.isMisc }) { remote.append(TodoBoard(isMisc: true)) }
-                    self.applyingRemoteTodos = true
-                    self.todoBoards = remote
-                    self.applyingRemoteTodos = false
-                    self.todosUpdatedAt = remoteTs
-                    self.clearDestructiveSync("todos")
-                } else if localTs > remoteTs {
-                    self.pushUserData("todos", self.todoBoards, localTs,
-                                      allowDestructive: self.pendingDestructiveSync.contains("todos"))
-                } else if localTs != 0 {
-                    self.clearDestructiveSync("todos")
-                }
-            }
-        }.resume()
-    }
-
-    private func syncNotes() {
-        guard let base = syncHostBase, let url = URL(string: "\(base)/userdata?key=notes") else { return }
-        brokerSession.dataTask(with: url) { data, _, _ in
-            let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-            var remoteTs: Int64 = 0; var remote: [Note]?
-            if let data, let env = try? dec.decode(SyncEnvelope<[Note]>.self, from: data) {
-                remoteTs = env.updatedAt; remote = env.data
-            }
-            DispatchQueue.main.async {
-                var localTs = self.notesUpdatedAt
-                if localTs == 0, !self.notes.isEmpty { localTs = self.nowMs(); self.notesUpdatedAt = localTs }
-                if remoteTs > localTs, let remote {
-                    self.applyingRemoteNotes = true
-                    self.notes = remote
-                    self.applyingRemoteNotes = false
-                    self.notesUpdatedAt = remoteTs
-                    self.clearDestructiveSync("notes")
-                } else if localTs > remoteTs {
-                    self.pushUserData("notes", self.notes, localTs,
-                                      allowDestructive: self.pendingDestructiveSync.contains("notes"))
-                } else if localTs != 0 {
-                    self.clearDestructiveSync("notes")
-                }
-            }
-        }.resume()
-    }
-
-    private func syncPlanner() {
-        guard let base = syncHostBase,
-              let url = URL(string: "\(base)/userdata?key=planner") else { return }
-        brokerSession.dataTask(with: url) { data, _, _ in
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-            var remoteTimestamp: Int64 = 0
-            var remoteCommitments: [PlannerCommitment]?
-            if let data,
-               let envelope = try? decoder.decode(SyncEnvelope<[PlannerCommitment]>.self, from: data) {
-                remoteTimestamp = envelope.updatedAt
-                remoteCommitments = envelope.data
-            }
-            DispatchQueue.main.async {
-                var localTimestamp = self.plannerUpdatedAt
-                if localTimestamp == 0, !self.plannerCommitments.isEmpty {
-                    localTimestamp = self.nowMs()
-                    self.plannerUpdatedAt = localTimestamp
-                }
-                if remoteTimestamp > localTimestamp, let remoteCommitments {
-                    self.applyingRemotePlanner = true
-                    self.plannerCommitments = remoteCommitments
-                    self.applyingRemotePlanner = false
-                    self.plannerUpdatedAt = remoteTimestamp
-                    self.clearDestructiveSync("planner")
-                } else if localTimestamp > remoteTimestamp {
-                    self.pushUserData(
-                        "planner", self.plannerCommitments, localTimestamp,
-                        allowDestructive: self.pendingDestructiveSync.contains("planner")
-                    )
-                } else if localTimestamp != 0 {
-                    self.clearDestructiveSync("planner")
-                }
-            }
-        }.resume()
-    }
 
     /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
     /// across devices): each refresh rebuilds this machine's membership from the `hidden`
@@ -1107,11 +1028,14 @@ final class AppState: ObservableObject {
     /// a full hide). Persisted, keyed by SessionRef.id.
     @Published var backlog: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "ut.backlog") ?? []) {
-        didSet { UserDefaults.standard.set(Array(backlog), forKey: "ut.backlog") }
+        didSet { if persistenceEnabled { UserDefaults.standard.set(Array(backlog), forKey: "ut.backlog") } }
     }
     func isBacklogged(_ ref: SessionRef) -> Bool { backlog.contains(ref.id) }
     func toggleBacklog(_ ref: SessionRef) {
-        if backlog.contains(ref.id) { backlog.remove(ref.id) } else { backlog.insert(ref.id) }
+        setBacklog(ref, included: !backlog.contains(ref.id))
+    }
+    func setBacklog(_ ref: SessionRef, included: Bool) {
+        if included { backlog.insert(ref.id) } else { backlog.remove(ref.id) }
     }
 
     /// Hide a session from the sidebar. If it was selected, move selection to the
@@ -1277,56 +1201,24 @@ final class AppState: ObservableObject {
 
     /// Present Planner as the one active top-level workspace pane.
     func presentPlanner() {
-        showPlanner = true
-        showWeeklyProgress = false
-        showOverview = false
-        showTodos = false
-        showNotes = false
-        showLedger = false
-        showLab = false
-        showArtifacts = false
-        showWebArtifacts = false
+        try? navigate(to: .planner)
     }
 
     /// Present the Artifact library as the one active top-level surface.
     func presentArtifacts() {
-        showArtifacts = true
-        showWeeklyProgress = false
-        showOverview = false
-        showPlanner = false
-        showTodos = false
-        showNotes = false
-        showLedger = false
-        showLab = false
-        showWebArtifacts = false
+        try? navigate(to: .artifacts)
     }
 
     /// Present Web Artifacts as its own top-level surface. These are executable
     /// web-service recipes, never files in the ordinary Artifact library.
     func presentWebArtifacts() {
-        showWebArtifacts = true
-        showArtifacts = false
-        showWeeklyProgress = false
-        showOverview = false
-        showPlanner = false
-        showTodos = false
-        showNotes = false
-        showLedger = false
-        showLab = false
+        try? navigate(to: .webArtifacts)
     }
 
     /// Present Weekly Progress as the one active top-level workspace. Like Artifacts,
     /// it owns the full window because its project rail replaces the session sidebar.
     func presentWeeklyProgress() {
-        showWeeklyProgress = true
-        showArtifacts = false
-        showWebArtifacts = false
-        showOverview = false
-        showPlanner = false
-        showTodos = false
-        showNotes = false
-        showLedger = false
-        showLab = false
+        try? navigate(to: .weeklyProgress)
     }
 
     /// The user's pinned working dir for a session, if set (nil/blank → not pinned).
@@ -1403,6 +1295,7 @@ final class AppState: ObservableObject {
             self?.applySessionRefresh(machine, update: update)
         }
         loadHistoryCache()
+        if !isolated { restoreWorkspace() }
         if !isolated {
             applyKeepAwake()   // honor a persisted "keep awake" across relaunches
             if !todoBoards.contains(where: { $0.isMisc }) { todoBoards.append(TodoBoard(isMisc: true)) }
@@ -1421,6 +1314,81 @@ final class AppState: ObservableObject {
     func toggleSidebar() {
         withAnimation(.easeInOut(duration: 0.2)) {
             columns = (columns == .detailOnly) ? .all : .detailOnly
+        }
+    }
+
+    // Shared UI/CLI durable workspace state. UserDefaults remains a migration
+    // mirror; the atomically written document is authoritative after migration.
+    func workspaceCollections() -> [String: ArgusJSON] {
+        ["notes": (try? .encode(notes)) ?? .array([]), "todos": (try? .encode(todoBoards)) ?? .array([]),
+         "planner": (try? .encode(plannerCommitments)) ?? .array([]), "workflows": (try? .encode(workflows)) ?? .array([])]
+    }
+    func applyWorkspaceCollection(_ key: String, _ value: ArgusJSON, validateOnly: Bool = false) throws {
+        guard let rows = value.array else { throw ArgusFailure("invalid_arguments", "Workspace data must be a record array.") }
+        var ids = Set<String>()
+        for row in rows {
+            guard let raw = row["id"].string, let id = UUID(uuidString: raw), ids.insert(id.uuidString).inserted else {
+                throw ArgusFailure("invalid_arguments", "Workspace records need unique UUIDs.")
+            }
+        }
+        switch key {
+        case "notes":
+            let next = try value.decode([Note].self)
+            if validateOnly { return }
+            if next == notes { return }
+            applyingRemoteNotes = true; notes = next; applyingRemoteNotes = false
+        case "todos":
+            let next = try value.decode([TodoBoard].self)
+            if next == todoBoards { return }
+            var itemIDs = Set<UUID>()
+            for item in next.flatMap(\.items) {
+                guard itemIDs.insert(item.id).inserted else { throw ArgusFailure("invalid_arguments", "Todo IDs must be unique across boards.") }
+            }
+            if validateOnly { return }
+            applyingRemoteTodos = true; todoBoards = next; applyingRemoteTodos = false
+        case "planner":
+            let next = try value.decode([PlannerCommitment].self)
+            if validateOnly { return }
+            if next == plannerCommitments { return }
+            applyingRemotePlanner = true; plannerCommitments = next; applyingRemotePlanner = false
+        case "workflows":
+            let next = try value.decode([Workflow].self)
+            if validateOnly { return }
+            if next == workflows { return }
+            applyingRemoteWorkflows = true; workflows = next; applyingRemoteWorkflows = false
+        default: throw ArgusFailure("invalid_arguments", "Unknown workspace collection.")
+        }
+        if let workspaceStorageError { throw ArgusFailure("storage_failed", workspaceStorageError) }
+    }
+    func flushWorkspace() throws {
+        guard persistenceEnabled, !restoringWorkspace else { return }
+        guard !workspaceRestoreFailed else { throw ArgusFailure("invalid_workspace", "The workspace failed to load. Its disk copy is preserved; repair it before saving.") }
+        let bytes = try ArgusWire.encoder().encode(workspaceCollections())
+        guard bytes.count <= 8 * 1024 * 1024 else { throw ArgusFailure("workspace_full", "Workspace exceeds the 8 MiB sync limit; data remains in memory and the previous disk copy is preserved.") }
+        let dir = Self.workspaceDirectory
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let url = dir.appendingPathComponent("state.json")
+        try bytes.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+    private func persistWorkspace() {
+        guard persistenceEnabled, !restoringWorkspace else { return }
+        do { try flushWorkspace(); workspaceStorageError = nil }
+        catch { workspaceStorageError = error.localizedDescription }
+    }
+    private func restoreWorkspace() {
+        let url = Self.workspaceDirectory.appendingPathComponent("state.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { persistWorkspace(); return }
+        restoringWorkspace = true
+        defer { restoringWorkspace = false }
+        do {
+            let values = try JSONDecoder().decode([String: ArgusJSON].self, from: ArgusWire.readFile(url, limit: 8 * 1024 * 1024))
+            guard Set(values.keys) == Set(["notes", "todos", "planner", "workflows"]) else { throw ArgusFailure("invalid_workspace", "Workspace document is incomplete.") }
+            for key in values.keys { try applyWorkspaceCollection(key, values[key]!, validateOnly: true) }
+            for key in values.keys { try applyWorkspaceCollection(key, values[key]!) }
+        } catch {
+            workspaceRestoreFailed = true
+            workspaceStorageError = "Workspace could not be restored; sync is stopped: \(error.localizedDescription)"
         }
     }
 
@@ -1636,6 +1604,8 @@ final class AppState: ObservableObject {
         if refreshIssueByMachine[m.id] != update.issue { refreshIssueByMachine[m.id] = update.issue }
         guard let fetched = update.sessions else { return } // retain the last good snapshot
         let now = Date()
+        foregroundSnapshotAt[m.id] = now
+        if update.scope == .all { fullSnapshotAt[m.id] = now }
         let lastRTT = lastRTTPublishedAt[m.id] ?? .distantPast
         if rttByMachine[m.id] == nil || now.timeIntervalSince(lastRTT) >= 30 {
             let roundedRTT = max(0, Int((Double(update.roundTripMilliseconds) / 5).rounded()) * 5)

@@ -165,6 +165,9 @@ func SetUserData(key string, body []byte) []byte {
 	defer userDataMu.Unlock()
 	p := userDataPath(key)
 	existing := readUserDataLocked(key)
+	if UserDataMergeProtected(existing) {
+		return existing // Legacy snapshot writes cannot bypass the shared merge contract.
+	}
 	incoming, valid := decodeUserDataEnvelope(body)
 	if !valid {
 		return existing

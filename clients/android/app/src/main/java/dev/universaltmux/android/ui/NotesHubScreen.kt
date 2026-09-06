@@ -76,6 +76,7 @@ fun NotesHubScreen(vm: AppViewModel) {
             IconButton(onClick = { vm.addNote() }) { Icon(Icons.Filled.Add, "New note", tint = nAccent) }
         }
         Divider(color = nFaint.copy(alpha = 0.2f))
+        WorkspaceSyncBanner(vm, "notes")
         if (vm.notes.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("No notes yet. Tap + to write one.", color = nDim, fontSize = 15.sp)
@@ -96,7 +97,6 @@ fun NotesHubScreen(vm: AppViewModel) {
 
 @Composable
 private fun NoteCard(vm: AppViewModel, note: Note) {
-    var text by remember(note.id) { mutableStateOf(note.text) }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(nPanel).padding(12.dp)) {
         Row(verticalAlignment = Alignment.Top) {
             IconButton(onClick = { vm.toggleNote(note.id) }, modifier = Modifier.size(34.dp)) {
@@ -109,14 +109,14 @@ private fun NoteCard(vm: AppViewModel, note: Note) {
                     modifier = Modifier.weight(1f).padding(start = 4.dp, top = 7.dp))
             } else {
                 BasicTextField(
-                    value = text,
-                    onValueChange = { text = it; vm.updateNoteText(note.id, it) },
+                    value = note.text,
+                    onValueChange = { vm.updateNoteText(note.id, it) },
                     textStyle = TextStyle(color = nText, fontSize = 15.sp),
                     cursorBrush = SolidColor(nAccent),
                     modifier = Modifier.weight(1f).padding(start = 4.dp, top = 7.dp),
                     decorationBox = { inner ->
                         Box {
-                            if (text.isEmpty()) Text("Write a note…", color = nFaint, fontSize = 15.sp)
+                            if (note.text.isEmpty()) Text("Write a note…", color = nFaint, fontSize = 15.sp)
                             inner()
                         }
                     }

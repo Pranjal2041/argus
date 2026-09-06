@@ -23,6 +23,11 @@ Windows boxes, your phone — over [Tailscale](https://tailscale.com), peer-to-p
 Activity Journal turns your supervision into a durable ledger and Wrapped recap: one calm pane of
 glass over a sprawl of agents and compute.
 
+The Mac-local **[`argus` CLI](docs/argus-cli.md)** exposes Command Center, app
+navigation, Notes, Todo Maps, Planner, Weekly Progress, and replayable events to a
+master agent using the same state and actions as the native app. It is separate
+from `ut` and does not steal focus during ordinary operations.
+
 > Named for **Argus Panoptes**, the hundred-eyed giant who watched over everything.
 > *(Formerly `universal_tmux`; the `ut` CLI and per-host broker keep that name internally —
 > it's load-bearing for tailnet discovery.)*

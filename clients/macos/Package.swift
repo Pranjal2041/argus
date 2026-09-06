@@ -10,9 +10,11 @@ let package = Package(
         .package(path: "vendor/SwiftTerm"),
     ],
     targets: [
+        .target(name: "ArgusProtocol"),
+        .executableTarget(name: "argus", dependencies: ["ArgusProtocol"]),
         .executableTarget(
             name: "UniversalTmuxMac",
-            dependencies: ["SwiftTerm"],
+            dependencies: ["SwiftTerm", "ArgusProtocol"],
             linkerSettings: [
                 // Embed Info.plist into the binary so macOS honors ATS (and other
                 // Info.plist keys) for this SwiftPM executable — a loose bundle
@@ -27,7 +29,7 @@ let package = Package(
         ),
         .testTarget(
             name: "UniversalTmuxMacTests",
-            dependencies: ["UniversalTmuxMac"]
+            dependencies: ["UniversalTmuxMac", "ArgusProtocol"]
         ),
     ]
 )
