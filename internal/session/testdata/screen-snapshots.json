@@ -1,0 +1,244 @@
+[
+  {
+    "name": "suggestion",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 13,
+      "CursorY": 0,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "prompt> typed\u001b[90m suggestion\u001b[0m",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hprompt> typed\u001b[90m suggestion\u001b[0m\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[1;14H",
+    "nextX": 13,
+    "nextY": 0,
+    "wide": false
+  },
+  {
+    "name": "wrapped-input",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 1,
+      "CursorY": 1,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "pppppppppppppppppppppppppppppppppppppabc",
+        "d\u001b[90m suggestion\u001b[0m",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hpppppppppppppppppppppppppppppppppppppabc\r\nd\u001b[90m suggestion\u001b[0m\r\n\r\n\r\n\r\n\r\n\r\n\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[2;2H",
+    "nextX": 1,
+    "nextY": 1,
+    "wide": false
+  },
+  {
+    "name": "pending-wrap",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 40,
+      "CursorY": 0,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[1;1H\u001b[0mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\u001b[0m",
+    "nextX": 0,
+    "nextY": 1,
+    "wide": false
+  },
+  {
+    "name": "wide-pending-wrap",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 40,
+      "CursorY": 0,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx界",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx界\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[1;1H\u001b[0mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx界\u001b[0m",
+    "nextX": 0,
+    "nextY": 1,
+    "wide": true
+  },
+  {
+    "name": "spaces-pending-wrap",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 40,
+      "CursorY": 0,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  ",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  \r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[1;1H\u001b[0mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  \u001b[0m",
+    "nextX": 0,
+    "nextY": 1,
+    "wide": false
+  },
+  {
+    "name": "history-blank-rows",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 4,
+      "CursorY": 2,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "history1",
+        "history2",
+        "visible top",
+        "",
+        "editing",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hhistory1\r\nhistory2\r\nvisible top\r\n\r\nediting\r\n\r\n\r\n\r\n\r\n\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[3;5H",
+    "nextX": 4,
+    "nextY": 2,
+    "wide": false
+  },
+  {
+    "name": "alternate-screen",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 5,
+      "CursorY": 3,
+      "Alternate": true,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": false,
+      "Origin": false,
+      "ScrollTop": 0,
+      "ScrollBottom": 7,
+      "Lines": [
+        "header",
+        "",
+        "",
+        " edit",
+        "",
+        "",
+        "",
+        "footer"
+      ]
+    },
+    "ansi": "\u001b[?1049h\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hheader\r\n\r\n\r\n edit\r\n\r\n\r\n\r\nfooter\u001b[0m\u001b[1;8r\u001b[?6l\u001b[?7h\u001b[?25h\u001b[4;6H",
+    "nextX": 5,
+    "nextY": 3,
+    "wide": false
+  },
+  {
+    "name": "scroll-origin-insert",
+    "snapshot": {
+      "Cols": 40,
+      "Rows": 8,
+      "CursorX": 5,
+      "CursorY": 3,
+      "Alternate": false,
+      "CursorVisible": true,
+      "Wrap": true,
+      "Insert": true,
+      "Origin": true,
+      "ScrollTop": 1,
+      "ScrollBottom": 6,
+      "Lines": [
+        "header",
+        "",
+        "",
+        " edit",
+        "",
+        "",
+        "footer",
+        "outside"
+      ]
+    },
+    "ansi": "\u001b[?1049l\u001b[?6l\u001b[r\u001b[4l\u001b[?7h\u001b[0m\u001b[2J\u001b[3J\u001b[Hheader\r\n\r\n\r\n edit\r\n\r\n\r\nfooter\r\noutside\u001b[0m\u001b[2;7r\u001b[?6h\u001b[?7h\u001b[?25h\u001b[3;6H\u001b[4h",
+    "nextX": 5,
+    "nextY": 3,
+    "wide": false
+  }
+]

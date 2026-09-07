@@ -52,13 +52,14 @@ type winSession struct {
 	doneFile   string
 	doneAt     int64
 
-	mu      sync.Mutex
-	ring    []byte
-	capture *captureScreen // authoritative rendered screen for /recent; never reconstructed from a truncated ring
-	modes   modeTracker    // DEC private modes, re-emitted in Snapshot so bracketed paste etc. survive attach
-	lastOut int64
-	cols    int // current ConPTY size (the width all output is formatted for)
-	rows    int
+	mu           sync.Mutex
+	ring         []byte
+	capture      *captureScreen // authoritative rendered screen for /recent; never reconstructed from a truncated ring
+	modes        modeTracker    // DEC private modes, re-emitted in Snapshot so bracketed paste etc. survive attach
+	lastOut      int64
+	cols         int // current ConPTY size (the width all output is formatted for)
+	rows         int
+	outputClosed bool
 }
 
 func (s *winSession) Output() <-chan session.Output { return s.outCh }
@@ -79,6 +80,10 @@ func (s *winSession) Resize(cols, rows int) error {
 		return nil
 	}
 	s.mu.Lock()
+	if s.outputClosed {
+		s.mu.Unlock()
+		return fmt.Errorf("terminal output has closed")
+	}
 	if err := s.cpty.Resize(cols, rows); err != nil {
 		s.mu.Unlock()
 		return err
@@ -88,15 +93,15 @@ func (s *winSession) Resize(cols, rows int) error {
 	if s.capture != nil {
 		s.capture.resize(cols, rows)
 	}
-	s.mu.Unlock()
 	if changed {
 		// In-band size event so EVERY viewer (not just the one that asked) re-pins
 		// its grid to the ConPTY's new size — mirrors the tmux %layout-change path.
 		select {
 		case s.outCh <- session.Output{Pane: "%0", Cols: cols, Rows: rows}:
-		default: // no/slow consumer; the connect-time Size() push covers it
+		default: // no/slow consumer; the ordered snapshot includes the size
 		}
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -117,9 +122,27 @@ func (s *winSession) Size() (int, int) {
 func (s *winSession) Snapshot() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.ring) == 0 {
-		return nil
+	return s.snapshotLocked()
+}
+
+func (s *winSession) RequestSnapshot(id uint64) error {
+	if id == 0 {
+		return fmt.Errorf("snapshot ID must be nonzero")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outputClosed {
+		return fmt.Errorf("terminal output has closed")
+	}
+	select {
+	case s.outCh <- session.Output{Pane: "%0", Data: s.snapshotLocked(), Cols: s.cols, Rows: s.rows, SnapshotID: id}:
+		return nil
+	default:
+		return fmt.Errorf("terminal snapshot queue is full; reconnect to retry")
+	}
+}
+
+func (s *winSession) snapshotLocked() []byte {
 	const prefix = "\x1b[2J\x1b[3J\x1b[H"
 	// Re-emit the currently-active DEC private modes (bracketed paste, mouse,
 	// cursor, alt-screen, …) so a client attaching to a long-running session
@@ -144,7 +167,7 @@ func (s *winSession) closeReal() { s.once.Do(func() { _ = s.cpty.Close() }) }
 // (best-effort; the ring covers any drop while no client is attached). It closes
 // outCh when the process exits, which ends the hub's pump.
 func (s *winSession) readLoop() {
-	defer close(s.outCh)
+	defer func() { s.mu.Lock(); s.outputClosed = true; close(s.outCh); s.mu.Unlock() }()
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := s.cpty.Read(buf)
@@ -161,11 +184,11 @@ func (s *winSession) readLoop() {
 			}
 			s.modes.feed(data) // track DEC private modes even as they scroll out of the ring
 			s.lastOut = time.Now().Unix()
-			s.mu.Unlock()
 			select {
 			case s.outCh <- session.Output{Pane: "%0", Data: data}:
 			default: // no/slow consumer — snapshot will carry it
 			}
+			s.mu.Unlock()
 		}
 		if err != nil {
 			return

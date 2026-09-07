@@ -40,18 +40,21 @@ func sizePayload(cols, rows int) []byte {
 }
 
 type subscriber struct {
-	ch     chan []byte
-	done   chan struct{}
-	cancel context.CancelFunc // cancels this client's serve ctx (used to evict on kill/rename)
+	ch         chan []byte
+	done       chan struct{}
+	cancel     context.CancelFunc // cancels this client's serve ctx (used to evict on kill/rename)
+	primed     bool               // protected by hub.mu
+	snapshotID uint64
 }
 
 // sessionHub owns one backend session (tmux or ConPTY) and its connected clients.
 type sessionHub struct {
-	tm       session.Session
-	mu       sync.Mutex
-	subs     map[*subscriber]struct{}
-	lastPane string
-	dead     chan struct{} // closed when the backend session ended (pump exited)
+	tm           session.Session
+	mu           sync.Mutex
+	subs         map[*subscriber]struct{}
+	lastPane     string
+	dead         chan struct{} // closed when the backend session ended (pump exited)
+	nextSnapshot uint64
 }
 
 func newSessionHub(tm session.Session) *sessionHub {
@@ -102,13 +105,27 @@ func (h *sessionHub) pump() {
 			// order, so each client re-pins its grid exactly between the bytes
 			// formatted for the old width and those formatted for the new.
 			frames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
-		} else {
-			frames = outputFrames(out.Pane, out.Data)
+		}
+		if len(out.Data) > 0 {
+			frames = append(frames, outputFrames(out.Pane, out.Data)...)
 		}
 		h.mu.Lock()
 		h.lastPane = out.Pane
 		subs := make([]*subscriber, 0, len(h.subs))
 		for s := range h.subs {
+			if out.SnapshotID != 0 {
+				if s.snapshotID != out.SnapshotID {
+					continue
+				}
+				s.snapshotID = 0
+				if len(out.Data) == 0 {
+					s.cancel()
+					continue
+				}
+				s.primed = true
+			} else if !s.primed {
+				continue
+			}
 			subs = append(subs, s)
 		}
 		h.mu.Unlock()
@@ -134,6 +151,35 @@ func (h *sessionHub) pump() {
 	}
 }
 
+// At most one outstanding request per viewer. Only pump writes snapshot and
+// live frames, preserving the backend's stream cut even for multi-frame captures.
+func (h *sessionHub) requestSnapshot(sub *subscriber) error {
+	h.mu.Lock()
+	if sub.snapshotID != 0 {
+		h.mu.Unlock()
+		return nil
+	}
+	h.nextSnapshot++
+	id := h.nextSnapshot
+	sub.snapshotID = id
+	h.mu.Unlock()
+	if err := h.tm.RequestSnapshot(id); err != nil {
+		h.mu.Lock()
+		sub.snapshotID = 0
+		h.mu.Unlock()
+		return err
+	}
+	time.AfterFunc(10*time.Second, func() {
+		h.mu.Lock()
+		pending := sub.snapshotID == id
+		h.mu.Unlock()
+		if pending {
+			sub.cancel()
+		}
+	})
+	return nil
+}
+
 func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	c.SetReadLimit(maxClientMessageBytes)
 	ctx, cancel := context.WithCancel(ctx)
@@ -143,11 +189,8 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
-	// Tell this client the pane's current authoritative size FIRST — before the
-	// snapshot and any live output — so it renders everything at the right width.
-	if cols, rows := h.tm.Size(); cols > 0 && rows > 0 {
-		sub.ch <- encodeFrame(opPaneSize, h.tm.Pane(), sizePayload(cols, rows))
-	}
+	// The initial snapshot carries its exact size. Until its ordered stream
+	// cut arrives, pre-attachment deltas are ignored for this viewer only.
 	defer func() {
 		h.mu.Lock()
 		delete(h.subs, sub)
@@ -168,21 +211,6 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 			}
 		}
 	}()
-
-	// sendSnapshot captures the pane's current screen and delivers it to THIS
-	// client, in order on its own channel. Used both for the one-shot initial
-	// prime and for explicit on-resize redraw requests (opReqSnapshot).
-	sendSnapshot := func() {
-		if snap := h.tm.Snapshot(); len(snap) > 0 {
-			for _, frame := range outputFrames(h.tm.Pane(), snap) {
-				select {
-				case sub.ch <- frame:
-				case <-sub.done:
-					return
-				}
-			}
-		}
-	}
 
 	// `primed` ensures we send the initial screen snapshot exactly once, AFTER the
 	// client's first resize has been applied — so the snapshot is captured at the
@@ -219,17 +247,18 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 			_ = h.tm.Resize(cols, rows)
 			if !primed {
 				primed = true
-				go func() {
-					time.Sleep(150 * time.Millisecond) // let tmux apply the resize + reflow
-					sendSnapshot()
-				}()
+				if err := h.requestSnapshot(sub); err != nil {
+					return err
+				}
 			}
 		case opReqSnapshot:
 			// The client applied its final size and now asks for an authoritative
 			// redraw. Snapshot() clears scrollback+screen before painting, so this
 			// is idempotent — feeding it on every settled resize never duplicates
 			// history and makes tmux (not the local reflow) the source of truth.
-			sendSnapshot()
+			if err := h.requestSnapshot(sub); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -255,11 +284,8 @@ func (h *sessionHub) stream(parent context.Context, w io.Writer, flush func()) {
 	// The /ws path gets this from the client's first resize; /stream must prime
 	// it itself, or no live output flows (only the snapshot).
 	_ = h.tm.Resize(200, 50)
-	if snap := h.tm.Snapshot(); len(snap) > 0 {
-		if _, err := w.Write(snap); err != nil {
-			return
-		}
-		flush()
+	if err := h.requestSnapshot(sub); err != nil {
+		return
 	}
 	for {
 		select {

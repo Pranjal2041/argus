@@ -15,8 +15,10 @@ import "context"
 type Output struct {
 	Pane string // backend pane id (tmux "%0"); a constant for single-pane backends
 	Data []byte
-	Cols int // >0 with Rows: size event (Data is empty)
+	Cols int // >0 with Rows: authoritative geometry, applied before Data
 	Rows int
+	// A snapshot is an ordered stream cut, consumed only by its requester.
+	SnapshotID uint64
 }
 
 // Info describes one session for the client's sidebar (JSON shape is the wire
@@ -36,13 +38,14 @@ type Info struct {
 
 // Session is one live session the broker streams to/from clients.
 type Session interface {
-	Output() <-chan Output // raw pane bytes + in-band size events (closed when the session ends)
+	Output() <-chan Output // ordered live bytes, geometry, and requested snapshots (closed when the session ends)
 	SendKeys(pane string, data []byte) error
 	Resize(cols, rows int) error
-	Size() (cols, rows int) // the pane's CURRENT size (0,0 if unknown)
-	Snapshot() []byte       // current screen to prime a freshly-connected client
-	Pane() string           // default pane id for input routing
-	Close()                 // detach this control client (session itself persists)
+	Size() (cols, rows int)          // the pane's CURRENT size (0,0 if unknown)
+	Snapshot() []byte                // repaint including viewport rows and editing cursor; subsequent deltas must land at the same cells
+	RequestSnapshot(id uint64) error // emit the repaint through Output(), never a parallel writer
+	Pane() string                    // default pane id for input routing
+	Close()                          // detach this control client (session itself persists)
 }
 
 // ExecRequest runs a command on this host (the mesh's remote-exec primitive).
