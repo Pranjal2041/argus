@@ -25,11 +25,12 @@ func (s *recordingInputSession) SendKeys(_ string, data []byte) error {
 	s.input <- copyOfData
 	return nil
 }
-func (s *recordingInputSession) Resize(int, int) error { return nil }
-func (s *recordingInputSession) Size() (int, int)      { return 0, 0 }
-func (s *recordingInputSession) Snapshot() []byte      { return nil }
-func (s *recordingInputSession) Pane() string          { return "%0" }
-func (s *recordingInputSession) Close()                {}
+func (s *recordingInputSession) Resize(int, int) error        { return nil }
+func (s *recordingInputSession) Size() (int, int)             { return 0, 0 }
+func (s *recordingInputSession) Snapshot() []byte             { return nil }
+func (s *recordingInputSession) RequestSnapshot(uint64) error { return nil }
+func (s *recordingInputSession) Pane() string                 { return "%0" }
+func (s *recordingInputSession) Close()                       {}
 
 func TestSessionHubAcceptsLegacyLargeInputMessage(t *testing.T) {
 	backend := &recordingInputSession{

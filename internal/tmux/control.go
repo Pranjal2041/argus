@@ -8,9 +8,8 @@
 // over the pty master; tmux puts the pty into raw mode itself, so our own
 // command writes are not echoed back into the stream.
 //
-// Slice 0 scope: stream pane %output (losslessly un-escaped) and forward
-// input/resize. Topology notifications and %begin/%end command-response guard
-// blocks are parsed away (ignored) for now — they arrive in later slices.
+// Stream pane %output (losslessly un-escaped), ordered screen snapshots, and
+// geometry notifications; forward input and resize through the same client.
 package tmux
 
 import (
@@ -419,10 +418,11 @@ type Client struct {
 	writeMu sync.Mutex
 	// Agent-session use is persisted at most once/minute while a user types in a
 	// connected viewer. CLI run/send paths touch the same marker directly.
-	meshOwned bool
-	lastTouch int64
-	lastW     int // last size emitted from %layout-change (readLoop goroutine only)
-	lastH     int
+	meshOwned     bool
+	lastTouch     int64
+	lastW         int // last size emitted from %layout-change (readLoop goroutine only)
+	lastH         int
+	snapshotReply snapshotReply // readLoop-owned command-response collector
 }
 
 // Dial starts a control-mode client attached to an EXISTING named session.
@@ -900,26 +900,35 @@ func (c *Client) paneFlag(format string) string {
 // Capture happens at the window's CURRENT width, so the broker must apply the
 // client's resize BEFORE calling this (see the hub's first-resize priming).
 func (c *Client) Snapshot() []byte {
-	esc := string(rune(27))
-	alt := c.paneFlag("#{alternate_on}") == "1"
-	var args []string
-	var prefix string
-	// [3J clears the client's scrollback before repaint, so a client may feed this
-	// snapshot repeatedly (e.g. a redraw on every settled resize) without ever
-	// duplicating history — the snapshot is an idempotent "here is the truth now".
-	if alt {
-		args = []string{"capture-pane", "-p", "-e", "-t", c.primary}      // visible screen only
-		prefix = esc + "[?1049h" + esc + "[2J" + esc + "[3J" + esc + "[H" // enter alt, clear, clear scrollback, home
-	} else {
-		args = []string{"capture-pane", "-p", "-e", "-S", "-10000", "-t", c.primary} // + scrollback
-		prefix = esc + "[?1049l" + esc + "[2J" + esc + "[3J" + esc + "[H"            // ensure main, clear, clear scrollback, home
-	}
-	out, err := exec.Command("tmux", tmuxArgs(c.socket, args...)...).Output()
+	// Capture metadata and the active grid in one non-yielding tmux command
+	// sequence, not separate processes which can observe different cursor states.
+	// The active alternate grid has no history, so the same capture handles both.
+	args := []string{"display-message", "-p", "-t", c.primary, snapshotMetadata, ";", "capture-pane", "-p", "-e", "-N", "-S", "-10000", "-t", c.primary}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", tmuxArgs(c.socket, args...)...).Output()
 	if err != nil || len(out) == 0 {
 		return nil
 	}
-	body := strings.ReplaceAll(strings.TrimRight(string(out), "\n"), "\n", "\r\n")
-	return []byte(prefix + body)
+	return decodeScreenSnapshot(out).ANSI()
+}
+
+func decodeScreenSnapshot(data []byte) session.ScreenSnapshot {
+	header, body, ok := strings.Cut(string(data), "\n")
+	if !ok || !strings.HasSuffix(body, "\n") {
+		return session.ScreenSnapshot{}
+	}
+	var s session.ScreenSnapshot
+	var alternate, visible, wrap, insert, origin int
+	n, err := fmt.Sscanf(header, "%d %d %d %d %d %d %d %d %d %d %d", &s.Cols, &s.Rows, &s.CursorX, &s.CursorY, &alternate, &visible, &wrap, &insert, &origin, &s.ScrollTop, &s.ScrollBottom)
+	if err != nil || n != 11 {
+		return session.ScreenSnapshot{}
+	}
+	s.Alternate, s.CursorVisible, s.Wrap, s.Insert, s.Origin = alternate == 1, visible == 1, wrap == 1, insert == 1, origin == 1
+	// Remove the final record separator ONLY. Empty viewport rows are real
+	// geometry; trimming all newlines shifts the screen relative to scrollback.
+	s.Lines = strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	return s
 }
 
 func (c *Client) readLoop(r io.Reader) {
@@ -938,8 +947,11 @@ func (c *Client) readLoop(r io.Reader) {
 
 // handleLine processes one control-mode line: %output (pane bytes) and
 // %layout-change (the window was resized — by anyone — so emit an in-band size
-// event). Everything else (guard blocks, other notifications) is ignored.
+// event), plus guarded snapshot responses. Other notifications are ignored.
 func (c *Client) handleLine(line string) {
+	if c.collectSnapshotLine(line) {
+		return
+	}
 	if strings.HasPrefix(line, "%layout-change ") {
 		// %layout-change @id window-layout window-visible-layout flags
 		// The layout's second field is the window size, e.g. "ac1d,139x53,0,0,0".

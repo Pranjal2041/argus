@@ -59,6 +59,7 @@ func (s *warmSession) SendKeys(string, []byte) error { return nil }
 func (s *warmSession) Resize(int, int) error         { return nil }
 func (s *warmSession) Size() (int, int)              { return 0, 0 }
 func (s *warmSession) Snapshot() []byte              { return nil }
+func (s *warmSession) RequestSnapshot(uint64) error  { return nil }
 func (s *warmSession) Pane() string                  { return "pane" }
 func (s *warmSession) Close()                        {}
 
