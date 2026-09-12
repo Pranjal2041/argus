@@ -5,6 +5,139 @@ import XCTest
 
 @MainActor
 final class RenderWebIntegrationTests: XCTestCase {
+    func testPDFPreservesBundledMathStylesAndNestedOverflow() async throws {
+        let webView = try await loadRenderer()
+        try await setDocument(webView, source: "# Math and nested content\n\n\\[\\frac{123}{456} + \\sqrt{789}\\]\n\nNESTED_START", origin: "test", presentation: "rendered")
+        _ = try await webView.evaluateJavaScript(#"""
+            const box = document.createElement('div');
+            box.style.cssText = 'overflow:hidden;width:180px;height:24px';
+            box.innerHTML = '<div style="overflow:auto;width:150px;height:20px"><div style="width:950px">NESTEDLEFT <span style="float:right">NESTEDRIGHT</span></div><p>NESTEDBOTTOM</p></div>';
+            document.getElementById('out').appendChild(box);
+            true;
+            """#)
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            RenderPDFExporter.create(from: webView) { continuation.resume(with: $0) }
+        }
+        let pdf = try XCTUnwrap(PDFDocument(data: data))
+        let text = (pdf.string ?? "").components(separatedBy: .whitespacesAndNewlines).joined()
+        for marker in ["NESTEDLEFT", "NESTEDRIGHT", "NESTEDBOTTOM", "123", "456", "789"] { XCTAssertTrue(text.contains(marker), "Missing \(marker) in \(text)") }
+        XCTAssertLessThan(try XCTUnwrap(pdf.page(at: 0)).bounds(for: .mediaBox).width, 1_100, "Decorative clipped glyphs must not expand the page")
+        // The hidden MathML accessibility representation must not become a
+        // second visible/extractable equation when scroll surfaces expand.
+        XCTAssertEqual(text.components(separatedBy: "123").count - 1, 1)
+        if let directory = ProcessInfo.processInfo.environment["ARGUS_PDF_QA_DIR"] {
+            try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("math-nested.pdf"))
+        }
+    }
+
+    func testPDFPaginationPreservesEveryLineAndTerminalColumn() async throws {
+        for terminalMode in [false, true] {
+            let webView = try await loadRenderer()
+            webView.frame = .init(x: 0, y: 0, width: 480, height: 360)
+            var lines = (0..<650).map { "ROW_\($0)_END_\($0)" }
+            lines[0] += String(repeating: "X", count: 100) + "_FAR_RIGHT"
+            let terminal: [String: Any] = ["columns": 120, "fontFamily": "monospace",
+                "background": "#11131A", "foreground": "#E8E9EE",
+                "styles": [terminalStyle(foreground: "#E8E9EE")],
+                "lines": lines.map { terminalLine([terminalRun($0)]) }]
+            try await setDocument(webView, source: "```text\n" + lines.joined(separator: "\n") + "\n```",
+                                  origin: "test-transcript", presentation: terminalMode ? "terminal" : "rendered", terminal: terminal)
+            let data: Data = try await withCheckedThrowingContinuation { continuation in
+                RenderPDFExporter.create(from: webView) { continuation.resume(with: $0) }
+            }
+            let pdf = try XCTUnwrap(PDFDocument(data: data))
+            XCTAssertGreaterThan(pdf.pageCount, 1)
+            let text = (pdf.string ?? "").components(separatedBy: .whitespacesAndNewlines).joined()
+            XCTAssertTrue(text.contains("_FAR_RIGHT"))
+            for index in 0..<650 {
+                XCTAssertTrue(text.contains("ROW_\(index)_"), "Missing row start \(index), terminal=\(terminalMode)")
+                XCTAssertTrue(text.contains("_END_\(index)"), "Missing row end \(index), terminal=\(terminalMode)")
+            }
+            for index in 0..<pdf.pageCount {
+                XCTAssertLessThanOrEqual(try XCTUnwrap(pdf.page(at: index)).bounds(for: .mediaBox).height, 12_000)
+            }
+            if let directory = ProcessInfo.processInfo.environment["ARGUS_PDF_QA_DIR"] {
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(terminalMode ? "terminal-tall.pdf" : "code-tall.pdf"))
+            }
+        }
+    }
+
+    func testPDFRejectsUnsupportedWidthInsteadOfSavingACroppedPage() async throws {
+        let webView = try await loadRenderer()
+        try await setDocument(webView, source: "Wide", origin: "test", presentation: "rendered")
+        _ = try await webView.evaluateJavaScript("document.querySelector('#out').style.width = '15000px'")
+        do {
+            let _: Data = try await withCheckedThrowingContinuation { continuation in
+                RenderPDFExporter.create(from: webView) { continuation.resume(with: $0) }
+            }
+            XCTFail("An oversized document must fail explicitly")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("page-width limit")) }
+    }
+
+    /// Optional local recovery/QA harness uses the same bundled renderer and
+    /// exporter as the app; source files are never test-suite dependencies.
+    func testExportRecoverySourcesWhenRequested() async throws {
+        guard let directory = ProcessInfo.processInfo.environment["ARGUS_PDF_RECOVERY_DIR"] else { return }
+        let root = URL(fileURLWithPath: directory)
+        for file in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) where file.pathExtension == "md" {
+            let webView = try await loadRenderer()
+            webView.frame = .init(x: 0, y: 0, width: 1488, height: 900)
+            try await setDocument(webView, source: String(contentsOf: file, encoding: .utf8), origin: "recovered-transcript", presentation: "rendered")
+            let cells = try await webView.evaluateJavaScript("Array.from(document.querySelectorAll('td,th')).map(e => e.innerText)") as? [String] ?? []
+            let data: Data = try await withCheckedThrowingContinuation { continuation in
+                RenderPDFExporter.create(from: webView) { continuation.resume(with: $0) }
+            }
+            let pdf = try XCTUnwrap(PDFDocument(data: data))
+            let text = (pdf.string ?? "").components(separatedBy: .whitespacesAndNewlines).joined()
+            for cell in cells {
+                let expected = cell.components(separatedBy: .whitespacesAndNewlines).joined()
+                if !expected.isEmpty { XCTAssertTrue(text.contains(expected), "Missing recovered cell in \(file.lastPathComponent): \(cell)") }
+            }
+            print("Recovery verified \(file.lastPathComponent): \(cells.count) table cells, \(pdf.pageCount) pages")
+            try data.write(to: file.deletingPathExtension().appendingPathExtension("pdf"))
+        }
+    }
+
+    func testPDFPreservesEveryWideTableCellAndScrolledCodeWithoutChangingPreview() async throws {
+        let webView = try await loadRenderer()
+        webView.frame = .init(x: 0, y: 0, width: 640, height: 480)
+        let headers = (0..<12).map { "Header\($0)" }
+        let rows = (0..<24).map { row in
+            "| " + (0..<12).map { "cellR\(row)C\($0)_value98765" }.joined(separator: " | ") + " |"
+        }
+        let code = "start_" + String(repeating: "abcdefghij", count: 80) + "_CODE_END_SENTINEL"
+        let header = "| " + headers.joined(separator: " | ") + " |"
+        let separator = "| " + headers.map { _ in "---" }.joined(separator: " | ") + " |"
+        let table = ([header, separator] + rows).joined(separator: "\n")
+        let source = "# Complete export\n\n\(table)\n\n```\n\(code)\n```\n\nDOCUMENT_END_SENTINEL"
+        try await setDocument(webView, source: source, origin: "transcript", presentation: "rendered")
+        _ = try await webView.evaluateJavaScript("document.querySelector('.table-scroll').scrollLeft = 180; document.querySelector('pre').scrollLeft = 120")
+        let before = try await webView.evaluateJavaScript("JSON.stringify({html:document.documentElement.outerHTML, table:document.querySelector('.table-scroll').scrollLeft, code:document.querySelector('pre').scrollLeft})") as? String
+        for markdown in [false, true] {
+            let data: Data = try await withCheckedThrowingContinuation { continuation in
+                if markdown {
+                    let proxy = MarkdownPreviewProxy(); proxy.attach(webView); proxy.renderingFinished(successfully: true)
+                    proxy.createPDF { continuation.resume(with: $0) }
+                } else {
+                    let proxy = RenderWebProxy(); proxy.webView = webView
+                    proxy.createPDF { continuation.resume(with: $0) }
+                }
+            }
+            let pdf = try XCTUnwrap(PDFDocument(data: data))
+            let text = (pdf.string ?? "").components(separatedBy: .whitespacesAndNewlines).joined()
+            for row in 0..<24 { for col in 0..<12 {
+                XCTAssertTrue(text.contains("cellR\(row)C\(col)_value98765"), "Missing cell \(row),\(col), Markdown=\(markdown)")
+            } }
+            XCTAssertTrue(text.contains("CODE_END_SENTINEL"))
+            XCTAssertTrue(text.contains("DOCUMENT_END_SENTINEL"))
+            if let directory = ProcessInfo.processInfo.environment["ARGUS_PDF_QA_DIR"] {
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(markdown ? "markdown-wide.pdf" : "render-wide.pdf"))
+            }
+        }
+        let after = try await webView.evaluateJavaScript("JSON.stringify({html:document.documentElement.outerHTML, table:document.querySelector('.table-scroll').scrollLeft, code:document.querySelector('pre').scrollLeft})") as? String
+        XCTAssertEqual(before, after, "Export must not resize, scroll or restyle the live preview")
+    }
+
     func testArtifactReaderUsesTheWideResponsiveLayout() async throws {
         let webView = try await loadRenderer()
         webView.frame = .init(x: 0, y: 0, width: 1_600, height: 900)

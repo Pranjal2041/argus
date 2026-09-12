@@ -7,6 +7,13 @@ import XCTest
 final class ArtifactStoreTests: XCTestCase {
     private var root: URL!
 
+    private func sourceArchive() -> RenderSourceArchive {
+        RenderSourceArchive(document: RenderDocument(source: "| A | B |\n|---|---|\n| λ | **exact** |",
+            sourceOrigin: "test-transcript", terminal: RenderTerminalSnapshot(columns: 80,
+                fontFamily: "monospace", background: "#000000", foreground: "#ffffff", styles: [], lines: [])),
+            presentation: "rendered", fontSize: 16)
+    }
+
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("argus-artifact-tests-" + UUID().uuidString, isDirectory: true)
@@ -24,17 +31,21 @@ final class ArtifactStoreTests: XCTestCase {
         ))!
         let id = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         let bytes = Data("exact-pdf-bytes".utf8)
+        let expectedSource = sourceArchive()
 
         let saved = try await disk.savePDF(
             bytes,
             panel: context,
             presentation: "rendered",
+            source: expectedSource,
             createdAt: created,
             id: id
         )
         let loaded = try await disk.load()
 
         XCTAssertEqual(loaded, [saved])
+        let restored = try await disk.loadRenderSource(for: saved)
+        XCTAssertEqual(restored, expectedSource)
         XCTAssertEqual(saved.filename, "vlm_gating — 2024-07-20 12.00.00.pdf")
         XCTAssertEqual(saved.relativePath, "pdf/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.pdf")
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(saved.relativePath)), bytes)
@@ -46,7 +57,7 @@ final class ArtifactStoreTests: XCTestCase {
     func testRenameChangesOnlyDisplayMetadataAndPersists() async throws {
         let disk = ArtifactDiskStore(rootURL: root)
         let bytes = Data("pdf".utf8)
-        let saved = try await disk.savePDF(bytes, panel: panel(), presentation: "terminal")
+        let saved = try await disk.savePDF(bytes, panel: panel(), presentation: "terminal", source: sourceArchive())
         let originalURL = root.appendingPathComponent(saved.relativePath)
 
         let renamed = try await disk.rename(saved, to: "  final/results  ")
@@ -57,6 +68,33 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(loaded, [renamed])
         XCTAssertEqual(try Data(contentsOf: originalURL), bytes)
         XCTAssertEqual(renamed.titleSource, ArtifactTitleSource.manual)
+    }
+
+    func testFailedSourceArchiveDoesNotCommitPDFOrManifest() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let id = UUID()
+        let path = "sources/" + id.uuidString.lowercased() + ".json"
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(path), withIntermediateDirectories: true)
+        do {
+            _ = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered", source: sourceArchive(), id: id)
+            XCTFail("Saving the PDF must require a successful source archive")
+        } catch {}
+        let records = try await disk.load()
+        XCTAssertTrue(records.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("pdf/" + id.uuidString.lowercased() + ".pdf").path))
+    }
+
+    func testLegacyPDFWithoutSourceStillLoads() async throws {
+        let disk = ArtifactDiskStore(rootURL: root)
+        let saved = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered", source: sourceArchive())
+        let manifest = root.appendingPathComponent("records/" + saved.id.uuidString.lowercased() + ".json")
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any])
+        json.removeValue(forKey: "renderSourcePath")
+        try JSONSerialization.data(withJSONObject: json).write(to: manifest)
+        let records = try await disk.load()
+        let record = try XCTUnwrap(records.first)
+        let source = try await disk.loadRenderSource(for: record)
+        XCTAssertNil(source)
     }
 
     @MainActor
@@ -72,7 +110,7 @@ final class ArtifactStoreTests: XCTestCase {
         let saved = try await store.savePDF(
             Data("pdf".utf8),
             panel: panel(name: "vlm_gating"),
-            presentation: "rendered"
+            presentation: "rendered", source: sourceArchive()
         )
         let updated = await waitForArtifact(in: store, id: saved.id) {
             $0.titleSource == ArtifactTitleSource.codex
@@ -97,7 +135,7 @@ final class ArtifactStoreTests: XCTestCase {
         let saved = try await store.savePDF(
             Data("pdf".utf8),
             panel: panel(),
-            presentation: "rendered"
+            presentation: "rendered", source: sourceArchive()
         )
         for _ in 0..<100 {
             if await provider.didStart() { break }
@@ -309,13 +347,14 @@ final class ArtifactStoreTests: XCTestCase {
 
     func testDeleteRemovesManifestAndPDF() async throws {
         let disk = ArtifactDiskStore(rootURL: root)
-        let saved = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered")
+        let saved = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered", source: sourceArchive())
 
         try await disk.delete(saved)
 
         let remaining = try await disk.load()
         XCTAssertEqual(remaining, [])
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(saved.relativePath).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(saved.renderSourcePath!).path))
     }
 
     func testSearchUsesFilenameAndSortOrdersAreDeterministic() {
@@ -477,7 +516,7 @@ final class ArtifactStoreTests: XCTestCase {
 
     func testLoaderReportsBrokenRecordsWithoutHidingHealthyArtifacts() async throws {
         let disk = ArtifactDiskStore(rootURL: root)
-        let healthy = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered")
+        let healthy = try await disk.savePDF(Data("pdf".utf8), panel: panel(), presentation: "rendered", source: sourceArchive())
         let recordsDir = root.appendingPathComponent("records", isDirectory: true)
         try Data("not-json".utf8).write(to: recordsDir.appendingPathComponent("broken.json"))
 
@@ -507,7 +546,7 @@ final class ArtifactStoreTests: XCTestCase {
         let disk = ArtifactDiskStore(rootURL: root)
         let id = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000001")!
         let healthy = try await disk.savePDF(
-            Data("pdf".utf8), panel: panel(), presentation: "rendered", id: id
+            Data("pdf".utf8), panel: panel(), presentation: "rendered", source: sourceArchive(), id: id
         )
         let brokenCopy = ArtifactRecord(
             id: id,
@@ -565,12 +604,14 @@ final class ArtifactStoreTests: XCTestCase {
             samplePDF,
             panel: panel(name: "vlm_gating", stableID: "$7"),
             presentation: "rendered",
+            source: sourceArchive(),
             createdAt: Date(timeIntervalSinceNow: -3_600)
         )
         _ = try await disk.savePDF(
             samplePDF,
             panel: panel(name: "spatial_fable", stableID: "$8"),
             presentation: "terminal",
+            source: sourceArchive(),
             createdAt: Date()
         )
         _ = try await disk.saveScreenshotPNG(
