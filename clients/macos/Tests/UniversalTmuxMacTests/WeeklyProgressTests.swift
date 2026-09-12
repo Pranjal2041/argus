@@ -552,6 +552,42 @@ final class WeeklyProgressTests: XCTestCase {
         XCTAssertFalse(output.contains("2026-08-10"))
     }
 
+    func testModelBadgePreservesModelIdentityAcrossProvidersAndEfforts() {
+        for (model, effort, expected) in [
+            ("gpt-6-astra", "high", "GPT-6-ASTRA · HIGH"),
+            ("provider/research-v2", "low", "PROVIDER/RESEARCH-V2 · LOW"),
+            ("local:analysis@stable", "medium", "LOCAL:ANALYSIS@STABLE · MEDIUM"),
+        ] {
+            XCTAssertEqual(
+                WeeklyProgressModelPresentation.label(model: model, reasoningEffort: effort),
+                expected
+            )
+        }
+    }
+
+    func testModelBadgeMatchesInitialResumeAndPersistedConfiguration() throws {
+        let generation = try WeeklyProgressDiskStore(rootURL: root).createGeneration(
+            project: WeeklyProgressProject(name: "Badge configuration", panels: []),
+            week: WeeklyProgressWeek(start: date(day: 3), calendar: calendar)
+        )
+        let finalURL = root.appendingPathComponent("final.txt")
+        let commands = [
+            CodexWeeklyProgressCommand.initialArguments(directory: root, finalMessageURL: finalURL),
+            CodexWeeklyProgressCommand.resumeArguments(sessionID: "test-session", finalMessageURL: finalURL),
+        ]
+        for arguments in commands {
+            let modelIndex = try XCTUnwrap(arguments.firstIndex(of: "-m"))
+            XCTAssertEqual(arguments[modelIndex + 1], generation.manifest.model)
+            XCTAssertTrue(arguments.contains(
+                "model_reasoning_effort=\"\(generation.manifest.reasoningEffort)\""
+            ))
+            XCTAssertEqual(
+                WeeklyProgressModelPresentation.currentLabel,
+                "\(arguments[modelIndex + 1].uppercased()) · \(generation.manifest.reasoningEffort.uppercased())"
+            )
+        }
+    }
+
     func testCodexCommandPinsAstraHighAndKeepsConversationDurable() {
         let initial = CodexWeeklyProgressCommand.initialArguments(
             directory: URL(fileURLWithPath: "/tmp/progress"),
