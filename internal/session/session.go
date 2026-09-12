@@ -90,7 +90,10 @@ type Provider interface {
 // state until the background cadence. Providers that do not implement this
 // optional capability retain the original List() behavior.
 type TieredStateProvider interface {
-	ListInventory() []Info
+	// Honor ctx across tool resolution and inventory reads. An error leaves
+	// the last successful inventory intact; only a successful empty result
+	// means that the workspace has no sessions.
+	ListInventory(ctx context.Context) ([]Info, error)
 	DetectState(name string) string
 }
 

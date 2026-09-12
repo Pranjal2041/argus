@@ -2,11 +2,11 @@ package recovery
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -112,8 +112,8 @@ func normalizeCodexResumeArgs(args []string, sessionID string) []string {
 func effectiveExecutable(entry Entry) (string, error) {
 	for _, candidate := range []string{entry.Executable, firstArg(entry.Argv)} {
 		if candidate != "" {
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-				return candidate, nil
+			if path, err := toolcommand.LookPath(candidate); err == nil {
+				return path, nil
 			}
 		}
 	}
@@ -121,7 +121,7 @@ func effectiveExecutable(entry Entry) (string, error) {
 	if len(entry.Argv) > 0 && entry.Argv[0] != "" {
 		name = filepath.Base(entry.Argv[0])
 	}
-	path, err := exec.LookPath(name)
+	path, err := toolcommand.LookPath(name)
 	if err != nil {
 		return "", fmt.Errorf("%s executable is no longer installed", entry.Agent)
 	}
@@ -179,12 +179,7 @@ func capturedLaunchArgv(entry Entry) ([]string, error) {
 		return nil, fmt.Errorf("no captured launch command is available")
 	}
 	executable := firstArg(entry.Argv)
-	if strings.ContainsRune(executable, os.PathSeparator) {
-		info, err := os.Stat(executable)
-		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-			return nil, fmt.Errorf("captured executable %q is not available", executable)
-		}
-	} else if _, err := exec.LookPath(executable); err != nil {
+	if _, err := toolcommand.LookPath(executable); err != nil {
 		return nil, fmt.Errorf("captured executable %q is not available", executable)
 	}
 	return append([]string(nil), entry.Argv...), nil
@@ -196,7 +191,7 @@ func capturedLaunchAvailable(entry Entry) bool {
 }
 
 func environmentExecutable() string {
-	if path, err := exec.LookPath("env"); err == nil {
+	if path, err := toolcommand.LookPath("env"); err == nil {
 		return path
 	}
 	return "env"

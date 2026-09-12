@@ -203,6 +203,8 @@ type Provider struct {
 	shell    string // command each session hosts (e.g. "cmd.exe", "powershell.exe -NoLogo")
 }
 
+var _ session.TieredStateProvider = (*Provider)(nil)
+
 // NewProvider returns an empty ConPTY provider hosting `shell` per session
 // (empty → defaultShell).
 func NewProvider(shell string) *Provider {
@@ -214,9 +216,15 @@ func NewProvider(shell string) *Provider {
 
 func (p *Provider) SetHistoryLimit(int) {} // n/a: the ring buffer is fixed-size
 
-func (p *Provider) ListInventory() []session.Info {
+func (p *Provider) ListInventory(ctx context.Context) ([]session.Info, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out := make([]session.Info, 0, len(p.sessions))
 	for _, s := range p.sessions {
 		s.mu.Lock()
@@ -228,7 +236,7 @@ func (p *Provider) ListInventory() []session.Info {
 		s.mu.Unlock()
 		out = append(out, info)
 	}
-	return out
+	return out, nil
 }
 
 func (p *Provider) DetectState(name string) string {
@@ -245,7 +253,7 @@ func (p *Provider) DetectState(name string) string {
 }
 
 func (p *Provider) List() []session.Info {
-	out := p.ListInventory()
+	out, _ := p.ListInventory(context.Background())
 	for i := range out {
 		out[i].State = p.DetectState(out[i].Name)
 	}

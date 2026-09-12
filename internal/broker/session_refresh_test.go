@@ -1,6 +1,8 @@
 package broker
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"sync"
 	"testing"
@@ -10,18 +12,45 @@ import (
 
 type tieredRefreshProvider struct {
 	warmProvider
-	inventory []session.Info
-	states    map[string]string
-	mu        sync.Mutex
-	detected  []string
+	inventory    []session.Info
+	inventoryErr error
+	states       map[string]string
+	mu           sync.Mutex
+	detected     []string
 }
 
 func (p *tieredRefreshProvider) List() []session.Info {
 	return append([]session.Info(nil), p.inventory...)
 }
 
-func (p *tieredRefreshProvider) ListInventory() []session.Info {
-	return append([]session.Info(nil), p.inventory...)
+func (p *tieredRefreshProvider) ListInventory(ctx context.Context) ([]session.Info, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		panic("inventory must have a deadline")
+	}
+	return append([]session.Info(nil), p.inventory...), p.inventoryErr
+}
+
+func TestInventoryFailureRetainsSessionsAndLaterRefreshRecovers(t *testing.T) {
+	p := &tieredRefreshProvider{inventoryErr: errors.New("backend lookup timed out")}
+	m := &Manager{
+		prov: p, hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+		sessCache: []session.Info{{Name: "existing", ID: "$1", State: "working"}},
+	}
+	m.refreshSessions(false)
+	if got := m.Sessions(); len(got) != 1 || got[0].Name != "existing" || got[0].State != "working" {
+		t.Fatalf("failed lookup erased existing sessions: %#v", got)
+	}
+	p.inventoryErr = nil
+	p.inventory = []session.Info{{Name: "existing", ID: "$1"}, {Name: "restored", ID: "$2"}}
+	m.refreshSessions(false)
+	if got := m.Sessions(); len(got) != 2 || got[1].Name != "restored" {
+		t.Fatalf("successful retry did not publish restored session: %#v", got)
+	}
+	p.inventory = nil
+	m.refreshSessions(false)
+	if got := m.Sessions(); len(got) != 0 {
+		t.Fatalf("successful empty inventory retained deleted sessions: %#v", got)
+	}
 }
 
 func (p *tieredRefreshProvider) DetectState(name string) string {

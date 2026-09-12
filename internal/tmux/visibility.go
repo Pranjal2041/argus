@@ -5,9 +5,10 @@ package tmux
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 // MigrateLegacyVisibility preserves the panels that predate affirmative
@@ -45,7 +46,7 @@ func MigrateLegacyVisibility(socket string) error {
 		return err
 	}
 
-	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
 		"#{session_name}\t#{@ut_agent}\t#{@ut_visible}")...).CombinedOutput()
 	if err != nil {
 		// No tmux server yet is a valid first launch. Record completion so a later
@@ -65,7 +66,7 @@ func MigrateLegacyVisibility(socket string) error {
 			"set-option", "-t", literalSessionTarget(fields[0]), optVisible, "1",
 			";", "set-option", "-t", literalSessionTarget(fields[0]), optOrigin, "legacy-migration",
 		)
-		if output, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+		if output, err := toolcommand.Command("tmux", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("mark legacy session %q visible: %v: %s", fields[0], err, strings.TrimSpace(string(output)))
 		}
 	}

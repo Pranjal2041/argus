@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 var errNoTmuxServer = errors.New("tmux server is not running")
@@ -51,21 +53,8 @@ func tmuxArgs(socket string, args ...string) []string {
 	return append([]string{"-L", socket}, args...)
 }
 
-func toolPath(name string) string {
-	if path, err := exec.LookPath(name); err == nil {
-		return path
-	}
-	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
-		candidate := filepath.Join(directory, name)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate
-		}
-	}
-	return name
-}
-
 func tmuxCommand(socket string, args ...string) *exec.Cmd {
-	cmd := exec.Command(toolPath("tmux"), tmuxArgs(socket, args...)...)
+	cmd := toolcommand.Command("tmux", tmuxArgs(socket, args...)...)
 	// Finder-launched macOS applications commonly have neither LANG nor
 	// LC_CTYPE. tmux sanitizes control characters in format output in that
 	// environment (a tab becomes "_"), which makes structured list output
@@ -195,7 +184,7 @@ func authoritativePaneDirectory(terminalReported, processDirectory string) strin
 }
 
 func readProcessTable() (map[int]processInfo, error) {
-	out, err := exec.Command(toolPath("ps"), "-axo", "pid=,ppid=,pgid=,tpgid=,tty=,comm=").Output()
+	out, err := toolcommand.Command("ps", "-axo", "pid=,ppid=,pgid=,tpgid=,tty=,comm=").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -927,13 +916,13 @@ func (s *Store) Bootstrap(sessionName string) error {
 		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "ut"))
 	}
 	candidates = append(candidates, filepath.Join(home, ".universal-tmux", "ut"))
-	if path, err := exec.LookPath("ut"); err == nil {
+	if path, err := toolcommand.LookPath("ut"); err == nil {
 		candidates = append(candidates, path)
 	}
 	var cli string
 	for _, candidate := range uniqueStrings(candidates) {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			cli = candidate
+		if path, err := toolcommand.LookPath(candidate); err == nil {
+			cli = path
 			break
 		}
 	}
@@ -941,7 +930,7 @@ func (s *Store) Bootstrap(sessionName string) error {
 		return fmt.Errorf("ut launcher was not found")
 	}
 	args := []string{"-L", s.Socket, sessionName}
-	cmd := exec.Command(cli, args...)
+	cmd := toolcommand.Command(cli, args...)
 	path := os.Getenv("PATH")
 	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
 		if !strings.Contains(":"+path+":", ":"+directory+":") {

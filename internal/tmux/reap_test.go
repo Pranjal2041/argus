@@ -120,7 +120,7 @@ func TestCreateAgentShellIsImmediatelyTagged(t *testing.T) {
 	}
 
 	var got *SessionInfo
-	inventory := provider.ListInventory()
+	inventory := testInventory(t, provider)
 	for i := range inventory {
 		info := inventory[i]
 		if info.Name == "mesh-shell" {
@@ -156,7 +156,7 @@ func TestVisibilityRequiresAffirmativeProvenance(t *testing.T) {
 		t.Fatalf("create unmarked session: %v: %s", err, out)
 	}
 	byName := map[string]SessionInfo{}
-	for _, info := range provider.ListInventory() {
+	for _, info := range testInventory(t, provider) {
 		byName[info.Name] = info
 	}
 	if byName["argus-panel"].Agent {
@@ -176,7 +176,7 @@ func TestLegacyVisibilityMigrationRunsOnlyOnce(t *testing.T) {
 	if err := MigrateLegacyVisibility(socket); err != nil {
 		t.Fatal(err)
 	}
-	if provider.ListInventory()[0].Agent {
+	if testInventory(t, provider)[0].Agent {
 		t.Fatal("legacy session was not preserved as visible")
 	}
 	if out, err := exec.Command("tmux", tmuxArgs(socket, "new-session", "-d", "-s", "later-direct")...).CombinedOutput(); err != nil {
@@ -185,7 +185,7 @@ func TestLegacyVisibilityMigrationRunsOnlyOnce(t *testing.T) {
 	if err := MigrateLegacyVisibility(socket); err != nil {
 		t.Fatal(err)
 	}
-	for _, info := range provider.ListInventory() {
+	for _, info := range testInventory(t, provider) {
 		if info.Name == "later-direct" && !info.Agent {
 			t.Fatal("second migration promoted a newly unmarked session")
 		}
@@ -201,7 +201,7 @@ func TestAgentShellDoesNotReclassifyExistingVisibleSession(t *testing.T) {
 		t.Fatalf("attach to existing session: %v", err)
 	}
 	found := false
-	for _, info := range provider.ListInventory() {
+	for _, info := range testInventory(t, provider) {
 		if info.Name != "human-shell" {
 			continue
 		}
@@ -223,7 +223,7 @@ func TestVisibleCreatePromotesExistingAgentShell(t *testing.T) {
 	if err := provider.Create("background", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, info := range provider.ListInventory() {
+	for _, info := range testInventory(t, provider) {
 		if info.Name == "background" && info.Agent {
 			t.Fatal("explicit visible create did not promote existing background session")
 		}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -699,7 +700,18 @@ func (m *Manager) HiddenNames() []string {
 func (m *Manager) refreshSessions(includeBackground bool) {
 	var list []session.Info
 	if provider, ok := m.prov.(session.TieredStateProvider); ok {
-		list = provider.ListInventory()
+		parent := m.ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+		var err error
+		list, err = provider.ListInventory(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("session inventory refresh failed; retaining last successful list: %v", err)
+			return
+		}
 
 		m.sessMu.Lock()
 		previous := make(map[string]string, len(m.sessCache))

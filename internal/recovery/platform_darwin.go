@@ -5,7 +5,6 @@ package recovery
 import (
 	"encoding/binary"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 func platformBootID() (string, error) {
@@ -53,7 +54,7 @@ func platformProcessDirectories(pids []int) map[int]string {
 	if len(values) == 0 {
 		return directories
 	}
-	out, err := exec.Command(toolPath("lsof"), "-a", "-p", strings.Join(values, ","), "-d", "cwd", "-FnP").Output()
+	out, err := toolcommand.Command("lsof", "-a", "-p", strings.Join(values, ","), "-d", "cwd", "-FnP").Output()
 	if err != nil {
 		return directories
 	}
@@ -148,7 +149,7 @@ func platformProcessState(pid int) (processState, error) {
 }
 
 func platformOpenFiles(pid int) ([]string, error) {
-	out, err := exec.Command(toolPath("lsof"), "-n", "-Fn", "-p", strconv.Itoa(pid)).Output()
+	out, err := toolcommand.Command("lsof", "-n", "-Fn", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return nil, err
 	}
