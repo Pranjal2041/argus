@@ -53,6 +53,45 @@ func TestInventoryFailureRetainsSessionsAndLaterRefreshRecovers(t *testing.T) {
 	}
 }
 
+// An in-memory backend without tiered screen classification gets the same
+// failure contract as a process/transport backend. Classification is optional;
+// distinguishing unknown inventory from deletion is not.
+type untieredRefreshProvider struct {
+	warmProvider
+	inventory []session.Info
+	err       error
+}
+
+func (p *untieredRefreshProvider) ListInventory(ctx context.Context) ([]session.Info, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		panic("inventory must have a deadline")
+	}
+	return p.inventory, p.err
+}
+
+func TestUntieredInventoryFailureRetainsSessions(t *testing.T) {
+	p := &untieredRefreshProvider{err: errors.New("session registry temporarily unavailable")}
+	m := &Manager{
+		prov: p, hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+		sessCache: []session.Info{{Name: "existing", ID: "in-memory-1", State: "working"}},
+	}
+	m.refreshSessions(false)
+	if got := m.Sessions(); len(got) != 1 || got[0].State != "working" {
+		t.Fatalf("failed inventory erased sessions: %+v", got)
+	}
+	p.err = nil
+	p.inventory = []session.Info{{Name: "existing", ID: "in-memory-1", State: "waiting"}}
+	m.refreshSessions(false)
+	if got := m.Sessions(); len(got) != 1 || got[0].State != "waiting" {
+		t.Fatalf("recovered state was not published: %+v", got)
+	}
+	p.inventory = nil
+	m.refreshSessions(false)
+	if got := m.Sessions(); len(got) != 0 {
+		t.Fatalf("authoritative deletion ignored: %+v", got)
+	}
+}
+
 func (p *tieredRefreshProvider) DetectState(name string) string {
 	p.mu.Lock()
 	p.detected = append(p.detected, name)

@@ -341,24 +341,42 @@ func ListSessionInventory(socket string) []SessionInfo {
 	return sessions
 }
 
-func readSessionInventory(ctx context.Context, socket string) ([]SessionInfo, error) {
+func readInventoryOutput(ctx context.Context, socket string) ([]byte, bool, error) {
 	// session_id ($N) is only a transport handle: it survives a rename, but tmux
 	// reuses it after the server restarts. lineageID includes the tmux server PID
 	// and session creation time, so archival clients can bridge a rename without
 	// ever confusing a later `$N` reuse for the same panel. All fixed fields are
 	// placed AFTER pane_current_path (SplitN keeps a tab in the path inside f[4]).
-	out, err := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, "list-sessions", "-F",
-		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}\t#{@ut_visible}")...).Output()
+	query := func() ([]byte, error) {
+		return toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, "list-sessions", "-F",
+			"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}\t#{@ut_visible}")...).Output()
+	}
+	out, err := query()
 	if err != nil {
-		// A missing tmux server is an authoritative empty workspace. A failed
-		// executable lookup or timed-out query is not evidence of deletion.
-		if exit, ok := err.(*exec.ExitError); ok &&
-			(strings.Contains(string(exit.Stderr), "no server running on") ||
-				(strings.Contains(string(exit.Stderr), "error connecting to") &&
-					strings.Contains(string(exit.Stderr), "No such file or directory"))) {
-			return []SessionInfo{}, nil
+		if exit, ok := err.(*exec.ExitError); ok && strings.TrimSpace(string(exit.Stderr)) == "no sessions" && ctx.Err() == nil {
+			return nil, true, nil // live exit-empty=off server, genuinely no sessions
 		}
-		return nil, fmt.Errorf("list session inventory: %w", err)
+		if endpoint := unavailableSocket(err); endpoint != "" {
+			running, recoveryErr := recoverSocket(ctx, endpoint)
+			if recoveryErr != nil {
+				return nil, false, fmt.Errorf("session transport unavailable: %w", recoveryErr)
+			}
+			if !running {
+				return nil, false, nil // no live owner, not merely no pathname
+			}
+			out, err = query() // retry the read, never replay a mutation
+		}
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("list session inventory: %w", err)
+	}
+	return out, true, nil
+}
+
+func readSessionInventory(ctx context.Context, socket string) ([]SessionInfo, error) {
+	out, _, err := readInventoryOutput(ctx, socket)
+	if err != nil {
+		return nil, err
 	}
 	sessions := []SessionInfo{}
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
@@ -498,8 +516,12 @@ func literalSessionTarget(name string) string {
 // CreateSession creates a new detached session. startDir, if non-empty, sets
 // its working directory (so "new session in this folder" works).
 func CreateSession(socket, name, startDir string) error {
+	args, exists, err := sessionCreationArgs(socket, name, startDir)
+	if err != nil {
+		return err
+	}
 	target := literalSessionTarget(name)
-	if HasSession(socket, name) {
+	if exists {
 		// An affirmative visible request also promotes an existing background
 		// session. Merely attaching through plain `ut` never reaches this path.
 		out, err := toolcommand.Command("tmux", tmuxArgs(socket,
@@ -512,10 +534,6 @@ func CreateSession(socket, name, startDir string) error {
 			return fmt.Errorf("promote %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 		}
 		return nil
-	}
-	args := []string{"new-session", "-d", "-s", name}
-	if startDir != "" {
-		args = append(args, "-c", startDir)
 	}
 	// Visibility is affirmative provenance. Sessions created through the Argus
 	// UI are marked visible atomically; a session with no marker is background
@@ -538,12 +556,12 @@ func CreateSession(socket, name, startDir string) error {
 // sessions keep their original classification: provenance is assigned only by
 // the path that actually created the session.
 func CreateAgentShell(socket, name, startDir string) error {
-	if HasSession(socket, name) {
-		return nil // attach-or-create without silently reclassifying a user session
+	args, exists, err := sessionCreationArgs(socket, name, startDir)
+	if err != nil {
+		return err
 	}
-	args := []string{"new-session", "-d", "-s", name}
-	if startDir != "" {
-		args = append(args, "-c", startDir)
+	if exists {
+		return nil // attach-or-create without silently reclassifying a user session
 	}
 	// Send one tmux command sequence so no /sessions refresh can observe the new
 	// shell before its agent marker is installed (which would make it flash in
@@ -591,9 +609,9 @@ const (
 // processes per shell), dozens of finished spawns would otherwise pile up; the
 // reaper clears the idle ones.
 func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
-	args := []string{"new-session", "-d", "-s", name}
-	if startDir != "" {
-		args = append(args, "-c", startDir)
+	args, _, err := sessionCreationArgs(socket, name, startDir)
+	if err != nil {
+		return err
 	}
 	// When cmd returns, mark the session done (a tmux option, set from inside the
 	// pane via $TMUX) BEFORE dropping into the interactive shell. This is the
@@ -732,14 +750,15 @@ func sessionIDForName(socket, name string) (string, bool) {
 	if isInternalSession(name) {
 		return "", false // infra sessions are not attachable by clients
 	}
-	out, err := toolcommand.Command("tmux", tmuxArgs(socket, "list-sessions", "-F", "#{session_name}\t#{session_id}")...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	list, err := readSessionInventory(ctx, socket)
 	if err != nil {
 		return "", false
 	}
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) == 2 && parts[0] == name {
-			return parts[1], true
+	for _, info := range list {
+		if info.Name == name {
+			return info.ID, true
 		}
 	}
 	return "", false

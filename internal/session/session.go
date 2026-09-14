@@ -70,6 +70,10 @@ type ExecResult struct {
 // Provider owns all sessions on one host (a tmux server, or the ConPTY set).
 type Provider interface {
 	List() []Info
+	// Honor ctx across discovery and reads. Only a successful empty inventory
+	// proves absence; an unavailable transport must return an error so callers
+	// retain the last successful inventory, never delete or replace live work.
+	ListInventory(ctx context.Context) ([]Info, error)
 	Create(name, dir string) error
 	CreateAgentShell(name, dir string) error // persistent mesh shell: hidden by default, reaped after seven idle days
 	Kill(name string) error
@@ -88,12 +92,8 @@ type Provider interface {
 // fork capture-pane once per classified session, so foreground user sessions are
 // classified on the fast cadence while hidden/agent sessions reuse their cached
 // state until the background cadence. Providers that do not implement this
-// optional capability retain the original List() behavior.
+// optional capability return their state directly in ListInventory.
 type TieredStateProvider interface {
-	// Honor ctx across tool resolution and inventory reads. An error leaves
-	// the last successful inventory intact; only a successful empty result
-	// means that the workspace has no sessions.
-	ListInventory(ctx context.Context) ([]Info, error)
 	DetectState(name string) string
 }
 
