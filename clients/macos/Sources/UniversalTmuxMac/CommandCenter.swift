@@ -56,7 +56,7 @@ protocol AgentStatusProvider {
 }
 
 enum CodexStatusCommand {
-    static let model = "gpt-5.6-luna"
+    static let model = CodexModels.luna
     static let reasoningEffort = "high"
 
     static func initialArguments(finalMessageURL: URL) -> [String] {
