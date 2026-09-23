@@ -9,6 +9,8 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02
 	github.com/wlynxg/anet v0.0.5
+	github.com/yuin/goldmark v1.7.13
+	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
 	tailscale.com v1.100.0
 )
@@ -48,7 +50,6 @@ require (
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/mobile v0.0.0-20260529142300-ecb4cd65260a // indirect
 	golang.org/x/mod v0.36.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/term v0.43.0 // indirect

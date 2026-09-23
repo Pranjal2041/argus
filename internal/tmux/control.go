@@ -30,6 +30,7 @@ import (
 	"universal-tmux/internal/recovery"
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
+	"universal-tmux/internal/terminaltext"
 	"universal-tmux/internal/toolcommand"
 )
 
@@ -77,37 +78,7 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 // SGR state is tracked across the stream: 2 turns faint on; 0/22 (and a bare ESC[m)
 // turn it off; parameters are processed left-to-right within one SGR.
 func dropDimAndAnsi(b []byte) string {
-	out := make([]byte, 0, len(b))
-	faint := false
-	for i := 0; i < len(b); {
-		if b[i] == 0x1b && i+1 < len(b) && b[i+1] == '[' {
-			j := i + 2
-			for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
-				j++
-			}
-			if j < len(b) && b[j] == 'm' { // SGR — update faint state
-				for _, ppar := range strings.Split(string(b[i+2:j]), ";") {
-					switch ppar {
-					case "2":
-						faint = true
-					case "0", "22", "":
-						faint = false
-					}
-				}
-			}
-			if j < len(b) {
-				i = j + 1 // drop the whole escape sequence
-			} else {
-				i = j
-			}
-			continue
-		}
-		if !faint {
-			out = append(out, b[i])
-		}
-		i++
-	}
-	return string(out)
+	return terminaltext.Plain(b, true)
 }
 
 // AgentTranscript returns the exact structured transcript owned by the

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"universal-tmux/internal/terminaltext"
 )
 
 const (
@@ -65,6 +67,9 @@ type message struct {
 	text     string
 	cwd      string
 	provider string
+	// Non-answer UI text proven by structured records in this logical turn.
+	// Adapters identify it; common matching decides whether it is on screen.
+	decorations []string
 }
 
 // Resolve searches the standard Codex and Claude transcript stores on this
@@ -79,7 +84,7 @@ func Resolve(home, cwd, screen string) (Result, error) {
 // is provider-independent and is stronger than a home-directory/cwd guess; the
 // provider value is used only to select the transcript format adapter.
 func ResolveWithTranscript(home, cwd, screen string, transcript TranscriptRef) (Result, error) {
-	screenTokens := tokenize(screen)
+	screenTokens := tokenize(terminaltext.Plain([]byte(screen), false))
 	if len(screenTokens) < 8 {
 		return Result{}, ErrNoMatch
 	}
@@ -116,7 +121,7 @@ func ResolveWithTranscript(home, cwd, screen string, transcript TranscriptRef) (
 		)
 	}
 
-	// Three-word shingles and a conservative combined threshold tolerate lost
+	// Contiguous anchors and a conservative combined threshold tolerate lost
 	// punctuation/formatting while rejecting unrelated prose and older responses
 	// much farther from the terminal prompt.
 	if best.Confidence < minimumConfidence {
@@ -134,9 +139,7 @@ func bestFromExactTranscript(file candidateFile, screenTokens []string) Result {
 	if len(candidate.text) > maxSourceBytes {
 		return Result{}
 	}
-	score := overlapScoreWithMinimum(
-		tokenize(candidate.text), screenTokens, exactTranscriptMinimumMatchTokens,
-	)
+	score := candidateScore(candidate, screenTokens, exactTranscriptMinimumMatchTokens)
 	if score < minimumConfidence {
 		return Result{}
 	}
@@ -160,6 +163,11 @@ func transcriptMessages(file candidateFile) []message {
 func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, best Result) Result {
 	for _, file := range files {
 		messages := transcriptMessages(file)
+		if len(messages) > 0 && messages[0].text == "" {
+			// An unanswered newest turn is a barrier, never a reason to scan back
+			// to the old answer still visible in this conversation's scrollback.
+			continue
+		}
 		for _, candidate := range messages {
 			if cwd != "" && candidate.cwd != "" && !samePath(candidate.cwd, cwd) {
 				continue
@@ -167,7 +175,11 @@ func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, bes
 			if len(candidate.text) > maxSourceBytes {
 				continue
 			}
-			score := overlapScore(tokenize(candidate.text), screenTokens)
+			// Discovery lacks process provenance; preserve its ambiguity floor.
+			if len(tokenize(visibleMarkdown(candidate.text))) < matchAnchorTokens {
+				continue
+			}
+			score := candidateScore(candidate, screenTokens, minimumMatchTokens)
 			if score > best.Confidence {
 				best = Result{
 					Source: candidate.text, Format: "markdown",
@@ -327,6 +339,7 @@ func codexMessages(path string) []message {
 	type turn struct {
 		messages []string
 		finals   []string
+		started  bool
 	}
 	turns := make([]message, 0, maxMessagesPerFile)
 	current := turn{}
@@ -339,7 +352,7 @@ func codexMessages(path string) []message {
 			// truncating it to whichever update happened to be written last.
 			parts = current.finals
 		}
-		if text := strings.TrimSpace(strings.Join(parts, "\n\n")); text != "" {
+		if text := strings.TrimSpace(strings.Join(parts, "\n\n")); text != "" || current.started {
 			turns = append(turns, message{text: text, provider: "codex"})
 		}
 		current = turn{}
@@ -365,6 +378,11 @@ func codexMessages(path string) []message {
 			flush()
 			continue
 		}
+		if envelope.Type == "event_msg" && envelope.Payload.Type == "task_started" {
+			flush()
+			current.started = true
+			continue
+		}
 		if envelope.Type != "response_item" || envelope.Payload.Type != "message" {
 			continue
 		}
@@ -375,6 +393,7 @@ func codexMessages(path string) []message {
 			if len(current.messages) > 0 {
 				flush()
 			}
+			current.started = true
 			continue
 		}
 		if envelope.Payload.Role != "assistant" {
@@ -406,10 +425,11 @@ func codexMessages(path string) []message {
 func claudeMessages(path string) []message {
 	lines := tailLines(path, maxTranscriptTail)
 	type turn struct {
-		messages []string
-		finals   []string
-		cwd      string
-		started  bool
+		messages    []string
+		finals      []string
+		cwd         string
+		started     bool
+		decorations []string
 	}
 	var turns []message
 	current := turn{}
@@ -424,20 +444,36 @@ func claudeMessages(path string) []message {
 		turns = append(turns, message{
 			text: strings.TrimSpace(strings.Join(parts, "\n\n")),
 			cwd:  current.cwd, provider: "claude",
+			decorations: current.decorations,
 		})
 		current = turn{}
 	}
 	for _, line := range lines {
 		var envelope struct {
-			Type    string `json:"type"`
-			CWD     string `json:"cwd"`
-			Message struct {
+			Type       string          `json:"type"`
+			CWD        string          `json:"cwd"`
+			Subtype    string          `json:"subtype"`
+			Content    json.RawMessage `json:"content"`
+			HookErrors []string        `json:"hookErrors"`
+			Message    struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
 				Stop    string          `json:"stop_reason"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(line, &envelope) != nil {
+			continue
+		}
+		if envelope.Type == "system" {
+			switch envelope.Subtype {
+			case "away_summary":
+				var content string
+				if json.Unmarshal(envelope.Content, &content) == nil {
+					current.decorations = append(current.decorations, content)
+				}
+			case "stop_hook_summary":
+				current.decorations = append(current.decorations, envelope.HookErrors...)
+			}
 			continue
 		}
 		if envelope.Type == "user" && envelope.Message.Role == "user" &&
@@ -568,20 +604,11 @@ func tokenize(text string) []string {
 	return tokens
 }
 
-func overlapScore(source, screen []string) float64 {
-	// Directory scans do not have process provenance, so short generic phrases
-	// remain insufficient to identify a conversation safely.
-	if len(source) < 8 {
-		return 0
-	}
-	return overlapScoreWithMinimum(source, screen, minimumMatchTokens)
-}
-
 func overlapScoreWithMinimum(source, screen []string, minimumTokens int) float64 {
 	// Exact process-owned transcripts may legitimately end in a very short
 	// answer ("Done.", "Topping all four."). Process provenance plus a match
 	// near the terminal tail is sufficient; unscoped discovery is filtered by
-	// overlapScore above before it reaches this matcher.
+	// bestFromFiles before it reaches this matcher.
 	if len(source) == 0 || len(screen) < 8 {
 		return 0
 	}
