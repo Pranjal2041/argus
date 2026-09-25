@@ -53,6 +53,18 @@ the target host's broker.
 | `ut forward ls` | list active forwards owned by the local broker |
 | `ut forward stop <id>` | stop an active forward |
 
+For a variable-based target, braces preserve the host/session separator in both bash and zsh:
+
+```sh
+HOST=worker-name
+ut spawn "@${HOST}:job" --idle 24h 'python train.py'
+ut cp ./config.yaml "${HOST}:/home/me/config.yaml"
+```
+
+In zsh, `@$HOST:job` can apply a variable modifier and change the hostname before `ut` receives it;
+quotes alone do not prevent that. Broker failures report the requested host, HTTP status, and
+underlying error instead of a nil transport error.
+
 For example, if a dashboard listens on `127.0.0.1:5800` on Babel:
 
 ```sh
