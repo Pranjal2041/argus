@@ -248,7 +248,6 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     private let httpBase: String   // broker http(s) base, for uploading pasted images
     private(set) var connURL: URL  // the session URL this conn (re)connects to; changes on rename or resume (new tmux id)
     private var lastPane = ""
-    private var wheelMonitor: Any?  // mouse-reporting panes: wheel → remote (see init)
 
     private var streamPump: TerminalStreamPump!
     // PaneConn is created for the currently visible panel. TerminalView and its
@@ -314,11 +313,13 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // feedPrepare() clears the selection on EVERY feed, so a periodically
         // redrawing TUI (an agent) makes text impossible to select/copy — and a
         // drag is sent to the remote app as mouse events instead of selecting.
-        // This is a copy-focused viewer, so prefer local selection; the keyboard
-        // still drives the agent fully. EXCEPTION: the git panel (lazygit) is a
+        // Wheel reporting is independent: SwiftTerm forwards wheels whenever the
+        // application requests them, without disabling local selection. The git
+        // panel (lazygit) is a
         // mouse-driven TUI where clicking panels/commits matters more than copy,
         // so its pane opts in via mouseReporting=true.
         view.allowMouseReporting = mouseReporting
+        view.allowMouseWheelReporting = true
         // This is a history limit, not a cache tier. Shrinking it on every hide
         // permanently discarded scrollback and synchronously copied/deallocated
         // thousands of rows during panel switching.
@@ -347,40 +348,6 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         }
         client.start()
 
-        // SwiftTerm's macOS scrollWheel ALWAYS scrolls the local scrollback and never
-        // reports wheel events to the remote app — so a mouse-driven TUI (lazygit in
-        // the git panel) can't be wheel-scrolled. Its override isn't `open`, so we
-        // can't subclass it; instead, for mouse-reporting panes, intercept the wheel
-        // with a local event monitor BEFORE view dispatch and forward it as wheel
-        // reports (buttons 4/5 — the same encodeButton/sendEvent path SwiftTerm's own
-        // mouseDown uses), swallowing the event. Only fires when the REMOTE app
-        // requested mouse events; otherwise the event passes through untouched.
-        if mouseReporting {
-            wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] ev in
-                guard let self, let win = self.view.window, ev.window === win,
-                      !self.view.isHidden, self.view.superview != nil else { return ev }
-                let pt = self.view.convert(ev.locationInWindow, from: nil)
-                guard self.view.bounds.contains(pt), ev.deltaY != 0 else { return ev }
-                let term = self.view.getTerminal()
-                // Do NOT gate on term.mouseMode: the remote app (lazygit) enabled mouse
-                // BEFORE this pane attached, and the connect snapshot is rendered text
-                // only (capture-pane) — the DECSET mouse-enable never reaches this
-                // terminal, so its mouseMode stays .off forever. Verified: injecting SGR
-                // wheel bytes into the session scrolls lazygit fine; the client gate was
-                // the only thing blocking. This pane is DEDICATED to a mouse TUI (the
-                // only kind that sets mouseReporting), so forward unconditionally.
-                let cols = max(term.cols, 1), rows = max(term.rows, 1)
-                let cw = max(self.view.bounds.width / CGFloat(cols), 1)
-                let ch = max(self.view.bounds.height / CGFloat(rows), 1)
-                let col = min(max(Int(pt.x / cw), 0), cols - 1)
-                let row = min(max(Int((self.view.bounds.height - pt.y) / ch), 0), rows - 1)
-                let button = ev.deltaY > 0 ? 4 : 5   // wheel up / down (encodeButton → 64/65)
-                let flags = term.encodeButton(button: button, release: false, shift: false, meta: false, control: false)
-                let ticks = min(3, max(1, Int(abs(ev.deltaY))))   // modest amplification for fast flicks
-                for _ in 0..<ticks { term.sendEvent(buttonFlags: flags, x: col, y: row) }
-                return nil   // swallow: don't ALSO scroll the local buffer
-            }
-        }
     }
 
     /// Hidden panes remain protocol-current through the cooperative stream pump.
@@ -405,7 +372,6 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     func disconnect() {
         streamPump.stop()
         client.stop()
-        if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
     }
 
     // MARK: W&B run detection (off the raw output stream)

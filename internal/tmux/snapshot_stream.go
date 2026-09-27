@@ -6,7 +6,8 @@ import (
 	"strings"
 )
 
-const snapshotMetadata = "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{alternate_on} #{cursor_flag} #{wrap_flag} #{insert_flag} #{origin_flag} #{scroll_region_upper} #{scroll_region_lower}"
+const snapshotMetadata = "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{alternate_on} #{cursor_flag} #{wrap_flag} #{insert_flag} #{origin_flag} #{scroll_region_upper} #{scroll_region_lower}" +
+	" #{?mouse_standard_flag,1,0} #{?mouse_button_flag,1,0} #{?mouse_all_flag,1,0} #{?mouse_utf8_flag,1,0} #{?mouse_sgr_flag,1,0}"
 
 type snapshotReply struct {
 	id            uint64

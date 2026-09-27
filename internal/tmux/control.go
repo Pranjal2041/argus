@@ -962,11 +962,29 @@ func decodeScreenSnapshot(data []byte) session.ScreenSnapshot {
 	}
 	var s session.ScreenSnapshot
 	var alternate, visible, wrap, insert, origin int
-	n, err := fmt.Sscanf(header, "%d %d %d %d %d %d %d %d %d %d %d", &s.Cols, &s.Rows, &s.CursorX, &s.CursorY, &alternate, &visible, &wrap, &insert, &origin, &s.ScrollTop, &s.ScrollBottom)
-	if err != nil || n != 11 {
+	var mouseStandard, mouseButton, mouseAll, mouseUTF8, mouseSGR int
+	n, err := fmt.Sscanf(header, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &s.Cols, &s.Rows, &s.CursorX, &s.CursorY, &alternate, &visible, &wrap, &insert, &origin, &s.ScrollTop, &s.ScrollBottom, &mouseStandard, &mouseButton, &mouseAll, &mouseUTF8, &mouseSGR)
+	if err != nil || n != 16 {
 		return session.ScreenSnapshot{}
 	}
 	s.Alternate, s.CursorVisible, s.Wrap, s.Insert, s.Origin = alternate == 1, visible == 1, wrap == 1, insert == 1, origin == 1
+	s.Mouse = &session.MouseState{}
+	switch {
+	// tmux's mouse_all_flag is DEC 1003; mouse_any_flag is the UNION of
+	// all tracking modes and must not promote a button-only app to 1003.
+	case mouseAll == 1:
+		s.Mouse.Tracking = 1003
+	case mouseButton == 1:
+		s.Mouse.Tracking = 1002
+	case mouseStandard == 1:
+		s.Mouse.Tracking = 1000
+	}
+	switch {
+	case mouseSGR == 1:
+		s.Mouse.Encoding = 1006
+	case mouseUTF8 == 1:
+		s.Mouse.Encoding = 1005
+	}
 	// Remove the final record separator ONLY. Empty viewport rows are real
 	// geometry; trimming all newlines shifts the screen relative to scrollback.
 	s.Lines = strings.Split(strings.TrimSuffix(body, "\n"), "\n")

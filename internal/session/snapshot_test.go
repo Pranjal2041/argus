@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/hinshun/vt10x"
@@ -42,6 +43,33 @@ func TestScreenSnapshotPreservesViewportAndContinuation(t *testing.T) {
 				if vt.Cell(tc.NextX, tc.NextY).Char != 'Z' {
 					t.Fatalf("input landed in wrong cell: %q", vt.String())
 				}
+			}
+		})
+	}
+}
+
+func TestMouseStateWireFixtures(t *testing.T) {
+	var fixtures []struct {
+		Name               string
+		Tracking, Encoding int
+		ANSI               string
+	}
+	data, err := os.ReadFile("testdata/mouse-modes.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.Name, func(t *testing.T) {
+			mouse := MouseState{Tracking: tc.Tracking, Encoding: tc.Encoding}
+			if got := string(mouse.ANSI()); got != tc.ANSI {
+				t.Fatalf("got %q, want %q", got, tc.ANSI)
+			}
+			snapshot := ScreenSnapshot{Cols: 8, Rows: 2, Lines: []string{"ready", ""}, Mouse: &mouse}
+			if !strings.Contains(string(snapshot.ANSI()), tc.ANSI) {
+				t.Fatal("screen snapshot omitted mouse state")
 			}
 		})
 	}
