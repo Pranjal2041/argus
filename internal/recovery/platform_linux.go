@@ -23,6 +23,32 @@ func platformProcessStart(pid int) (time.Time, error) {
 	return processStartViaPS(pid)
 }
 
+func platformProcessStartTicks(pid int) (string, error) {
+	body, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return "", err
+	}
+	return procStatStartTicks(string(body))
+}
+
+func procStatStartTicks(stat string) (string, error) {
+	// comm (field 2) can contain spaces and closing parentheses. Everything
+	// after its final ')' starts at field 3; starttime is field 22.
+	end := strings.LastIndexByte(stat, ')')
+	if end < 0 {
+		return "", fmt.Errorf("malformed process stat: missing comm")
+	}
+	fields := strings.Fields(stat[end+1:])
+	if len(fields) < 20 {
+		return "", fmt.Errorf("truncated process stat")
+	}
+	ticks, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil || ticks == 0 {
+		return "", fmt.Errorf("invalid process start ticks %q", fields[19])
+	}
+	return strconv.FormatUint(ticks, 10), nil
+}
+
 func platformProcessDirectory(pid int) (string, error) {
 	return os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
 }

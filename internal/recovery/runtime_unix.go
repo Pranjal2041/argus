@@ -290,16 +290,8 @@ func inspectClaude(pid int, state processState) (string, string, string, error) 
 	if record.PID != pid || !uuidPattern.MatchString(record.SessionID) {
 		return "", "", registry, fmt.Errorf("Claude active-session registry has invalid process identity")
 	}
-	started, err := platformProcessStart(pid)
-	if err != nil {
-		return "", "", registry, fmt.Errorf("read Claude process start: %w", err)
-	}
-	value := strings.Join(strings.Fields(record.ProcStart), " ")
-	const layout = "Mon Jan 2 15:04:05 2006"
-	recordedUTC, utcErr := time.ParseInLocation(layout, value, time.UTC)
-	recordedLocal, localErr := time.ParseInLocation(layout, value, time.Local)
-	if (utcErr != nil || recordedUTC.Unix() != started.Unix()) && (localErr != nil || recordedLocal.Unix() != started.Unix()) {
-		return "", "", registry, fmt.Errorf("Claude active-session registry is stale (process start mismatch)")
+	if err := verifyRecordedProcessStart(pid, record.ProcStart); err != nil {
+		return "", "", registry, fmt.Errorf("Claude active-session registry is stale or unverifiable: %w", err)
 	}
 	return record.SessionID, findClaudeTranscript(config, record.SessionID), registry, nil
 }

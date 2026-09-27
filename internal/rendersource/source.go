@@ -115,10 +115,20 @@ func ResolveWithTranscript(home, cwd, screen string, transcript TranscriptRef) (
 		)
 	}
 	if best.Confidence < minimumConfidence {
+		root := filepath.Join(home, ".claude", "projects")
 		best = bestFromFiles(
-			discover(filepath.Join(home, ".claude", "projects"), "claude", cwd),
+			discover(root, "claude", cwd),
 			cwd, screenTokens, best,
 		)
+		if cwd != "" && best.Confidence < minimumConfidence {
+			// Encoded project names reflect the launch path, which can be a
+			// symlink rather than the pane's physical cwd. A scoped miss must
+			// not hide an equivalent path's transcript. Keep cwd and visible
+			// overlap checks; broaden only the directory-name optimization.
+			if _, scoped := claudeProjectRoot(root, cwd); scoped {
+				best = bestFromFiles(discoverCandidates(root, "claude", cwd, false), cwd, screenTokens, best)
+			}
+		}
 	}
 
 	// Contiguous anchors and a conservative combined threshold tolerate lost
@@ -205,10 +215,14 @@ func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, bes
 }
 
 func discover(root, provider, cwd string) []candidateFile {
+	return discoverCandidates(root, provider, cwd, true)
+}
+
+func discoverCandidates(root, provider, cwd string, scopeProject bool) []candidateFile {
 	cutoff := time.Now().Add(-candidateMaxAge)
 	searchRoot := root
 	trustedProjectScope := false
-	if provider == "claude" && cwd != "" {
+	if scopeProject && provider == "claude" && cwd != "" {
 		if projectRoot, ok := claudeProjectRoot(root, cwd); ok {
 			searchRoot = projectRoot
 			trustedProjectScope = true
@@ -690,5 +704,14 @@ func samePath(a, b string) bool {
 		}
 		return value
 	}
-	return normalize(a) == normalize(b)
+	if normalize(a) == normalize(b) {
+		return true
+	}
+	// Agent launch paths and kernel-reported pane paths can name the same
+	// directory through different symlinks. Resolve identity at the common
+	// matching boundary for every transcript provider; unrelated directories
+	// still fail closed, including when either path is unavailable.
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
 }

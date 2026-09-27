@@ -71,7 +71,8 @@ func testRenderSourceConsumesExactTranscript(t *testing.T, providerName string) 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	source := "## Exact report\n\nThe [provider-neutral](https://example.test/invisible-destination) broker contract returns the [complete authored](https://example.test/report) response for this [live pane](https://example.test/pane)."
+	source := "## Exact report\n\nThe [provider-neutral](https://example.test/invisible-destination) broker contract returns the [complete authored](https://example.test/report) response for this [live pane](https://example.test/pane)." +
+		"\n\nThis remainder is outside the fullscreen application's visible viewport. The renderer must still receive the entire authored answer, including this paragraph and its **formatting**."
 	lines := []any{
 		map[string]any{"type": "user", "cwd": cwd, "message": map[string]any{
 			"role": "user", "content": "Render this turn.",

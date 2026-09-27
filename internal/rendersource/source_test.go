@@ -210,15 +210,76 @@ func TestResolveRejectsUnrelatedTranscript(t *testing.T) {
 }
 
 func TestResolveRejectsMatchingTranscriptFromDifferentWorkingDirectory(t *testing.T) {
-	home := t.TempDir()
-	wantedCWD := filepath.Join(home, "wanted")
-	otherCWD := filepath.Join(home, "other")
-	source := "## Exact result\n\nThe measured tensor contraction is stable across every validation shard."
-	writeCodex(t, home, "wrong-project.jsonl", otherCWD, source)
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			home := t.TempDir()
+			wantedCWD := filepath.Join(home, "wanted")
+			otherCWD := filepath.Join(home, "other")
+			for _, path := range []string{wantedCWD, otherCWD} {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			source := "## Exact result\n\nThe measured tensor contraction is stable across every validation shard."
+			if provider == "codex" {
+				writeCodex(t, home, "wrong-project.jsonl", otherCWD, source)
+			} else {
+				root := filepath.Join(home, ".claude", "projects")
+				if err := os.MkdirAll(filepath.Join(root, claudeProjectKey(wantedCWD)), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writeLines(t, filepath.Join(root, claudeProjectKey(otherCWD), "wrong-project.jsonl"),
+					map[string]any{"type": "assistant", "cwd": otherCWD, "message": map[string]any{
+						"role": "assistant", "content": source,
+					}})
+			}
+			_, err := Resolve(home, wantedCWD, source)
+			if !errors.Is(err, ErrNoMatch) {
+				t.Fatalf("expected cwd-mismatched transcript to be rejected, got %v", err)
+			}
+		})
+	}
+}
 
-	_, err := Resolve(home, wantedCWD, source)
-	if !errors.Is(err, ErrNoMatch) {
-		t.Fatalf("expected cwd-mismatched transcript to be rejected, got %v", err)
+func TestResolveMatchesSymlinkedDirectoriesForEveryProvider(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reverse=%v", provider, reverse), func(t *testing.T) {
+				home := t.TempDir()
+				physical := filepath.Join(home, "physical-project")
+				alias := filepath.Join(home, "launch-alias")
+				if err := os.Mkdir(physical, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(physical, alias); err != nil {
+					t.Fatal(err)
+				}
+				cwd, launch := physical, alias
+				if reverse {
+					cwd, launch = launch, cwd
+				}
+				source := "The complete authored answer preserves every distinctive measurement and explanation even when the terminal only paints its opening paragraph."
+				if provider == "codex" {
+					writeCodex(t, home, "session.jsonl", launch, source)
+				} else {
+					root := filepath.Join(home, ".claude", "projects")
+					// An existing directory for the pane spelling must not hide
+					// the matching conversation stored under its launch spelling.
+					writeLines(t, filepath.Join(root, claudeProjectKey(cwd), "decoy.jsonl"),
+						map[string]any{"type": "assistant", "cwd": cwd, "message": map[string]any{
+							"role": "assistant", "content": "An unrelated deployment log has no visible answer overlap.",
+						}})
+					writeLines(t, filepath.Join(root, claudeProjectKey(launch), "session.jsonl"),
+						map[string]any{"type": "assistant", "cwd": launch, "message": map[string]any{
+							"role": "assistant", "content": source,
+						}})
+				}
+				got, err := Resolve(home, cwd, source)
+				if err != nil || got.Source != source || got.Origin != provider+"-transcript" {
+					t.Fatalf("symlinked transcript = %#v, %v", got, err)
+				}
+			})
+		}
 	}
 }
 
