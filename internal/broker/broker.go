@@ -21,6 +21,7 @@ import (
 
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
+	"universal-tmux/internal/terminalquery"
 )
 
 const (
@@ -41,11 +42,12 @@ func sizePayload(cols, rows int) []byte {
 }
 
 type subscriber struct {
-	ch         chan []byte
-	done       chan struct{}
-	cancel     context.CancelFunc // cancels this client's serve ctx (used to evict on kill/rename)
-	primed     bool               // protected by hub.mu
-	snapshotID uint64
+	ch          chan []byte
+	done        chan struct{}
+	cancel      context.CancelFunc // cancels this client's serve ctx (used to evict on kill/rename)
+	primed      bool               // protected by hub.mu
+	snapshotID  uint64
+	interactive bool // /stream observers can never be the terminal-query responder
 }
 
 // sessionHub owns one backend session (tmux or ConPTY) and its connected clients.
@@ -56,6 +58,7 @@ type sessionHub struct {
 	lastPane     string
 	dead         chan struct{} // closed when the backend session ended (pump exited)
 	nextSnapshot uint64
+	replyViewer  *subscriber // stable while connected and primed; protected by mu
 }
 
 func newSessionHub(tm session.Session) *sessionHub {
@@ -99,16 +102,37 @@ func outputFrames(pane string, data []byte) [][]byte {
 
 func (h *sessionHub) pump() {
 	defer close(h.dead)
+	filters := make(map[string]*terminalquery.Filter)
 	for out := range h.tm.Output() {
-		var frames [][]byte
+		var sizeFrames [][]byte
 		if out.Cols > 0 && out.Rows > 0 {
 			// In-band size event: broadcast the authoritative pane size in stream
 			// order, so each client re-pins its grid exactly between the bytes
 			// formatted for the old width and those formatted for the new.
-			frames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
+			sizeFrames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
 		}
-		if len(out.Data) > 0 {
-			frames = append(frames, outputFrames(out.Pane, out.Data)...)
+		filter := filters[out.Pane]
+		if filter == nil {
+			filter = &terminalquery.Filter{}
+			filters[out.Pane] = filter
+		}
+		if out.SnapshotID != 0 {
+			// A capture is historical display state, never a new request to the
+			// application. Do not let its parser consume a live partial query.
+			filter = &terminalquery.Filter{}
+		}
+		active, passive := filter.Feed(out.Data)
+		framesFor := func(data []byte) [][]byte {
+			frames := append([][]byte(nil), sizeFrames...)
+			if len(data) > 0 {
+				frames = append(frames, outputFrames(out.Pane, data)...)
+			}
+			return frames
+		}
+		passiveFrames := framesFor(passive)
+		var activeFrames [][]byte
+		if out.SnapshotID == 0 && h.tm.QueryOwnership() == session.ViewerQueries {
+			activeFrames = framesFor(active)
 		}
 		h.mu.Lock()
 		h.lastPane = out.Pane
@@ -129,8 +153,27 @@ func (h *sessionHub) pump() {
 			}
 			subs = append(subs, s)
 		}
+		// Multiplexers already own the reply path. Raw backends elect one
+		// interactive viewer; all other viewers and all snapshots are passive.
+		// Keep the owner stable across chunks, joins and resize/snapshot requests.
+		if _, present := h.subs[h.replyViewer]; !present {
+			h.replyViewer = nil
+		}
+		if h.replyViewer == nil && h.tm.QueryOwnership() == session.ViewerQueries {
+			for s := range h.subs {
+				if s.interactive && s.primed {
+					h.replyViewer = s
+					break
+				}
+			}
+		}
+		owner := h.replyViewer
 		h.mu.Unlock()
 		for _, s := range subs {
+			frames := passiveFrames
+			if s == owner && out.SnapshotID == 0 {
+				frames = activeFrames
+			}
 		send:
 			for _, frame := range frames {
 				select {
@@ -186,7 +229,7 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel}
+	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel, interactive: true}
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
 	h.mu.Unlock()

@@ -791,6 +791,10 @@ func tmuxArgs(socket string, rest ...string) []string {
 // Pane returns the session's primary pane id (best default for input routing).
 func (c *Client) Pane() string { return c.primary }
 
+// tmux parses and answers the pane's queries before exposing the same bytes in
+// %output. Viewers must not answer them again or advertise a different terminal.
+func (c *Client) QueryOwnership() session.QueryOwnership { return session.BackendQueries }
+
 // Close detaches this control-mode client (closing the PTY makes tmux -CC exit).
 // Used when a session is killed or renamed out from under its hub.
 func (c *Client) Close() {
