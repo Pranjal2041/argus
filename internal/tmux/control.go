@@ -73,6 +73,16 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 	return dropDimAndAnsi(out), nil
 }
 
+// CaptureRenderScreen keeps cursor geometry and physical rows from the same
+// non-yielding tmux command sequence. The shared matcher interprets the layout.
+func (p *Provider) CaptureRenderScreen(name string, lines int) (session.ScreenSnapshot, error) {
+	pane := discoverPane(p.socket, name)
+	if pane == "" {
+		return session.ScreenSnapshot{}, fmt.Errorf("no pane for session %q", name)
+	}
+	return captureScreenSnapshot(p.socket, pane, lines)
+}
+
 // dropDimAndAnsi removes any text drawn in the ANSI FAINT style (SGR 2) — the agent's
 // dim autosuggestion — then strips all remaining escape sequences, yielding plain text.
 // SGR state is tracked across the stream: 2 turns faint on; 0/22 (and a bare ESC[m)
@@ -913,17 +923,32 @@ func (c *Client) paneFlag(format string) string {
 // Capture happens at the window's CURRENT width, so the broker must apply the
 // client's resize BEFORE calling this (see the hub's first-resize priming).
 func (c *Client) Snapshot() []byte {
+	screen, err := captureScreenSnapshot(c.socket, c.primary, 10000)
+	if err != nil {
+		return nil
+	}
+	return screen.ANSI()
+}
+
+func captureScreenSnapshot(socket, pane string, history int) (session.ScreenSnapshot, error) {
+	if history < 0 {
+		history = 0
+	}
 	// Capture metadata and the active grid in one non-yielding tmux command
 	// sequence, not separate processes which can observe different cursor states.
 	// The active alternate grid has no history, so the same capture handles both.
-	args := []string{"display-message", "-p", "-t", c.primary, snapshotMetadata, ";", "capture-pane", "-p", "-e", "-N", "-S", "-10000", "-t", c.primary}
+	args := []string{"display-message", "-p", "-t", pane, snapshotMetadata, ";", "capture-pane", "-p", "-e", "-N", "-S", "-" + strconv.Itoa(history), "-t", pane}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(c.socket, args...)...).Output()
-	if err != nil || len(out) == 0 {
-		return nil
+	out, err := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, args...)...).Output()
+	if err != nil {
+		return session.ScreenSnapshot{}, err
 	}
-	return decodeScreenSnapshot(out).ANSI()
+	screen := decodeScreenSnapshot(out)
+	if screen.Rows <= 0 || screen.Cols <= 0 || len(screen.Lines) < screen.Rows {
+		return session.ScreenSnapshot{}, fmt.Errorf("incomplete screen capture for pane %q", pane)
+	}
+	return screen, nil
 }
 
 func decodeScreenSnapshot(data []byte) session.ScreenSnapshot {

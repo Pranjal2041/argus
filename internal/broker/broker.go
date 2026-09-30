@@ -518,6 +518,13 @@ type capturer interface {
 	Capture(name string, lines int) (string, error)
 }
 
+// renderScreenProvider captures grid and cursor together, so matching can
+// distinguish an active editor/status region from conversation output without
+// guessing from provider names or status wording.
+type renderScreenProvider interface {
+	CaptureRenderScreen(name string, lines int) (session.ScreenSnapshot, error)
+}
+
 // agentTranscriptProvider identifies the exact structured conversation owned
 // by the foreground agent process. Provider-specific process discovery belongs
 // at the host provider; selection and fallback consume one shared contract.
@@ -568,7 +575,7 @@ func (m *Manager) Recent(name string, lines int) (string, error) {
 // every supported agent uses the same newest-turn and screen-overlap policy. If
 // that cannot be proved, callers retain their lossless styled terminal snapshot.
 func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
-	text, err := m.Recent(name, 600)
+	text, err := m.renderMatchingScreen(name)
 	if err != nil {
 		return rendersource.Result{}, err
 	}
@@ -594,6 +601,20 @@ func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
 		transcript, _ = provider.AgentTranscript(name)
 	}
 	return rendersource.ResolveWithTranscript(home, cwd, text, transcript)
+}
+
+func (m *Manager) renderMatchingScreen(name string) (string, error) {
+	if !m.prov.Has(name) {
+		return "", fmt.Errorf("no such session: %q", name)
+	}
+	if provider, ok := m.prov.(renderScreenProvider); ok {
+		capture, err := provider.CaptureRenderScreen(name, 600)
+		if err != nil {
+			return "", err
+		}
+		return rendersource.MatchingScreen(capture), nil
+	}
+	return m.Recent(name, 600)
 }
 
 // Sessions returns the cached session list (refreshed in the background). Always

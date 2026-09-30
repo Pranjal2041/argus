@@ -5,7 +5,25 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"universal-tmux/internal/rendersource"
 )
+
+func TestRenderSnapshotPreservesCursorBlankRowsAndEditorBoundary(t *testing.T) {
+	s := newCaptureScreen(80, 12)
+	border := strings.Repeat("─", 80)
+	s.write([]byte("\x1b[2J\x1b[H\r\nanswer\r\n" + border + "\r\n> draft\r\n" + border + "\r\nstatus panel\x1b[4;3H\x1b[?25h"))
+	grid := s.snapshot()
+	if len(grid.Lines) != 12 || grid.CursorY != 3 || grid.CursorX != 2 || !grid.CursorVisible {
+		t.Fatalf("incoherent grid: %+v", grid)
+	}
+	if got := rendersource.MatchingScreen(grid); strings.TrimSpace(got) != "answer" {
+		t.Fatalf("wrong matching region: %q", got)
+	}
+	s.write([]byte("\x1b[?25l"))
+	if got := rendersource.MatchingScreen(s.snapshot()); !strings.Contains(got, "status panel") {
+		t.Fatal("hidden cursor cannot identify editor")
+	}
+}
 
 // TestRenderRingFlowing: plain flowing lines must all appear (the case strip-and-tail
 // dropped). 25 lines fit in a 30-row screen.

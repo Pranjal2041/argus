@@ -9,7 +9,24 @@ import (
 	"time"
 
 	"github.com/hinshun/vt10x"
+	"universal-tmux/internal/rendersource"
 )
+
+func TestRenderCaptureKeepsCursorAndGridTogether(t *testing.T) {
+	border := strings.Repeat("─", 40)
+	output := "\x1b[2J\x1b[Hanswer\r\n" + border + "\r\n❯ \r\n" + border + "\r\nstatus words\r\nmore status\x1b[3;3H\x1b[?25h"
+	c := snapshotFixture(t, output, 2, 2)
+	s, err := NewProvider(c.socket).CaptureRenderScreen("fixture", 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CursorY != 2 || s.CursorX != 2 || len(s.Lines) != 8 {
+		t.Fatalf("wrong geometry: %+v", s)
+	}
+	if got := rendersource.MatchingScreen(s); strings.TrimSpace(got) != "answer" {
+		t.Fatalf("wrong answer region: %q", got)
+	}
+}
 
 // These sessions live on their own server, never the user's tmux socket.
 func snapshotFixture(t *testing.T, output string, x, y int) *Client {

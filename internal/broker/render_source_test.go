@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"universal-tmux/internal/rendersource"
@@ -57,6 +58,33 @@ func (p *exactTranscriptRenderProvider) Capture(string, int) (string, error) {
 
 func (p *exactTranscriptRenderProvider) AgentTranscript(string) (rendersource.TranscriptRef, error) {
 	return p.ref, nil
+}
+
+type gridRenderProvider struct {
+	exactTranscriptRenderProvider
+	grid session.ScreenSnapshot
+}
+
+func (p *gridRenderProvider) CaptureRenderScreen(string, int) (session.ScreenSnapshot, error) {
+	return p.grid, nil
+}
+
+func TestRenderMatchingScreenUsesCoherentGridWithoutChangingRecent(t *testing.T) {
+	body := "The authored answer remains separate from input and status text."
+	border := strings.Repeat("─", 80)
+	provider := &gridRenderProvider{
+		exactTranscriptRenderProvider: exactTranscriptRenderProvider{warmProvider: warmProvider{exists: true}, screen: "complete uncropped recent capture"},
+		grid:                          session.ScreenSnapshot{Lines: []string{body, border, "❯ ", border, strings.Repeat("status ", 100), ""}, Cols: 80, Rows: 6, CursorX: 2, CursorY: 2, CursorVisible: true},
+	}
+	m := &Manager{prov: provider}
+	got, err := m.renderMatchingScreen("panel")
+	if err != nil || got != body {
+		t.Fatalf("matching view: %q %v", got, err)
+	}
+	got, err = m.Recent("panel", 600)
+	if err != nil || got != provider.screen {
+		t.Fatalf("/recent was changed: %q %v", got, err)
+	}
 }
 
 func TestRenderSourceConsumesProviderNeutralExactTranscript(t *testing.T) {
