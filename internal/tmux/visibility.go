@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"universal-tmux/internal/statedir"
 )
 
 // MigrateLegacyVisibility preserves the panels that predate affirmative
@@ -16,6 +18,9 @@ import (
 // background session in ListSessionInventory.
 func MigrateLegacyVisibility(socket string) error {
 	dir := os.Getenv("UT_VISIBILITY_STATE_DIR")
+	if dir == "" && os.Getenv("UT_STATE_DIR") != "" {
+		dir = statedir.Dir()
+	}
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

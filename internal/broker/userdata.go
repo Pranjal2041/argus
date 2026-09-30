@@ -259,12 +259,7 @@ func SetUnattendedMode(enabled bool) UnattendedModeState {
 var journalMu sync.Mutex
 
 func journalInboxPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
-	dir := filepath.Join(home, ".universal-tmux")
-	_ = os.MkdirAll(dir, 0o755)
+	dir := brokerStateDir()
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"

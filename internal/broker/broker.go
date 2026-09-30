@@ -631,16 +631,11 @@ func (m *Manager) ForegroundSessions() []session.Info {
 // hiddenStatePath is a per-HOST file (not the NFS-shared home key) so brokers on
 // different nodes don't clobber each other's hidden state.
 func hiddenStatePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"
 	}
-	dir := filepath.Join(home, ".universal-tmux")
-	_ = os.MkdirAll(dir, 0o755)
+	dir := brokerStateDir()
 	return filepath.Join(dir, "hidden-"+host+".json")
 }
 

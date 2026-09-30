@@ -91,6 +91,21 @@ grep -q -- "--listen '127.0.0.1:8722'" "$TMP/local/supervise-base.sh"
 grep -q -- "--listen ':8722' --local-listen '127.0.0.1:8732'" "$TMP/local/supervise-second.sh"
 grep -q -- "--listen '127.0.0.1:8732'" "$TMP/local/supervise-second.sh"
 assert_eq "$(env UT_HOME="$TMP/home" UT_PORT=8722 UT_LOCAL_PORT=8732 "$ROOT/ut" ls)" '8722 8732'
+
+# A second instance's state roots reach its broker even through a tmux server
+# whose environment predates them; the default instance declares none.
+(cd "$TMP" && env PATH="$TMP/bin:$PATH" UT_HOME="$TMP/home" UT_LOCAL_DIR="$TMP/local" \
+  UT_TAILSCALE_BIN="$TMP/tailscale" UT_NO_ATTACH=1 UT_LOCAL_PORT=8742 \
+  UT_STATE_DIR="$TMP/state dir" UT_LAB_ROOT="$TMP/lab" "$ROOT/ut" -L third demo)
+(
+  unset UT_STATE_DIR UT_LAB_ROOT UT_BACKUP_ROOT
+  eval "$(grep "^export UT_" "$TMP/local/supervise-third.sh")"
+  assert_eq "$UT_STATE_DIR|$UT_LAB_ROOT|${UT_BACKUP_ROOT:-}" "$TMP/state dir|$TMP/lab|"
+)
+if grep -q '^export UT_' "$TMP/local/supervise-base.sh"; then
+  echo "default instance must not pin state roots" >&2
+  exit 1
+fi
 assert_eq "$(env UT_HOME="$TMP/home" UT_PORT=8722 UT_LOCAL_PORT= "$ROOT/ut" ls)" '8722 8722'
 
 printf 'ut transport selection tests passed\n'

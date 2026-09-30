@@ -219,12 +219,18 @@ if ! broker_running; then
   # Self-restarting supervisor (node-local, never NFS). It reads the authkey at
   # runtime rather than embedding it, so the key never lands in this script file.
   SUP="$LOCAL/supervise-$socket.sh"
+  # Instance state roots are fixed at launch, since a reused tmux server's
+  # environment may predate them (see UT_STATE_DIR in docs/cli).
+  INSTANCE_ENV=""
+  for var in UT_STATE_DIR UT_LAB_ROOT UT_BACKUP_ROOT; do
+    [ -z "${!var:-}" ] || INSTANCE_ENV+="export $var=$(printf '%q' "${!var}")"$'\n'
+  done
   cat > "$SUP" <<SUPEOF
 #!/usr/bin/env bash
 # ut broker supervisor — hosted by tmux so it inherits tmux's daemonization and
 # outlives SSH/login teardown. Restarts the broker if it ever exits.
 exec >>'$LOGFILE' 2>&1
-KEY="\$(cat '$UT_HOME/authkey' 2>/dev/null || true)"
+${INSTANCE_ENV}KEY="\$(cat '$UT_HOME/authkey' 2>/dev/null || true)"
 [ -n "\$KEY" ] || KEY="\${TS_AUTHKEY:-}"
 PLAN=""
 while true; do
