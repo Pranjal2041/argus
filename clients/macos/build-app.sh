@@ -51,6 +51,9 @@ if [ "$SIGN_IDENTITY" = "-" ] && [ "${UT_NO_INSTALL:-0}" != "1" ]; then
     echo "Error: refusing to install an ad-hoc-signed Argus.app." >&2
     exit 1
 fi
+# File-provider sync (iCloud Desktop/Documents, Dropbox, ...) stamps extended
+# attributes such as com.apple.FinderInfo onto the bundle; codesign rejects them.
+xattr -cr "$APP"
 codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
 echo "Signed with stable identity: $SIGN_IDENTITY"
 
