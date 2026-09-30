@@ -61,4 +61,36 @@ done
 assert_eq "$(plan 100.64.0.9 1 $'native\t100.64.0.8')" $'native\t100.64.0.9'
 assert_eq "$(plan 100.64.0.9 1 $'embedded\t')" $'native\t100.64.0.9'
 
+# --- local control port is independent of the tailnet port -------------------
+# Several brokers can share one host (another `-L` socket, or a second install
+# under the same login). Each must publish the standard tailnet port while owning
+# a distinct loopback control port, and its CLI must reach that same broker.
+mkdir -p "$TMP/bin" "$TMP/home"
+cat > "$TMP/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in has-session|kill-session) exit 1 ;; esac
+done
+exit 0
+EOF
+cat > "$TMP/home/ut-broker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s %s\n' "${UT_PORT:-}" "${UT_LOCAL_PORT:-}"
+EOF
+chmod +x "$TMP/bin/tmux" "$TMP/home/ut-broker"
+
+launch() { # socket [UT_LOCAL_PORT]
+  (cd "$TMP" && env PATH="$TMP/bin:$PATH" UT_HOME="$TMP/home" UT_LOCAL_DIR="$TMP/local" \
+    UT_TAILSCALE_BIN="$TMP/tailscale" UT_NO_ATTACH=1 UT_PORT=8722 \
+    ${2:+UT_LOCAL_PORT=$2} "$ROOT/ut" -L "$1" demo)
+}
+launch base
+launch second 8732
+grep -q -- "--listen ':8722' --local-listen '127.0.0.1:8722'" "$TMP/local/supervise-base.sh"
+grep -q -- "--listen '127.0.0.1:8722'" "$TMP/local/supervise-base.sh"
+grep -q -- "--listen ':8722' --local-listen '127.0.0.1:8732'" "$TMP/local/supervise-second.sh"
+grep -q -- "--listen '127.0.0.1:8732'" "$TMP/local/supervise-second.sh"
+assert_eq "$(env UT_HOME="$TMP/home" UT_PORT=8722 UT_LOCAL_PORT=8732 "$ROOT/ut" ls)" '8722 8732'
+assert_eq "$(env UT_HOME="$TMP/home" UT_PORT=8722 UT_LOCAL_PORT= "$ROOT/ut" ls)" '8722 8722'
+
 printf 'ut transport selection tests passed\n'

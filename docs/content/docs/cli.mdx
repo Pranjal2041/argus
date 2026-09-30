@@ -104,7 +104,8 @@ The human approval, policy, curation, archive, and key commands are documented i
 |---|---|---|
 | `UT_HOME` | `$HOME/.universal-tmux` | shared dir (NFS ok): the broker binary + the one auth key |
 | `UT_BROKER` | `$UT_HOME/ut-broker` | path to the broker binary |
-| `UT_PORT` | `8722` | port the broker listens on |
+| `UT_PORT` | `8722` | tailnet port the broker publishes (clients discover brokers on it) |
+| `UT_LOCAL_PORT` | `$UT_PORT` | loopback control port that `ut` commands on this host use |
 | `UT_LOCAL_DIR` | `/tmp/ut-$USER` | **node-local** state: identity, pidfiles, logs (never NFS) |
 
 <Callout type="info">
@@ -112,6 +113,12 @@ Isolation between two allocations on one node is opt-in: each passes a distinct 
 (`ut -L <name>`), exactly as with `tmux`. By default they share the node's default server and
 one broker.
 </Callout>
+
+Every broker also serves a loopback control port for `ut` commands on its own host. When more
+than one broker runs on a host — another `ut -L` socket, or a second install under a shared
+login — give each a distinct `UT_LOCAL_PORT`. Each still publishes the standard tailnet port, so
+the apps discover all of them, while `ut exec`, `ut ls`, and the broker's own mesh calls reach
+the broker they belong to.
 
 ## tmux version notes
 

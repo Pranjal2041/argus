@@ -16,7 +16,8 @@ set -euo pipefail
 
 UT_HOME="${UT_HOME:-$HOME/.universal-tmux}"            # shared (NFS ok): binary + the one key
 BROKER="${UT_BROKER:-$UT_HOME/ut-broker}"
-PORT="${UT_PORT:-8722}"
+PORT="${UT_PORT:-8722}"                                # tailnet port clients probe
+LOCAL_PORT="${UT_LOCAL_PORT:-$PORT}"                     # loopback control port for CLIs on this host
 USERNAME="$(id -un 2>/dev/null || echo user)"
 LOCAL="${UT_LOCAL_DIR:-/tmp/ut-$USERNAME}"             # NODE-LOCAL: identity/state/pidfiles (never NFS)
 SELF="$0"
@@ -97,7 +98,7 @@ fi
 case "${1:-}" in
   ls|exec|run|sh|spawn|tail|send|cp|forward|browser|web-artifacts|api-key|api_key|lab|recovery|help|--help|-h)
     [ -x "$BROKER" ] || { echo "ut: broker not found at $BROKER (set UT_BROKER)" >&2; exit 1; }
-    export UT_PORT="$PORT"
+    export UT_PORT="$PORT" UT_LOCAL_PORT="$LOCAL_PORT"
     exec "$BROKER" "$@"
     ;;
 esac
@@ -156,7 +157,7 @@ broker_running() {
       return 0
     fi
   fi
-  curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/sessions" >/dev/null 2>&1
+  curl -fsS --max-time 2 "http://127.0.0.1:${LOCAL_PORT}/sessions" >/dev/null 2>&1
 }
 
 # --- session: CLI-created sessions are background unless --visible ----------
@@ -236,7 +237,8 @@ while true; do
     # Rootless fallback for a host with no native tailnet. Its identity is
     # node-local (never NFS), while the reusable auth key remains shared.
     TS_AUTHKEY="\$KEY" '$BROKER' --tmux-socket '$socket' --session '$name' \\
-      --listen ':${PORT}' --tsnet-host '$host' --tsnet-dir '$LOCAL/tsnet-$socket' &
+      --listen ':${PORT}' --local-listen '127.0.0.1:${LOCAL_PORT}' \\
+      --tsnet-host '$host' --tsnet-dir '$LOCAL/tsnet-$socket' &
     BPID=\$!
   else
     # local mode: serve on loopback AND this host's own tailnet IP, so
@@ -244,7 +246,7 @@ while true; do
     # invisible from the tailnet. Never 0.0.0.0 (LAN exposure); the broker retries
     # failed tailnet binds while local service stays available.
     EXTRA=""; [ -n "\$TSIP" ] && EXTRA="--extra-listen \$TSIP:${PORT}"
-    '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${PORT}' \$EXTRA &
+    '$BROKER' --tmux-socket '$socket' --session '$name' --listen '127.0.0.1:${LOCAL_PORT}' \$EXTRA &
     BPID=\$!
   fi
   # Re-evaluate the complete transport contract, not just the current IP. This
