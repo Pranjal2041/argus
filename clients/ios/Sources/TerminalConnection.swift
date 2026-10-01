@@ -47,7 +47,11 @@ final class TerminalConnection: NSObject, ObservableObject {
         return c.url!
     }
 
+    private var demoLine = ""
+    private var demoScreenPending = false
+
     func connect() {
+        if DemoFleet.isDemo(machine) { return connectDemo() }
         closedByUser = false
         generation += 1
         let gen = generation
@@ -88,14 +92,54 @@ final class TerminalConnection: NSObject, ObservableObject {
         let c = min(max(cols, 2), 1000), r = min(max(rows, 2), 1000)
         if let q = requested, q.cols == c, q.rows == r { return }
         requested = (c, r)
+        if DemoFleet.isDemo(machine) {
+            paneSize = (c, r)
+            if demoScreenPending { demoScreenPending = false; emitDemoScreen() }
+            return
+        }
         if task != nil { enqueue(WireFrame.resize(cols: c, rows: r)) }
     }
 
     func send(_ bytes: ArraySlice<UInt8>) {
+        if DemoFleet.isDemo(machine) { return demoInput(bytes) }
         for f in WireFrame.encode(op: Op.input, payload: Array(bytes)) { enqueue(f) }
     }
 
     func requestSnapshot() { enqueue(WireFrame.encode(op: Op.requestSnapshot)[0]) }
+
+    // MARK: Demo
+
+    /// The demo fleet has no socket: render the session and answer commands locally.
+    private func connectDemo() {
+        closedByUser = false
+        state = .connected
+        // Like a real broker: nothing is drawn until the terminal has a size.
+        guard let r = requested else { demoScreenPending = true; return }
+        paneSize = r
+        emitDemoScreen()
+    }
+
+    private func emitDemoScreen() {
+        onOutput?(ArraySlice(Array(DemoShell.screen(machine: machine, handle: handle).utf8)))
+    }
+
+    private func demoInput(_ bytes: ArraySlice<UInt8>) {
+        var echo = ""
+        for b in bytes {
+            switch b {
+            case 0x0d, 0x0a:
+                let reply = DemoShell.run(demoLine)
+                echo += "\r\n" + (reply.isEmpty ? "" : reply.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n") + "$ "
+                demoLine = ""
+            case 0x7f, 0x08:
+                if !demoLine.isEmpty { demoLine.removeLast(); echo += "\u{8} \u{8}" }
+            case 0x20...0x7e:
+                demoLine.append(Character(UnicodeScalar(b))); echo.append(Character(UnicodeScalar(b)))
+            default: break
+            }
+        }
+        if !echo.isEmpty { onOutput?(ArraySlice(Array(echo.utf8))) }
+    }
 
     // MARK: Socket
 

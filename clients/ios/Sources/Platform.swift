@@ -42,7 +42,8 @@ final class AttentionNotifications: NSObject, UNUserNotificationCenterDelegate {
     func attach(fleet: FleetStore, lab: LabStore, router: AppRouter) {
         self.fleet = fleet; self.lab = lab; self.router = router
         UNUserNotificationCenter.current().delegate = self
-        if enabled { requestAuthorization() }
+        // Ask once there is a fleet to be notified about, not on a cold first launch.
+        if enabled, fleet.isConfigured, !fleet.isDemo { requestAuthorization() }
         fleet.onEnteredWaiting = { [weak self] entered in
             for (m, s) in entered { self?.notifyWaiting(machine: m, session: s) }
         }

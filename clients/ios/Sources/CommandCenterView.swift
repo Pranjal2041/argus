@@ -36,6 +36,12 @@ struct CommandCenterView: View {
         let all = cards
         List {
             if let e = fleet.hubError { Section { Label(e, systemImage: "wifi.exclamationmark").font(.footnote).foregroundStyle(.orange) } }
+            if fleet.isDemo {
+                Section {
+                    Label("Demo fleet. Connect your Mac in More → Settings to see your own machines.", systemImage: "sparkles")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
             Section {
                 SummaryChips(counts: Dictionary(uniqueKeysWithValues: Bucket.allCases.map { b in
                     (b, all.filter { bucket($0) == b }.count + (b == .needsYou ? lab.attention.count : 0))
@@ -321,7 +327,7 @@ struct QuickReplySheet: View {
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .focused($focused)
                         .padding(10).background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
-                    Button { send(text) } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                    Button { send(text) } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send reply")
                         .disabled(text.isEmpty || sending)
                 }
                 .padding()

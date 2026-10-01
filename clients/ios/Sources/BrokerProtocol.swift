@@ -209,6 +209,7 @@ enum BrokerHTTP {
         let c = URLSessionConfiguration.ephemeral
         c.timeoutIntervalForRequest = 6
         c.waitsForConnectivity = false
+        c.protocolClasses = [DemoURLProtocol.self] + (c.protocolClasses ?? [])   // the in-app demo fleet
         return URLSession(configuration: c)
     }()
 

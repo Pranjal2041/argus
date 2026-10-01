@@ -306,7 +306,7 @@ struct FilesBrowser: View {
                     Button { newName = ""; newFolder = true } label: { Label("New folder", systemImage: "folder.badge.plus") }
                     Button { Task { await model.go(model.home) } } label: { Label("Home", systemImage: "house") }
                     Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
-                } label: { Image(systemName: "ellipsis.circle") }
+                } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Folder actions")
                 .disabled(model.path.isEmpty)
             }
         }
@@ -514,13 +514,13 @@ struct FilePreview: View {
                     Button("Save") { Task { await save() } }.disabled(text == saved)
                 } else {
                     if kind == .markdown {
-                        Button { renderMarkdown.toggle() } label: { Image(systemName: renderMarkdown ? "chevron.left.forwardslash.chevron.right" : "doc.richtext") }
+                        Button { renderMarkdown.toggle() } label: { Image(systemName: renderMarkdown ? "chevron.left.forwardslash.chevron.right" : "doc.richtext") }.accessibilityLabel(renderMarkdown ? "Show source" : "Show rendered")
                     }
                     Menu {
                         Button("Edit") { editing = true }
                         Button("Larger text") { fontSize = min(fontSize + 1, 40) }
                         Button("Smaller text") { fontSize = max(fontSize - 1, 7) }
-                    } label: { Image(systemName: "textformat.size") }
+                    } label: { Image(systemName: "textformat.size") }.accessibilityLabel("Text options")
                 }
             }
             Button {
@@ -528,7 +528,7 @@ struct FilePreview: View {
                     if localURL == nil { localURL = await model.download(entry) }
                     if let u = localURL { shareItem = ShareItem(url: u) }
                 }
-            } label: { Image(systemName: "square.and.arrow.up") }
+            } label: { Image(systemName: "square.and.arrow.up") }.accessibilityLabel("Share")
         }
     }
 

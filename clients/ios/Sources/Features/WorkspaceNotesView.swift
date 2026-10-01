@@ -59,7 +59,7 @@ struct NotesView: View {
         .navigationTitle("Notes")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { newNote() } label: { Image(systemName: "square.and.pencil") }
+                Button { newNote() } label: { Image(systemName: "square.and.pencil") }.accessibilityLabel("New note")
                     .accessibilityLabel("New note")
             }
             ToolbarItemGroup(placement: .keyboard) {

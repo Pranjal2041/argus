@@ -138,6 +138,17 @@ struct SetupView: View {
                             }
                         }
                     }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Just looking?").font(.headline)
+                        Text("Explore Argus with a sample fleet — three machines with agents working, waiting and finished. Nothing leaves this phone.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Button {
+                            fleet.hubAddress = DemoFleet.hubHost
+                            Task { await fleet.refreshNow() }
+                        } label: { Label("Explore the demo", systemImage: "sparkles") }
+                        .buttonStyle(.bordered)
+                    }
                 }
                 .padding(24)
             }
@@ -163,6 +174,7 @@ struct SetupView: View {
             _ = try await fleet.resolveHub(address)
             fleet.hubAddress = address.trimmingCharacters(in: .whitespaces)
             await fleet.refreshNow()
+            if AttentionNotifications.shared.enabled { AttentionNotifications.shared.requestAuthorization() }
         } catch {
             self.error = "Couldn't reach an Argus broker at \(address). Check that Tailscale is connected on this iPhone and Argus is running on your Mac. (\(error.localizedDescription))"
         }

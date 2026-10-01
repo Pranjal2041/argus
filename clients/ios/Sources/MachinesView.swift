@@ -67,7 +67,7 @@ struct MachinesView: View {
                     Toggle("Show agent sessions", isOn: $fleet.showAgentSessions)
                     if fleet.hasHiddenSessions { Toggle("Show hidden", isOn: $fleet.showHidden) }
                     Button { machineHost = ""; addingMachine = true } label: { Label("Add machine…", systemImage: "plus") }
-                } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
+                } label: { Image(systemName: "line.3.horizontal.decrease.circle") }.accessibilityLabel("View options")
             }
         }
         .sheet(item: $newSessionOn) { m in

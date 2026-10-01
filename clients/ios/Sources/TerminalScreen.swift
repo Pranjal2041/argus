@@ -46,14 +46,21 @@ final class PinnedTerminalContainer: UIView, TerminalViewDelegate {
 
     static func font(_ size: CGFloat) -> UIFont { .monospacedSystemFont(ofSize: size, weight: .regular) }
 
-    /// Same metrics SwiftTerm uses: advance of a glyph, ceil(ascent+descent+leading).
-    static func cell(_ font: UIFont) -> CGSize {
-        let ct = font as CTFont
-        var glyph = CTFontGetGlyphWithName(ct, "W" as CFString)
-        var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(ct, .horizontal, &glyph, &advance, 1)
-        let height = ceil(CTFontGetAscent(ct) + CTFontGetDescent(ct) + CTFontGetLeading(ct))
-        return CGSize(width: advance.width, height: height)
+    private var cellCache: [CGFloat: CGSize] = [:]
+
+    /// SwiftTerm's own cell size at a font size, read back from the view
+    /// (getOptimalFrameSize = cell × grid) rather than re-derived: any other
+    /// measure draws the last column past the frame.
+    func cell(at size: CGFloat) -> CGSize {
+        if let c = cellCache[size] { return c }
+        let previous = terminal.font
+        terminal.font = Self.font(size)
+        let t = terminal.getTerminal()
+        let f = terminal.getOptimalFrameSize()
+        let c = CGSize(width: f.width / CGFloat(max(t.cols, 1)), height: f.height / CGFloat(max(t.rows, 1)))
+        if previous.pointSize != size { terminal.font = previous }
+        cellCache[size] = c
+        return c
     }
 
     func setPane(cols: Int, rows: Int) {
@@ -74,18 +81,28 @@ final class PinnedTerminalContainer: UIView, TerminalViewDelegate {
         let avail = bounds.inset(by: safeAreaInsets)
         guard avail.width > 20, avail.height > 20 else { return }
 
+        // Size the emulator before asking for a grid: a reply can arrive (and be
+        // drawn) before the next layout pass.
         // Ask for the grid this screen shows comfortably at the preferred font.
-        let preferred = Self.cell(Self.font(Self.preferredFontSize))
-        connection.requestSize(cols: Int(avail.width / preferred.width), rows: Int(avail.height / preferred.height))
+        let preferred = cell(at: Self.preferredFontSize)
+        let want = (cols: Int(avail.width / preferred.width), rows: Int(avail.height / preferred.height))
+        if pane == nil {
+            // Until the broker answers, the emulator is exactly the grid we ask for.
+            terminal.frame = CGRect(x: avail.minX, y: avail.minY,
+                                    width: CGFloat(want.cols) * preferred.width + 0.5,
+                                    height: CGFloat(want.rows) * preferred.height + 0.5)
+            terminal.layoutIfNeeded()   // recompute cols now, not on the next pass
+        }
+        connection.requestSize(cols: want.cols, rows: want.rows)
 
         // Pin to the broker's grid: the largest font (≤ preferred) that fits it.
-        guard let pane else { terminal.frame = avail; return }
+        guard let pane else { return }
         var size = Self.preferredFontSize
         var cell = preferred
         while size > Self.minFontSize,
               CGFloat(pane.cols) * cell.width > avail.width || CGFloat(pane.rows) * cell.height > avail.height {
             size -= 0.25
-            cell = Self.cell(Self.font(size))
+            cell = self.cell(at: size)
         }
         if terminal.font.pointSize != size { terminal.font = Self.font(size) }
         // A hair over cols×cell so SwiftTerm's floor() lands exactly on the grid.
@@ -93,6 +110,7 @@ final class PinnedTerminalContainer: UIView, TerminalViewDelegate {
         let h = CGFloat(pane.rows) * cell.height + 0.5
         terminal.frame = CGRect(x: avail.minX + max(0, (avail.width - w) / 2), y: avail.minY,
                                 width: min(w, avail.width), height: min(h, avail.height))
+        terminal.layoutIfNeeded()
         let t = terminal.getTerminal()
         if t.cols != pane.cols || t.rows != pane.rows { t.resize(cols: pane.cols, rows: pane.rows) }
     }
@@ -233,7 +251,7 @@ struct TerminalScreen: View {
                 if !handle.wandbRuns.isEmpty {
                     Menu {
                         ForEach(handle.wandbRuns) { r in Button(r.label) { wandbURL = r.url } }
-                    } label: { Image(systemName: "chart.xyaxis.line") }
+                    } label: { Image(systemName: "chart.xyaxis.line") }.accessibilityLabel("Weights & Biases runs")
                 }
                 Button { rendering = true } label: { Image(systemName: "doc.richtext") }.accessibilityLabel("Render output")
                 menu
@@ -290,7 +308,7 @@ struct TerminalScreen: View {
                 Label(session.hidden ? "Unhide" : "Hide", systemImage: session.hidden ? "eye" : "eye.slash")
             }
             Button(role: .destructive) { confirmKill = true } label: { Label("Kill", systemImage: "xmark.octagon") }
-        } label: { Image(systemName: "ellipsis.circle") }
+        } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Session actions")
     }
 
     private var findBar: some View {
@@ -301,9 +319,9 @@ struct TerminalScreen: View {
                 .onSubmit { find(forward: false) }
                 .onChange(of: findText) { _, _ in find(forward: false) }
             if findMissed { Text("0").foregroundStyle(.orange).font(.caption) }
-            Button { find(forward: false) } label: { Image(systemName: "chevron.up") }
-            Button { find(forward: true) } label: { Image(systemName: "chevron.down") }
-            Button { finding = false; findText = "" } label: { Image(systemName: "xmark.circle.fill") }.foregroundStyle(.secondary)
+            Button { find(forward: false) } label: { Image(systemName: "chevron.up") }.accessibilityLabel("Previous match")
+            Button { find(forward: true) } label: { Image(systemName: "chevron.down") }.accessibilityLabel("Next match")
+            Button { finding = false; findText = "" } label: { Image(systemName: "xmark.circle.fill") }.accessibilityLabel("Close find").foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(.bar)
@@ -383,8 +401,8 @@ struct RenderOutputView: View {
                         Button { plain.toggle() } label: { Image(systemName: plain ? "doc.richtext" : "text.alignleft") }
                             .accessibilityLabel(plain ? "Render as Markdown" : "Show plain text")
                     }
-                    Button { fontSize = max(9, fontSize - 1) } label: { Image(systemName: "textformat.size.smaller") }
-                    Button { fontSize = min(28, fontSize + 1) } label: { Image(systemName: "textformat.size.larger") }
+                    Button { fontSize = max(9, fontSize - 1) } label: { Image(systemName: "textformat.size.smaller") }.accessibilityLabel("Smaller text")
+                    Button { fontSize = min(28, fontSize + 1) } label: { Image(systemName: "textformat.size.larger") }.accessibilityLabel("Larger text")
                     if let markdown { ShareLink(item: markdown) }
                 }
             }

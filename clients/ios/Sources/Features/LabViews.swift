@@ -53,7 +53,7 @@ struct LabView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if lab.refreshing { ProgressView() } else {
-                    Button { Task { await lab.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                    Button { Task { await lab.refresh() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Refresh")
                         .accessibilityLabel("Refresh Lab")
                 }
             }

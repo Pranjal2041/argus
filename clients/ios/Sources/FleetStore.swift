@@ -16,8 +16,18 @@ final class FleetStore: ObservableObject {
     static let hubIDKey = "argus.hubID"
 
     @Published var hubAddress: String = UserDefaults.standard.string(forKey: FleetStore.hubKey) ?? "" {
-        didSet { UserDefaults.standard.set(hubAddress, forKey: Self.hubKey) }
+        didSet {
+            UserDefaults.standard.set(hubAddress, forKey: Self.hubKey)
+            guard hubAddress != oldValue else { return }
+            // A different hub is a different fleet: forget the remembered one.
+            machines = []; allSessions = [:]; commandCenter = [:]; reachable = []; misses = [:]
+            hubID = nil
+            UserDefaults.standard.removeObject(forKey: Self.hubIDKey)
+            Self.saveMachines([])
+        }
     }
+
+    var isDemo: Bool { hubAddress == DemoFleet.hubHost }
     /// Hostnames added by hand (never pruned by discovery).
     @Published var manualBrokers: [String] = UserDefaults.standard.stringArray(forKey: FleetStore.manualKey) ?? [] {
         didSet { UserDefaults.standard.set(manualBrokers, forKey: Self.manualKey) }

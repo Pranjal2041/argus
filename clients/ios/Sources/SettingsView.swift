@@ -11,6 +11,13 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            if fleet.isDemo {
+                Section {
+                    Button("Connect my own Mac") { fleet.hubAddress = "" }
+                } header: { Text("Demo") } footer: {
+                    Text("You're exploring a sample fleet. Connect your Mac to see your real machines.")
+                }
+            }
             Section {
                 TextField("hub", text: $address)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)

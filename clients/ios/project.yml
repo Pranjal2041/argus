@@ -36,13 +36,22 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: Argus
-        CFBundleShortVersionString: "0.1"
+        CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
+        LSApplicationCategoryType: public.app-category.developer-tools
+        # Only Apple's TLS (HTTPS/WSS) is used: exempt from export documentation.
+        ITSAppUsesNonExemptEncryption: false
+        NSHumanReadableCopyright: "© 2026 Argus contributors. MIT License."
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         # Native brokers (a Mac) serve plain http on their tailnet IP; the

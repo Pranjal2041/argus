@@ -34,7 +34,7 @@ struct TodoMapsView: View {
                     Image(systemName: showFinished ? "checkmark.circle.fill" : "checkmark.circle")
                 }
                 .accessibilityLabel(showFinished ? "Hide finished panels" : "Show finished panels")
-                Button { addingPanel = true } label: { Image(systemName: "plus") }
+                Button { addingPanel = true } label: { Image(systemName: "plus") }.accessibilityLabel("New panel")
                     .accessibilityLabel("New panel")
             }
         }
