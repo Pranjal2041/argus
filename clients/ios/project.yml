@@ -17,7 +17,12 @@ targets:
   Argus:
     type: application
     platform: iOS
-    sources: [Sources]
+    sources:
+      - Sources
+      # Shared with the macOS app: ArgusJSON + the three-way workspace merge, so
+      # phone edits merge exactly like the Mac and the sync host do.
+      - path: ../macos/Sources/ArgusProtocol/Protocol.swift
+      - path: ../macos/Sources/ArgusProtocol/WorkspaceMerge.swift
     dependencies:
       - package: SwiftTerm
     info:

@@ -207,11 +207,29 @@ enum BrokerHTTP {
     }
 
     @discardableResult
-    static func post(_ base: URL, _ path: String, query: [URLQueryItem], body: Data? = nil) async throws -> Data {
+    static func post(_ base: URL, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
+                     contentType: String? = nil, timeout: TimeInterval = 15) async throws -> Data {
+        let (data, response) = try await raw("POST", base, path, query: query, body: body, contentType: contentType, timeout: timeout)
+        try check(response, data)
+        return data
+    }
+
+    /// Any method, without status checking: for endpoints whose non-2xx bodies
+    /// carry meaning (409 conflicts, 404 "no render source").
+    static func raw(_ method: String, _ base: URL, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
+                    contentType: String? = nil, timeout: TimeInterval = 15) async throws -> (Data, HTTPURLResponse) {
         var req = URLRequest(url: url(base, path, query))
-        req.httpMethod = "POST"
+        req.httpMethod = method
         req.httpBody = body
+        req.timeoutInterval = timeout
+        if let contentType { req.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw BrokerError.http("no response") }
+        return (data, http)
+    }
+
+    static func getData(_ base: URL, _ path: String, query: [URLQueryItem] = [], timeout: TimeInterval = 15) async throws -> Data {
+        let (data, response) = try await raw("GET", base, path, query: query, timeout: timeout)
         try check(response, data)
         return data
     }
@@ -222,9 +240,10 @@ enum BrokerHTTP {
         return c.url!
     }
 
-    private static func check(_ response: URLResponse, _ data: Data) throws {
+    static func check(_ response: URLResponse, _ data: Data) throws {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
+                ?? (data.count < 300 ? String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) : nil)
             throw BrokerError.http(message ?? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }
     }
