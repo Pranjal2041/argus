@@ -239,7 +239,12 @@ enum BrokerHTTP {
 
     static func url(_ base: URL, _ path: String, _ query: [URLQueryItem]) -> URL {
         var c = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
-        if !query.isEmpty { c.queryItems = query }
+        if !query.isEmpty {
+            c.queryItems = query
+            // URLComponents leaves "+" literal, but Go's query parser reads it as a
+            // space ("a+b.txt" → "a b.txt"); encode it so values arrive verbatim.
+            c.percentEncodedQuery = c.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
         return c.url!
     }
 

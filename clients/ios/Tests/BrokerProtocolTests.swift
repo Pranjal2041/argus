@@ -53,6 +53,12 @@ final class BrokerProtocolTests: XCTestCase {
         XCTAssertEqual(s[1].handle, "old-broker")
     }
 
+    func testQueryValuesKeepPlusSigns() {
+        let url = BrokerHTTP.url(URL(string: "http://h:8722")!, "fs/write", [.init(name: "path", value: "/tmp/a+b c.txt")])
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.percentEncodedQuery!
+        XCTAssertTrue(items.contains("a%2Bb%20c.txt"), items)
+    }
+
     func testAttentionSectionsPreferTheModelLabel() {
         XCTAssertEqual(AttentionSection.of(label: "stuck", state: "working"), .needsYou)
         XCTAssertEqual(AttentionSection.of(label: "milestone", state: "waiting"), .idle)
