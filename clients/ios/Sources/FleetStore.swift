@@ -12,6 +12,8 @@ final class FleetStore: ObservableObject {
     static let backlogKey = "argus.backlog"
     static let showAgentKey = "argus.showAgent"
     static let nicknamesKey = "argus.machineNicknames"
+    static let machinesKey = "argus.knownMachines.v1"
+    static let hubIDKey = "argus.hubID"
 
     @Published var hubAddress: String = UserDefaults.standard.string(forKey: FleetStore.hubKey) ?? "" {
         didSet { UserDefaults.standard.set(hubAddress, forKey: Self.hubKey) }
@@ -20,7 +22,13 @@ final class FleetStore: ObservableObject {
     @Published var manualBrokers: [String] = UserDefaults.standard.stringArray(forKey: FleetStore.manualKey) ?? [] {
         didSet { UserDefaults.standard.set(manualBrokers, forKey: Self.manualKey) }
     }
-    @Published private(set) var machines: [Machine] = []
+    /// Remembered across launches, so the fleet shows (and its terminals stay
+    /// reachable) even when the hub is offline.
+    @Published private(set) var machines: [Machine] = FleetStore.loadMachines()
+    /// Identity of the configured hub (your Mac), learned from its /whoami.
+    private var hubID = UserDefaults.standard.string(forKey: FleetStore.hubIDKey)
+    /// Successful discoveries in a row that did not list a machine.
+    private var misses: [String: Int] = [:]
     /// Every session a broker reports (including background and hidden).
     @Published private(set) var allSessions: [String: [SessionInfo]] = [:]
     @Published private(set) var commandCenter: [String: [String: CommandCenterItem]] = [:] // machine → session → item
@@ -120,36 +128,71 @@ final class FleetStore: ObservableObject {
 
     // MARK: Discovery
 
+    /// Ask the hub for its peers; if it's offline, ask any other known broker —
+    /// every broker serves /mesh/peers. Remembered machines are only pruned
+    /// after three successful scans that don't list them (as on Android).
     private func discover() async {
         guard isConfigured else { return }
         var found: [Machine] = []
-        do {
-            let hub = try await resolveHub(hubAddress)
-            let peers = try await BrokerHTTP.get(hub.httpBase, "mesh/peers", as: PeersResponse.self).peers
-            found.append(hub)
-            for p in peers {
-                guard let m = Machine.from(peer: p), !found.contains(where: { $0.id == m.id }) else { continue }
-                found.append(m)
+        var source: Machine?
+        if let hub = try? await resolveHub(hubAddress) {
+            hubID = hub.id
+            UserDefaults.standard.set(hub.id, forKey: Self.hubIDKey)
+            found = [hub]
+            if let peers = try? await peerMachines(of: hub) { found += peers; source = hub }
+        }
+        if source == nil {
+            let others = machines.filter { $0.id != hubID }
+                .sorted { reachable.contains($0.id) && !reachable.contains($1.id) }
+            for m in others {
+                if let peers = try? await peerMachines(of: m) { found = [m] + peers; source = m; break }
             }
-            hubError = nil
-        } catch {
-            hubError = "Can't reach the hub at \(hubAddress): \(error.localizedDescription). Is Tailscale connected on this iPhone?"
         }
         for host in manualBrokers where !found.contains(where: { $0.httpBase.host?.lowercased() == host.lowercased() }) {
             if var m = try? await resolveHub(host) {
-                m = Machine(id: "manual:" + host.lowercased(), name: m.name, os: m.os, httpBase: m.httpBase, wsBase: m.wsBase)
+                m.isHub = false
                 found.append(m)
             }
         }
-        // Merge: keep machines a transient scan missed while they still answer.
-        let kept = machines.filter { old in !found.contains { $0.id == old.id } && reachable.contains(old.id) }
-        found = found.map { m in
-            var m = m
+        // De-dupe by identity; the hub keeps its role however it was found.
+        var unique: [Machine] = []
+        for var m in found where !unique.contains(where: { $0.id == m.id }) {
+            m.isHub = m.id == hubID
             if m.brokerName.isEmpty { m.brokerName = m.name }
             if let nick = nicknames[m.id], !nick.isEmpty { m.name = nick }
-            return m
+            unique.append(m)
         }
-        machines = (found + kept).sorted { ($0.isHub ? 0 : 1, $0.name.lowercased()) < ($1.isHub ? 0 : 1, $1.name.lowercased()) }
+        if let source {
+            hubError = source.id == hubID ? nil
+                : "Your Mac is offline — machines found through \(source.name). Terminals work as usual; summaries stop updating, and Notes sync and Weekly Progress wait for it."
+            for m in unique { misses[m.id] = 0 }
+            let manualIDs = Set(unique.filter { m in manualBrokers.contains { $0.lowercased() == m.httpBase.host?.lowercased() } }.map(\.id))
+            for old in machines where !unique.contains(where: { $0.id == old.id }) {
+                misses[old.id, default: 0] += 1
+                if misses[old.id, default: 0] < 3 || reachable.contains(old.id) || manualIDs.contains(old.id) { unique.append(old) }
+            }
+        } else {
+            hubError = machines.isEmpty
+                ? "Can't reach your Mac at \(hubAddress). Is Tailscale connected on this iPhone?"
+                : "Can't reach your Mac or the machines' list right now. Showing the machines Argus remembers."
+            for old in machines where !unique.contains(where: { $0.id == old.id }) { unique.append(old) }
+        }
+        machines = unique.sorted { ($0.isHub ? 0 : 1, $0.name.lowercased()) < ($1.isHub ? 0 : 1, $1.name.lowercased()) }
+        Self.saveMachines(machines)
+    }
+
+    private func peerMachines(of m: Machine) async throws -> [Machine] {
+        try await BrokerHTTP.get(m.httpBase, "mesh/peers", as: PeersResponse.self).peers.compactMap(Machine.from)
+    }
+
+    private static func loadMachines() -> [Machine] {
+        guard let d = UserDefaults.standard.data(forKey: machinesKey),
+              let m = try? JSONDecoder().decode([Machine].self, from: d) else { return [] }
+        return m
+    }
+
+    private static func saveMachines(_ m: [Machine]) {
+        if let d = try? JSONEncoder().encode(m) { UserDefaults.standard.set(d, forKey: machinesKey) }
     }
 
     private struct PeersResponse: Decodable { let peers: [MeshPeer] }
@@ -170,7 +213,8 @@ final class FleetStore: ObservableObject {
             do {
                 let who = try await BrokerHTTP.get(base, "whoami", as: Whoami.self)
                 guard who.isBroker else { throw BrokerError.notABroker }
-                return Machine(id: "hub:" + host.lowercased(), name: who.name ?? host, os: who.os ?? "",
+                return Machine(id: Machine.identity(host: who.host, socket: who.socket) ?? "hub:" + host.lowercased(),
+                               name: who.name ?? host, brokerName: who.name ?? host, os: who.os ?? "",
                                httpBase: base, wsBase: ws, isHub: true)
             } catch { lastError = error }
         }

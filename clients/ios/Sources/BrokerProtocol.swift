@@ -87,7 +87,7 @@ struct MeshPeer: Decodable {
     let socket: String?
 }
 
-struct Machine: Identifiable, Hashable {
+struct Machine: Identifiable, Hashable, Codable {
     let id: String
     /// Display name: a nickname set on this phone, else the broker's name.
     var name: String
@@ -100,13 +100,22 @@ struct Machine: Identifiable, Hashable {
 
     /// Map a hub's `/mesh/peers` entry the way the macOS client does: https
     /// peers are addressed by their MagicDNS name (TLS SNI), http peers by IP.
+    /// A broker's logical identity: its OS hostname plus tmux socket (as the
+    /// macOS client de-dupes). Stable whichever broker reported it, so the hub
+    /// seen directly and the hub seen in another broker's peer list match.
+    static func identity(host: String?, socket: String?) -> String? {
+        guard let h = host?.lowercased(), !h.isEmpty else { return nil }
+        return h + "|" + ((socket?.isEmpty == false ? socket! : "ut").lowercased())
+    }
+
     static func from(peer p: MeshPeer) -> Machine? {
         guard let host = p.host, !host.isEmpty,
               let scheme = p.scheme, scheme == "http" || scheme == "https" else { return nil }
         let urlHost = host.contains(":") ? "[\(host)]" : host
         guard let http = URL(string: "\(scheme)://\(urlHost):\(brokerPort)"),
               let ws = URL(string: "\(scheme == "https" ? "wss" : "ws")://\(urlHost):\(brokerPort)") else { return nil }
-        let id = (p.tailnetName?.isEmpty == false ? p.tailnetName! : host).lowercased()
+        let id = identity(host: p.brokerHost, socket: p.socket)
+            ?? (p.tailnetName?.isEmpty == false ? p.tailnetName! : host).lowercased()
         let name = (p.name?.isEmpty == false ? p.name! : host)
         return Machine(id: id, name: name, brokerName: name, os: p.os ?? "", httpBase: http, wsBase: ws)
     }

@@ -53,6 +53,15 @@ final class BrokerProtocolTests: XCTestCase {
         XCTAssertEqual(s[1].handle, "old-broker")
     }
 
+    func testHubSeenDirectlyAndAsAPeerShareOneIdentity() {
+        let peer = MeshPeer(name: "MacBook", host: "100.64.0.1", scheme: "http", os: "darwin",
+                            tailnetName: "macbook.tailnet.ts.net", address: nil, brokerHost: "MacBook-Pro.local", socket: "ut")
+        XCTAssertEqual(Machine.from(peer: peer)?.id, Machine.identity(host: "MacBook-Pro.local", socket: "ut"))
+        XCTAssertEqual(Machine.identity(host: "Node7", socket: nil), "node7|ut")
+        XCTAssertNotEqual(Machine.identity(host: "node7", socket: "ljang"), Machine.identity(host: "node7", socket: "ut"),
+                          "two installs on one host are different machines")
+    }
+
     func testQueryValuesKeepPlusSigns() {
         let url = BrokerHTTP.url(URL(string: "http://h:8722")!, "fs/write", [.init(name: "path", value: "/tmp/a+b c.txt")])
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.percentEncodedQuery!

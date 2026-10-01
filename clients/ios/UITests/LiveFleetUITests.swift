@@ -76,6 +76,29 @@ final class LiveFleetUITests: XCTestCase {
         attach(app, "tour-7-render-output")
     }
 
+    /// With the hub (your Mac) unreachable, remembered machines are still
+    /// listed and discovery continues through any other broker.
+    func testMacOfflineStillShowsOtherMachines() throws {
+        guard let hub = ProcessInfo.processInfo.environment["ARGUS_UITEST_HUB"], !hub.isEmpty else {
+            throw XCTSkip("ARGUS_UITEST_HUB not set")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["-argus.hub", hub]
+        app.launch()
+        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow"]
+        if allow.waitForExistence(timeout: 3) { allow.tap() }
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "session-card").firstMatch.waitForExistence(timeout: 30))
+        app.terminate()
+
+        // 100.64.0.250: a tailnet address with nothing behind it — the Mac is "off".
+        app.launchArguments = ["-argus.hub", "100.64.0.250"]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "session-card").firstMatch.waitForExistence(timeout: 45),
+                      "sessions on other machines should stay visible without the Mac")
+        sleep(3)
+        attach(app, "tour-9-mac-offline")
+    }
+
     func testSetupScreen() {
         let app = XCUIApplication()
         app.launchArguments = ["-argus.hub", ""]
