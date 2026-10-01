@@ -15,6 +15,8 @@ struct MachinesView: View {
     @State private var actionError: String?
     @State private var addingMachine = false
     @State private var machineHost = ""
+    @State private var nicknaming: Machine?
+    @State private var nickname = ""
 
     var body: some View {
         List {
@@ -48,10 +50,19 @@ struct MachinesView: View {
                         Circle().fill(fleet.reachable.contains(m.id) ? theme.palette.milestoneColor : theme.palette.badColor).frame(width: 7, height: 7)
                         Text(m.name)
                         if m.isHub { Text("hub").font(.caption2).foregroundStyle(.secondary) }
+                        if m.name != m.brokerName, !m.brokerName.isEmpty {
+                            Text(m.brokerName).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                        }
                         Spacer()
                         Button { newName = ""; newDir = ""; newSessionOn = m } label: { Image(systemName: "plus.circle") }
                             .disabled(!fleet.reachable.contains(m.id))
                             .accessibilityLabel("New session on \(m.name)")
+                    }
+                    .contextMenu {
+                        Button { nickname = m.name == m.brokerName ? "" : m.name; nicknaming = m } label: {
+                            Label("Nickname on this phone", systemImage: "character.cursor.ibeam")
+                        }
+                        Button { UIPasteboard.general.string = m.brokerName } label: { Label("Copy broker name", systemImage: "doc.on.doc") }
                     }
                 }
             }
@@ -102,6 +113,11 @@ struct MachinesView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .alert("Nickname", isPresented: Binding(get: { nicknaming != nil }, set: { if !$0 { nicknaming = nil } })) {
+            TextField(nicknaming?.brokerName ?? "", text: $nickname).autocorrectionDisabled()
+            Button("Save") { if let m = nicknaming { fleet.setNickname(nickname, for: m) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("Shown on this phone only. Leave empty to use the broker's name.") }
         .alert("Add machine", isPresented: $addingMachine) {
             TextField("ut-host.your-tailnet.ts.net", text: $machineHost).textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Add") { act { try await fleet.addManualBroker(machineHost) } }
@@ -128,7 +144,7 @@ struct MachinesView: View {
                 }
                 Spacer()
                 if let a = s.activity, a > 0 {
-                    Text(Date(timeIntervalSince1970: TimeInterval(a)), style: .relative).font(.caption2).foregroundStyle(.tertiary)
+                    Text(Date(timeIntervalSince1970: TimeInterval(a)), format: .relative(presentation: .named)).font(.caption2).foregroundStyle(.tertiary)
                 }
             }
         }

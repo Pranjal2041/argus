@@ -40,7 +40,9 @@ struct CommandCenterView: View {
                 let labItems = b == .needsYou && query.isEmpty ? lab.attention : []
                 if !rows.isEmpty || !labItems.isEmpty {
                     Section {
-                        ForEach(labItems) { item in LabAttentionRow(item: item).contentShape(Rectangle()).onTapGesture { router.openLab(item) } }
+                        ForEach(labItems) { item in
+                            Button { router.openLab(item) } label: { LabAttentionRow(item: item) }.buttonStyle(.plain)
+                        }
                         ForEach(rows) { card in row(card) }
                     } header: {
                         Text("\(b.title) · \(rows.count + labItems.count)")
@@ -69,9 +71,10 @@ struct CommandCenterView: View {
     }
 
     @ViewBuilder private func row(_ card: FleetStore.Card) -> some View {
-        CardRow(card: card, palette: theme.palette)
-            .contentShape(Rectangle())
-            .onTapGesture { router.openTerminal(card.machine, card.session) }
+        Button { router.openTerminal(card.machine, card.session) } label: {
+            CardRow(card: card, palette: theme.palette).contentShape(Rectangle())
+        }
+            .buttonStyle(.plain)
             .opacity(card.backlogged ? 0.6 : 1)
             .swipeActions(edge: .leading) {
                 Button { fleet.toggleBacklog(card.machine, card.session) } label: {
@@ -135,7 +138,7 @@ struct CardRow: View {
                     .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
             }
             if let updated = card.item?.updatedAt {
-                Text(Date(timeIntervalSince1970: updated), style: .relative).font(.caption2).foregroundStyle(.tertiary)
+                Text(Date(timeIntervalSince1970: updated), format: .relative(presentation: .named)).font(.caption2).foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 2)

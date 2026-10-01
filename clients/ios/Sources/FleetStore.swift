@@ -11,6 +11,7 @@ final class FleetStore: ObservableObject {
     static let manualKey = "argus.manualBrokers"
     static let backlogKey = "argus.backlog"
     static let showAgentKey = "argus.showAgent"
+    static let nicknamesKey = "argus.machineNicknames"
 
     @Published var hubAddress: String = UserDefaults.standard.string(forKey: FleetStore.hubKey) ?? "" {
         didSet { UserDefaults.standard.set(hubAddress, forKey: Self.hubKey) }
@@ -30,6 +31,8 @@ final class FleetStore: ObservableObject {
         didSet { UserDefaults.standard.set(showAgentSessions, forKey: Self.showAgentKey) }
     }
     @Published var showHidden = false
+    /// Phone-local display names for machines, keyed by machine id.
+    @Published private(set) var nicknames: [String: String] = UserDefaults.standard.dictionary(forKey: FleetStore.nicknamesKey) as? [String: String] ?? [:]
     /// Device-local "set aside" list, keyed "machineID session" (as on Android).
     @Published private(set) var backlog: Set<String> = Set(UserDefaults.standard.stringArray(forKey: FleetStore.backlogKey) ?? [])
     /// Sessions the user has looked at since they started waiting.
@@ -60,7 +63,10 @@ final class FleetStore: ObservableObject {
     func machine(named raw: String) -> Machine? {
         let want = Self.normalizedHost(raw)
         guard !want.isEmpty else { return nil }
-        return machines.first { Self.normalizedHost($0.name) == want || Self.normalizedHost($0.httpBase.host ?? "") == want }
+        return machines.first {
+            Self.normalizedHost($0.brokerName) == want || Self.normalizedHost($0.name) == want
+                || Self.normalizedHost($0.httpBase.host ?? "") == want
+        }
     }
 
     nonisolated static func normalizedHost(_ s: String) -> String {
@@ -137,6 +143,12 @@ final class FleetStore: ObservableObject {
         }
         // Merge: keep machines a transient scan missed while they still answer.
         let kept = machines.filter { old in !found.contains { $0.id == old.id } && reachable.contains(old.id) }
+        found = found.map { m in
+            var m = m
+            if m.brokerName.isEmpty { m.brokerName = m.name }
+            if let nick = nicknames[m.id], !nick.isEmpty { m.name = nick }
+            return m
+        }
         machines = (found + kept).sorted { ($0.isHub ? 0 : 1, $0.name.lowercased()) < ($1.isHub ? 0 : 1, $1.name.lowercased()) }
     }
 
@@ -163,6 +175,15 @@ final class FleetStore: ObservableObject {
             } catch { lastError = error }
         }
         throw lastError
+    }
+
+    func setNickname(_ name: String, for m: Machine) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        nicknames[m.id] = trimmed.isEmpty ? nil : trimmed
+        UserDefaults.standard.set(nicknames, forKey: Self.nicknamesKey)
+        if let i = machines.firstIndex(where: { $0.id == m.id }) {
+            machines[i].name = trimmed.isEmpty ? machines[i].brokerName : trimmed
+        }
     }
 
     func addManualBroker(_ host: String) async throws {

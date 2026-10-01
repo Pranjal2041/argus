@@ -337,13 +337,18 @@ struct RenderOutputView: View {
     @State private var markdown: String?
     @State private var origin = "terminal"
     @State private var fontSize: CGFloat = 16
+    /// Terminal fallback only: show raw text instead of interpreting Markdown
+    /// (plain shell output like `ls` isn't Markdown).
+    @State private var plain = false
 
     private struct Source: Decodable { let source: String?; let format: String?; let origin: String? }
 
     var body: some View {
         NavigationStack {
             Group {
-                if let markdown { RenderWebView(markdown: markdown, fontSize: fontSize) } else { ProgressView() }
+                if let markdown {
+                    RenderWebView(markdown: plain ? "```text\n" + markdown + "\n```" : markdown, fontSize: fontSize)
+                } else { ProgressView() }
             }
             .navigationTitle("Rendered output")
             .navigationBarTitleDisplayMode(.inline)
@@ -357,6 +362,10 @@ struct RenderOutputView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !origin.hasSuffix("-transcript") {
+                        Button { plain.toggle() } label: { Image(systemName: plain ? "doc.richtext" : "text.alignleft") }
+                            .accessibilityLabel(plain ? "Render as Markdown" : "Show plain text")
+                    }
                     Button { fontSize = max(9, fontSize - 1) } label: { Image(systemName: "textformat.size.smaller") }
                     Button { fontSize = min(28, fontSize + 1) } label: { Image(systemName: "textformat.size.larger") }
                     if let markdown { ShareLink(item: markdown) }

@@ -28,6 +28,41 @@ final class LiveFleetUITests: XCTestCase {
                       "status line should show machine · cols×rows once connected")
     }
 
+    /// Visits every top-level screen (read-only) and keeps a screenshot of each.
+    func testTourScreens() throws {
+        guard let hub = ProcessInfo.processInfo.environment["ARGUS_UITEST_HUB"], !hub.isEmpty else {
+            throw XCTSkip("ARGUS_UITEST_HUB not set")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["-argus.hub", hub]
+        app.launch()
+        // The first launch asks for notification permission.
+        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow"]
+        if allow.waitForExistence(timeout: 5) { allow.tap() }
+        XCTAssertTrue(app.collectionViews.buttons.firstMatch.waitForExistence(timeout: 30))
+        sleep(3)
+        attach(app, "tour-1-command-center")
+
+        app.tabBars.buttons["Machines"].tap(); sleep(2)
+        attach(app, "tour-2-machines")
+
+        app.tabBars.buttons["Files"].tap(); sleep(4)
+        attach(app, "tour-3-files")
+
+        app.tabBars.buttons["Lab"].tap(); sleep(4)
+        attach(app, "tour-4-lab")
+
+        app.tabBars.buttons["More"].tap(); sleep(1)
+        attach(app, "tour-5-more")
+        app.buttons["Settings"].tap(); sleep(1)
+        attach(app, "tour-6-settings")
+
+        app.tabBars.buttons["Command"].tap(); sleep(1)
+        app.collectionViews.buttons.firstMatch.tap(); sleep(6)
+        app.buttons["Render output"].tap(); sleep(4)
+        attach(app, "tour-7-render-output")
+    }
+
     private func attach(_ app: XCUIApplication, _ name: String) {
         let a = XCTAttachment(screenshot: app.screenshot())
         a.name = name

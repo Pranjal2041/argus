@@ -89,7 +89,10 @@ struct MeshPeer: Decodable {
 
 struct Machine: Identifiable, Hashable {
     let id: String
+    /// Display name: a nickname set on this phone, else the broker's name.
     var name: String
+    /// The name the broker reports (/whoami); used for matching records.
+    var brokerName: String = ""
     var os: String
     var httpBase: URL
     var wsBase: URL
@@ -105,7 +108,7 @@ struct Machine: Identifiable, Hashable {
               let ws = URL(string: "\(scheme == "https" ? "wss" : "ws")://\(urlHost):\(brokerPort)") else { return nil }
         let id = (p.tailnetName?.isEmpty == false ? p.tailnetName! : host).lowercased()
         let name = (p.name?.isEmpty == false ? p.name! : host)
-        return Machine(id: id, name: name, os: p.os ?? "", httpBase: http, wsBase: ws)
+        return Machine(id: id, name: name, brokerName: name, os: p.os ?? "", httpBase: http, wsBase: ws)
     }
 }
 
