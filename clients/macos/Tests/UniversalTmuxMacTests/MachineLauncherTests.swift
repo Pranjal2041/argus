@@ -98,6 +98,32 @@ final class MachineLauncherTests: XCTestCase {
         XCTAssertEqual(store.runs.first?.phase, .stopped, "the exit of a stopped command must not revive it")
     }
 
+    func testBabelPresetUsesTheBundledSlurmLauncher() {
+        let preset = MachineLauncher.babelPreset()
+        XCTAssertTrue(preset.command.hasPrefix("\"$ARGUS_LAUNCHERS/slurm-node\" babel up "))
+        XCTAssertTrue(preset.command.contains("--time=3-00:00:00"))
+        XCTAssertEqual(preset.machinePattern, "babel-*")
+    }
+
+    func testPresetCommandRunsTheBundledScriptWithItsOptions() async throws {
+        // A stand-in slurm-node in a directory with a space, to prove quoting.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("argus launchers \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let script = dir.appendingPathComponent("slurm-node")
+        try "#!/bin/bash\necho \"host=$1 args=$#\"\necho ARGUS_MACHINE=babel-test-1\n"
+            .write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let store = isolatedStore(AppState(isolatedForTesting: true))
+        store.launcherDirectory = dir
+        store.request(.babelPreset())
+        try await waitFor { store.runs.first?.phase == .waitingForMachine }
+        XCTAssertEqual(store.runs.first?.lastLine, "host=babel args=8")
+        XCTAssertEqual(store.runs.first?.announcedMachine, "babel-test-1")
+    }
+
     /// No network: discovery is driven by the test through `app.machines`.
     private func isolatedStore(_ app: AppState) -> MachineLauncherStore {
         let store = MachineLauncherStore()
