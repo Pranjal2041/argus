@@ -23,6 +23,12 @@ targets:
       # phone edits merge exactly like the Mac and the sync host do.
       - path: ../macos/Sources/ArgusProtocol/Protocol.swift
       - path: ../macos/Sources/ArgusProtocol/WorkspaceMerge.swift
+      # W&B run detection, shared with macOS (Android ports the same matchers).
+      - path: ../macos/Sources/UniversalTmuxMac/Wandb.swift
+      # Offline Markdown/LaTeX renderer (window.UTRender), shared with Android.
+      - path: ../android/app/src/main/assets/render
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: SwiftTerm
     info:
@@ -40,6 +46,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         # Native brokers (a Mac) serve plain http on their tailnet IP; the
         # tailnet (WireGuard) is the transport security, as on macOS/Android.
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [dev.universaltmux.ios.refresh]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
     settings:

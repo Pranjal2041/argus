@@ -19,7 +19,7 @@ struct ArgusApp: App {
                 .environmentObject(workspace)
                 .environmentObject(weekly)
                 .environmentObject(theme)
-                .tint(theme.palette.accent)
+                .tint(theme.palette.accentColor)
                 .preferredColorScheme(theme.palette.isLight ? .light : .dark)
                 .onAppear {
                     AttentionNotifications.shared.attach(fleet: fleet, lab: lab, router: router)
@@ -32,7 +32,7 @@ struct ArgusApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active: fleet.start(); AttentionNotifications.shared.clearBadgeIfNeeded()
-                    case .background: fleet.stop(); BackgroundRefresh.schedule()
+                    case .background: BackgroundRefresh.remember(fleet); fleet.stop(); BackgroundRefresh.schedule()
                     default: break
                     }
                 }

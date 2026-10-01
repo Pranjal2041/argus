@@ -1,0 +1,60 @@
+import SwiftUI
+import UIKit
+
+/// Color themes, generated from the Android client's ThemePalette.all
+/// (clients/android/.../ui/Theme.kt) so every client offers the same set.
+/// Chrome roles color the app; `ansi` + term* drive the terminal.
+struct ThemePalette: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let isLight: Bool
+    let bg, bgDeep, panel, panelAlt, text, dim, faint, accent: UInt32
+    let working, waiting, milestone, bad, look, unseen, idle, live, selection, border: UInt32
+    let termBg, termFg, termCursor: UInt32
+    let ansi: [UInt32]
+
+    static func color(_ hex: UInt32) -> Color { Color(uiColor(hex)) }
+    static func uiColor(_ hex: UInt32) -> UIColor {
+        UIColor(red: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255,
+                blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+    }
+
+    var accentColor: Color { Self.color(accent) }
+    var workingColor: Color { Self.color(working) }
+    var waitingColor: Color { Self.color(waiting) }
+    var milestoneColor: Color { Self.color(milestone) }
+    var badColor: Color { Self.color(bad) }
+    var lookColor: Color { Self.color(look) }
+    var idleColor: Color { Self.color(idle) }
+    var unseenColor: Color { Self.color(unseen) }
+
+    static let all: [ThemePalette] = [
+        ThemePalette(id: "argus", name: "Argus", isLight: false, bg: 0x1a1b26, bgDeep: 0x0d0e12, panel: 0x16161e, panelAlt: 0x1e1f2b, text: 0xc0caf5, dim: 0x9aa5ce, faint: 0x565f89, accent: 0x7aa2f7, working: 0x7aa2f7, waiting: 0xe0af68, milestone: 0x9ece6a, bad: 0xf7768e, look: 0x7dcfff, unseen: 0xff9f40, idle: 0x565f89, live: 0x61d6aa, selection: 0x24283b, border: 0x2a2b3c, termBg: 0x1a1b26, termFg: 0xc0caf5, termCursor: 0xc0caf5,
+                     ansi: [0x1a1d27, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc8ccd6, 0x3b4048, 0xff8da3, 0xb5e08a, 0xf0c485, 0x9cb8ff, 0xd0b6ff, 0xa0deff, 0xe6e8ee]),
+        ThemePalette(id: "tokyonight", name: "Tokyo Night", isLight: false, bg: 0x24283b, bgDeep: 0x24283b, panel: 0x292e42, panelAlt: 0x1f2335, text: 0xc0caf5, dim: 0xa9b1d6, faint: 0x565f89, accent: 0x7aa2f7, working: 0x7aa2f7, waiting: 0xe0af68, milestone: 0x9ece6a, bad: 0xf7768e, look: 0x7dcfff, unseen: 0xff9e64, idle: 0x565f89, live: 0x9ece6a, selection: 0x2e3c64, border: 0x3b4261, termBg: 0x24283b, termFg: 0xc0caf5, termCursor: 0xc0caf5,
+                     ansi: [0x1d202f, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x414868, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5]),
+        ThemePalette(id: "dracula", name: "Dracula", isLight: false, bg: 0x282a36, bgDeep: 0x282a36, panel: 0x21222c, panelAlt: 0x343746, text: 0xf8f8f2, dim: 0xc8c8dc, faint: 0x6272a4, accent: 0xbd93f9, working: 0x8be9fd, waiting: 0xf1fa8c, milestone: 0x50fa7b, bad: 0xff5555, look: 0x8be9fd, unseen: 0xffb86c, idle: 0x6272a4, live: 0x50fa7b, selection: 0x44475a, border: 0x44475a, termBg: 0x282a36, termFg: 0xf8f8f2, termCursor: 0xf8f8f2,
+                     ansi: [0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2, 0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff]),
+        ThemePalette(id: "catppuccin-mocha", name: "Catppuccin Mocha", isLight: false, bg: 0x1e1e2e, bgDeep: 0x1e1e2e, panel: 0x181825, panelAlt: 0x313244, text: 0xcdd6f4, dim: 0xa6adc8, faint: 0x6c7086, accent: 0xcba6f7, working: 0x89b4fa, waiting: 0xf9e2af, milestone: 0xa6e3a1, bad: 0xf38ba8, look: 0x94e2d5, unseen: 0xfab387, idle: 0x6c7086, live: 0xa6e3a1, selection: 0x45475a, border: 0x45475a, termBg: 0x1e1e2e, termFg: 0xcdd6f4, termCursor: 0xf5e0dc,
+                     ansi: [0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8]),
+        ThemePalette(id: "nord", name: "Nord", isLight: false, bg: 0x2e3440, bgDeep: 0x2e3440, panel: 0x272c36, panelAlt: 0x3b4252, text: 0xd8dee9, dim: 0xabb2c0, faint: 0x4c566a, accent: 0x88c0d0, working: 0x81a1c1, waiting: 0xebcb8b, milestone: 0xa3be8c, bad: 0xbf616a, look: 0x88c0d0, unseen: 0xd08770, idle: 0x4c566a, live: 0xa3be8c, selection: 0x434c5e, border: 0x434c5e, termBg: 0x2e3440, termFg: 0xd8dee9, termCursor: 0xd8dee9,
+                     ansi: [0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x88c0d0, 0xe5e9f0, 0x4c566a, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x8fbcbb, 0xeceff4]),
+        ThemePalette(id: "gruvbox", name: "Gruvbox Dark", isLight: false, bg: 0x282828, bgDeep: 0x282828, panel: 0x1d2021, panelAlt: 0x3c3836, text: 0xebdbb2, dim: 0xd5c4a1, faint: 0x928374, accent: 0x8ec07c, working: 0x83a598, waiting: 0xfabd2f, milestone: 0xb8bb26, bad: 0xfb4934, look: 0x8ec07c, unseen: 0xfe8019, idle: 0x928374, live: 0xb8bb26, selection: 0x504945, border: 0x504945, termBg: 0x282828, termFg: 0xebdbb2, termCursor: 0xebdbb2,
+                     ansi: [0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2]),
+        ThemePalette(id: "one-dark", name: "One Dark", isLight: false, bg: 0x282c34, bgDeep: 0x282c34, panel: 0x21252b, panelAlt: 0x2c313a, text: 0xabb2bf, dim: 0x9da5b4, faint: 0x5c6370, accent: 0x61afef, working: 0x61afef, waiting: 0xe5c07b, milestone: 0x98c379, bad: 0xe06c75, look: 0x56b6c2, unseen: 0xd19a66, idle: 0x5c6370, live: 0x98c379, selection: 0x3e4451, border: 0x3b4048, termBg: 0x282c34, termFg: 0xabb2bf, termCursor: 0x61afef,
+                     ansi: [0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x5c6370, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff]),
+        ThemePalette(id: "solarized-dark", name: "Solarized Dark", isLight: false, bg: 0x002b36, bgDeep: 0x002b36, panel: 0x073642, panelAlt: 0x073642, text: 0x839496, dim: 0x93a1a1, faint: 0x586e75, accent: 0x2aa198, working: 0x268bd2, waiting: 0xb58900, milestone: 0x859900, bad: 0xdc322f, look: 0x2aa198, unseen: 0xcb4b16, idle: 0x586e75, live: 0x859900, selection: 0x073642, border: 0x586e75, termBg: 0x002b36, termFg: 0x839496, termCursor: 0x93a1a1,
+                     ansi: [0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3]),
+        ThemePalette(id: "solarized-light", name: "Solarized Light", isLight: true, bg: 0xfdf6e3, bgDeep: 0xfdf6e3, panel: 0xeee8d5, panelAlt: 0xeee8d5, text: 0x657b83, dim: 0x586e75, faint: 0x93a1a1, accent: 0x2aa198, working: 0x268bd2, waiting: 0xb58900, milestone: 0x859900, bad: 0xdc322f, look: 0x2aa198, unseen: 0xcb4b16, idle: 0x93a1a1, live: 0x859900, selection: 0xeee8d5, border: 0x93a1a1, termBg: 0xfdf6e3, termFg: 0x657b83, termCursor: 0x586e75,
+                     ansi: [0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3]),
+        ThemePalette(id: "monokai", name: "Monokai", isLight: false, bg: 0x272822, bgDeep: 0x272822, panel: 0x1e1f1a, panelAlt: 0x3e3d32, text: 0xf8f8f2, dim: 0xcfcfc2, faint: 0x75715e, accent: 0x66d9ef, working: 0x66d9ef, waiting: 0xe6db74, milestone: 0xa6e22e, bad: 0xf92672, look: 0x66d9ef, unseen: 0xfd971f, idle: 0x75715e, live: 0xa6e22e, selection: 0x49483e, border: 0x49483e, termBg: 0x272822, termFg: 0xf8f8f2, termCursor: 0xf8f8f0,
+                     ansi: [0x272822, 0xf92672, 0xa6e22e, 0xf4bf75, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf8f8f2, 0x75715e, 0xf92672, 0xa6e22e, 0xe6db74, 0x66d9ef, 0xae81ff, 0xa1efe4, 0xf9f8f5]),
+        ThemePalette(id: "github-dark", name: "GitHub Dark", isLight: false, bg: 0x0d1117, bgDeep: 0x0d1117, panel: 0x010409, panelAlt: 0x161b22, text: 0xc9d1d9, dim: 0xb1bac4, faint: 0x8b949e, accent: 0x58a6ff, working: 0x58a6ff, waiting: 0xd29922, milestone: 0x3fb950, bad: 0xff7b72, look: 0x39c5cf, unseen: 0xdb6d28, idle: 0x8b949e, live: 0x3fb950, selection: 0x21262d, border: 0x30363d, termBg: 0x0d1117, termFg: 0xc9d1d9, termCursor: 0x58a6ff,
+                     ansi: [0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xb1bac4, 0x6e7681, 0xffa198, 0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xf0f6fc]),
+        ThemePalette(id: "github-light", name: "GitHub Light", isLight: true, bg: 0xffffff, bgDeep: 0xffffff, panel: 0xf6f8fa, panelAlt: 0xf6f8fa, text: 0x24292f, dim: 0x57606a, faint: 0x6e7781, accent: 0x0969da, working: 0x0969da, waiting: 0x9a6700, milestone: 0x1a7f37, bad: 0xcf222e, look: 0x1b7c83, unseen: 0xbc4c00, idle: 0x6e7781, live: 0x1a7f37, selection: 0xddf4ff, border: 0xd0d7de, termBg: 0xffffff, termFg: 0x24292f, termCursor: 0x0969da,
+                     ansi: [0x24292f, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781, 0x57606a, 0xa40e26, 0x1a7f37, 0x633c01, 0x218bff, 0xa475f9, 0x3192aa, 0x8c959f]),
+        ThemePalette(id: "rose-pine", name: "Rosé Pine", isLight: false, bg: 0x191724, bgDeep: 0x191724, panel: 0x1f1d2e, panelAlt: 0x26233a, text: 0xe0def4, dim: 0x908caa, faint: 0x6e6a86, accent: 0xc4a7e7, working: 0x31748f, waiting: 0xf6c177, milestone: 0x9ccfd8, bad: 0xeb6f92, look: 0xebbcba, unseen: 0xebbcba, idle: 0x6e6a86, live: 0x9ccfd8, selection: 0x403d52, border: 0x403d52, termBg: 0x191724, termFg: 0xe0def4, termCursor: 0xe0def4,
+                     ansi: [0x26233a, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4, 0x6e6a86, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4]),
+    ]
+    static let argus = all[0]
+}
