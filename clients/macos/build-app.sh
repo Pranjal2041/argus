@@ -99,7 +99,12 @@ EOF
         fi
     fi
     rm -rf /Applications/Argus.app
-    ditto "$APP" /Applications/Argus.app && echo "Installed to /Applications/Argus.app"
+    ditto "$APP" /Applications/Argus.app
+    # The source bundle can be re-stamped by a file provider after signing, and
+    # ditto carries that over; the signature excludes it, so strip and verify.
+    xattr -cr /Applications/Argus.app
+    codesign --verify --deep --strict /Applications/Argus.app
+    echo "Installed to /Applications/Argus.app"
     CLI_DIR="$HOME/.local/bin"
     CLI_TARGET="/Applications/Argus.app/Contents/MacOS/argus-cli"
     mkdir -p "$CLI_DIR"
