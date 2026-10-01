@@ -54,6 +54,11 @@ final class LiveFleetUITests: XCTestCase {
 
         app.tabBars.buttons["More"].tap(); sleep(1)
         attach(app, "tour-5-more")
+        for (i, screen) in ["Notes", "Todo Maps", "Workflows", "Weekly Progress"].enumerated() {
+            app.buttons[screen].tap(); sleep(4)
+            attach(app, "tour-5\(i)-\(screen)")
+            app.navigationBars.buttons.element(boundBy: 0).tap(); sleep(1)
+        }
         app.buttons["Settings"].tap(); sleep(1)
         attach(app, "tour-6-settings")
 
