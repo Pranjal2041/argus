@@ -94,30 +94,65 @@ struct MoreView: View {
 
 struct SetupView: View {
     @EnvironmentObject var fleet: FleetStore
+    @Environment(\.openURL) private var openURL
     @State private var address = ""
     @State private var checking = false
     @State private var error: String?
+    @FocusState private var focused: Bool
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    TextField("macbook-pro or 100.x.y.z", text: $address)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    Button(checking ? "Connecting…" : "Connect") { Task { await connect() } }
-                        .disabled(checking || address.trimmingCharacters(in: .whitespaces).isEmpty)
-                } header: {
-                    Text("Your Mac's tailnet name")
-                } footer: {
-                    Text("Argus on iPhone uses the Tailscale app to join your tailnet. Install Tailscale, sign in to the same tailnet as your Mac, then enter your Mac's Tailscale machine name (or its 100.x address). Argus finds your other machines through it.")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Image(systemName: "eye.circle.fill").font(.system(size: 52)).foregroundStyle(.tint)
+                        Text("Argus").font(.largeTitle.bold())
+                        Text("Every agent, on every machine — from your phone.").foregroundStyle(.secondary)
+                    }
+                    step(1, "Join your tailnet",
+                         "Install Tailscale on this iPhone and sign in with the same account as your Mac.") {
+                        Button { openURL(URL(string: "https://apps.apple.com/app/tailscale/id1470499037")!) } label: {
+                            Label("Get Tailscale", systemImage: "arrow.down.app")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    step(2, "Connect to your Mac",
+                         "Enter your Mac's Tailscale machine name (shown in the Tailscale app) or its 100.x address. Argus finds your other machines through it.") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            TextField("macbook-pro or 100.x.y.z", text: $address)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                                .focused($focused)
+                                .submitLabel(.go)
+                                .onSubmit { Task { await connect() } }
+                                .padding(12).background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+                            Button { Task { await connect() } } label: {
+                                HStack {
+                                    if checking { ProgressView().controlSize(.small) }
+                                    Text(checking ? "Connecting…" : "Connect").frame(maxWidth: .infinity)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent).controlSize(.large)
+                            .disabled(checking || address.trimmingCharacters(in: .whitespaces).isEmpty)
+                            if let error {
+                                Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
+                            }
+                        }
+                    }
                 }
-                if let error {
-                    Section { Text(error).foregroundStyle(.red) }
-                }
+                .padding(24)
             }
-            .navigationTitle("Argus")
+            .scrollDismissesKeyboard(.interactively)
+        }
+    }
+
+    private func step<Content: View>(_ n: Int, _ title: String, _ detail: String, @ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text("\(n)").font(.headline).frame(width: 28, height: 28).background(Circle().fill(.tint.opacity(0.2)))
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                content()
+            }
         }
     }
 
@@ -129,7 +164,7 @@ struct SetupView: View {
             fleet.hubAddress = address.trimmingCharacters(in: .whitespaces)
             await fleet.refreshNow()
         } catch {
-            self.error = "Couldn't reach an Argus broker at \(address): \(error.localizedDescription)"
+            self.error = "Couldn't reach an Argus broker at \(address). Check that Tailscale is connected on this iPhone and Argus is running on your Mac. (\(error.localizedDescription))"
         }
     }
 }

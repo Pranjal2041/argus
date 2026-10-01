@@ -202,6 +202,23 @@ struct TerminalScreen: View {
             if finding { findBar }
             TerminalRepresentable(connection: connection, handle: handle, palette: theme.palette,
                                   journalKey: (machine, session.name), wandbKey: key)
+                .overlay(alignment: .top) {
+                    if connection.state == .reconnecting || connection.state == .connecting {
+                        Button { connection.connect() } label: {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text(connection.state == .connecting ? "Connecting…" : "Reconnecting… tap to retry")
+                            }
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: connection.state)
         }
         .background(ThemePalette.color(theme.palette.termBg))
         .navigationBarTitleDisplayMode(.inline)

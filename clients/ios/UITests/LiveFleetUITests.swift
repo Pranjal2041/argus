@@ -12,7 +12,7 @@ final class LiveFleetUITests: XCTestCase {
         app.launch()
 
         // Section headers are cells too; a session row is a navigation button.
-        let firstCard = app.collectionViews.buttons.firstMatch
+        let firstCard = app.descendants(matching: .any).matching(identifier: "session-card").firstMatch
         XCTAssertTrue(firstCard.waitForExistence(timeout: 30), "no sessions discovered via \(hub)")
         attach(app, "1-command-center")
         firstCard.tap()
@@ -39,9 +39,17 @@ final class LiveFleetUITests: XCTestCase {
         // The first launch asks for notification permission.
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }
-        XCTAssertTrue(app.collectionViews.buttons.firstMatch.waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "session-card").firstMatch.waitForExistence(timeout: 30))
         sleep(3)
         attach(app, "tour-1-command-center")
+
+        // Quick reply (opened and closed; nothing is sent).
+        app.descendants(matching: .any).matching(identifier: "session-card").firstMatch.swipeLeft()
+        if app.buttons["Reply"].waitForExistence(timeout: 3) {
+            app.buttons["Reply"].tap(); sleep(4)
+            attach(app, "tour-1b-quick-reply")
+            app.buttons["Close"].tap(); sleep(1)
+        }
 
         app.tabBars.buttons["Machines"].tap(); sleep(2)
         attach(app, "tour-2-machines")
@@ -63,9 +71,17 @@ final class LiveFleetUITests: XCTestCase {
         attach(app, "tour-6-settings")
 
         app.tabBars.buttons["Command"].tap(); sleep(1)
-        app.collectionViews.buttons.firstMatch.tap(); sleep(6)
+        app.descendants(matching: .any).matching(identifier: "session-card").firstMatch.tap(); sleep(6)
         app.buttons["Render output"].tap(); sleep(4)
         attach(app, "tour-7-render-output")
+    }
+
+    func testSetupScreen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-argus.hub", ""]
+        app.launch()
+        XCTAssertTrue(app.buttons["Connect"].waitForExistence(timeout: 10))
+        attach(app, "tour-0-setup")
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

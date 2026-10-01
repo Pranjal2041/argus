@@ -39,30 +39,22 @@ struct MachinesView: View {
                 }
                 .listRowBackground(theme.palette.waitingColor.opacity(0.07))
             }
-            ForEach(fleet.machines) { m in
+            let busy = fleet.machines.filter { !fleet.sessions(on: $0).isEmpty }
+            let quiet = fleet.machines.filter { fleet.sessions(on: $0).isEmpty }
+            ForEach(busy) { m in
                 Section {
                     ForEach(fleet.sessions(on: m)) { s in sessionRow(m, s) }
-                    if fleet.sessions(on: m).isEmpty {
-                        Text(fleet.reachable.contains(m.id) ? "No sessions" : "Unreachable").font(.caption).foregroundStyle(.secondary)
-                    }
                 } header: {
-                    HStack {
-                        Circle().fill(fleet.reachable.contains(m.id) ? theme.palette.milestoneColor : theme.palette.badColor).frame(width: 7, height: 7)
-                        Text(m.name)
-                        if m.isHub { Text("hub").font(.caption2).foregroundStyle(.secondary) }
-                        if m.name != m.brokerName, !m.brokerName.isEmpty {
-                            Text(m.brokerName).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
-                        }
-                        Spacer()
-                        Button { newName = ""; newDir = ""; newSessionOn = m } label: { Image(systemName: "plus.circle") }
-                            .disabled(!fleet.reachable.contains(m.id))
-                            .accessibilityLabel("New session on \(m.name)")
-                    }
-                    .contextMenu {
-                        Button { nickname = m.name == m.brokerName ? "" : m.name; nicknaming = m } label: {
-                            Label("Nickname on this phone", systemImage: "character.cursor.ibeam")
-                        }
-                        Button { UIPasteboard.general.string = m.brokerName } label: { Label("Copy broker name", systemImage: "doc.on.doc") }
+                    machineLabel(m).textCase(nil)
+                }
+            }
+            // Machines with nothing running share one compact section.
+            if !quiet.isEmpty {
+                Section(busy.isEmpty ? "Machines" : "Other machines") {
+                    ForEach(quiet) { m in
+                        machineLabel(m)
+                            .font(.subheadline)
+                            .foregroundStyle(fleet.reachable.contains(m.id) ? .primary : .secondary)
                     }
                 }
             }
@@ -126,6 +118,46 @@ struct MachinesView: View {
         .alert("Couldn't do that", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(actionError ?? "") }
+    }
+
+    /// Machine name with its kind, reachability, a "new session" button, and a
+    /// long-press menu for the phone-local nickname.
+    private func machineLabel(_ m: Machine) -> some View {
+        let up = fleet.reachable.contains(m.id)
+        return HStack(spacing: 6) {
+            Image(systemName: osIcon(m.os)).foregroundStyle(up ? theme.palette.accentColor : .secondary).frame(width: 18)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 4) {
+                    Text(m.name).lineLimit(1).truncationMode(.middle)
+                    if m.isHub { Text("hub").font(.caption2.weight(.semibold)).foregroundStyle(.secondary) }
+                }
+                if !up {
+                    Text("Unreachable").font(.caption2).foregroundStyle(theme.palette.badColor)
+                } else if m.name != m.brokerName, !m.brokerName.isEmpty {
+                    Text(m.brokerName).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Spacer()
+            Button { newName = ""; newDir = ""; newSessionOn = m } label: { Image(systemName: "plus.circle") }
+                .buttonStyle(.borderless)
+                .disabled(!up)
+                .accessibilityLabel("New session on \(m.name)")
+        }
+        .contextMenu {
+            Button { nickname = m.name == m.brokerName ? "" : m.name; nicknaming = m } label: {
+                Label("Nickname on this phone", systemImage: "character.cursor.ibeam")
+            }
+            Button { UIPasteboard.general.string = m.brokerName } label: { Label("Copy broker name", systemImage: "doc.on.doc") }
+            Button { router.openFiles(m, path: "~") } label: { Label("Browse files", systemImage: "folder") }
+        }
+    }
+
+    private func osIcon(_ os: String) -> String {
+        switch os {
+        case "darwin": return "laptopcomputer"
+        case "windows": return "pc"
+        default: return "server.rack"
+        }
     }
 
     @ViewBuilder private func sessionRow(_ m: Machine, _ s: SessionInfo) -> some View {

@@ -10,8 +10,10 @@ struct CommandCenterView: View {
     @EnvironmentObject var theme: ThemeStore
     @State private var query = ""
     @State private var actionError: String?
+    @State private var focus: Bucket?
+    @State private var replying: FleetStore.Card?
 
-    private enum Bucket: Int, CaseIterable, Identifiable {
+    enum Bucket: Int, CaseIterable, Identifiable {
         case needsYou, working, idle, backlog
         var id: Int { rawValue }
         var title: String { ["Needs you", "Working", "Done & idle", "Backlog"][rawValue] }
@@ -32,10 +34,16 @@ struct CommandCenterView: View {
 
     var body: some View {
         let all = cards
-        let needs = all.filter { bucket($0) == .needsYou }.count + lab.attention.count
         List {
             if let e = fleet.hubError { Section { Label(e, systemImage: "wifi.exclamationmark").font(.footnote).foregroundStyle(.orange) } }
-            ForEach(Bucket.allCases) { b in
+            Section {
+                SummaryChips(counts: Dictionary(uniqueKeysWithValues: Bucket.allCases.map { b in
+                    (b, all.filter { bucket($0) == b }.count + (b == .needsYou ? lab.attention.count : 0))
+                }), focus: $focus, palette: theme.palette)
+                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                .listRowBackground(Color.clear)
+            }
+            ForEach(Bucket.allCases.filter { focus == nil || focus == $0 }) { b in
                 let rows = all.filter { bucket($0) == b }
                 let labItems = b == .needsYou && query.isEmpty ? lab.attention : []
                 if !rows.isEmpty || !labItems.isEmpty {
@@ -49,6 +57,16 @@ struct CommandCenterView: View {
                     }
                 }
             }
+            if let focus, all.filter({ bucket($0) == focus }).isEmpty, focus != .needsYou || lab.attention.isEmpty {
+                Section {
+                    VStack(spacing: 6) {
+                        Text(focus == .needsYou ? "Nothing needs you" : "Nothing in \(focus.title)").font(.headline)
+                        Button("Show everything") { self.focus = nil }.font(.subheadline)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 24)
+                }
+                .listRowBackground(Color.clear)
+            }
             if all.isEmpty && lab.attention.isEmpty && fleet.hubError == nil {
                 ContentUnavailableView(fleet.machines.isEmpty ? "Looking for machines…" : "No sessions",
                                        systemImage: "rectangle.stack",
@@ -58,10 +76,7 @@ struct CommandCenterView: View {
         .navigationTitle("Command Center")
         .searchable(text: $query, prompt: "Filter sessions")
         .refreshable { await fleet.refreshNow() }
-        .safeAreaInset(edge: .top) {
-            Text(needs == 0 ? "All \(all.count) quiet" : "\(needs) need you · \(all.count + lab.attention.count - needs) other")
-                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 2)
-        }
+        .sheet(item: $replying) { QuickReplySheet(card: $0) }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { UnattendedPill() }
         }
@@ -75,6 +90,7 @@ struct CommandCenterView: View {
             CardRow(card: card, palette: theme.palette).contentShape(Rectangle())
         }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("session-card")
             .opacity(card.backlogged ? 0.6 : 1)
             .swipeActions(edge: .leading) {
                 Button { fleet.toggleBacklog(card.machine, card.session) } label: {
@@ -83,10 +99,11 @@ struct CommandCenterView: View {
                 .tint(.gray)
             }
             .swipeActions(edge: .trailing) {
+                Button { replying = card } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }.tint(.blue)
                 Button { setStatus("milestone", card) } label: { Label("Done", systemImage: "checkmark") }.tint(.green)
-                Button { setStatus("needs-decision", card) } label: { Label("Needs you", systemImage: "hand.raised") }.tint(.orange)
             }
             .contextMenu {
+                Button { replying = card } label: { Label("Quick reply", systemImage: "arrowshape.turn.up.left") }
                 Section("Set status") {
                     ForEach(FleetStore.statusLabels, id: \.label) { s in
                         Button((card.label == s.label ? "● " : "") + s.title) { setStatus(s.label, card) }
@@ -212,6 +229,148 @@ struct UnattendedPill: View {
             }
             .tint(on ? .purple : .secondary)
             .disabled(busy)
+        }
+    }
+}
+
+/// Counts per bucket; tapping one shows only that bucket.
+struct SummaryChips: View {
+    let counts: [CommandCenterView.Bucket: Int]
+    @Binding var focus: CommandCenterView.Bucket?
+    let palette: ThemePalette
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(CommandCenterView.Bucket.allCases) { b in
+                let n = counts[b] ?? 0
+                let on = focus == b
+                Button {
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    focus = on ? nil : b
+                } label: {
+                    VStack(spacing: 2) {
+                        Text("\(n)").font(.title3.weight(.semibold).monospacedDigit())
+                        Text(b.title).font(.caption2).lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+                    .foregroundStyle(n == 0 ? Color.secondary : color(b))
+                    .background(color(b).opacity(on ? 0.28 : 0.1), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(on ? color(b) : .clear, lineWidth: 1.5))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(n) \(b.title)")
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+        }
+    }
+
+    private func color(_ b: CommandCenterView.Bucket) -> Color {
+        switch b {
+        case .needsYou: return palette.waitingColor
+        case .working: return palette.workingColor
+        case .idle: return palette.milestoneColor
+        case .backlog: return .gray
+        }
+    }
+}
+
+/// Answer an agent without opening the full terminal: its latest output
+/// (`/recent`), a reply box, and one-tap answers. Text is typed with Enter.
+struct QuickReplySheet: View {
+    let card: FleetStore.Card
+    @EnvironmentObject var fleet: FleetStore
+    @EnvironmentObject var router: AppRouter
+    @Environment(\.dismiss) private var dismiss
+    @State private var recent = ""
+    @State private var text = ""
+    @State private var sending = false
+    @State private var error: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(recent.isEmpty ? "Loading output…" : recent)
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                    .background(Color.black.opacity(0.35))
+                    .onChange(of: recent) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                }
+                if let summary = card.item?.summary, !summary.isEmpty {
+                    Text(summary).font(.footnote).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.top, 8)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(["y", "n", "1", "2", "3", "continue"], id: \.self) { quick in
+                            Button(quick) { send(quick) }.buttonStyle(.bordered)
+                        }
+                        Button { send("") } label: { Label("Enter", systemImage: "return") }.buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal).padding(.top, 8)
+                }
+                HStack(alignment: .bottom) {
+                    TextField("Reply to \(card.session.name)", text: $text, axis: .vertical)
+                        .lineLimit(1...5)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .focused($focused)
+                        .padding(10).background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                    Button { send(text) } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                        .disabled(text.isEmpty || sending)
+                }
+                .padding()
+                if let error { Text(error).font(.caption).foregroundStyle(.red).padding(.bottom, 6) }
+            }
+            .navigationTitle(card.session.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Terminal") {
+                        dismiss()
+                        router.openTerminal(card.machine, card.session)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .task {
+            focused = true
+            while !Task.isCancelled {
+                await loadRecent()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    private func loadRecent() async {
+        guard let data = try? await BrokerHTTP.getData(card.machine.httpBase, "recent", query: [
+            .init(name: "session", value: card.session.name), .init(name: "lines", value: "60"),
+        ]) else { return }
+        let lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
+        recent = lines.reversed().drop { $0.trimmingCharacters(in: .whitespaces).isEmpty }.reversed().joined(separator: "\n")
+    }
+
+    private func send(_ reply: String) {
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                try await fleet.send(reply, to: card.session, on: card.machine)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                text = ""
+                fleet.acknowledge(card.machine, card.session)
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                await loadRecent()
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
 }
