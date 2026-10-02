@@ -63,7 +63,11 @@ struct DetailPanel: View {
                             set: { store.selection = DetailSelection(sourceID: source.id, driveID: $0) }
                         ), now: store.now)
                     } else if let unavailable = source.unavailable {
-                        DetailTitle(title: unavailable.title, subtitle: source.account)
+                        DetailTitle(title: source.readingStatusTitle, subtitle: source.account)
+                        if let identity = source.accountIdentity {
+                            Label(identity, systemImage: "person.crop.circle").font(.system(size: 12))
+                                .foregroundStyle(Palette.secondary).textSelection(.enabled)
+                        }
                         Text(unavailable.message).font(.system(size: 13)).foregroundStyle(Palette.secondary)
                         Button("Manage connection") { store.selection = nil; store.page = "Connections" }.buttonStyle(PrimaryButtonStyle())
                     }

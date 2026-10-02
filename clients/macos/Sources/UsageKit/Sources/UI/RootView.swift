@@ -216,13 +216,15 @@ struct RootView: View {
 
     @ViewBuilder
     private func dashboard(width: CGFloat) -> some View {
-        let visible = store.filteredSources.filter(\.hasOverviewReading)
+        let overview = UsageOverview(sources: store.filteredSources)
+        let visible = overview.readingSources
         let daytona = visible.filter { $0.integration == .daytona }
         let modal = visible.filter { $0.integration == .modal }
         let openai = visible.filter { $0.integration == .openaiAPI }
         let storage = visible.filter { $0.storage != nil }
-        ForEach(IntegrationID.allCases.filter { provider in visible.contains { $0.integration == provider && $0.quota != nil } }) { provider in
-            CodexCard(sources: visible.filter { $0.integration == provider }, store: store)
+        if !overview.statusSources.isEmpty { SourceStatusCard(sources: overview.statusSources, store: store) }
+        ForEach(overview.quotaProviders) { provider in
+            CodexCard(sources: overview.quotaAccounts(provider), store: store)
         }
         let topCount = [!daytona.isEmpty, !modal.isEmpty, !openai.isEmpty].filter { $0 }.count
         if topCount > 0 {
@@ -234,7 +236,7 @@ struct RootView: View {
             }
         }
         if !storage.isEmpty { StorageCard(sources: storage, store: store) }
-        if visible.isEmpty {
+        if overview.sources.isEmpty {
             ContentUnavailableView("Connect a source", systemImage: "square.grid.2x2", description: Text("Manage your accounts in Connections."))
         }
     }
@@ -244,7 +246,7 @@ struct RootView: View {
             Image(systemName: "info.circle").font(.system(size: 10))
             Text("Agent accounts show remaining quota; other meters show usage. Account limits stay separate.")
             Spacer()
-            Text("\(store.filteredSources.filter(\.hasOverviewReading).count) sources shown")
+            Text("\(UsageOverview(sources: store.filteredSources).sources.count) sources shown")
             Text("·").padding(.horizontal, 4)
             Text(store.isDemo ? "Sample data" : "Read-only · Auto refresh")
         }.font(.system(size: 10)).foregroundStyle(Palette.tertiary).padding(.top, 1)

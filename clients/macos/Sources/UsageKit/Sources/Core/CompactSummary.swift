@@ -10,6 +10,12 @@ struct CompactSummary {
         var seen = Set<String>()
         return sources.filter { seen.insert($0.id).inserted }
     }
+    var overview: UsageOverview { UsageOverview(sources: uniqueSources) }
+    var statusSources: [UsageSource] {
+        let quotaProviders = Set(overview.quotaProviders)
+        let readingIDs = Set(providerReadings.map(\.id) + devices.map(\.id))
+        return uniqueSources.filter { !quotaProviders.contains($0.integration) && !readingIDs.contains($0.id) }
+    }
     var weeklyQuota: QuotaAggregate? {
         weeklyQuota(for: .codex)
     }

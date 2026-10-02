@@ -54,6 +54,8 @@ Existing Devin connections from the initial integration retain their labels but 
 
 Only explicit daily/weekly remaining percentages or a reported consumed/limit ACU pair become quota measurements. Missing reset times stay unknown. Unrecognized output and quota failures use the shared unavailable/cached-reading behavior, never a fabricated balance.
 
+Account visibility is independent of measurement availability for every provider. Full and compact dashboards retain accounts without readings in a shared status card, or in their existing provider card when other accounts have quota readings. Command Center retains a navigable status tile. Saved identity remains visible, missing usage is not labeled as missing authentication, and enabled connections appear after relaunch even before a successful reading exists. Unknown measurements never contribute to averages or usage warnings.
+
 During implementation on October 1, 2026, the installed CLI reported successful enterprise authentication but **Failed to fetch quota**. The failure path was checked live; successful quota normalization is fixture-tested, not verified against a successful live response on this account. `/usage` reports session consumption and is not a substitute for account quota. See the official [CLI command reference](https://docs.devin.ai/cli/reference/commands) and [usage documentation](https://docs.devin.ai/admin/billing/usage).
 
 ## Automated verification

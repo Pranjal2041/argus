@@ -141,7 +141,14 @@ public final class UsageController: ObservableObject {
 
     static func summary(_ sources: [UsageSource]) -> [UsageGlance] {
         var rows: [UsageGlance] = []
-        for provider in IntegrationID.allCases where sources.contains(where: { $0.integration == provider && $0.quota != nil }) {
+        let summary = CompactSummary(sources: sources)
+        for source in summary.statusSources {
+            rows.append(UsageGlance(id: "status-" + source.id, title: "\(source.name) · \(source.account)",
+                value: source.connectionStatusTitle,
+                detail: [source.readingStatusTitle, source.accountIdentity].compactMap { $0 }.joined(separator: " · "),
+                symbol: source.integration.symbol, sourceID: source.id))
+        }
+        for provider in summary.overview.quotaProviders {
             let readings = QuotaAggregate.mainReadings(sources: sources, integration: provider)
             if let quota = readings.first(where: { $0.durationMinutes == 10080 || ($0.durationMinutes == nil && $0.label.lowercased() == "weekly") }) ?? readings.first {
                 rows.append(UsageGlance(id: "quota-" + provider.rawValue, title: provider.name,
@@ -152,7 +159,6 @@ public final class UsageController: ObservableObject {
                     value: "Cached", detail: "Open Usage for account readings", symbol: provider.symbol))
             }
         }
-        let summary = CompactSummary(sources: sources)
         for row in summary.providerReadings {
             rows.append(UsageGlance(id: row.id, title: "\(row.integration.name) · \(row.account)",
                 value: row.spentUSD.map { UsageFormat.money($0) } ?? "\(row.runningCount ?? 0) running",

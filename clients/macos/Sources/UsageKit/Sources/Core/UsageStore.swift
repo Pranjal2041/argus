@@ -134,8 +134,16 @@ final class UsageStore {
             ActivityEvent(title: "MacBook Pro reported new storage usage", detail: "Macintosh HD · 360 GB available", date: DemoData.ago(42), symbol: "laptopcomputer", category: .devices, selection: DetailSelection(sourceID: "macbook-pro")),
         ] : []
         if registry.origin == .live {
-            let allowed = Set(registry.adapters.compactMap { $0.descriptor?.sourceID })
-            sources = self.cache?.load().filter { allowed.contains($0.id) } ?? []
+            let cached = self.cache?.load() ?? []
+            sources = registry.adapters.compactMap(\.descriptor).map { descriptor in
+                if let previous = cached.first(where: { $0.id == descriptor.sourceID }) { return previous }
+                // A saved connection exists before its first successful usage
+                // reading, including after relaunch with an empty reading cache.
+                return UsageSource(id: descriptor.sourceID, integration: descriptor.integration, account: descriptor.label,
+                    observedAt: .now, payload: .unavailable(UnavailableUsage(title: "Checking usage",
+                        message: "Waiting for this connection's next refresh.")), origin: .live,
+                    accountIdentity: registry.configuration?.sources.first { $0.id == descriptor.sourceID }?.accountIdentity)
+            }
         }
     }
 

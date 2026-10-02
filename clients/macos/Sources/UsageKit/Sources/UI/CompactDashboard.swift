@@ -6,19 +6,20 @@ struct CompactDashboard: View {
     var store: UsageStore
     private var summary: CompactSummary { CompactSummary(sources: store.filteredSources) }
     private var quotaProviders: [IntegrationID] {
-        IntegrationID.allCases.filter { provider in store.filteredSources.contains { $0.integration == provider && $0.quota != nil } }
+        summary.overview.quotaProviders
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if !summary.statusSources.isEmpty { SourceStatusCard(sources: summary.statusSources, store: store) }
             ForEach(quotaProviders) { provider in
-                let accounts = store.filteredSources.filter { $0.integration == provider }
+                let accounts = summary.overview.quotaAccounts(provider)
                 let readings = QuotaAggregate.mainReadings(sources: accounts, integration: provider)
                 weeklyCard(provider, accounts: accounts, quota: readings.first { $0.durationMinutes == 10080 } ?? readings.first)
             }
             if !summary.providerReadings.isEmpty { providerCard }
             if !summary.devices.isEmpty { storageCard }
-            if quotaProviders.isEmpty && summary.providerReadings.isEmpty && summary.devices.isEmpty {
+            if summary.uniqueSources.isEmpty {
                 ContentUnavailableView("Connect a source", systemImage: "square.grid.2x2", description: Text("Your readings will appear here."))
             }
         }.accessibilityIdentifier("compact-dashboard")

@@ -65,7 +65,7 @@ final class AnalyticsAndRemainingTests: XCTestCase {
         XCTAssertEqual(source.quota?.additionalBuckets.count, 2, "Model data remains available in account details")
     }
 
-    func testOverviewHidesUnavailableSourcesButKeepsPartialRealReadings() {
+    func testOverviewReadingEligibilityExcludesUnknownValuesButKeepsPartialReadings() {
         let missing = UsageSource(id: "missing", integration: .openaiAPI, account: "Missing", observedAt: now,
             payload: .unavailable(UnavailableUsage(title: "Access required", message: "Not connected")))
         let partial = UsageSource(id: "daytona", integration: .daytona, account: "Personal", observedAt: now,

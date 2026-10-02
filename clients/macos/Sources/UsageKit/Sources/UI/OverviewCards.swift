@@ -184,7 +184,7 @@ struct CodexCard: View {
     private var accountList: some View {
         VStack(spacing: 0) {
             ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
-                if let quota = source.quota {
+                if let quota = source.quota, !quota.allWindows.isEmpty {
                     Button { store.selection = DetailSelection(sourceID: source.id) } label: {
                         HStack(spacing: 22) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -296,16 +296,42 @@ struct StorageCard: View {
 struct UnavailableAccountRow: View {
     var source: UsageSource
     var store: UsageStore
+    var showProvider = false
     var body: some View {
-        Button { store.page = "Connections"; store.selection = nil } label: {
+        Button { store.selection = DetailSelection(sourceID: source.id) } label: {
             HStack(spacing: 12) {
-                Text(source.account).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.text).frame(width: 105, alignment: .leading).lineLimit(1)
-                Text(source.unavailable?.title ?? "Unavailable").font(.system(size: 11)).foregroundStyle(Palette.secondary)
-                Spacer()
-                Text("Set up").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.blue)
+                if showProvider { SourceIcon(integration: source.integration, size: 21) }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(showProvider ? "\(source.name) · \(source.account)" : source.account)
+                        .font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.text).lineLimit(1)
+                    if let identity = source.accountIdentity {
+                        Text(identity).font(.system(size: 10)).foregroundStyle(Palette.secondary).lineLimit(1)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Text(source.readingStatusTitle).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize()
                 Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(Palette.tertiary)
             }.contentShape(Rectangle())
         }.buttonStyle(.plain)
+            .accessibilityLabel("Open \(source.name) \(source.account), \(source.readingStatusTitle)")
+            .accessibilityIdentifier("open-status-\(source.id)")
+            .help(source.unavailable?.message ?? source.readingStatusTitle)
+    }
+}
+
+@available(macOS 14.0, *)
+struct SourceStatusCard: View {
+    var sources: [UsageSource]
+    var store: UsageStore
+    var body: some View {
+        SourceCard(selected: sources.contains { $0.id == store.selection?.sourceID }) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Source status").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.secondary)
+                ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
+                    if index > 0 { Hairline() }
+                    UnavailableAccountRow(source: source, store: store, showProvider: true)
+                }
+            }
+        }.accessibilityElement(children: .contain).accessibilityIdentifier("source-status-card")
     }
 }
 

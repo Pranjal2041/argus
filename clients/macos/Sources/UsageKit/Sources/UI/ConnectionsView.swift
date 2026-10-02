@@ -126,7 +126,7 @@ struct ConnectionsView: View {
                     }
                 }
                 Spacer()
-                SoftBadge(text: !configuration.enabled ? "Disabled" : (needsWork ? (source?.isStale == true ? "Cached" : (source?.hasLimitedAccess == true ? "Limited access" : "Needs setup")) : (source == nil ? "Waiting" : "Connected")),
+                SoftBadge(text: !configuration.enabled ? "Disabled" : (source?.connectionStatusTitle ?? failure?.errorTitle ?? "Waiting"),
                           symbol: needsWork ? "exclamationmark.circle" : "checkmark.circle", warning: needsWork)
                 if configuration.integration.supportsAccountSignIn {
                     Button(configuration.hasSavedAccount ? "Change account" : "Sign in") { store.connectAccount(configuration.id) }

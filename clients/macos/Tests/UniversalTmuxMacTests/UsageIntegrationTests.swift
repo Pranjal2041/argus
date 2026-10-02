@@ -177,6 +177,47 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertEqual(try IntegrationConfiguration.load(from: url).sources[0].loginProfile, profile)
     }
 
+    func testNativeUnavailableAccountsRemainVisibleAndOpenDetails() async throws {
+        guard ProcessInfo.processInfo.environment["UT_USAGE_VISUAL_QA"] == "1" else {
+            throw XCTSkip("Opt-in native UI; requires an approved desktop-testing window")
+        }
+        _ = NSApplication.shared
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        let suite = "argus.status.visual.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        store.sources = [IntegrationID.devin, .modal].map { provider in
+            UsageSource(id: provider.rawValue, integration: provider, account: "Work", observedAt: .now,
+                payload: .unavailable(UnavailableUsage(title: "Unavailable", message: "The account is connected, but usage is unavailable.")),
+                origin: .live, accountIdentity: "person@example.test")
+        }
+        store.didLoad = true
+        let controller = UsageController(store: store, defaults: defaults)
+        let (fullWindow, fullHost) = mount(UsageDashboard(controller: controller), width: 1200, height: 850)
+        defer { fullWindow.close() }
+        try await settle(); try capture(fullHost, name: "unavailable-full")
+        XCTAssertTrue(press(fullHost, identifier: "open-status-devin"))
+        XCTAssertEqual(store.selection?.sourceID, "devin")
+        try await settle(); try capture(fullHost, name: "unavailable-details")
+        XCTAssertTrue(press(fullHost, identifier: "close-details"))
+
+        let (compactWindow, compactHost) = mount(UsageDashboard(controller: controller), width: 585, height: 628)
+        defer { compactWindow.close() }
+        try await settle(); try capture(compactHost, name: "unavailable-compact")
+        XCTAssertTrue(press(compactHost, identifier: "open-status-modal"))
+        XCTAssertEqual(store.selection?.sourceID, "modal")
+        controller.open()
+        var opened = false
+        let (ccWindow, ccHost) = mount(UsageCommandCenterSection(usage: controller) { opened = true }
+            .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 900, height: 350)
+        defer { ccWindow.close() }
+        try await settle(); try capture(ccHost, name: "unavailable-command-center")
+        XCTAssertTrue(press(ccHost, identifier: "usage-metric-status-devin"))
+        XCTAssertTrue(opened)
+        XCTAssertEqual(store.selection?.sourceID, "devin")
+    }
+
     private func settle() async throws { try await Task.sleep(for: .milliseconds(300)) }
 
     private func capture(_ view: NSView, name: String) throws {
