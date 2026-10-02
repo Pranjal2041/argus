@@ -138,6 +138,15 @@ struct SetupView: View {
                             }
                         }
                     }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("New to Argus?").font(.headline)
+                        Text("Your Mac runs the Argus app and its broker; each machine you want to reach runs `ut`. The installation guide walks through it in a few minutes.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Button { openURL(URL(string: "https://pranjal2041.github.io/argus/docs/installation")!) } label: {
+                            Label("Installation guide", systemImage: "book")
+                        }
+                        .buttonStyle(.bordered)
+                    }
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Just looking?").font(.headline)
