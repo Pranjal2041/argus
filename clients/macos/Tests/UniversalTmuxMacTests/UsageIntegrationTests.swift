@@ -274,7 +274,10 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertTrue(opened, "Normal click-to-open still works after arranging")
     }
 
-    private func settle() async throws { try await Task.sleep(for: .milliseconds(300)) }
+    private func settle() async throws {
+        // Let native spring animations finish before inspecting or capturing their layout.
+        try await Task.sleep(for: .milliseconds(800))
+    }
 
     private func capture(_ view: NSView, name: String) throws {
         view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
