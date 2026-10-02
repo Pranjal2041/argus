@@ -175,6 +175,13 @@ public final class UsageController: ObservableObject {
                 detail: [source.readingStatusTitle, source.accountIdentity].compactMap { $0 }.joined(separator: " · "),
                 symbol: source.integration.symbol, sourceID: source.id, ordering: .source(source.id)))
         }
+        for source in summary.overview.consumptionSources {
+            guard let consumption = source.consumption else { continue }
+            rows.append(UsageGlance(id: source.id, title: "\(source.name) · \(source.account)",
+                value: consumption.formattedAmount,
+                detail: [consumption.usedLabel, consumption.period?.label, source.isStale ? "Cached" : nil].compactMap { $0 }.joined(separator: " · "),
+                symbol: source.integration.symbol, sourceID: source.id, ordering: .source(source.id)))
+        }
         for provider in summary.overview.quotaProviders {
             let readings = QuotaAggregate.mainReadings(sources: sources, integration: provider)
             if let quota = readings.first(where: { $0.durationMinutes == 10080 || ($0.durationMinutes == nil && $0.label.lowercased() == "weekly") }) ?? readings.first {

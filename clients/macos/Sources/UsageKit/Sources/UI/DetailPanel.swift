@@ -57,6 +57,8 @@ struct DetailPanel: View {
                         SpendDetailView(source: source, spend: spend, now: store.now)
                     } else if let quota = source.quota {
                         QuotaDetailView(source: source, quota: quota, now: store.now)
+                    } else if let consumption = source.consumption {
+                        ConsumptionDetailView(source: source, usage: consumption)
                     } else if let storage = source.storage {
                         StorageDetailView(source: source, storage: storage, selectedDriveID: Binding(
                             get: { store.selection?.driveID },
@@ -120,6 +122,9 @@ struct DetailPanel: View {
         } else if let quota = source.quota {
             lines += quota.windows.map { "\($0.label): \(UsageFormat.percent($0.remainingPercent)) remaining" }
             lines += quota.additionalBuckets.flatMap { bucket in bucket.windows.map { "\(bucket.name) · \($0.label): \(UsageFormat.percent($0.remainingPercent)) remaining" } }
+        } else if let consumption = source.consumption {
+            lines.append("\(consumption.formattedAmount) \(consumption.usedLabel)")
+            if let period = consumption.period { lines.append(period.label) }
         } else if let storage = source.storage {
             lines += storage.drives.map { "\($0.name): \(UsageFormat.storage($0.freeGB)) free / \(UsageFormat.storage($0.capacityGB))" }
         }

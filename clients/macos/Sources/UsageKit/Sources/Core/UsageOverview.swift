@@ -12,17 +12,18 @@ struct UsageOverview {
     }
 
     var readingSources: [UsageSource] { sources.filter(\.hasOverviewReading) }
+    var consumptionSources: [UsageSource] { sources.filter { $0.consumption?.hasReading == true } }
     var quotaProviders: [IntegrationID] {
         IntegrationID.allCases.filter { provider in
             sources.contains { $0.integration == provider && $0.quota?.allWindows.isEmpty == false }
         }
     }
     func quotaAccounts(_ provider: IntegrationID) -> [UsageSource] {
-        sources.filter { $0.integration == provider }
+        sources.filter { $0.integration == provider && $0.consumption == nil }
     }
     var statusSources: [UsageSource] {
-        let grouped = Set(quotaProviders)
-        return sources.filter { !$0.hasOverviewReading && !grouped.contains($0.integration) }
+        let grouped = Set(quotaProviders.flatMap { quotaAccounts($0).map(\.id) })
+        return sources.filter { !$0.hasOverviewReading && !grouped.contains($0.id) }
     }
 }
 

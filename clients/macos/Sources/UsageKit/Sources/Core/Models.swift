@@ -55,7 +55,7 @@ enum IntegrationID: String, CaseIterable, Codable, Sendable, Identifiable {
         case .openaiAPI: "API spending and project breakdowns"
         case .codex: "Account limits and reset windows"
         case .claude: "Five-hour, weekly, and model limits"
-        case .devin: "Independent Devin accounts and quota windows"
+        case .devin: "Independent Devin accounts and ACU consumption"
         case .macStorage: "Drive capacity and storage on your Mac"
         case .windowsStorage: "Available space across Windows drives"
         }
@@ -81,10 +81,11 @@ struct UsageSource: Identifiable, Codable, Sendable {
     var compute: ComputeUsage? { if case .compute(let value) = payload { value } else { nil } }
     var spend: SpendUsage? { if case .spend(let value) = payload { value } else { nil } }
     var quota: QuotaUsage? { if case .quota(let value) = payload { value } else { nil } }
+    var consumption: ConsumptionUsage? { if case .consumption(let value) = payload { value } else { nil } }
     var storage: StorageUsage? { if case .storage(let value) = payload { value } else { nil } }
     var unavailable: UnavailableUsage? { if case .unavailable(let value) = payload { value } else { nil } }
     var hasOverviewReading: Bool {
-        compute != nil || spend != nil || quota?.allWindows.isEmpty == false || storage?.drives.isEmpty == false
+        compute != nil || spend != nil || consumption?.hasReading == true || quota?.allWindows.isEmpty == false || storage?.drives.isEmpty == false
     }
 }
 
@@ -116,6 +117,7 @@ enum UsagePayload: Codable, Sendable {
     case compute(ComputeUsage)
     case spend(SpendUsage)
     case quota(QuotaUsage)
+    case consumption(ConsumptionUsage)
     case storage(StorageUsage)
     case unavailable(UnavailableUsage)
 }
@@ -260,7 +262,7 @@ struct QuotaAggregate: Identifiable, Sendable {
     }
 
     static func readings(sources: [UsageSource], integration: IntegrationID = .codex) -> [QuotaAggregate] {
-        let accounts = Dictionary(sources.filter { $0.integration == integration }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values
+        let accounts = Dictionary(sources.filter { $0.integration == integration && $0.consumption == nil }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values
         var groups: [String: QuotaAggregate] = [:]
         for source in accounts where !source.isStale {
             guard let quota = source.quota else { continue }

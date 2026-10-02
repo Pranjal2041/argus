@@ -218,11 +218,17 @@ struct RootView: View {
     private func dashboard(width: CGFloat) -> some View {
         let overview = UsageOverview(sources: store.filteredSources)
         let visible = overview.readingSources
-        let daytona = visible.filter { $0.integration == .daytona }
-        let modal = visible.filter { $0.integration == .modal }
-        let openai = visible.filter { $0.integration == .openaiAPI }
+        let daytona = visible.filter { $0.integration == .daytona && $0.compute != nil }
+        let modal = visible.filter { $0.integration == .modal && $0.compute != nil }
+        let openai = visible.filter { $0.integration == .openaiAPI && $0.spend != nil }
         let storage = visible.filter { $0.storage != nil }
         if !overview.statusSources.isEmpty { SourceStatusCard(sources: overview.statusSources, store: store) }
+        if !overview.consumptionSources.isEmpty {
+            let columns = min(overview.consumptionSources.count, width >= 1060 ? 3 : 2)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: columns), spacing: 16) {
+                ForEach(overview.consumptionSources) { ConsumptionCard(source: $0, store: store) }
+            }
+        }
         ForEach(overview.quotaProviders) { provider in
             CodexCard(sources: overview.quotaAccounts(provider), store: store)
         }
@@ -244,7 +250,7 @@ struct RootView: View {
     private var footer: some View {
         HStack(spacing: 5) {
             Image(systemName: "info.circle").font(.system(size: 10))
-            Text("Agent accounts show remaining quota; other meters show usage. Account limits stay separate.")
+            Text("Quota cards show remaining allowance; consumption cards show units used.")
             Spacer()
             Text("\(UsageOverview(sources: store.filteredSources).sources.count) sources shown")
             Text("·").padding(.horizontal, 4)

@@ -12,9 +12,9 @@ struct CompactSummary {
     }
     var overview: UsageOverview { UsageOverview(sources: uniqueSources) }
     var statusSources: [UsageSource] {
-        let quotaProviders = Set(overview.quotaProviders)
-        let readingIDs = Set(providerReadings.map(\.id) + devices.map(\.id))
-        return uniqueSources.filter { !quotaProviders.contains($0.integration) && !readingIDs.contains($0.id) }
+        let quotaIDs = Set(overview.quotaProviders.flatMap { overview.quotaAccounts($0).map(\.id) })
+        let readingIDs = Set(providerReadings.map(\.id) + devices.map(\.id) + overview.consumptionSources.map(\.id))
+        return uniqueSources.filter { !quotaIDs.contains($0.id) && !readingIDs.contains($0.id) }
     }
     var weeklyQuota: QuotaAggregate? {
         weeklyQuota(for: .codex)

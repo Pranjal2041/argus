@@ -42,7 +42,7 @@ struct IntegrationRegistry: Sendable {
             case .openaiAPI: return LiveOpenAIIntegration(configuration: source, client: client)
             case .codex: return LiveCodexIntegration(configuration: source, executable: executables.codex)
             case .claude: return LiveClaudeIntegration(configuration: source, client: client)
-            case .devin: return LiveDevinIntegration(configuration: source, executable: executables.devin, runner: runner)
+            case .devin: return LiveDevinIntegration(configuration: source, executable: executables.devin, runner: runner, client: client)
             case .macStorage: return LiveMacStorageIntegration(configuration: source)
             case .windowsStorage: return LiveWindowsStorageIntegration(configuration: source, executable: executables.ut, runner: runner)
             }

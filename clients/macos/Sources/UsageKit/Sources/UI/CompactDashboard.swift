@@ -12,6 +12,7 @@ struct CompactDashboard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !summary.statusSources.isEmpty { SourceStatusCard(sources: summary.statusSources, store: store) }
+            ForEach(summary.overview.consumptionSources) { ConsumptionCard(source: $0, store: store) }
             ForEach(quotaProviders) { provider in
                 let accounts = summary.overview.quotaAccounts(provider)
                 let readings = QuotaAggregate.mainReadings(sources: accounts, integration: provider)

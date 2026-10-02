@@ -274,6 +274,56 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertTrue(opened, "Normal click-to-open still works after arranging")
     }
 
+    func testNativeConsumedUnitsAppearWithoutQuotaAndOpenDetails() async throws {
+        guard ProcessInfo.processInfo.environment["UT_USAGE_VISUAL_QA"] == "1" else {
+            throw XCTSkip("Opt-in native UI; requires an approved desktop-testing window")
+        }
+        _ = NSApplication.shared
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        let suite = "argus.consumption.visual.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let period = ConsumptionPeriod(start: JSONValue.string("2026-09-15T00:00:00-08:00").date!,
+            end: JSONValue.string("2026-10-15T00:00:00-08:00").date!, timeZoneOffsetSeconds: -8 * 3600)
+        let store = UsageStore(defaults: defaults)
+        store.sources = [
+            UsageSource(id: "devin-work", integration: .devin, account: "Work", observedAt: .now,
+                payload: .consumption(ConsumptionUsage(used: 2331.999656, unit: "ACUs", period: period, plan: "Enterprise")),
+                origin: .live, accountIdentity: "work@example.test"),
+            UsageSource(id: "devin-personal", integration: .devin, account: "Personal", observedAt: .now,
+                payload: .consumption(ConsumptionUsage(used: 0, unit: "ACUs", period: period)),
+                origin: .live, accountIdentity: "personal@example.test"),
+            UsageSource(id: "metered-api", integration: .openaiAPI, account: "Metered units", observedAt: .now,
+                payload: .consumption(ConsumptionUsage(used: 1570.5, unit: "credits")), origin: .live)
+        ]
+        store.didLoad = true
+        let controller = UsageController(store: store, defaults: defaults)
+        XCTAssertEqual(controller.glances.count, 3)
+        XCTAssertTrue(controller.glances.allSatisfy { $0.remaining == nil })
+        XCTAssertTrue(controller.warnings.isEmpty)
+        let (fullWindow, fullHost) = mount(UsageDashboard(controller: controller), width: 1200, height: 850)
+        defer { fullWindow.close() }
+        try await settle(); try capture(fullHost, name: "consumption-full")
+        XCTAssertTrue(press(fullHost, identifier: "open-consumption-devin-work"))
+        XCTAssertEqual(store.selection?.sourceID, "devin-work")
+        try await settle(); try capture(fullHost, name: "consumption-details")
+        XCTAssertTrue(press(fullHost, identifier: "close-details"))
+        let (compactWindow, compactHost) = mount(UsageDashboard(controller: controller), width: 585, height: 628)
+        defer { compactWindow.close() }
+        try await settle(); try capture(compactHost, name: "consumption-compact")
+        XCTAssertTrue(press(compactHost, identifier: "open-consumption-metered-api"))
+        XCTAssertEqual(store.selection?.sourceID, "metered-api")
+        controller.open()
+        var opened = false
+        let (ccWindow, ccHost) = mount(UsageCommandCenterSection(usage: controller) { opened = true }
+            .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 1100, height: 350)
+        defer { ccWindow.close() }
+        try await settle(); try capture(ccHost, name: "consumption-command-center")
+        XCTAssertTrue(press(ccHost, identifier: "usage-metric-devin-personal"))
+        XCTAssertTrue(opened)
+        XCTAssertEqual(store.selection?.sourceID, "devin-personal")
+    }
+
     private func settle() async throws {
         // Let native spring animations finish before inspecting or capturing their layout.
         try await Task.sleep(for: .milliseconds(800))
