@@ -42,6 +42,10 @@ Warning preferences and dismissals use the `dev.universaltmux.usage` defaults su
 
 For cutover, quit standalone Usage before starting the new Argus build so both applications do not refresh the same imported OAuth profiles concurrently. Terminal sessions and brokers do not need restarting.
 
+## Command Center card arrangement
+
+Drag Usage cards to either side of another card to reorder them. **Arrange** exposes left/right buttons; the context menu also moves a card to either end. **Reset order** restores the default layout. The arrangement is saved separately from credentials and warning settings, survives refresh and relaunch, and retains positions for temporarily absent cards. New cards follow saved cards. Identity anchors keep accounts in place when their display changes between live and unavailable readings or between individual accounts and quota aggregates. Drag payloads are scoped to the current strip; unrelated or stale drops do not alter the layout.
+
 ## Devin CLI
 
 Background reading executes only `devin auth status` with a timeout and `NO_COLOR=1`. Each connection supplies its own `HOME` and XDG data/config/cache directories. Ambient provider tokens are not inherited. A missing private profile requires sign-in and never falls back to the account in the user's terminal.
@@ -65,6 +69,6 @@ swift test --package-path clients/macos --filter 'UsageKitTests|UsageIntegration
 UT_USAGE_VISUAL_QA=1 swift test --package-path clients/macos --filter UsageIntegrationTests
 ```
 
-The opt-in visual test opens real native windows, mounts the actual SwiftUI views with fixture data, presses native accessibility controls, and captures `/tmp/argus-usage-*.png`. Run it only after arranging an approved desktop-testing window with the user. It covers Command Center dismissal/open, full and compact account navigation, warning restoration, provider selection, Devin code entry, verified account replacement and cancellation. It does not use real credentials or contact providers. `UT_DEVIN_CLI_PROBE=1` additionally starts and cancels the installed CLI's sign-in prompt in an empty private profile, without opening a browser or entering a login code.
+The opt-in visual test opens real native windows, mounts the actual SwiftUI views with fixture data, presses native accessibility controls, and captures `/tmp/argus-usage-*.png`. Run it only after arranging an approved desktop-testing window with the user. It covers Command Center dismissal/open, card-arrangement controls and reset, full and compact account navigation, warning restoration, provider selection, Devin code entry, verified account replacement and cancellation. It does not use real credentials or contact providers. `UT_DEVIN_CLI_PROBE=1` additionally starts and cancels the installed CLI's sign-in prompt in an empty private profile, without opening a browser or entering a login code.
 
 The shared tests cover independent accounts, partial failures, credentials and rollback, quota/billing normalization, migration, alert reset/recovery/freshness, persistent settings, and single-loop ownership. The source app's tests are preserved alongside the new integration tests.

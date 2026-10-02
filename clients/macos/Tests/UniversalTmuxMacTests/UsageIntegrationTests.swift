@@ -218,6 +218,62 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertEqual(store.selection?.sourceID, "devin")
     }
 
+    func testUsageCardDropsValidateSessionAndCurrentCards() async throws {
+        let suite = "argus.card-drop.tests.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        await store.refresh()
+        let controller = UsageController(store: store, defaults: defaults)
+        let before = controller.glances.map(\.id)
+        let first = try XCTUnwrap(before.first), last = try XCTUnwrap(before.last), session = UUID()
+        let payload = UsageCardDrag(sessionID: session, cardID: last)
+        let decoded = try JSONDecoder().decode(UsageCardDrag.self, from: JSONEncoder().encode(payload))
+        XCTAssertFalse(UsageCardDrag.drop([decoded], sessionID: UUID(), targetID: first, placement: .before, usage: controller))
+        XCTAssertFalse(UsageCardDrag.drop([decoded, decoded], sessionID: session, targetID: first, placement: .before, usage: controller))
+        XCTAssertFalse(UsageCardDrag.drop([decoded], sessionID: session, targetID: "removed", placement: .before, usage: controller))
+        XCTAssertEqual(controller.glances.map(\.id), before)
+        XCTAssertTrue(UsageCardDrag.drop([decoded], sessionID: session, targetID: first, placement: .before, usage: controller))
+        XCTAssertEqual(controller.glances.first?.id, last)
+    }
+
+    func testNativeUsageCardArrangeControlsAndPersistence() async throws {
+        guard ProcessInfo.processInfo.environment["UT_USAGE_VISUAL_QA"] == "1" else {
+            throw XCTSkip("Opt-in native UI; requires an approved desktop-testing window")
+        }
+        _ = NSApplication.shared
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        let suite = "argus.arrange.visual.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        await store.refresh()
+        let controller = UsageController(store: store, defaults: defaults)
+        let original = controller.glances.map(\.id)
+        let first = try XCTUnwrap(original.first), second = original[1]
+        var opened = false
+        let (window, host) = mount(UsageCommandCenterSection(usage: controller) { opened = true }
+            .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 1100, height: 650)
+        defer { window.close() }
+        try await settle(); try capture(host, name: "arrange-default")
+        XCTAssertTrue(press(host, identifier: "usage-arrange-cards"))
+        try await settle(); try capture(host, name: "arrange-controls")
+        XCTAssertTrue(press(host, identifier: "usage-move-right-\(first)"))
+        try await settle()
+        XCTAssertEqual(Array(controller.glances.prefix(2)).map(\.id), [second, first])
+        XCTAssertFalse(opened, "Arranging must not navigate away from the cards")
+        try capture(host, name: "arrange-moved")
+        controller.reconcile()
+        XCTAssertEqual(controller.glances.first?.id, second)
+        XCTAssertEqual(UsageController(store: store, defaults: defaults).glances.first?.id, second)
+        XCTAssertTrue(press(host, identifier: "usage-reset-card-order"))
+        try await settle()
+        XCTAssertEqual(controller.glances.map(\.id), original)
+        XCTAssertTrue(press(host, identifier: "usage-arrange-cards"))
+        try await settle()
+        XCTAssertTrue(press(host, identifier: "usage-metric-\(first)"))
+        XCTAssertTrue(opened, "Normal click-to-open still works after arranging")
+    }
+
     private func settle() async throws { try await Task.sleep(for: .milliseconds(300)) }
 
     private func capture(_ view: NSView, name: String) throws {

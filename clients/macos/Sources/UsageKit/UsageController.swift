@@ -16,6 +16,7 @@ public struct UsageGlance: Identifiable {
     public var symbol: String
     public var remaining: Double?
     public var sourceID: String?
+    var ordering: UsageCardIdentity?
 }
 
 @available(macOS 14.0, *)
@@ -35,8 +36,10 @@ public final class UsageController: ObservableObject {
     }
     var engine: UsageAlertEngine
     private var refreshTask: Task<Void, Never>?
+    private var cardOrder: UsageCardOrder
     private static let policyKey = "warningPolicy.v1"
     private static let dismissalKey = "warningDismissals.v1"
+    private static let cardOrderKey = "commandCenterCardOrder.v1"
 
     public convenience init(demo: Bool = false) {
         let defaults = UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
@@ -62,6 +65,7 @@ public final class UsageController: ObservableObject {
     init(store: UsageStore, defaults: UserDefaults) {
         self.store = store
         self.defaults = defaults
+        cardOrder = UsageCardOrder(keys: defaults.stringArray(forKey: Self.cardOrderKey) ?? [])
         policy = defaults.data(forKey: Self.policyKey).flatMap { try? JSONDecoder().decode(UsageAlertPolicy.self, from: $0) } ?? UsageAlertPolicy()
         engine = UsageAlertEngine(dismissals: defaults.data(forKey: Self.dismissalKey).flatMap {
             try? JSONDecoder().decode([String: UsageAlertEngine.Dismissal].self, from: $0)
@@ -118,6 +122,29 @@ public final class UsageController: ObservableObject {
 
     func restoreDismissed() { engine.dismissals = [:]; reconcile() }
 
+    public var hasCustomCardOrder: Bool { !cardOrder.keys.isEmpty }
+
+    @discardableResult
+    public func moveGlance(_ id: String, relativeTo targetID: String, placement: UsageCardPlacement) -> Bool {
+        guard cardOrder.move(id, relativeTo: targetID, placement: placement, cards: glances) else { return false }
+        defaults.set(cardOrder.keys, forKey: Self.cardOrderKey)
+        glances = cardOrder.arranged(glances)
+        return true
+    }
+
+    @discardableResult
+    public func moveGlance(_ id: String, by offset: Int) -> Bool {
+        guard let index = glances.firstIndex(where: { $0.id == id }), offset != 0,
+              glances.indices.contains(index + offset) else { return false }
+        return moveGlance(id, relativeTo: glances[index + offset].id, placement: offset < 0 ? .before : .after)
+    }
+
+    public func resetCardOrder() {
+        cardOrder = UsageCardOrder()
+        defaults.removeObject(forKey: Self.cardOrderKey)
+        reconcile()
+    }
+
     func reconcile(now: Date = .now) {
         let maxAge = max(300, refreshSeconds * 3)
         let readings = UsageMeasurement.readings(store.sources, now: now, maxAge: maxAge, includeModelLimits: policy.includeModelLimits)
@@ -129,7 +156,7 @@ public final class UsageController: ObservableObject {
             if now.timeIntervalSince(source.observedAt) > maxAge { result.isStale = true }
             return result
         }
-        glances = Self.summary(sources)
+        glances = cardOrder.arranged(Self.summary(sources))
         connectionIssueCount = store.failures.count
         lastRefresh = store.lastRefresh
         if let data = try? JSONEncoder().encode(engine.dismissals) { defaults.set(data, forKey: Self.dismissalKey) }
@@ -146,30 +173,32 @@ public final class UsageController: ObservableObject {
             rows.append(UsageGlance(id: "status-" + source.id, title: "\(source.name) · \(source.account)",
                 value: source.connectionStatusTitle,
                 detail: [source.readingStatusTitle, source.accountIdentity].compactMap { $0 }.joined(separator: " · "),
-                symbol: source.integration.symbol, sourceID: source.id))
+                symbol: source.integration.symbol, sourceID: source.id, ordering: .source(source.id)))
         }
         for provider in summary.overview.quotaProviders {
             let readings = QuotaAggregate.mainReadings(sources: sources, integration: provider)
             if let quota = readings.first(where: { $0.durationMinutes == 10080 || ($0.durationMinutes == nil && $0.label.lowercased() == "weekly") }) ?? readings.first {
                 rows.append(UsageGlance(id: "quota-" + provider.rawValue, title: provider.name,
                     value: UsageFormat.percent(quota.remainingPercent), detail: "\(quota.label) left · \(quota.accountCount)/\(quota.totalAccounts) accounts · average",
-                    symbol: provider.symbol, remaining: quota.remainingPercent))
+                    symbol: provider.symbol, remaining: quota.remainingPercent,
+                    ordering: .group(sources: summary.overview.quotaAccounts(provider).map(\.id))))
             } else {
                 rows.append(UsageGlance(id: "quota-" + provider.rawValue, title: provider.name,
-                    value: "Cached", detail: "Open Usage for account readings", symbol: provider.symbol))
+                    value: "Cached", detail: "Open Usage for account readings", symbol: provider.symbol,
+                    ordering: .group(sources: summary.overview.quotaAccounts(provider).map(\.id))))
             }
         }
         for row in summary.providerReadings {
             rows.append(UsageGlance(id: row.id, title: "\(row.integration.name) · \(row.account)",
                 value: row.spentUSD.map { UsageFormat.money($0) } ?? "\(row.runningCount ?? 0) running",
                 detail: row.runningCount.map { "\($0) \(row.resourceNoun ?? "resources") · month to date" } ?? "Month to date",
-                symbol: row.integration.symbol, sourceID: row.id))
+                symbol: row.integration.symbol, sourceID: row.id, ordering: .source(row.id)))
         }
         for source in summary.devices {
             for drive in source.storage.map(CompactSummary.storageDrives) ?? [] {
                 rows.append(UsageGlance(id: UsageMeasurement.identity([source.id, drive.id]), title: source.account,
                     value: UsageFormat.storage(drive.freeGB) + " free", detail: drive.name + (source.isStale ? " · cached" : ""),
-                    symbol: "externaldrive", sourceID: source.id))
+                    symbol: "externaldrive", sourceID: source.id, ordering: .drive(sourceID: source.id, driveID: drive.id)))
             }
         }
         return rows

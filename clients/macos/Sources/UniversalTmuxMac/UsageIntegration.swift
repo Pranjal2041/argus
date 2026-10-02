@@ -1,5 +1,22 @@
 import SwiftUI
 import UsageKit
+import UniformTypeIdentifiers
+
+@available(macOS 14.0, *)
+struct UsageCardDrag: Codable, Transferable {
+    let sessionID: UUID
+    let cardID: String
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: UTType(exportedAs: "dev.universaltmux.usage-card"))
+    }
+
+    @MainActor
+    static func drop(_ items: [Self], sessionID: UUID, targetID: String,
+                     placement: UsageCardPlacement, usage: UsageController) -> Bool {
+        guard items.count == 1, let item = items.first, item.sessionID == sessionID else { return false }
+        return usage.moveGlance(item.cardID, relativeTo: targetID, placement: placement)
+    }
+}
 
 @available(macOS 14.0, *)
 @MainActor
@@ -33,9 +50,14 @@ struct UsageWorkspaceView: View {
 
 @available(macOS 14.0, *)
 struct UsageCommandCenterSection: View {
+    private static let cardWidth: CGFloat = 236
+    private static let cardPadding: CGFloat = 14
     @ObservedObject var usage: UsageController
     var open: () -> Void
     @State private var showAllWarnings = false
+    @State private var arranging = false
+    @State private var dragSessionID = UUID()
+    @State private var targetedCardID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -52,6 +74,15 @@ struct UsageCommandCenterSection: View {
                         usage.openConnections(); open()
                     }.font(.system(size: 11)).foregroundStyle(Theme.waiting)
                 }
+                if arranging {
+                    Button("Reset order") { withAnimation { usage.resetCardOrder() } }
+                        .disabled(!usage.hasCustomCardOrder).accessibilityIdentifier("usage-reset-card-order")
+                }
+                Button { withAnimation { arranging.toggle() } } label: {
+                    Label(arranging ? "Done" : "Arrange", systemImage: arranging ? "checkmark" : "arrow.left.arrow.right")
+                }.disabled(usage.glances.count < 2 && !arranging)
+                    .help("Drag cards to rearrange, or use the left and right buttons.")
+                    .accessibilityIdentifier("usage-arrange-cards")
                 Button { Task { await usage.refresh() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }.disabled(usage.refreshing).help("Refresh usage").accessibilityIdentifier("usage-refresh")
@@ -75,8 +106,7 @@ struct UsageCommandCenterSection: View {
                 ScrollView(.horizontal, showsIndicators: true) {
                     HStack(spacing: 10) {
                         ForEach(usage.glances) { item in
-                            Button { usage.open(sourceID: item.sourceID); open() } label: { metric(item) }
-                                .buttonStyle(.plain).accessibilityIdentifier("usage-metric-\(item.id)")
+                            reorderableMetric(item)
                         }
                     }.padding(.bottom, 5)
                 }
@@ -95,6 +125,58 @@ struct UsageCommandCenterSection: View {
         .accessibilityIdentifier("usage-command-center")
     }
 
+    private func reorderableMetric(_ item: UsageGlance) -> some View {
+        VStack(spacing: 6) {
+            Button {
+                if !arranging { usage.open(sourceID: item.sourceID); open() }
+            } label: { metric(item) }
+                .buttonStyle(.plain).accessibilityIdentifier("usage-metric-\(item.id)")
+            if arranging {
+                HStack(spacing: 12) {
+                    Button { withAnimation { _ = usage.moveGlance(item.id, by: -1) } } label: { Image(systemName: "arrow.left") }
+                        .disabled(usage.glances.first?.id == item.id)
+                        .accessibilityLabel("Move \(item.title) left").accessibilityIdentifier("usage-move-left-\(item.id)")
+                    Spacer()
+                    Label("Drag to move", systemImage: "line.3.horizontal")
+                        .font(.system(size: 10)).foregroundStyle(Theme.textTertiary)
+                    Spacer()
+                    Button { withAnimation { _ = usage.moveGlance(item.id, by: 1) } } label: { Image(systemName: "arrow.right") }
+                        .disabled(usage.glances.last?.id == item.id)
+                        .accessibilityLabel("Move \(item.title) right").accessibilityIdentifier("usage-move-right-\(item.id)")
+                }.buttonStyle(.plain).foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 12).frame(width: Self.cardWidth, height: 26)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 9))
+        .draggable(UsageCardDrag(sessionID: dragSessionID, cardID: item.id))
+        .dropDestination(for: UsageCardDrag.self) { items, location in
+            withAnimation(.easeInOut(duration: 0.18)) {
+                UsageCardDrag.drop(items, sessionID: dragSessionID, targetID: item.id,
+                    placement: location.x < Self.cardWidth / 2 ? .before : .after, usage: usage)
+            }
+        } isTargeted: { targeted in
+            if targeted { targetedCardID = item.id }
+            else if targetedCardID == item.id { targetedCardID = nil }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(targetedCardID == item.id ? Theme.accent : .clear, lineWidth: 2))
+        .contextMenu {
+            Button("Move left") { withAnimation { _ = usage.moveGlance(item.id, by: -1) } }
+                .disabled(usage.glances.first?.id == item.id)
+            Button("Move right") { withAnimation { _ = usage.moveGlance(item.id, by: 1) } }
+                .disabled(usage.glances.last?.id == item.id)
+            if let first = usage.glances.first {
+                Button("Move to beginning") { withAnimation { _ = usage.moveGlance(item.id, relativeTo: first.id, placement: .before) } }
+                    .disabled(first.id == item.id)
+            }
+            if let last = usage.glances.last {
+                Button("Move to end") { withAnimation { _ = usage.moveGlance(item.id, relativeTo: last.id, placement: .after) } }
+                    .disabled(last.id == item.id)
+            }
+        }
+        .help("Drag to rearrange. \(arranging ? "Use the arrows for one position at a time." : "Click to open usage.")")
+        .accessibilityElement(children: .contain)
+    }
+
     private func metric(_ item: UsageGlance) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Label(item.title, systemImage: item.symbol)
@@ -110,8 +192,8 @@ struct UsageCommandCenterSection: View {
                     }
                 }.frame(height: 3)
             }
-        }.frame(width: 208, height: 101, alignment: .topLeading)
-            .padding(14).background(Theme.surface.opacity(0.65))
+        }.frame(width: Self.cardWidth - Self.cardPadding * 2, height: 101, alignment: .topLeading)
+            .padding(Self.cardPadding).background(Theme.surface.opacity(0.65))
             .clipShape(RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.border.opacity(0.7)))
     }
