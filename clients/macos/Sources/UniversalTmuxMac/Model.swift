@@ -406,6 +406,7 @@ final class AppState: ObservableObject {
     @Published var navigationRevision: UInt64 = 0
     @Published var selection: SessionRef? {
         didSet {
+            if selection != nil { showUsage = false }
             if navigationOrigin != .human {
                 if !Self.isRunningTests { ActivityJournal.shared.selectionChanged(to: nil) }
                 showWeeklyProgress = false
@@ -442,9 +443,13 @@ final class AppState: ObservableObject {
     @Published var findFocusToken = 0     // bumped to (re)focus the find field
     @Published var showPalette = false
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
-    @Published var showOverview = true          // command-center panel is the home view (⇧⌘A); set false when diving into a session
-    @Published var showPlanner = false          // chronological finish-line agenda (⇧⌘P)
-    @Published var showWeeklyProgress = false   // manual project/week research review
+    @Published var showUsage = false
+    // Command Center is home (⇧⌘A). Legacy panel entry points also leave Usage.
+    @Published var showOverview = true { didSet { if showOverview { showUsage = false } } }
+    // Chronological finish-line agenda (⇧⌘P).
+    @Published var showPlanner = false { didSet { if showPlanner { showUsage = false } } }
+    // Manual project/week research review.
+    @Published var showWeeklyProgress = false { didSet { if showWeeklyProgress { showUsage = false } } }
     @Published var renderDocument: RenderDocument? // non-nil → styled/static Render overlay is up
     @Published var renderArtifactContext: ArtifactPanelContext? // immutable panel identity captured with Render
     @Published var renderPDFCaptureInProgress = false // freezes semantic/visual changes during WebKit PDF capture
@@ -630,7 +635,7 @@ final class AppState: ObservableObject {
     // MARK: Todo Maps — per-session checklists that outlive the session.
 
     /// Drives the ⇧⌘D Todo Maps panel.
-    @Published var showTodos = false
+    @Published var showTodos = false { didSet { if showTodos { showUsage = false } } }
     /// Boards keyed by <machine, session> plus one Misc board. Persisted with full item
     /// history (created/completed timestamps), so nothing is lost for later analysis.
     @Published var todoBoards: [TodoBoard] = AppState.loadTodoBoards() {
@@ -728,13 +733,13 @@ final class AppState: ObservableObject {
 
     // MARK: Notes Hub — free-form, time-grouped notes (synced like todos/workflows).
 
-    @Published var showNotes = false
-    @Published var showLedger = false   // in-app Activity Ledger (⇧⌘J), a fleet-wide top-level view
-    @Published var showArtifacts = false // local library of panel renders and screenshots
-    @Published var showWebArtifacts = false // restartable web services saved by agents
+    @Published var showNotes = false { didSet { if showNotes { showUsage = false } } }
+    @Published var showLedger = false { didSet { if showLedger { showUsage = false } } }
+    @Published var showArtifacts = false { didSet { if showArtifacts { showUsage = false } } }
+    @Published var showWebArtifacts = false { didSet { if showWebArtifacts { showUsage = false } } }
     // Argus Lab (⇧⌘L). UT_OPEN_LAB=1 opens it on launch — the hook the
     // screenshot-verification harness uses to capture the real pane.
-    @Published var showLab = ProcessInfo.processInfo.environment["UT_OPEN_LAB"] == "1"
+    @Published var showLab = ProcessInfo.processInfo.environment["UT_OPEN_LAB"] == "1" { didSet { if showLab { showUsage = false } } }
     @Published var notes: [Note] = AppState.loadNotes() {
         // Save locally + stamp on a local edit; the periodic reconcile pushes it (no POST
         // per keystroke). Adopting a remote copy sets applyingRemoteNotes to skip the stamp.

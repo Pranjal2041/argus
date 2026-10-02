@@ -18,6 +18,7 @@ argus context --json
 argus cc list --needs-attention --json
 argus app show session '<session-id>'
 argus app show notes
+argus app show usage
 ```
 
 `cc` aliases `command-center`. Ordinary reads and data mutations do not navigate.

@@ -7,11 +7,12 @@ enum WorkspaceActionOrigin: Equatable { case human, agent(String) }
 /// are deliberately separate actions. No global keyboard/mouse events are used.
 enum WorkspaceDestination: String, CaseIterable {
     case commandCenter = "command-center", session, notes, todos, planner
-    case weeklyProgress = "weekly-progress", artifacts, webArtifacts = "web-artifacts", lab, ledger
+    case weeklyProgress = "weekly-progress", artifacts, webArtifacts = "web-artifacts", lab, ledger, usage
 }
 
 extension AppState {
     var workspaceDestination: WorkspaceDestination {
+        if showUsage { return .usage }
         if showWebArtifacts { return .webArtifacts }
         if showArtifacts { return .artifacts }
         if showWeeklyProgress { return .weeklyProgress }
@@ -39,6 +40,7 @@ extension AppState {
         showPlanner = destination == .planner; showWeeklyProgress = destination == .weeklyProgress
         showArtifacts = destination == .artifacts; showWebArtifacts = destination == .webArtifacts
         showLab = destination == .lab; showLedger = destination == .ledger
+        showUsage = destination == .usage
         renderDocument = nil
         navigationRevision &+= 1
     }
