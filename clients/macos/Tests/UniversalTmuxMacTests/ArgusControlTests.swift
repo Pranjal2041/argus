@@ -242,7 +242,7 @@ final class ArgusControlTests: XCTestCase {
         for view in WorkspaceDestination.allCases where view != .session {
             let response = await call("app.show", ["view": view.rawValue])
             XCTAssertTrue(response.ok); XCTAssertEqual(app.workspaceDestination, view)
-            XCTAssertEqual([app.showNotes, app.showTodos, app.showPlanner, app.showOverview, app.showLab, app.showLedger, app.showWeeklyProgress, app.showArtifacts, app.showWebArtifacts].filter { $0 }.count, 1)
+            XCTAssertEqual([app.showNotes, app.showTodos, app.showPlanner, app.showOverview, app.showLab, app.showLedger, app.showWeeklyProgress, app.showArtifacts, app.showWebArtifacts, app.showUsage].filter { $0 }.count, 1)
         }
     }
 }

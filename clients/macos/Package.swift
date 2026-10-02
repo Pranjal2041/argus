@@ -10,11 +10,13 @@ let package = Package(
         .package(path: "vendor/SwiftTerm"),
     ],
     targets: [
+        .target(name: "UsageKit"),
+        .testTarget(name: "UsageKitTests", dependencies: ["UsageKit"]),
         .target(name: "ArgusProtocol"),
         .executableTarget(name: "argus", dependencies: ["ArgusProtocol"]),
         .executableTarget(
             name: "UniversalTmuxMac",
-            dependencies: ["SwiftTerm", "ArgusProtocol"],
+            dependencies: ["SwiftTerm", "ArgusProtocol", "UsageKit"],
             linkerSettings: [
                 // Embed Info.plist into the binary so macOS honors ATS (and other
                 // Info.plist keys) for this SwiftPM executable — a loose bundle

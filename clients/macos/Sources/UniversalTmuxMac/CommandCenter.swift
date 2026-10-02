@@ -807,6 +807,9 @@ struct CommandCenterView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 glance(needsYou: needsCount, rest: all.count - sessionNeeds.count)
+                if #available(macOS 14.0, *) {
+                    UsageCommandCenterSection(usage: ArgusUsage.shared) { try? state.navigate(to: .usage) }
+                }
                 needsYouBlock(sessions: sessionNeeds, labItems: labNeeds)
                 sectionBlock(1, "Done & idle", .medium, 270, in: all)
                 sectionBlock(2, "Working",     .medium, 270, in: all)

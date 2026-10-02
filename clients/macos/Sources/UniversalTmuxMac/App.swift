@@ -1,6 +1,7 @@
 import AppKit
 import ObjectiveC
 import SwiftUI
+import UsageKit
 
 struct UniversalTmuxApp: App {
     @StateObject private var state = AppState()
@@ -59,6 +60,14 @@ struct UniversalTmuxApp: App {
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
                     browserControl.start(dashboards: dashboards, credentialVault: credentialVault)
+                    if #available(macOS 14.0, *) {
+                        UsageBrowser.open = { url in
+                            dashboards.openURL(url.absoluteString, host: "usage")
+                            state.openWindowRequest = "dashboards"
+                            return true
+                        }
+                        ArgusUsage.shared.start()
+                    }
                     credentialVault.unattendedModeActive = lab.unattendedMode
                     weeklyProgressRemote.start()
                     argusControl.start(state: state, commandCenter: commandCenter, weekly: weeklyProgress, lab: lab)
@@ -79,7 +88,10 @@ struct UniversalTmuxApp: App {
                 Button("About Argus") { showAbout() }
             }
             CommandGroup(replacing: .newItem) {
-                Button("New Session…") { state.showNew = true }
+                Button(state.showUsage ? "Connect Usage Account…" : "New Session…") {
+                    if #available(macOS 14.0, *), state.showUsage { ArgusUsage.shared.addConnection() }
+                    else { state.showNew = true }
+                }
                     .keyboardShortcut("n", modifiers: .command)
             }
             CommandGroup(replacing: .pasteboard) {
@@ -111,6 +123,9 @@ struct UniversalTmuxApp: App {
                     .keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Command Center") { state.showOverview.toggle(); if state.showOverview { state.showPlanner = false; state.showWeeklyProgress = false; state.showTodos = false; state.showNotes = false; state.showLedger = false; state.showLab = false; state.showArtifacts = false; state.showWebArtifacts = false } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                if #available(macOS 14.0, *) {
+                    Button("Usage…") { try? state.navigate(to: .usage) }
+                }
                 Button("Workflows…") { state.showWorkflows = true }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
                 Button("Planner…") {
@@ -156,7 +171,10 @@ struct UniversalTmuxApp: App {
                 .disabled(lab.unattendedModeUpdating)
                 Toggle("Keep This Mac Awake While Locked", isOn: $state.keepAwake)
                 Divider()
-                Button("Refresh Sessions") { state.refreshAll() }
+                Button(state.showUsage ? "Refresh Usage" : "Refresh Sessions") {
+                    if #available(macOS 14.0, *), state.showUsage { Task { await ArgusUsage.shared.refresh() } }
+                    else { state.refreshAll() }
+                }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Filter Sessions") { state.focusSearch() }
                     .keyboardShortcut("l", modifiers: .command)
@@ -196,7 +214,10 @@ struct UniversalTmuxApp: App {
                 Divider()
                 Button("Scroll to Bottom") { terminals.scrollToBottom() }
                     .keyboardShortcut(.downArrow, modifiers: .command)
-                Button("Clear Buffer") { terminals.clearBuffer() }
+                Button(state.showUsage ? "Search Usage" : "Clear Buffer") {
+                    if #available(macOS 14.0, *), state.showUsage { ArgusUsage.shared.search() }
+                    else { terminals.clearBuffer() }
+                }
                     .keyboardShortcut("k", modifiers: .command)
             }
         }
@@ -859,7 +880,7 @@ struct RootView: View {
             // Artifacts is a library destination, not a panel detail. Give it the
             // entire window while preserving the user's normal sidebar setting
             // so closing the library restores the workspace exactly as it was.
-            if state.columns != .detailOnly && !state.showArtifacts && !state.showWebArtifacts && !state.showWeeklyProgress {
+            if state.columns != .detailOnly && !state.showArtifacts && !state.showWebArtifacts && !state.showWeeklyProgress && !state.showUsage {
                 sidebar
                     .frame(width: currentSidebarWidth)
                     .frame(maxHeight: .infinity)
@@ -867,7 +888,10 @@ struct RootView: View {
                 sidebarResizeHandle
             }
             Group {
-                if state.showWebArtifacts {
+                if state.showUsage {
+                    if #available(macOS 14.0, *) { UsageWorkspaceView(usage: ArgusUsage.shared) }
+                    else { Text("Usage requires macOS 14 or newer.") }
+                } else if state.showWebArtifacts {
                     WebArtifactsView()
                 } else if state.showArtifacts {
                     ArtifactsView()
@@ -1898,6 +1922,9 @@ struct CommandPalette: View {
                 RenderLauncher.open(state: state, terminals: terminals)
             }),
             ("calendar", "Open Planner", "⇧⌘P", { state.presentPlanner() }),
+            ("gauge.with.dots.needle.50percent", "Open Usage", "Accounts, limits, spending & storage", {
+                try? state.navigate(to: .usage)
+            }),
             ("chart.bar.doc.horizontal", "Open Weekly Progress", "⇧⌘U", {
                 state.presentWeeklyProgress()
             }),
