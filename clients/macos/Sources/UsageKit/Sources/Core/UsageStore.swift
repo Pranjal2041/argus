@@ -94,6 +94,7 @@ final class UsageStore {
     private(set) var addedSources: [AddedSource]
     private let defaults: UserDefaults
     private var registry: IntegrationRegistry
+    @ObservationIgnored var makeRegistry: @Sendable (IntegrationConfiguration) -> IntegrationRegistry = { .live($0) }
     private let cache: SnapshotCache?
     private let connections: ConnectionRepository
     var connectionDraft: ConnectionDraft?
@@ -107,6 +108,10 @@ final class UsageStore {
     var loginSourceID: String?
     var claudeLoginFlow: ClaudeLoginFlow?
     var claudeAuthorizationCode = ""
+    var devinAuthorizationCode = ""
+    var devinCodeSubmitted = false
+    var devinLoginProcess: (any LoginProcessServing)?
+    @ObservationIgnored var makeDevinAuthenticator: @Sendable (String) -> DevinAuthenticator = { DevinAuthenticator(executable: $0) }
     private var claudeOriginalReference: String?
     private var loginTask: Task<Void, Never>?
 
@@ -167,7 +172,8 @@ final class UsageStore {
                     fresh.append(UsageSource(id: descriptor.sourceID, integration: descriptor.integration, account: descriptor.label,
                                              observedAt: .now, payload: .unavailable(UnavailableUsage(
                                                 title: result.errorTitle,
-                                                message: result.error ?? "The source is unavailable.", needsAuthentication: result.needsAuthentication)), origin: .live))
+                                                message: result.error ?? "The source is unavailable.", needsAuthentication: result.needsAuthentication)), origin: .live,
+                                             accountIdentity: configuration?.sources.first { $0.id == descriptor.sourceID }?.accountIdentity))
                 }
             } else { fresh.append(contentsOf: sources.filter { $0.integration == result.integration && !isAdded($0.id) }) }
         }
@@ -247,7 +253,7 @@ final class UsageStore {
     func reloadConnections(sourceID: String? = nil) async {
         guard !isDemo, !refreshing else { return }
         do {
-            registry = .live(try connections.load())
+            registry = makeRegistry(try connections.load())
             configurationError = nil
             await refresh(sourceID: sourceID)
         } catch { configurationError = "Couldn't load integrations.json. Check its format and try again." }
@@ -274,9 +280,10 @@ final class UsageStore {
         do {
             let previous = configuration?.sources.first { $0.id == draft.sourceID }
             let saved = try connections.save(draft)
-            registry = .live(try connections.load())
+            registry = makeRegistry(try connections.load())
             let identityChanged = previous?.credentialReference != saved.credentialReference
                 || previous?.credentialFile != saved.credentialFile || previous?.codexHome != saved.codexHome
+                || previous?.loginProfile != saved.loginProfile
                 || previous?.environment != saved.environment || previous?.host != saved.host
                 || previous?.mountPaths != saved.mountPaths
             if identityChanged || !saved.enabled { sources.removeAll { $0.id == saved.id } }
@@ -287,6 +294,7 @@ final class UsageStore {
             connectionDraft = nil
             if draft.startsCodexLogin { connectCodex(saved.id, method: draft.codexLoginMethod) }
             else if draft.startsClaudeLogin { connectClaude(saved.id) }
+            else if draft.startsDevinLogin { connectDevin(saved.id) }
             else if saved.enabled { await refresh(sourceID: saved.id) }
             return true
         } catch {
@@ -324,6 +332,71 @@ final class UsageStore {
                 loginMessage = "Account connected."
             } catch is CancellationError { loginMessage = "Sign-in cancelled. Existing logins are unchanged." }
             catch { loginMessage = (error as? IntegrationError)?.errorDescription ?? "Sign-in failed. Existing logins are unchanged." }
+        }
+    }
+
+    func connectAccount(_ sourceID: String) {
+        guard let source = configuration?.sources.first(where: { $0.id == sourceID }), source.enabled,
+              loginSourceID == nil, !refreshing else { return }
+        switch source.integration {
+        case .codex: connectCodex(sourceID)
+        case .claude: connectClaude(sourceID)
+        case .devin: connectDevin(sourceID)
+        default: break
+        }
+    }
+
+    func connectDevin(_ sourceID: String) {
+        guard loginSourceID == nil, let configuration,
+              let source = configuration.sources.first(where: { $0.id == sourceID && $0.integration == .devin && $0.enabled }) else { return }
+        loginSourceID = sourceID; loginInstructions = nil
+        devinAuthorizationCode = ""; devinCodeSubmitted = false
+        loginMessage = "Starting a private Devin sign-in…"
+        loginTask = Task {
+            var profile: AccountProfile?, committed = false
+            defer {
+                loginTask = nil; loginSourceID = nil; loginInstructions = nil
+                devinLoginProcess = nil; devinAuthorizationCode = ""; devinCodeSubmitted = false
+                // The authenticator stops its owned process before returning,
+                // including cancellation. Failed attempts cannot modify the old
+                // profile or leave an abandoned signed-in credential behind.
+                if !committed, let profile { try? FileManager.default.removeItem(at: profile.root) }
+            }
+            do {
+                let created = try AccountProfile.create(in: connections.profilesDirectory)
+                profile = created
+                let login = try await makeDevinAuthenticator(configuration.executables.devin).signIn(profile: created) { [weak self] url, process in
+                    await self?.showDevinPrompt(url: url, process: process, label: source.label)
+                }
+                while refreshing { try await Task.sleep(for: .milliseconds(50)) }
+                try Task.checkCancellation()
+                try AccountProfileCommit.save(login, sourceID: sourceID, integration: .devin,
+                    originalProfile: source.accountProfile, repository: connections)
+                committed = true
+                sources.removeAll { $0.id == sourceID }
+                await reloadConnections(sourceID: sourceID)
+                loginMessage = "Devin account connected as \(login.identity)."
+            } catch is CancellationError { loginMessage = "Sign-in cancelled. Existing accounts are unchanged." }
+            catch { loginMessage = (error as? IntegrationError)?.errorDescription ?? "Devin sign-in failed. Start a new sign-in and try again." }
+        }
+    }
+
+    private func showDevinPrompt(url: URL, process: any LoginProcessServing, label: String) {
+        guard !Task.isCancelled else { process.cancel(); return }
+        devinLoginProcess = process
+        loginInstructions = CodexLoginInstructions(url: url, userCode: nil, browserOpened: false)
+        loginMessage = "Open the sign-in page, choose the Devin account for \(label), and paste its code below."
+    }
+
+    func finishDevinLogin() {
+        guard let process = devinLoginProcess, !devinCodeSubmitted else { return }
+        do {
+            try process.sendCode(devinAuthorizationCode)
+            devinAuthorizationCode = ""; devinCodeSubmitted = true
+            loginMessage = "Verifying this Devin account…"
+        } catch {
+            devinAuthorizationCode = ""
+            loginMessage = (error as? IntegrationError)?.errorDescription ?? "The sign-in prompt ended. Cancel and start again."
         }
     }
 
@@ -368,6 +441,7 @@ final class UsageStore {
     }
 
     func cancelLogin() {
+        devinAuthorizationCode = ""
         loginTask?.cancel()
         if claudeLoginFlow != nil && loginTask == nil {
             claudeLoginFlow = nil; claudeOriginalReference = nil; claudeAuthorizationCode = ""

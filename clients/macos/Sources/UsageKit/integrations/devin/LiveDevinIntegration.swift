@@ -1,7 +1,7 @@
 import Foundation
 
-/// Read-only CLI boundary: the installed CLI owns credentials and enterprise
-/// routing. Never send a prompt, create a session, or scrape its credential store.
+/// Read-only CLI boundary: the CLI owns credentials and enterprise routing,
+/// but account selection is always the connection's explicit private profile.
 @available(macOS 14.0, *)
 struct LiveDevinIntegration: UsageIntegration {
     let id = IntegrationID.devin
@@ -12,23 +12,30 @@ struct LiveDevinIntegration: UsageIntegration {
 
     func fetchSources() async throws -> [UsageSource] {
         guard FileManager.default.isExecutableFile(atPath: executable) else {
-            throw IntegrationError.configuration("Install Devin CLI, then run devin auth login. Its signed-in account supplies this connection.")
+            throw IntegrationError.configuration("Install Devin CLI, then sign in to this account in Connections.")
         }
+        guard let path = configuration.accountProfile else {
+            throw IntegrationError.authentication("Sign in to this Devin account in Connections. Each connection has its own private login.")
+        }
+        let profile = try AccountProfile(path: path)
         let result = try await runner.run(executable: executable, arguments: ["auth", "status"],
-            environment: ["NO_COLOR": "1"], timeout: 30)
+            environment: profile.environment, timeout: 30)
         guard result.status == 0 else {
-            throw IntegrationError.authentication("Devin CLI could not check this account. Run devin auth status, then sign in if needed.")
+            throw IntegrationError.authentication("Devin CLI could not check this account. Sign in again in Connections.")
         }
         return [try Self.normalize(String(decoding: result.stdout + result.stderr, as: UTF8.self), configuration: configuration, now: .now)]
     }
 
-    static func normalize(_ text: String, configuration: SourceConfiguration, now: Date) throws -> UsageSource {
+    static func normalize(_ output: String, configuration: SourceConfiguration, now: Date) throws -> UsageSource {
+        let text = DevinOutput.plain(output)
+        let email = DevinOutput.captures("(?im)^\\s*Email:\\s*(\\S+)$", text).first
+        try configuration.validateAccountIdentity(email)
         guard text.localizedCaseInsensitiveContains("Logged in") && !text.localizedCaseInsensitiveContains("Not logged in") else {
-            throw IntegrationError.authentication("Sign in with devin auth login, then check this connection again.")
+            throw IntegrationError.authentication("Sign in to this Devin account in Connections, then check it again.")
         }
         guard !text.localizedCaseInsensitiveContains("Failed to fetch quota"),
               !text.localizedCaseInsensitiveContains("No quota data"), !text.localizedCaseInsensitiveContains("Timed out fetching quota") else {
-            throw IntegrationError.unavailable("Devin is signed in, but its CLI could not fetch account quota. Check devin auth status; the last successful reading is preserved.")
+            throw IntegrationError.unavailable("This Devin account is signed in, but its CLI could not fetch quota. The last successful reading is preserved.")
         }
         // The CLI has no JSON auth-status flag. Only explicitly labeled remaining
         // percentages or a consumed/limit ACU pair count as evidence. Unknown
@@ -46,13 +53,12 @@ struct LiveDevinIntegration: UsageIntegration {
             windows.append(QuotaWindow(label: "Billing cycle", usedPercent: used / limit * 100, resetsAt: nil, durationMinutes: nil))
         }
         guard !windows.isEmpty else {
-            throw IntegrationError.unavailable("Devin CLI did not report a readable account limit. Check devin auth status or your organization's usage page. Unreported limits stay unknown.")
+            throw IntegrationError.unavailable("This Devin account is signed in, but the CLI did not report a readable account limit. Unreported limits stay unknown.")
         }
         let plan = captures("(?im)^\\s*Plan:\\s*(.+)$", text).first
-        let email = captures("(?im)^\\s*Email:\\s*(\\S+)$", text).first
         return UsageSource(id: configuration.id, integration: .devin, account: configuration.label, observedAt: now,
             payload: .quota(QuotaUsage(windows: windows, plan: plan)), origin: .live,
-            notes: ["Read from devin auth status. This connection follows the account signed into the local CLI. No model run is started; unreported reset times remain unknown."], accountIdentity: email)
+            notes: ["Read from this connection's private Devin CLI profile. No model run is started; unreported reset times remain unknown."], accountIdentity: email ?? configuration.accountIdentity)
     }
 
     private static func captures(_ pattern: String, _ text: String) -> [String] {

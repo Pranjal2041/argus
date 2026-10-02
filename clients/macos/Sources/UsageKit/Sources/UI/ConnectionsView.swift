@@ -15,7 +15,10 @@ struct ConnectionsView: View {
                     if store.loginSourceID != nil { ProgressView().controlSize(.small) }
                     Text(message).font(.system(size: 12)).foregroundStyle(Palette.secondary)
                     Spacer()
-                    if store.loginSourceID != nil { Button("Cancel sign-in") { store.cancelLogin() }.buttonStyle(SecondaryButtonStyle()) }
+                    if store.loginSourceID != nil {
+                        Button("Cancel sign-in") { store.cancelLogin() }.buttonStyle(SecondaryButtonStyle())
+                            .accessibilityIdentifier("cancel-account-sign-in")
+                    }
                   }
                   if let instructions = store.loginInstructions {
                     HStack(spacing: 12) {
@@ -25,6 +28,7 @@ struct ConnectionsView: View {
                         }
                         Link(instructions.userCode == nil ? "Open sign-in page" : "Open authorization page", destination: instructions.url)
                             .font(.system(size: 12))
+                            .accessibilityIdentifier("open-account-sign-in")
                         Button("Copy link") { copy(instructions.url.absoluteString) }.buttonStyle(SecondaryButtonStyle())
                     }
                     if instructions.userCode != nil {
@@ -41,7 +45,20 @@ struct ConnectionsView: View {
                             .accessibilityIdentifier("finish-claude-login")
                     }
                   }
+                  if store.devinLoginProcess != nil {
+                    HStack(spacing: 12) {
+                        SecureField("Code from the Devin sign-in page", text: $store.devinAuthorizationCode)
+                            .textFieldStyle(.roundedBorder).disabled(store.devinCodeSubmitted)
+                            .accessibilityIdentifier("devin-authorization-code")
+                        Button("Finish sign-in") { store.finishDevinLogin() }
+                            .buttonStyle(PrimaryButtonStyle())
+                            .disabled(store.devinAuthorizationCode.isEmpty || store.devinCodeSubmitted)
+                            .accessibilityIdentifier("finish-devin-login")
+                    }
+                  }
                 }.padding(16).background(Palette.inset).clipShape(RoundedRectangle(cornerRadius: 9))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("account-sign-in")
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 440), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
                 ForEach(IntegrationID.allCases) { integration in
@@ -86,6 +103,7 @@ struct ConnectionsView: View {
               }.padding(.vertical, 10)
             }.font(.system(size: 11)).foregroundStyle(Palette.secondary)
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("connections-page")
     }
 
@@ -103,20 +121,15 @@ struct ConnectionsView: View {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(configuration.label).font(.system(size: 12, weight: .semibold))
-                    if let identity = source?.accountIdentity {
+                    if let identity = source?.accountIdentity ?? configuration.accountIdentity {
                         Text(identity).font(.system(size: 10)).foregroundStyle(Palette.secondary).textSelection(.enabled)
                     }
                 }
                 Spacer()
                 SoftBadge(text: !configuration.enabled ? "Disabled" : (needsWork ? (source?.isStale == true ? "Cached" : (source?.hasLimitedAccess == true ? "Limited access" : "Needs setup")) : (source == nil ? "Waiting" : "Connected")),
                           symbol: needsWork ? "exclamationmark.circle" : "checkmark.circle", warning: needsWork)
-                if configuration.integration == .codex {
-                    Button(source?.quota == nil ? "Sign in" : "Change account") { store.connectCodex(configuration.id) }
-                        .buttonStyle(SecondaryButtonStyle()).disabled(store.loginSourceID != nil || store.refreshing || !configuration.enabled)
-                        .accessibilityIdentifier("connect-\(configuration.id)")
-                }
-                if configuration.integration == .claude {
-                    Button(configuration.credentialReference == nil ? "Sign in" : "Change account") { store.connectClaude(configuration.id) }
+                if configuration.integration.supportsAccountSignIn {
+                    Button(configuration.hasSavedAccount ? "Change account" : "Sign in") { store.connectAccount(configuration.id) }
                         .buttonStyle(SecondaryButtonStyle()).disabled(store.loginSourceID != nil || store.refreshing || !configuration.enabled)
                         .accessibilityIdentifier("connect-\(configuration.id)")
                 }
@@ -145,6 +158,8 @@ struct ConnectionsView: View {
                 Text("Using existing credential file").font(.system(size: 10)).foregroundStyle(Palette.tertiary).help(file)
             } else if let profile = configuration.codexHome {
                 Text("Separate Codex login profile").font(.system(size: 10)).foregroundStyle(Palette.tertiary).help(profile)
+            } else if let profile = configuration.loginProfile {
+                Text("Private \(configuration.integration.name) login profile").font(.system(size: 10)).foregroundStyle(Palette.tertiary).help(profile)
             } else if let host = configuration.host {
                 Text("UT host · \(host)").font(.system(size: 10)).foregroundStyle(Palette.secondary)
             }

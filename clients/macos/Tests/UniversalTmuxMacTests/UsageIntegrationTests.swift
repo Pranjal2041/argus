@@ -113,6 +113,70 @@ final class UsageIntegrationTests: XCTestCase {
         return (window, host)
     }
 
+    func testNativeDevinAccountSignInAndReplacementControls() async throws {
+        guard ProcessInfo.processInfo.environment["UT_USAGE_VISUAL_QA"] == "1" else { throw XCTSkip("Opt-in native UI; fixture authentication only") }
+        _ = NSApplication.shared
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("argus-devin-ui-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "argus.devin.visual.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = SourceConfiguration(id: "devin-fleet", integration: .devin, label: "Fleet")
+        var second = SourceConfiguration(id: "devin-personal", integration: .devin, label: "Personal")
+        second.loginProfile = directory.appendingPathComponent("personal").path; second.accountIdentity = "personal@example.test"
+        let config = IntegrationConfiguration(sources: [first, second])
+        let url = directory.appendingPathComponent("config.json")
+        try config.save(to: url)
+        let store = UsageStore(registry: IntegrationRegistry(adapters: [], origin: .live, configuration: config), defaults: defaults,
+            cache: SnapshotCache(url: directory.appendingPathComponent("cache.json")),
+            connections: ConnectionRepository(url: url, profilesDirectory: directory.appendingPathComponent("profiles")))
+        store.makeRegistry = { config in
+            IntegrationRegistry(adapters: config.sources.map { VisualDevinAccount(configuration: $0) }, origin: .live, configuration: config)
+        }
+        store.makeDevinAuthenticator = { executable in
+            DevinAuthenticator(executable: executable, runner: VisualDevinStatus(), makeSession: { _, environment in
+                VisualDevinLogin(profile: URL(fileURLWithPath: environment["HOME"]!))
+            })
+        }
+        let controller = UsageController(store: store, defaults: defaults)
+        controller.openConnections()
+        let (window, host) = mount(UsageDashboard(controller: controller), width: 1200, height: 850)
+        defer { window.close(); store.cancelLogin() }
+        try await settle()
+        XCTAssertTrue(press(host, identifier: "edit-devin-fleet"))
+        try await settle(); try capture(host, name: "devin-edit-account")
+        XCTAssertTrue(press(host, identifier: "save-connection"), "An unsigned Devin row must offer native sign-in")
+        try await settle()
+        XCTAssertNotNil(store.devinLoginProcess)
+        try capture(host, name: "devin-sign-in")
+        var opened: URL?
+        let previousBrowser = UsageBrowser.open
+        UsageBrowser.open = { opened = $0; return true }
+        defer { UsageBrowser.open = previousBrowser }
+        XCTAssertTrue(press(host, identifier: "open-account-sign-in"))
+        XCTAssertEqual(opened?.host, "app.devin.ai", "The sign-in link must route through the host browser integration")
+        store.devinAuthorizationCode = "fixture-only-code"
+        try await settle()
+        XCTAssertTrue(press(host, identifier: "finish-devin-login"))
+        for _ in 0..<100 where store.loginSourceID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await settle()
+        let saved = try IntegrationConfiguration.load(from: url)
+        let profile = try XCTUnwrap(saved.sources[0].loginProfile)
+        XCTAssertEqual(saved.sources[0].accountIdentity, "fleet@example.test")
+        XCTAssertEqual(saved.sources[1].loginProfile, second.loginProfile)
+        XCTAssertEqual(saved.sources[1].accountIdentity, second.accountIdentity)
+        XCTAssertEqual(store.devinAuthorizationCode, "")
+        try capture(host, name: "devin-connected-accounts")
+        XCTAssertTrue(press(host, identifier: "edit-devin-fleet"))
+        try await settle(); try capture(host, name: "devin-change-account")
+        XCTAssertTrue(press(host, identifier: "change-account-devin-fleet"))
+        try await settle()
+        XCTAssertTrue(press(host, identifier: "cancel-account-sign-in"))
+        for _ in 0..<100 where store.loginSourceID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(try IntegrationConfiguration.load(from: url).sources[0].loginProfile, profile)
+    }
+
     private func settle() async throws { try await Task.sleep(for: .milliseconds(300)) }
 
     private func capture(_ view: NSView, name: String) throws {
@@ -143,4 +207,45 @@ final class UsageIntegrationTests: XCTestCase {
         }
         return false
     }
+}
+
+@available(macOS 14.0, *)
+private struct VisualDevinStatus: CommandRunning {
+    func run(executable: String, arguments: [String], environment: [String: String], timeout: Double) async throws -> CommandOutput {
+        CommandOutput(status: 0, stdout: Data("Logged in\nEmail: fleet@example.test\nPlan: Enterprise\n".utf8), stderr: Data())
+    }
+}
+
+@available(macOS 14.0, *)
+private struct VisualDevinAccount: UsageIntegration {
+    let id = IntegrationID.devin
+    let configuration: SourceConfiguration
+    var descriptor: IntegrationDescriptor? { configuration.descriptor }
+    func fetchSources() async throws -> [UsageSource] {
+        [UsageSource(id: configuration.id, integration: .devin, account: configuration.label, observedAt: .now,
+            payload: .quota(QuotaUsage(windows: [QuotaWindow(label: "Weekly", usedPercent: 32, durationMinutes: 10080)])),
+            origin: .live, accountIdentity: configuration.accountIdentity)]
+    }
+}
+
+@available(macOS 14.0, *)
+private final class VisualDevinLogin: LoginProcessServing, @unchecked Sendable {
+    let events: AsyncThrowingStream<LoginProcessEvent, Error>
+    let continuation: AsyncThrowingStream<LoginProcessEvent, Error>.Continuation
+    let profile: URL
+    init(profile: URL) {
+        let stream = AsyncThrowingStream<LoginProcessEvent, Error>.makeStream()
+        events = stream.stream; continuation = stream.continuation; self.profile = profile
+    }
+    func start() throws {
+        continuation.yield(.output(Data("Visit https://app.devin.ai/auth/cli/continue?state=fixture&code_challenge=fixture&code_challenge_method=S256 to sign in.\n".utf8)))
+    }
+    func sendCode(_ code: String) throws {
+        let directory = profile.appendingPathComponent("data/devin")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("fixture-only".utf8).write(to: directory.appendingPathComponent("credentials.toml"))
+        continuation.yield(.exited(0)); continuation.finish()
+    }
+    func cancel() { continuation.finish(throwing: CancellationError()) }
+    func close() async { cancel() }
 }

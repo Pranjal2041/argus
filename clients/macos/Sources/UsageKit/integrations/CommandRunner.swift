@@ -38,12 +38,7 @@ private final class ProcessOperation: @unchecked Sendable {
     init(executable: String, arguments: [String], environment: [String: String], timeout: Double) {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        var inherited = ProcessInfo.processInfo.environment
-        // Do not pass unrelated API credentials to subprocesses.
-        inherited = inherited.filter { !($0.key.hasSuffix("API_KEY") || $0.key.hasSuffix("TOKEN_SECRET") || $0.key.hasSuffix("TOKEN_ID")) }
-        inherited.merge(environment) { _, new in new }
-        inherited["NO_COLOR"] = "1"
-        process.environment = inherited
+        process.environment = UsageProcessEnvironment.make(overrides: environment)
         process.currentDirectoryURL = IntegrationConfiguration.directory
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output; process.standardError = errors

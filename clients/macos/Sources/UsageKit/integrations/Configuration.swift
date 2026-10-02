@@ -11,6 +11,8 @@ struct SourceConfiguration: Identifiable, Codable, Sendable {
     var credentialReference: String?
     var credentialVariables: [String: String] = [:]
     var codexHome: String?
+    var loginProfile: String?
+    var accountIdentity: String?
     var environment: String?
     var host: String?
     var mountPaths: [String]?
@@ -24,7 +26,7 @@ struct SourceConfiguration: Identifiable, Codable, Sendable {
 @available(macOS 14.0, *)
 extension SourceConfiguration {
     private enum CodingKeys: String, CodingKey {
-        case id, integration, label, enabled, credentialFile, credentialReference, credentialVariables, codexHome, environment, host, mountPaths, budgetUSD
+        case id, integration, label, enabled, credentialFile, credentialReference, credentialVariables, codexHome, loginProfile, accountIdentity, environment, host, mountPaths, budgetUSD
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -36,6 +38,8 @@ extension SourceConfiguration {
         credentialReference = try values.decodeIfPresent(String.self, forKey: .credentialReference)
         credentialVariables = try values.decodeIfPresent([String: String].self, forKey: .credentialVariables) ?? [:]
         codexHome = try values.decodeIfPresent(String.self, forKey: .codexHome)
+        loginProfile = try values.decodeIfPresent(String.self, forKey: .loginProfile)
+        accountIdentity = try values.decodeIfPresent(String.self, forKey: .accountIdentity)
         environment = try values.decodeIfPresent(String.self, forKey: .environment)
         host = try values.decodeIfPresent(String.self, forKey: .host)
         mountPaths = try values.decodeIfPresent([String].self, forKey: .mountPaths)

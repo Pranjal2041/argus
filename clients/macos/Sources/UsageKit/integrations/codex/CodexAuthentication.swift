@@ -79,12 +79,8 @@ struct CodexAuthenticator: Sendable {
     /// Re-read before committing so a long sign-in cannot overwrite unrelated config edits.
     static func save(_ login: CodexLogin, sourceID: String, originalProfile: String,
                      to url: URL = IntegrationConfiguration.file) throws {
-        var latest = try IntegrationConfiguration.load(from: url)
-        guard let index = latest.sources.firstIndex(where: { $0.id == sourceID && $0.integration == .codex }),
-              latest.sources[index].codexHome == originalProfile else {
-            throw IntegrationError.configuration("The account configuration changed during sign-in. Reload Connections before retrying.")
-        }
-        latest.sources[index].codexHome = login.profile
-        try latest.save(to: url)
+        try AccountProfileCommit.save(VerifiedProfileLogin(profile: login.profile, identity: login.email),
+            sourceID: sourceID, integration: .codex, originalProfile: originalProfile,
+            repository: ConnectionRepository(url: url))
     }
 }

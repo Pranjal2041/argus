@@ -23,7 +23,7 @@ extension IntegrationID {
         case .openaiAPI: "Organization costs require an admin key with api.usage.read. A normal project or person key cannot read billing."
         case .codex: "Sign in with ChatGPT in UT Browser, or use a device code. Argus keeps a separate profile and never signs out your existing CLI accounts."
         case .claude: "Connect each Claude subscription separately. Open the sign-in link, choose this account, and paste the returned code here. Usage saves its own login in Keychain, independent of your Claude Code terminal accounts."
-        case .devin: "Uses the account already signed into Devin CLI on this Mac. Sign in with devin auth login first. Argus reads devin auth status without starting a session or consuming quota; unavailable limits stay unknown."
+        case .devin: "Sign in with Devin in UT Browser, then paste the returned code here. Each connection has its own private CLI login. Changing this account never switches your terminal's Devin account or another connection."
         case .macStorage: "Read capacity from a local volume. No folders are scanned and no files are changed."
         case .windowsStorage: "Read Windows drive capacity through an existing UT connection. Enter the machine's UT host name."
         }
@@ -40,6 +40,7 @@ struct ConnectionDraft: Identifiable, Sendable {
     var enabled = true
     var credentials: [String: String] = [:]
     var hasSavedCredentials = false
+    var hasSavedProfile = false
     var environment = "main"
     var host = ""
     var mountPath = "/System/Volumes/Data"
@@ -52,6 +53,7 @@ struct ConnectionDraft: Identifiable, Sendable {
     init(source: SourceConfiguration) {
         sourceID = source.id; integration = source.integration; label = source.label; enabled = source.enabled
         hasSavedCredentials = source.credentialReference != nil || source.credentialFile != nil
+        hasSavedProfile = source.accountProfile != nil
         environment = source.environment ?? "main"; host = source.host ?? ""
         mountPath = source.mountPaths?.joined(separator: "\n") ?? "/System/Volumes/Data"
         budget = source.budgetUSD.map { String($0) } ?? ""
@@ -59,6 +61,8 @@ struct ConnectionDraft: Identifiable, Sendable {
     }
     var startsCodexLogin: Bool { integration == .codex && !useExistingCodexProfile && enabled }
     var startsClaudeLogin: Bool { integration == .claude && enabled && !hasSavedCredentials }
+    var startsDevinLogin: Bool { integration == .devin && enabled && !hasSavedProfile }
+    var startsAccountLogin: Bool { startsCodexLogin || startsClaudeLogin || startsDevinLogin }
 }
 
 /// Persists a single connection without altering other accounts or their original dotenv files.

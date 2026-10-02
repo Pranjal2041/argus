@@ -44,9 +44,13 @@ For cutover, quit standalone Usage before starting the new Argus build so both a
 
 ## Devin CLI
 
-The additional adapter executes only `devin auth status` with a timeout and `NO_COLOR=1`. The installed CLI owns authentication and enterprise routing. Argus does not read its API key, start a session, send a prompt, or call undocumented Devin endpoints.
+Background reading executes only `devin auth status` with a timeout and `NO_COLOR=1`. Each connection supplies its own `HOME` and XDG data/config/cache directories. Ambient provider tokens are not inherited. A missing private profile requires sign-in and never falls back to the account in the user's terminal.
 
-The default executable is `~/.local/bin/devin`, configurable through `executables.devin`. An installed, signed-in CLI is discovered when initializing the normal Argus configuration. A connection can also be added in Connections. This connection follows the CLI's current account; it is not an independent Devin login profile.
+The default executable is `~/.local/bin/devin`, configurable through `executables.devin`. Connections supports **Sign in with Devin CLI**, **Change account**, and separate account identities. Sign-in opens a link in UT Browser; the user pastes its code into Argus's secure code field. The CLI handles PKCE, token exchange, and enterprise routing through `devin auth login --force-manual-token-flow` in a private, owned prompt terminal. That terminal is not a tmux/broker session, never receives global keyboard input, and has no model run. Argus does not read the CLI API key or call undocumented endpoints.
+
+Every attempt uses a new owner-only profile directory. Only verified identities are committed. The shared profile-commit contract, also used by Codex, rejects duplicate identities, shared roots, stale configuration, and disabled/removed connections. A failed or cancelled attempt stops its owned process and deletes only its temporary profile; the previous account and other connections remain unchanged. New private profiles and identity metadata survive Argus restarts. Changing the terminal's default Devin login no longer changes these connections.
+
+Existing Devin connections from the initial integration retain their labels but need **Sign in** once to establish an independent account. No default CLI credentials are copied, overwritten, or signed out.
 
 Only explicit daily/weekly remaining percentages or a reported consumed/limit ACU pair become quota measurements. Missing reset times stay unknown. Unrecognized output and quota failures use the shared unavailable/cached-reading behavior, never a fabricated balance.
 
@@ -59,6 +63,6 @@ swift test --package-path clients/macos --filter 'UsageKitTests|UsageIntegration
 UT_USAGE_VISUAL_QA=1 swift test --package-path clients/macos --filter UsageIntegrationTests
 ```
 
-The opt-in visual test mounts the actual SwiftUI views with fixture data, presses native accessibility controls, and captures `/tmp/argus-usage-*.png`. It covers Command Center dismissal/open, full and compact account navigation, warning restoration, and provider selection in the light-mode connection editor. It does not use real credentials or contact providers.
+The opt-in visual test opens real native windows, mounts the actual SwiftUI views with fixture data, presses native accessibility controls, and captures `/tmp/argus-usage-*.png`. Run it only after arranging an approved desktop-testing window with the user. It covers Command Center dismissal/open, full and compact account navigation, warning restoration, provider selection, Devin code entry, verified account replacement and cancellation. It does not use real credentials or contact providers. `UT_DEVIN_CLI_PROBE=1` additionally starts and cancels the installed CLI's sign-in prompt in an empty private profile, without opening a browser or entering a login code.
 
 The shared tests cover independent accounts, partial failures, credentials and rollback, quota/billing normalization, migration, alert reset/recovery/freshness, persistent settings, and single-loop ownership. The source app's tests are preserved alongside the new integration tests.

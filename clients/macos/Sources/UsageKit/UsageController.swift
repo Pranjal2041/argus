@@ -50,7 +50,7 @@ public final class UsageController: ObservableObject {
                 if !config.sources.contains(where: { $0.integration == .devin }),
                    FileManager.default.isExecutableFile(atPath: config.executables.devin),
                    FileManager.default.fileExists(atPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/devin/credentials.toml").path) {
-                    config.sources.append(SourceConfiguration(id: "devin-\(UUID().uuidString.lowercased())", integration: .devin, label: "CLI account"))
+                    config.sources.append(SourceConfiguration(id: "devin-\(UUID().uuidString.lowercased())", integration: .devin, label: "Devin account"))
                     try config.save()
                 }
             } catch { importError = "The existing Usage configuration could not be imported. Its files are unchanged. Check Connections before adding accounts." }

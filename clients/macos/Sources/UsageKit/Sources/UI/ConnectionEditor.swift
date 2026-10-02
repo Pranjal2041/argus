@@ -7,8 +7,7 @@ struct ConnectionEditor: View {
 
     private var busy: Bool { store.savingConnection || store.refreshing || store.loginSourceID != nil }
     private var actionTitle: String {
-        if draft.startsCodexLogin { return "Sign in with ChatGPT" }
-        if draft.startsClaudeLogin { return "Sign in with Claude" }
+        if draft.startsAccountLogin { return draft.integration.signInTitle }
         return draft.sourceID == nil ? (draft.integration.category == .devices ? "Connect device" : "Connect account") : "Save changes"
     }
 
@@ -104,6 +103,22 @@ struct ConnectionEditor: View {
                 }
                 if draft.integration == .windowsStorage {
                     field("UT machine name") { TextField("DESKTOP-EXAMPLE", text: $draft.host).accessibilityIdentifier("connection-host") }
+                }
+                if draft.integration.supportsAccountSignIn, let sourceID = draft.sourceID, draft.hasSavedProfile || draft.hasSavedCredentials {
+                    HStack(spacing: 12) {
+                        if let identity = store.configuration?.sources.first(where: { $0.id == sourceID })?.accountIdentity {
+                            Label(identity, systemImage: "person.crop.circle.badge.checkmark")
+                                .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                        }
+                        Spacer()
+                        Button("Change account…") {
+                            Task {
+                                guard await store.saveConnection(draft) else { return }
+                                store.connectAccount(sourceID)
+                            }
+                        }.buttonStyle(SecondaryButtonStyle()).disabled(busy || !draft.enabled)
+                            .accessibilityIdentifier("change-account-\(sourceID)")
+                    }
                 }
                 if draft.integration == .macStorage {
                     field("Volume path · one per line") { TextField("/System/Volumes/Data", text: $draft.mountPath, axis: .vertical).lineLimit(1...3) }

@@ -24,6 +24,7 @@ struct LiveCodexIntegration: UsageIntegration {
     }
 
     static func normalize(account: JSONValue, rates: JSONValue, configuration: SourceConfiguration, now: Date) throws -> UsageSource {
+        try configuration.validateAccountIdentity(account["email"].string)
         let buckets = rates["rateLimitsByLimitId"].object ?? [:]
         let main = buckets["codex"] ?? rates["rateLimits"]
         guard main.object != nil else { throw IntegrationError.invalidResponse("Codex did not report any quota information.") }

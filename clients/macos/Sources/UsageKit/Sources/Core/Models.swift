@@ -55,7 +55,7 @@ enum IntegrationID: String, CaseIterable, Codable, Sendable, Identifiable {
         case .openaiAPI: "API spending and project breakdowns"
         case .codex: "Account limits and reset windows"
         case .claude: "Five-hour, weekly, and model limits"
-        case .devin: "Quota from your signed-in Devin CLI account"
+        case .devin: "Independent Devin accounts and quota windows"
         case .macStorage: "Drive capacity and storage on your Mac"
         case .windowsStorage: "Available space across Windows drives"
         }
