@@ -30,6 +30,7 @@ Warnings are based on normalized measurements, not provider-specific UI logic:
 - Each category can be disabled or assigned its own threshold; individual sources can be muted.
 - Model-specific windows are opt-in. Every main quota window is evaluated independently, even if the summary displays a weekly average.
 - Dismissals persist across refresh and relaunch until reset or a fresh recovery above the threshold. A later critically low reading can re-alert.
+- Quota dismissals keep their original cycle boundary through reset-time estimate changes. With a reported period, the nearest nominal cycle determines renewal; without one, a changed deadline cannot rearm the warning before the original boundary passes. Missing reset metadata preserves the dismissal, and its first reported boundary is adopted without re-alerting.
 - Snooze supports one, four, or twenty-four hours. **Restore dismissed warnings** clears all dismissals.
 - Unavailable, stale, expired, or over-age readings never trigger warnings. Missing data does not erase an existing dismissal. Prior-month budget readings cannot be assigned to the new month's alert cycle.
 

@@ -324,6 +324,51 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertEqual(store.selection?.sourceID, "devin-personal")
     }
 
+    func testNativeWarningDismissalSurvivesResetEstimateChanges() async throws {
+        guard ProcessInfo.processInfo.environment["UT_USAGE_VISUAL_QA"] == "1" else {
+            throw XCTSkip("Opt-in native UI; requires an approved desktop-testing window")
+        }
+        _ = NSApplication.shared
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        let suite = "argus.warning-episode.visual.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let boundary = Date(timeIntervalSince1970: floor(Date.now.timeIntervalSince1970) + 3600)
+        func sources(offset: Double, renewed: Bool = false) -> [UsageSource] {
+            [(IntegrationID.claude, 10080), (.codex, 300)].map { provider, minutes in
+                UsageSource(id: provider.rawValue, integration: provider, account: "Work", observedAt: .now,
+                    payload: .quota(QuotaUsage(windows: [QuotaWindow(label: minutes == 10080 ? "Weekly" : "5-hour", usedPercent: 98,
+                        resetsAt: boundary.addingTimeInterval(offset + (renewed ? Double(minutes) * 60 : 0)), durationMinutes: minutes)])), origin: .live)
+            }
+        }
+        let store = UsageStore(defaults: defaults)
+        store.sources = sources(offset: -0.289)
+        store.didLoad = true
+        let controller = UsageController(store: store, defaults: defaults)
+        XCTAssertEqual(controller.warnings.count, 2)
+        let (window, host) = mount(UsageCommandCenterSection(usage: controller) {}
+            .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 1100, height: 550)
+        defer { window.close() }
+        try await settle(); try capture(host, name: "warning-episode-before")
+        for warning in controller.warnings {
+            XCTAssertTrue(press(host, identifier: "usage-dismiss-\(warning.id)"))
+            try await settle()
+        }
+        XCTAssertTrue(controller.warnings.isEmpty)
+        for offset in [0.072, -1.2, 1.5] {
+            store.sources = sources(offset: offset)
+            controller.reconcile()
+            XCTAssertTrue(controller.warnings.isEmpty)
+        }
+        let restored = UsageController(store: store, defaults: defaults)
+        XCTAssertTrue(restored.warnings.isEmpty)
+        try await settle(); try capture(host, name: "warning-episode-dismissed")
+        store.sources = sources(offset: 0.072, renewed: true)
+        controller.reconcile()
+        XCTAssertEqual(controller.warnings.count, 2)
+        try await settle(); try capture(host, name: "warning-episode-rearmed")
+    }
+
     private func settle() async throws {
         // Let native spring animations finish before inspecting or capturing their layout.
         try await Task.sleep(for: .milliseconds(800))
