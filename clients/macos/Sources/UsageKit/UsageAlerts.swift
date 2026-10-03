@@ -52,6 +52,27 @@ struct UsageMeasurement {
     var cycle: String
     var resetsAt: Date?
     var driveID: String?
+    var cycleDuration: TimeInterval?
+
+    func continuesDismissedCycle(_ recorded: String, now: Date) -> Bool {
+        guard kind == .quota else { return cycle == recorded }
+        if cycle == recorded || recorded == "unreported" { return true }
+        guard let previousReset = TimeInterval(recorded), previousReset.isFinite else { return false }
+        // Losing reset metadata is not evidence that the quota renewed.
+        guard let reset = resetsAt else { return true }
+        let advance = reset.timeIntervalSince1970 - previousReset
+        if advance <= 0 { return true }
+        if let duration = cycleDuration, duration.isFinite, duration > 0 {
+            // Match the nearest nominal cycle to the ORIGINAL dismissed end.
+            // Adjacent ends are one period apart, so their midpoint separates
+            // estimate corrections from a renewal. Never slide this anchor on
+            // each refresh: accumulated drift must not hide the next period.
+            return advance < duration / 2
+        }
+        // Without a reported period, an adjusted future deadline cannot prove
+        // renewal before the previously reported boundary has even passed.
+        return now.timeIntervalSince1970 < previousReset
+    }
 
     static func readings(_ sources: [UsageSource], now: Date, maxAge: TimeInterval, includeModelLimits: Bool) -> [Self] {
         var output: [Self] = []
@@ -67,7 +88,8 @@ struct UsageMeasurement {
                             label: [bucket.name, window.label].filter { !$0.isEmpty }.joined(separator: " · "),
                             remaining: window.remainingPercent, kind: .quota,
                             cycle: window.resetsAt.map { String(Int64($0.timeIntervalSince1970)) } ?? "unreported",
-                            resetsAt: window.resetsAt))
+                            resetsAt: window.resetsAt,
+                            cycleDuration: window.durationMinutes.flatMap { $0 > 0 ? Double($0) * 60 : nil }))
                     }
                 }
             }
@@ -116,8 +138,16 @@ struct UsageAlertEngine {
             }
             guard !policy.mutedSources.contains(metric.sourceID) else { continue }
             let critical = metric.remaining <= min(2, threshold / 4) + 1e-9
-            if let dismissal = dismissals[metric.id], dismissal.cycle == metric.cycle,
-               (dismissal.critical || !critical), dismissal.expiresAt.map({ $0 > now }) ?? true { continue }
+            if var dismissal = dismissals[metric.id], metric.continuesDismissedCycle(dismissal.cycle, now: now),
+               (dismissal.critical || !critical), dismissal.expiresAt.map({ $0 > now }) ?? true {
+                // Adopt the first reported boundary without re-alerting. Keep
+                // it through later estimate changes or missing metadata.
+                if dismissal.cycle == "unreported", metric.cycle != "unreported" {
+                    dismissal.cycle = metric.cycle
+                    dismissals[metric.id] = dismissal
+                }
+                continue
+            }
             dismissals.removeValue(forKey: metric.id)
             warnings.append(UsageWarning(id: metric.id, sourceID: metric.sourceID, title: metric.title,
                 detail: "\(UsageFormat.percent(metric.remaining)) \(metric.label.lowercased()) remaining",
