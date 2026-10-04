@@ -647,6 +647,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// need a way of toggling this behavior.
     public var allowMouseReporting: Bool = true
 
+    /// Wheel reporting is independent of click/drag reporting: applications can
+    /// own scrolling while the user still selects and copies terminal text locally.
+    /// With no application-requested mouse mode, wheels scroll local history.
+    public var allowMouseWheelReporting: Bool = true
+
     /// Controls how link tracking resolves hovered links:
     /// `.explicit` = OSC 8 only, `.implicit` = explicit + implicit fallback, `.none` = off.
     public var linkReporting: LinkReporting = .implicit
@@ -2216,7 +2221,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         updateHoverLink(at: hit.grid)
         
-        if terminal.mouseMode.sendMotionEvent() {
+        if allowMouseReporting && terminal.mouseMode.sendMotionEvent() {
             let flags = encodeMouseEvent(with: event, overwriteRelease: true)
             terminal.sendMotion(buttonFlags: flags, x: hit.grid.col, y: hit.grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }
@@ -2225,6 +2230,22 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public override func scrollWheel(with event: NSEvent) {
         if event.deltaY == 0 {
             return
+        }
+        if allowMouseWheelReporting && terminal.mouseMode.sendButtonPress() {
+            let hit = calculateMouseHit(with: event)
+            let displayBuffer = terminal.displayBuffer
+            let screenRow = max(0, min(displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
+            let modifiers = event.modifierFlags
+            let flags = terminal.encodeButton(
+                button: event.deltaY > 0 ? 4 : 5, release: false,
+                shift: modifiers.contains(.shift), meta: modifiers.contains(.option),
+                control: modifiers.contains(.control))
+            let ticks = min(3, max(1, Int(abs(event.deltaY))))
+            for _ in 0..<ticks {
+                terminal.sendEvent(buttonFlags: flags, x: hit.grid.col, y: screenRow,
+                                   pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+            }
+            return // Never also scroll local history for a remotely handled wheel.
         }
         let velocity = calcScrollingVelocity(delta: Int (abs (event.deltaY)))
         if event.deltaY > 0 {

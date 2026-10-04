@@ -14,6 +14,35 @@ type ScreenSnapshot struct {
 	Cols, Rows, CursorX, CursorY                   int
 	Alternate, CursorVisible, Wrap, Insert, Origin bool
 	ScrollTop, ScrollBottom                        int
+	// Nil means the adapter cannot report mouse state. A non-nil zero value
+	// explicitly turns reporting off, including modes left by a previous view.
+	Mouse *MouseState
+}
+
+// MouseState is application-requested terminal state, independent of a backend
+// or UI's policy for local text selection. Values are DEC private mode numbers;
+// encoding zero denotes the default byte-encoded protocol.
+type MouseState struct {
+	Tracking int // 0, 9, 1000, 1002, 1003
+	Encoding int // 0, 1005, 1006, 1015, 1016
+}
+
+func (m MouseState) ANSI() []byte {
+	var out strings.Builder
+	// Reset first, then enable: some emulators reset the active encoding on
+	// DECRST even when the mode being reset wasn't the active one.
+	for _, mode := range []int{9, 1000, 1002, 1003, 1005, 1006, 1015, 1016} {
+		fmt.Fprintf(&out, "\x1b[?%dl", mode)
+	}
+	switch m.Tracking {
+	case 9, 1000, 1002, 1003:
+		fmt.Fprintf(&out, "\x1b[?%dh", m.Tracking)
+	}
+	switch m.Encoding {
+	case 1005, 1006, 1015, 1016:
+		fmt.Fprintf(&out, "\x1b[?%dh", m.Encoding)
+	}
+	return []byte(out.String())
 }
 
 func (s ScreenSnapshot) ANSI() []byte {
@@ -29,6 +58,9 @@ func (s ScreenSnapshot) ANSI() []byte {
 		fmt.Fprintf(&out, "\x1b[?%d%c", number, suffix)
 	}
 	mode(1049, s.Alternate)
+	if s.Mouse != nil {
+		out.Write(s.Mouse.ANSI())
+	}
 	// Painting must not inherit scrolling margins, insert mode, origin mode,
 	// or disabled wrapping from the previous live display.
 	out.WriteString("\x1b[?6l\x1b[r\x1b[4l\x1b[?7h\x1b[0m\x1b[2J\x1b[3J\x1b[H")

@@ -26,6 +26,13 @@ version of this, see the [Command Center](/docs/command-center).
 - **Click to open** — a file path or URL in the output opens on the right host: a file in
   [Files](/docs/files), a local web address in [Dashboards](/docs/dashboards).
 
+On macOS, wheel and trackpad scrolling follows the running application's requested terminal mode.
+Mouse-aware applications receive wheel events, including full-screen interfaces with their own
+conversation history; ordinary shells scroll Argus's local history. This is independent of text
+selection: click-and-drag still selects locally in normal terminal panels. Reconnecting to a tmux
+session restores its mouse tracking and encoding modes, including when the application enabled them
+before Argus attached. This requires the updated Mac app and broker on the session's host.
+
 Reconnects are visibility-aware. The pane you are reading uses an eager first-frame watchdog and
 retry schedule; background panes back off more calmly so one unhealthy host cannot churn the whole
 sidebar. On macOS, the eight most-recent panes stay warm and protocol-current. Off-screen panes keep
