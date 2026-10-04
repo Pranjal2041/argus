@@ -68,6 +68,7 @@ data class FsHome(val home: String, val roots: List<String>, val sep: String)
 data class PortInfo(val port: Int, val address: String, val process: String, val pid: Int)
 
 data class RenderSource(val source: String, val format: String, val origin: String)
+data class TerminalHistoryText(val text: String, val origin: String)
 
 /** HTTP + WebSocket to brokers. All traffic rides the encrypted tailnet. */
 object Net {
@@ -80,6 +81,29 @@ object Net {
         .readTimeout(15, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
+
+    /** One read-only document. The caller owns cancellation and UI lifetime. */
+    fun terminalHistory(b: Broker, session: String, result: (TerminalHistoryText?) -> Unit): okhttp3.Call {
+        val request = Request.Builder().url("${b.httpBase}/terminal-history?session=${enc(session)}").build()
+        return client.newCall(request).also { call ->
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) { result(null) }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val history = response.use { r ->
+                        try {
+                            if (!r.isSuccessful) null else {
+                                val o = JSONObject(r.body?.string() ?: "{}")
+                                o.optString("text").takeIf { it.isNotBlank() }?.let {
+                                    TerminalHistoryText(it, o.optString("origin", "terminal"))
+                                }
+                            }
+                        } catch (_: Exception) { null }
+                    }
+                    result(history)
+                }
+            })
+        }
+    }
 
     /** Probe a tailnet host:8722 for the broker handshake; returns the working scheme. */
     fun probe(host: String): Broker? {

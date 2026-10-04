@@ -395,6 +395,28 @@ func main() {
 		}
 		_ = json.NewEncoder(w).Encode(source)
 	})
+	// Read-only scroll surface for full-screen clients. Never sends navigation
+	// keys to the application and never guesses a neighboring agent transcript.
+	mux.HandleFunc("/terminal-history", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		name := r.URL.Query().Get("session")
+		if name == "" {
+			name = *session
+		}
+		history, err := mgr.TerminalHistory(name)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(history)
+	})
 	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

@@ -8,6 +8,8 @@ import android.os.Looper
 import android.util.Log
 import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
@@ -37,10 +39,17 @@ class RemoteTerminal(
 ) {
     private val main = Handler(Looper.getMainLooper())
     val view = TerminalView(context, null)
+    val historyView = TerminalHistoryView(context, view) { result ->
+        val call = Net.terminalHistory(broker, connectHandle, result)
+        return@TerminalHistoryView { call.cancel() }
+    }
+    var historyVisible by androidx.compose.runtime.mutableStateOf(false)
+        private set
 
     private var ws: WebSocket? = null
     private var closed = false
     private var backoff = 500L
+    private val repaintPolicy = TerminalRepaintPolicy()
 
     /** Coalesced "repaint at the settled size" request after pane-size pins. */
     private val snapshotRequest = Runnable {
@@ -131,6 +140,7 @@ class RemoteTerminal(
     val session = TerminalSession(10_000, sessionClient, bridge)
 
     init {
+        historyView.onHistoryVisibilityChanged = { historyVisible = it }
         view.setTerminalViewClient(makeViewClient(onTap = { showKeyboard() }))
         view.setTextSize(40)
         view.setTypeface(Typeface.MONOSPACE)
@@ -147,11 +157,24 @@ class RemoteTerminal(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "WS open ($url)")
                 backoff = 500
-                main.post { session.emulator?.let { bridge.onResize(it.mColumns, it.mRows) } }
+                main.post {
+                    repaintPolicy.reset()
+                    view.endScreenSnapshot()
+                    session.emulator?.let { bridge.onResize(it.mColumns, it.mRows) }
+                }
             }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val d = decodeFrame(bytes.toByteArray()) ?: return
                 when (d.first) {
+                    Op.SNAPSHOT_BEGIN -> main.post {
+                        main.removeCallbacks(snapshotRequest)
+                        repaintPolicy.inSnapshot = true
+                        view.beginScreenSnapshot()
+                    }
+                    Op.SNAPSHOT_END -> main.post {
+                        repaintPolicy.inSnapshot = false
+                        view.endScreenSnapshot()
+                    }
                     Op.OUTPUT -> {
                         val payload = d.third
                         main.post { session.feedOutput(payload, 0, payload.size); ingestWandb(payload) }
@@ -167,10 +190,13 @@ class RemoteTerminal(
                             val rows = ((p[2].toInt() and 0xff) shl 8) or (p[3].toInt() and 0xff)
                             Log.d(TAG, "paneSize ${cols}x$rows")
                             main.post {
+                                val needsRepaint = repaintPolicy.onSize(cols, rows)
                                 session.setRemoteSize(cols, rows)
                                 view.onScreenUpdated()
-                                main.removeCallbacks(snapshotRequest)
-                                main.postDelayed(snapshotRequest, 250)
+                                if (needsRepaint) {
+                                    main.removeCallbacks(snapshotRequest)
+                                    main.postDelayed(snapshotRequest, 250)
+                                }
                             }
                         }
                     }
@@ -179,10 +205,12 @@ class RemoteTerminal(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "WS fail: ${t.javaClass.simpleName}: ${t.message}", t)
                 scheduleReconnect()
+                main.post { view.endScreenSnapshot() }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "WS closed $code $reason")
                 scheduleReconnect()
+                main.post { view.endScreenSnapshot() }
             }
         })
     }
@@ -195,7 +223,10 @@ class RemoteTerminal(
     }
 
     /** Send raw bytes (accessory keys) straight to the session. */
-    fun sendBytes(b: ByteArray) = session.write(b, 0, b.size)
+    fun sendBytes(b: ByteArray) {
+        view.onExternalInput()
+        session.write(b, 0, b.size)
+    }
 
     /** Text for the Renders screen: the whole transcript with soft-wrapped rows
      *  REJOINED (Termux's joinBackLines), tail-limited, agent gutters peeled —
@@ -241,6 +272,7 @@ class RemoteTerminal(
     }
 
     fun close() {
+        historyView.dispose()
         journal.finalizeNow()   // an utterance in flight when the pane closes still counts
         closed = true
         ws?.cancel()

@@ -41,12 +41,16 @@ func TestSnapshotAndLiveFramesHaveOneOrderedWriter(t *testing.T) {
 	s.out <- session.Output{Pane: "%0", Data: []byte("before")}
 	s.out <- session.Output{Pane: "%0", Data: large, Cols: 80, Rows: 24, SnapshotID: id}
 	s.out <- session.Output{Pane: "%0", Data: []byte("after")}
+	var observed []byte
 	read := func(sub *subscriber, n int) []byte {
 		var data []byte
 		for i := 0; i < n; i++ {
 			select {
 			case frame := <-sub.ch:
 				op, _, payload, _ := decodeFrame(frame)
+				if sub == a {
+					observed = append(observed, op)
+				}
 				if op == opOutput {
 					data = append(data, payload...)
 				}
@@ -58,8 +62,11 @@ func TestSnapshotAndLiveFramesHaveOneOrderedWriter(t *testing.T) {
 	}
 	// A gets the atomic size + multi-frame snapshot, then continuation. B only
 	// gets original live bytes; another viewer's snapshot never overwrites it.
-	if got := read(a, 4); !bytes.Equal(got, append(append([]byte{}, large...), []byte("after")...)) {
+	if got := read(a, 6); !bytes.Equal(got, append(append([]byte{}, large...), []byte("after")...)) {
 		t.Fatal("snapshot interleaved with live output")
+	}
+	if !bytes.Equal(observed, []byte{opSnapshotBegin, opPaneSize, opOutput, opOutput, opSnapshotEnd, opOutput}) {
+		t.Fatalf("repaint boundaries do not enclose exactly its size and bytes: %v", observed)
 	}
 	if got := read(b, 2); string(got) != "beforeafter" {
 		t.Fatalf("other viewer received snapshot: %q", got)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -402,6 +403,44 @@ func inspectCodex(pid int, state processState) (string, string, error) {
 	return inspectCodexRollouts(codexRollouts(files, state))
 }
 
+// inspectCodexTranscript handles agents that close their rollout between writes.
+// Open-file ownership remains preferred; a launch selector is only a candidate
+// and requires current-screen corroboration at the common source boundary.
+func inspectCodexTranscript(files []string, state processState) (AgentSession, error) {
+	rollouts := codexRollouts(files, state)
+	if len(rollouts) > 0 {
+		id, path, err := inspectCodexRollouts(rollouts)
+		return AgentSession{Agent: AgentCodex, ID: id, Path: path}, err
+	}
+	id, ok := codexResumeSessionFromArgv(state.Argv)
+	if !ok {
+		return AgentSession{}, fmt.Errorf("Codex process has no open rollout or explicit conversation selector")
+	}
+	root := filepath.Join(codexHome(state), "sessions")
+	var matches []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") ||
+			!strings.HasSuffix(strings.ToLower(entry.Name()), "-"+id+".jsonl") || !pathWithin(root, path) {
+			return nil
+		}
+		actualID, parentID, readErr := inspectCodexRollout(path)
+		if readErr == nil && strings.EqualFold(actualID, id) && (parentID == "" || strings.EqualFold(parentID, id)) {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return AgentSession{}, err
+	}
+	if len(matches) != 1 {
+		return AgentSession{}, fmt.Errorf("Codex launch selector has %d matching root transcripts", len(matches))
+	}
+	return AgentSession{Agent: AgentCodex, ID: id, Path: matches[0], RequireScreenMatch: true}, nil
+}
+
 // InspectAgentSession identifies the foreground agent conversation in a tmux
 // session from kernel-owned process state. Provider-specific discovery stays
 // here; consumers receive the same process-proven transcript contract.
@@ -429,7 +468,11 @@ func InspectAgentSession(socket, name string) (AgentSession, error) {
 		var id, path string
 		switch agent {
 		case AgentCodex:
-			id, path, err = inspectCodex(process.PID, state)
+			files, fileErr := platformOpenFiles(process.PID)
+			if fileErr != nil {
+				return AgentSession{}, fileErr
+			}
+			return inspectCodexTranscript(files, state)
 		case AgentClaude:
 			id, path, _, err = inspectClaude(process.PID, state)
 		default:

@@ -27,6 +27,9 @@ type AgentSession struct {
 	Agent string
 	ID    string
 	Path  string
+	// Launch-time identity can outlive an in-process conversation switch.
+	// Consumers must corroborate it against the current screen before use.
+	RequireScreenMatch bool
 }
 
 // Entry is one user-owned tmux session in a recovery snapshot. Argv is the

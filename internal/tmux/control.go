@@ -83,6 +83,22 @@ func (p *Provider) CaptureRenderScreen(name string, lines int) (session.ScreenSn
 	return captureScreenSnapshot(p.socket, pane, lines)
 }
 
+// CaptureHistory also exposes the saved primary screen when a full-screen
+// application owns the alternate buffer. It is passive: no copy-mode or input
+// state is changed. -q makes the inactive-buffer capture empty in normal mode.
+func (p *Provider) CaptureHistory(name string, lines int) (string, error) {
+	if lines <= 0 || lines > 10000 {
+		lines = 10000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := tmuxArgs(p.socket,
+		"capture-pane", "-a", "-q", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name, ";",
+		"capture-pane", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name)
+	output, err := toolcommand.CommandContext(ctx, "tmux", args...).Output()
+	return string(output), err
+}
+
 // dropDimAndAnsi removes any text drawn in the ANSI FAINT style (SGR 2) — the agent's
 // dim autosuggestion — then strips all remaining escape sequences, yielding plain text.
 // SGR state is tracked across the stream: 2 turns faint on; 0/22 (and a bare ESC[m)
@@ -100,7 +116,9 @@ func (p *Provider) AgentTranscript(name string) (rendersource.TranscriptRef, err
 	if err != nil {
 		return rendersource.TranscriptRef{}, err
 	}
-	return rendersource.TranscriptRef{Provider: result.Agent, Path: result.Path}, nil
+	return rendersource.TranscriptRef{
+		Provider: result.Agent, Path: result.Path, RequireScreenMatch: result.RequireScreenMatch,
+	}, nil
 }
 
 func (p *Provider) Create(name, dir string) error { return CreateSession(p.socket, name, dir) }

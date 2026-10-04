@@ -210,8 +210,45 @@ func TestSnapshotRestoresApplicationMouseModes(t *testing.T) {
 	}
 }
 
+func TestSnapshotRestoresRequestedMouseModes(t *testing.T) {
+	for _, tracking := range []int{0, 1000, 1002, 1003} {
+		t.Run(fmt.Sprint(tracking), func(t *testing.T) {
+			output := "\x1b[?1049h\x1b[?1006h"
+			if tracking != 0 {
+				output += fmt.Sprintf("\x1b[?%dh", tracking)
+			}
+			output += "\x1b[Hmouse ready\x1b[2;4H"
+			c := snapshotFixture(t, output, 3, 1)
+			wire := string(c.Snapshot())
+			for _, reset := range []int{1000, 1002, 1003} {
+				if !strings.Contains(wire, fmt.Sprintf("\x1b[?%dl", reset)) {
+					t.Fatalf("stale mode %d was not reset", reset)
+				}
+			}
+			if tracking != 0 && !strings.Contains(wire, fmt.Sprintf("\x1b[?%dh", tracking)) {
+				t.Fatalf("mouse mode %d was lost on attach: %q", tracking, wire)
+			}
+			if !strings.Contains(wire, "\x1b[?1006h") {
+				t.Fatal("SGR mouse encoding lost on attach")
+			}
+		})
+	}
+}
+
 func TestSnapshotRejectsMissingMouseMetadata(t *testing.T) {
 	if got := decodeScreenSnapshot([]byte("40 8 0 0 0 1 1 0 0 0 7\n" + strings.Repeat("\n", 8))).ANSI(); got != nil {
 		t.Fatal("partial metadata must not silently erase application input state")
+	}
+}
+
+func TestFullScreenHistoryCaptureDoesNotNavigateTheApplication(t *testing.T) {
+	c := snapshotFixture(t, "primary output\x1b[?1049h\x1b[Hfullscreen draft\x1b[3;7H", 6, 2)
+	before := c.paneFlag("#{alternate_on},#{cursor_x},#{cursor_y},#{pane_in_mode}")
+	text, err := NewProvider(c.socket).CaptureHistory("fixture", 100)
+	if err != nil || !strings.Contains(text, "primary output") || !strings.Contains(text, "fullscreen draft") {
+		t.Fatalf("history capture=%q, %v", text, err)
+	}
+	if after := c.paneFlag("#{alternate_on},#{cursor_x},#{cursor_y},#{pane_in_mode}"); after != before {
+		t.Fatalf("history changed application state: %s -> %s", before, after)
 	}
 }
