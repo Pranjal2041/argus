@@ -23,6 +23,24 @@ struct MachineLauncher: Identifiable, Codable, Hashable {
     /// Wildcard machine-name pattern (as in Workflows), e.g. "babel-*". Optional
     /// when the command prints ARGUS_MACHINE=<name>.
     var machinePattern: String = ""
+
+    /// CMU Babel: a 3-day, 1-GPU russ-lab job through the bundled Slurm launcher.
+    /// Everything is in the editable command (host alias, partition, resources).
+    static func babelPreset() -> MachineLauncher {
+        MachineLauncher(
+            name: "Babel · 3-day GPU job",
+            command: "\"$ARGUS_LAUNCHERS/slurm-node\" babel up --partition=russ-lab --qos=russ_lab_qos "
+                + "--gres=gpu:1 --cpus-per-task=16 --mem=64G --time=3-00:00:00",
+            machinePattern: "babel-*")
+    }
+}
+
+/// Bundled launcher scripts (Contents/Resources/launchers), exported to launcher
+/// commands as $ARGUS_LAUNCHERS.
+enum BundledLaunchers {
+    static var directory: URL? {
+        Bundle.main.resourceURL.map { $0.appendingPathComponent("launchers", isDirectory: true) }
+    }
 }
 
 struct MachineLaunchRun: Identifiable, Equatable {
@@ -98,6 +116,8 @@ final class MachineLauncherStore: ObservableObject {
     private var discoveryTimer: Timer?
     /// Asks for an immediate merge-only broker discovery; replaced in tests.
     var discover: () -> Void = {}
+    /// Where $ARGUS_LAUNCHERS points; replaced in tests.
+    var launcherDirectory: URL? = BundledLaunchers.directory
 
     func attach(_ s: AppState) {
         guard state !== s else { return }
@@ -115,6 +135,8 @@ final class MachineLauncherStore: ObservableObject {
     func add() {
         launchers.append(MachineLauncher(name: "New launcher", command: "", machinePattern: ""))
     }
+    func addBabelPreset() { launchers.append(.babelPreset()) }
+    var hasBabelPreset: Bool { launchers.contains { $0.command.contains("slurm-node\" babel") } }
     func delete(_ l: MachineLauncher) { launchers.removeAll { $0.id == l.id } }
 
     // MARK: Requests
@@ -136,6 +158,9 @@ final class MachineLauncherStore: ObservableObject {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", command]
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        var environment = ProcessInfo.processInfo.environment
+        if let dir = launcherDirectory { environment["ARGUS_LAUNCHERS"] = dir.path }
+        process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -384,11 +409,17 @@ struct MachineLaunchersSettingsSection: View {
                 }
                 .padding(.vertical, 2)
             }
-            Button("Add launcher") { store.add() }
+            HStack {
+                Button("Add launcher") { store.add() }
+                if !store.hasBabelPreset {
+                    Button("Add Babel preset") { store.addBabelPreset() }
+                        .help("CMU Babel: a 3-day, 1-GPU russ-lab job. Edit the command for another partition or size.")
+                }
+            }
         } header: {
             Text("Machine launchers")
         } footer: {
-            Text("A launcher requests a machine that does not exist yet, e.g. a cluster job or a cloud VM that runs `ut`. Its command runs on this Mac in a login shell. When the new machine's broker joins your tailnet it appears in every machine list. Print `ARGUS_MACHINE=<name>` to name the machine, or set a pattern and Argus takes the first new match. Request one from the machine menu of the New session sheet.")
+            Text("A launcher requests a machine that does not exist yet, e.g. a cluster job or a cloud VM that runs `ut`. Its command runs on this Mac in a login shell. When the new machine's broker joins your tailnet it appears in every machine list. Print `ARGUS_MACHINE=<name>` to name the machine, or set a pattern and Argus takes the first new match. `$ARGUS_LAUNCHERS/slurm-node <ssh-host> [sbatch options]` puts a Slurm compute node into Argus (needs `ut` on the cluster). Request one from the machine menu of the New session sheet.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

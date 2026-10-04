@@ -1743,6 +1743,9 @@ struct RootView: View {
                                 .disabled(l.command.trimmingCharacters(in: .whitespaces).isEmpty
                                           || machineLaunchers.activeRuns.contains { $0.launcher.id == l.id })
                         }
+                        if !machineLaunchers.hasBabelPreset {
+                            Button("Add Babel 3-day GPU job") { machineLaunchers.addBabelPreset() }
+                        }
                         Button(machineLaunchers.launchers.isEmpty ? "Add a machine launcher…" : "Manage launchers…") {
                             openArgusSettings()
                         }

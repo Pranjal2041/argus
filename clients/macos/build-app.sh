@@ -27,6 +27,7 @@ cp -R Resources/render "$APP/Contents/Resources/" 2>/dev/null || true      # aut
 cp -R Resources/gitview "$APP/Contents/Resources/" 2>/dev/null || true
 cp -R Resources/ledger "$APP/Contents/Resources/" 2>/dev/null || true    # activity ledger viewer
 cp -R Resources/wrapped "$APP/Contents/Resources/" 2>/dev/null || true   # Argus Wrapped deck/dashboard
+cp -R Resources/launchers "$APP/Contents/Resources/"                         # machine launcher scripts ($ARGUS_LAUNCHERS)
 cp -R Resources/lab "$APP/Contents/Resources/" 2>/dev/null || true       # the Lab experiments hub (â§âL)
 
 # SwiftPM linker-signs the loose executable before these bundle resources exist.

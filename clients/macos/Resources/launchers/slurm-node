@@ -1,0 +1,58 @@
+#!/bin/bash
+# Put a Slurm compute node into Argus. Runs on the Mac: submits the bundled
+# argus-node.sbatch through `ssh <host>` (the script travels on stdin, so nothing
+# is installed on the cluster beyond `ut`) and waits for the job to run.
+#
+#   slurm-node <ssh-host> [up] [sbatch options]   reuse a running/pending Argus job, else submit
+#   slurm-node <ssh-host> new [sbatch options]    always submit another
+#   slurm-node <ssh-host> status | down
+#
+# When the job runs it prints ARGUS_MACHINE=<node>, which Argus's machine
+# launchers use to find the node once its broker joins the tailnet.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+JOB_SCRIPT="${ARGUS_SLURM_JOB_SCRIPT:-$HERE/argus-node.sbatch}"
+SSH="${ARGUS_SSH:-ssh}"
+POLL="${ARGUS_SLURM_POLL:-15}"
+
+[ $# -ge 1 ] || { sed -n '2,11p' "$0"; exit 2; }
+HOST="$1"; shift
+cmd="up"
+case "${1:-}" in up|new|status|down) cmd="$1"; shift ;; esac
+
+remote() { $SSH -o BatchMode=yes "$HOST" "$@"; }
+jobs() { remote "squeue -u \$USER -n argus -h -o '%i %T %N'"; }
+
+wait_running() { # jobid
+  local job="$1" state node
+  while :; do
+    state="$(remote "squeue -j $job -h -o '%T %N %r'" 2>/dev/null || true)"
+    case "$state" in
+      RUNNING*)
+        node="$(printf '%s' "$state" | awk '{print $2}')"
+        echo "job $job running on $node"
+        echo "ARGUS_MACHINE=$node"
+        return 0 ;;
+      "") echo "job $job ended; see ~/argus-$job.out on $HOST" >&2; return 1 ;;
+      *) echo "job $job: $state"; sleep "$POLL" ;;
+    esac
+  done
+}
+
+case "$cmd" in
+  status) out="$(jobs)"; echo "${out:-no Argus job on $HOST}" ;;
+  down) remote "scancel -u \$USER -n argus" && echo "cancelled Argus jobs on $HOST" ;;
+  up|new)
+    if [ "$cmd" = up ] && existing="$(jobs)" && [ -n "$existing" ]; then
+      job="${existing%% *}"
+      echo "using existing job: $existing"
+    else
+      # Quote options for the remote shell; with none, pass nothing (bash 3.2's
+      # `printf %q` of zero arguments yields '', which sbatch reads as a script).
+      extra=""; [ $# -gt 0 ] && extra="$(printf '%q ' "$@")"
+      job="$(remote "sbatch --parsable $extra" < "$JOB_SCRIPT")"
+      job="${job%%;*}"
+      echo "submitted job $job (stopping here is safe; the job stays queued)"
+    fi
+    wait_running "$job" ;;
+esac
