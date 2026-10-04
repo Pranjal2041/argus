@@ -27,6 +27,21 @@ enum WeeklyProgressWeekNavigation {
     }
 }
 
+enum WeeklyProgressModelPresentation {
+    /// The dashboard describes the configuration used for new and resumed runs,
+    /// not the model recorded by an older generation in the selected week.
+    static var currentLabel: String {
+        label(
+            model: CodexWeeklyProgressCommand.model,
+            reasoningEffort: CodexWeeklyProgressCommand.reasoningEffort
+        )
+    }
+
+    static func label(model: String, reasoningEffort: String) -> String {
+        "\(model.uppercased()) · \(reasoningEffort.uppercased())"
+    }
+}
+
 enum WeeklyProgressStagePresentation {
     static let activeStages: [WeeklyProgressStage] = [
         .collectingEvidence,

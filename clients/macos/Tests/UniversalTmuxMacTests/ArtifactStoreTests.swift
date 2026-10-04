@@ -155,18 +155,22 @@ final class ArtifactStoreTests: XCTestCase {
         XCTAssertEqual(loaded.first?.titleSource, ArtifactTitleSource.manual)
     }
 
-    func testCodexTitleCommandPinsLunaAndMediumReasoning() {
-        let arguments = CodexArtifactTitleProvider.commandArguments(
-            outputURL: URL(fileURLWithPath: "/tmp/title.txt"),
-            workingDirectory: URL(fileURLWithPath: "/tmp/title-work"),
-            imageURL: URL(fileURLWithPath: "/tmp/screenshot.png")
-        )
+    func testCodexTitleCommandPinsGPT6LunaAndMediumReasoningForTextAndImages() {
+        let screenshot = URL(fileURLWithPath: "/tmp/screenshot.png")
+        for imageURL in [nil, screenshot] as [URL?] {
+            let arguments = CodexArtifactTitleProvider.commandArguments(
+                outputURL: URL(fileURLWithPath: "/tmp/title.txt"),
+                workingDirectory: URL(fileURLWithPath: "/tmp/title-work"),
+                imageURL: imageURL
+            )
 
-        XCTAssertTrue(arguments.contains("gpt-5.6-luna"))
-        XCTAssertTrue(arguments.contains("model_reasoning_effort=\"medium\""))
-        XCTAssertTrue(arguments.contains("--ephemeral"))
-        XCTAssertTrue(arguments.contains("read-only"))
-        XCTAssertTrue(arguments.contains("/tmp/screenshot.png"))
+            XCTAssertEqual(arguments.filter { $0.hasPrefix("gpt-") }, ["gpt-6-luna"])
+            XCTAssertTrue(arguments.contains("model_reasoning_effort=\"medium\""))
+            XCTAssertTrue(arguments.contains("--ephemeral"))
+            XCTAssertTrue(arguments.contains("read-only"))
+            XCTAssertEqual(arguments.contains("-i"), imageURL != nil)
+            XCTAssertEqual(arguments.contains(screenshot.path), imageURL != nil)
+        }
     }
 
     func testAutomaticTitleSanitizingAndVersionNumbersRemainReadable() {

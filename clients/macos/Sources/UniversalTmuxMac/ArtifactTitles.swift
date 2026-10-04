@@ -51,7 +51,7 @@ protocol ArtifactTitleProviding {
 /// deliberately ignore repository/user instructions: artifact content is data,
 /// never a source of instructions for the naming agent.
 actor CodexArtifactTitleProvider: ArtifactTitleProviding {
-    static let model = "gpt-5.6-luna"
+    static let model = CodexModels.luna
     static let reasoningEffort = "medium"
 
     private var unavailableUntil: Date?

@@ -2,7 +2,7 @@ import XCTest
 @testable import UniversalTmuxMac
 
 final class CommandCenterCaptureTests: XCTestCase {
-    func testStatusCommandPinsLunaHighAndKeepsConversationDurable() {
+    func testStatusCommandPinsGPT6LunaHighAndKeepsConversationDurable() {
         let output = URL(fileURLWithPath: "/tmp/status.txt")
         let initial = CodexStatusCommand.initialArguments(finalMessageURL: output)
         let resumed = CodexStatusCommand.resumeArguments(
@@ -10,13 +10,17 @@ final class CommandCenterCaptureTests: XCTestCase {
             finalMessageURL: output
         )
 
-        XCTAssertTrue(initial.contains("gpt-5.6-luna"))
+        XCTAssertEqual(CodexStatusCommand.model, "gpt-6-luna")
+        XCTAssertEqual(CodexStatusCommand.model, CodexArtifactTitleProvider.model)
+        XCTAssertEqual(initial.filter { $0.hasPrefix("gpt-") }, ["gpt-6-luna"])
         XCTAssertTrue(initial.contains("model_reasoning_effort=\"high\""))
         XCTAssertTrue(initial.contains("read-only"))
         XCTAssertFalse(initial.contains("--ephemeral"))
         XCTAssertEqual(Array(resumed.prefix(2)), ["exec", "resume"])
         XCTAssertTrue(resumed.contains("019f630d-5663-7722-bc65-5fd298a497ec"))
-        XCTAssertTrue(resumed.contains("gpt-5.6-luna"))
+        XCTAssertEqual(resumed.filter { $0.hasPrefix("gpt-") }, ["gpt-6-luna"])
+        XCTAssertTrue(resumed.contains("model_reasoning_effort=\"high\""))
+        XCTAssertFalse(resumed.contains("--ephemeral"))
     }
 
     func testStatusCommandParsesCodexSessionID() {
