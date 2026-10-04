@@ -40,6 +40,7 @@ import (
 	sess "universal-tmux/internal/session" // aliased: the `session` flag var below shadows the package name
 	"universal-tmux/internal/webartifact"
 	"universal-tmux/internal/weeklyprogressbridge"
+	"universal-tmux/internal/workspace"
 	webassets "universal-tmux/web"
 )
 
@@ -100,7 +101,17 @@ func main() {
 	// never delay opening the broker's listeners or reconnecting live sessions.
 	go broker.RunDailyBackupLoop(ctx)
 
-	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
+	var workspaceStore *workspace.Store
+	if root, err := workspace.DefaultRoot(*tmuxSock); err != nil {
+		log.Printf("workspace service unavailable: %v", err)
+	} else if workspaceStore, err = workspace.Open(root); err != nil {
+		log.Printf("workspace service unavailable: %v", err)
+	}
+	if workspaceStore != nil {
+		defer workspaceStore.Close()
+		go workspaceStore.RunBackupLoop(ctx, func(err error) { log.Printf("workspace backup: %v", err) })
+	}
+	mgr := broker.NewManagerWithWorkspace(ctx, makeProvider(*tmuxSock, *shell), workspaceStore)
 	recoveryStore := recovery.NewStoreWithRuntime(*tmuxSock, newRecoveryRuntime(mgr))
 	// Mac restores after reboot; Babel restores the same logical workspace after
 	// a scheduler allocation moves it to a different node; Windows captures the
@@ -131,6 +142,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	if workspaceStore != nil {
+		workspaceStore.RegisterRoutes(mux)
+	}
 	browserbridge.New(displayName).RegisterRoutes(mux)
 	weeklyprogressbridge.New(displayName).RegisterRoutes(mux)
 	webartifact.NewRegistry("", displayName, hostName, mgr).RegisterRoutes(mux)
@@ -141,14 +155,23 @@ func main() {
 	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"service": "universal-tmux-broker",
-			"proto":   1,
-			"name":    displayName,
-			"host":    hostName, // os.Hostname(): equals /history's `node`, so a client can map a history row to this machine even when name (--name) differs
-			"socket":  *tmuxSock,
-			"os":      runtime.GOOS, // lets the phone pick the Mac broker as the sync host
-		})
+		identity := map[string]any{
+			"service":      "universal-tmux-broker",
+			"proto":        1,
+			"name":         displayName,
+			"host":         hostName, // os.Hostname(): equals /history's `node`, so a client can map a history row to this machine even when name (--name) differs
+			"socket":       *tmuxSock,
+			"os":           runtime.GOOS,
+			"capabilities": []string{"files-v1", "git-v1", "history-v1", "notebooks-v1", "web-artifacts-v1"},
+		}
+		if workspaceStore != nil {
+			if info, err := workspaceStore.Info(); err == nil {
+				identity["brokerID"] = info.BrokerID
+				identity["workspace"] = info
+				identity["capabilities"] = append(identity["capabilities"].([]string), "workspace-v1", "session-activity-v1")
+			}
+		}
+		_ = json.NewEncoder(w).Encode(identity)
 	})
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -765,16 +788,31 @@ func main() {
 		_, _ = w.Write(out)
 	})
 	mux.HandleFunc("/git/pr/review", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		e := gitsvc.ReviewPR(q.Get("dir"), q.Get("num"), q.Get("event"), q.Get("body"))
 		prActionResult(w, e)
 	})
 	mux.HandleFunc("/git/pr/merge", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		e := gitsvc.MergePR(q.Get("dir"), q.Get("num"), q.Get("method"))
 		prActionResult(w, e)
 	})
 	mux.HandleFunc("/git/pr/comment", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		e := gitsvc.CommentPR(q.Get("dir"), q.Get("num"), q.Get("body"))
 		prActionResult(w, e)
@@ -846,6 +884,7 @@ func main() {
 		data, _ := io.ReadAll(r.Body)
 		fsResult(w, fsvc.Write(r.URL.Query().Get("path"), data))
 	})
+	mux.HandleFunc("/fs/document", fsvc.ServeDocument)
 
 	// Argus Lab (LAB-DESIGN.md): read routes for the hub plus key decisions for
 	// the phone. The `ut lab` CLI operates on the store directly; these serve

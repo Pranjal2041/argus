@@ -31,14 +31,17 @@ const (
 
 // Peer is a reachable broker on the fabric.
 type Peer struct {
-	Name        string `json:"name"`                  // display name from /whoami
-	Host        string `json:"host"`                  // host used in the broker URL (and TLS identity)
-	Scheme      string `json:"scheme"`                // http | https
-	Os          string `json:"os"`                    // runtime.GOOS — lets a client pick the Mac as sync host
-	TailnetName string `json:"tailnetName,omitempty"` // stable tailnet DNS identity, even for native HTTP
-	Address     string `json:"address,omitempty"`     // authoritative socket IP for Host when TLS is used
-	BrokerHost  string `json:"brokerHost,omitempty"`  // OS hostname reported by /whoami
-	Socket      string `json:"socket,omitempty"`      // tmux socket reported by /whoami
+	Name         string          `json:"name"`                  // display name from /whoami
+	Host         string          `json:"host"`                  // host used in the broker URL (and TLS identity)
+	Scheme       string          `json:"scheme"`                // http | https
+	Os           string          `json:"os"`                    // runtime.GOOS — lets a client pick the Mac as sync host
+	TailnetName  string          `json:"tailnetName,omitempty"` // stable tailnet DNS identity, even for native HTTP
+	Address      string          `json:"address,omitempty"`     // authoritative socket IP for Host when TLS is used
+	BrokerHost   string          `json:"brokerHost,omitempty"`  // OS hostname reported by /whoami
+	Socket       string          `json:"socket,omitempty"`      // tmux socket reported by /whoami
+	BrokerID     string          `json:"brokerID,omitempty"`
+	Workspace    json.RawMessage `json:"workspace,omitempty"`
+	Capabilities []string        `json:"capabilities,omitempty"`
 
 	// A TLS broker remains named by Host (HTTP Host, SNI, and certificate), but
 	// can be dialed by its authoritative tailnet IP when MagicDNS is stale.
@@ -391,11 +394,14 @@ func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
 		}
 		cancel()
 		var who struct {
-			Service string `json:"service"`
-			Name    string `json:"name"`
-			Host    string `json:"host"`
-			Os      string `json:"os"`
-			Socket  string `json:"socket"`
+			Service      string          `json:"service"`
+			Name         string          `json:"name"`
+			Host         string          `json:"host"`
+			Os           string          `json:"os"`
+			Socket       string          `json:"socket"`
+			BrokerID     string          `json:"brokerID"`
+			Workspace    json.RawMessage `json:"workspace"`
+			Capabilities []string        `json:"capabilities"`
 		}
 		if json.Unmarshal(body, &who) == nil && who.Service == "universal-tmux-broker" {
 			name := who.Name
@@ -406,6 +412,7 @@ func (m *Mesh) probe(ctx context.Context, c candidate) (Peer, bool) {
 				Name: name, Host: a.host, Scheme: a.scheme, Os: who.Os,
 				TailnetName: c.dns, Address: a.dialHost,
 				BrokerHost: who.Host, Socket: who.Socket,
+				BrokerID: who.BrokerID, Workspace: who.Workspace, Capabilities: who.Capabilities,
 				dialHost: a.dialHost, tlsServerName: a.tlsServerName,
 			}, true
 		}
