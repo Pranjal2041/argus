@@ -96,9 +96,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := broker.BackupDurableState(); err != nil {
-		log.Printf("warn: initial durable-state backup: %v", err)
-	}
+	// Initial and periodic backups share one background worker. A slow store must
+	// never delay opening the broker's listeners or reconnecting live sessions.
 	go broker.RunDailyBackupLoop(ctx)
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
