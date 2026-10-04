@@ -87,25 +87,51 @@ func TestTerminalQueryOwnershipAcrossViewersAndReconnect(t *testing.T) {
 }
 
 func TestSnapshotQueriesArePassiveAndDoNotConsumeLiveParser(t *testing.T) {
-	raw := &viewerQuerySession{recordingInputSession{out: make(chan session.Output, 10)}}
-	h := newSessionHub(raw)
-	defer close(raw.out)
-	s := querySubscriber(true)
-	h.mu.Lock()
-	h.subs[s] = struct{}{}
-	s.snapshotID = 42
-	h.mu.Unlock()
-	raw.out <- session.Output{Pane: "%0", Data: []byte("live\x1b[")}
-	if got := string(readQueryFrame(t, s)); got != "live" {
-		t.Fatalf("live prefix: %q", got)
-	}
-	raw.out <- session.Output{Pane: "%0", SnapshotID: 42, Data: []byte("capture\x1b[6n\x1b]10;?\a\x1b[")}
-	if got := string(readQueryFrame(t, s)); got != "capture" {
-		t.Fatalf("replay query leaked: %q", got)
-	}
-	raw.out <- session.Output{Pane: "%0", Data: []byte("6nend")}
-	if got := string(readQueryFrame(t, s)); got != "\x1b[6nend" {
-		t.Fatalf("snapshot contaminated live query: %q", got)
+	for _, viewerOwned := range []bool{false, true} {
+		t.Run(map[bool]string{false: "backend", true: "viewer"}[viewerOwned], func(t *testing.T) {
+			raw := &recordingInputSession{out: make(chan session.Output, 10)}
+			var backend session.Session = raw
+			if viewerOwned {
+				backend = &viewerQuerySession{*raw}
+			}
+			h := newSessionHub(backend)
+			defer close(raw.out)
+			s := querySubscriber(true)
+			h.mu.Lock()
+			h.subs[s] = struct{}{}
+			s.snapshotID = 42
+			h.mu.Unlock()
+			control := func(want byte) {
+				t.Helper()
+				select {
+				case frame := <-s.ch:
+					op, pane, data, ok := decodeFrame(frame)
+					if !ok || op != want || pane != "%0" || len(data) != 0 {
+						t.Fatalf("snapshot control %d: %x", want, frame)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("missing snapshot control")
+				}
+			}
+			raw.out <- session.Output{Pane: "%0", Data: []byte("live\x1b[")}
+			if got := string(readQueryFrame(t, s)); got != "live" {
+				t.Fatalf("live prefix: %q", got)
+			}
+			raw.out <- session.Output{Pane: "%0", SnapshotID: 42, Data: []byte("capture\x1b[6n\x1b]10;?\a\x1b[")}
+			control(opSnapshotBegin)
+			if got := string(readQueryFrame(t, s)); got != "capture" {
+				t.Fatalf("replay query leaked: %q", got)
+			}
+			control(opSnapshotEnd)
+			raw.out <- session.Output{Pane: "%0", Data: []byte("6nend")}
+			want := "end"
+			if viewerOwned {
+				want = "\x1b[6nend"
+			}
+			if got := string(readQueryFrame(t, s)); got != want {
+				t.Fatalf("snapshot contaminated live query: %q", got)
+			}
+		})
 	}
 }
 

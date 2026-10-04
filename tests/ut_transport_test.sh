@@ -77,7 +77,12 @@ cat > "$TMP/home/ut-broker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s %s\n' "${UT_PORT:-}" "${UT_LOCAL_PORT:-}"
 EOF
-chmod +x "$TMP/bin/tmux" "$TMP/home/ut-broker"
+# Keep the fixture independent of brokers listening on the developer's machine.
+cat > "$TMP/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+chmod +x "$TMP/bin/tmux" "$TMP/bin/curl" "$TMP/home/ut-broker"
 
 launch() { # socket [UT_LOCAL_PORT]
   (cd "$TMP" && env PATH="$TMP/bin:$PATH" UT_HOME="$TMP/home" UT_LOCAL_DIR="$TMP/local" \
