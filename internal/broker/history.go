@@ -40,16 +40,11 @@ const (
 // historyStatePath is a per-HOST file (like hiddenStatePath) so brokers on different
 // nodes keep their own session history without clobbering each other over NFS.
 func historyStatePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"
 	}
-	dir := filepath.Join(home, ".universal-tmux")
-	_ = os.MkdirAll(dir, 0o755)
+	dir := brokerStateDir()
 	return filepath.Join(dir, "history-"+host+".json")
 }
 

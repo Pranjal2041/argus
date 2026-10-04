@@ -71,7 +71,13 @@ func main() {
 	name := flag.String("name", "", "display name reported to clients via /whoami (default: hostname)")
 	shell := flag.String("shell", "", "shell to host for new sessions (Windows ConPTY only; default cmd.exe)")
 	extraListen := flag.String("extra-listen", "", "additional best-effort host:port to ALSO serve the same mux on (e.g. this host's tailnet IP, so remote tailnet clients can reach a loopback-bound broker). A bind failure here is logged and ignored — it never stops the primary --listen.")
+	localListenFlag := flag.String("local-listen", "", "loopback host:port for CLIs and agents on THIS host (default 127.0.0.1:$UT_LOCAL_PORT, else the --listen port). Lets several brokers share a host while each publishes the standard tailnet port.")
 	flag.Parse()
+	localListen, err := resolveLocalListen(*localListenFlag, *listen, os.Getenv("UT_LOCAL_PORT"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	servingLocalPort = portOf(localListen)
 
 	// Display name the client shows for this broker's device, plus the OS hostname.
 	// The hostname is what /history records as a session's `node`; reporting it here
@@ -574,7 +580,7 @@ func main() {
 					f = fwdMgr.Find(peer.Host, remotePort)
 				}
 				if f == nil {
-					f, err = fwdMgr.StartViaMesh(routeMachine, peer.Host, peer.Name, peer.Scheme, remotePort, localPort, q.Get("label"), portOf(*listen))
+					f, err = fwdMgr.StartViaMesh(routeMachine, peer.Host, peer.Name, peer.Scheme, remotePort, localPort, q.Get("label"), servingLocalPort)
 				}
 			} else {
 				if q.Get("reuse") == "1" {
@@ -1223,13 +1229,37 @@ func main() {
 	// its local broker (and relay out through the mesh). In tsnet mode the primary
 	// listener is the tailnet interface only — without this, the `ut` mesh client
 	// on a cluster compute node couldn't talk to its own broker.
-	if loopback := "127.0.0.1:" + portOf(*listen); loopback != *listen && loopback != *extraListen {
-		go serveRecoveringListener(ctx, loopback, 5*time.Second, net.Listen, srv.Serve)
+	if localListen != *listen && localListen != *extraListen {
+		go serveRecoveringListener(ctx, localListen, 5*time.Second, net.Listen, srv.Serve)
 	}
 	log.Printf("universal_tmux broker → %s  (tmux -L %s, fallback session %q)", where, *tmuxSock, *session)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// resolveLocalListen picks the loopback control endpoint: an explicit
+// --local-listen, else UT_LOCAL_PORT, else the --listen port. It is only ever a
+// loopback address, so separating it from the tailnet port never widens exposure.
+func resolveLocalListen(explicit, listen, envPort string) (string, error) {
+	addr := explicit
+	if addr == "" && envPort != "" {
+		addr = net.JoinHostPort("127.0.0.1", envPort)
+	}
+	if addr == "" {
+		addr = net.JoinHostPort("127.0.0.1", portOf(listen))
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("local listen %q: %w", addr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("local listen %q: host must be a loopback IP", addr)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("local listen %q: invalid port", addr)
+	}
+	return addr, nil
 }
 
 // portOf returns the port of a host:port (or the string itself if it has no host).

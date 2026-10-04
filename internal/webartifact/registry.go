@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"universal-tmux/internal/statedir"
 )
 
 const SchemaVersion = 1
@@ -87,11 +89,7 @@ type Registry struct {
 }
 
 func DefaultRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
-	return filepath.Join(home, ".universal-tmux", "web-artifacts", "records")
+	return filepath.Join(statedir.Dir(), "web-artifacts", "records")
 }
 
 func NewRegistry(root, machineName, machineHost string, runner Runner) *Registry {

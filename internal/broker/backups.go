@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"universal-tmux/internal/statedir"
 )
 
 const backupRetentionDays = 7
@@ -28,7 +30,7 @@ func homeDir() string {
 }
 
 func brokerStateDir() string {
-	dir := filepath.Join(homeDir(), ".universal-tmux")
+	dir := statedir.Dir()
 	_ = os.MkdirAll(dir, 0o755)
 	return dir
 }

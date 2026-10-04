@@ -27,9 +27,22 @@ var meshVerbs = map[string]bool{
 
 func isMeshVerb(s string) bool { return meshVerbs[s] }
 
+// servingLocalPort is set by a running broker to its own loopback control port,
+// so in-process mesh clients (Lab mirror, automation) reach THIS broker even
+// when another broker on the same host owns the default port.
+var servingLocalPort string
+
+// localPort is the loopback control port of the broker this process talks to.
+// UT_LOCAL_PORT separates it from the tailnet port (UT_PORT) so several brokers
+// can share one host while each still publishes the standard tailnet port.
 func localPort() string {
-	if p := os.Getenv("UT_PORT"); p != "" {
-		return p
+	if servingLocalPort != "" {
+		return servingLocalPort
+	}
+	for _, key := range []string{"UT_LOCAL_PORT", "UT_PORT"} {
+		if p := os.Getenv(key); p != "" {
+			return p
+		}
 	}
 	return "8722"
 }
