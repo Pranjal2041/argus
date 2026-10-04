@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Science
@@ -36,6 +37,8 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -85,7 +88,12 @@ fun App(vm: AppViewModel) {
         var newSessionFor by remember { mutableStateOf<Broker?>(null) }
         var showAbout by remember { mutableStateOf(false) }
         var showTheme by remember { mutableStateOf(false) }
-        var screen by remember { mutableStateOf(3) }   // 0 = terminal, 1 = files, 2 = ports, 3 = command center (home)
+        var screen by rememberSaveable { mutableStateOf(3) }
+        var destinationsOpen by remember { mutableStateOf(false) }
+        val screenState = rememberSaveableStateHolder()
+        val destinations = listOf(3 to "Command Center", 0 to "Terminal", 1 to "Files", 2 to "Ports", SCREEN_PLANNER to "Planner",
+            SCREEN_USAGE to "Usage", SCREEN_GIT to "Git & pull requests", SCREEN_DASHBOARDS to "Dashboards", SCREEN_NOTEBOOKS to "Notebooks", SCREEN_HISTORY to "Session history", SCREEN_ARTIFACTS to "Artifacts", SCREEN_JOURNAL to "Activity Ledger", SCREEN_WRAPPED to "Wrapped",
+            4 to "Workflows", 5 to "Todo Maps", 6 to "Notes", SCREEN_LAB to "Lab", SCREEN_WEEKLY_PROGRESS to "Weekly Progress", SCREEN_WORKSPACE to "Workspace & sync")
         var showFind by remember { mutableStateOf(false) }
         var renderDocument by remember { mutableStateOf<RenderContent?>(null) }
 
@@ -108,11 +116,13 @@ fun App(vm: AppViewModel) {
         LaunchedEffect(Unit) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 var tick = 0
+                try {
                 while (true) {
+                    vm.terminalVisible = screen == 0
                     if (TsnetCore.isUp && tick % 5 == 0) vm.refreshAll() else vm.pollKnown()
                     vm.refreshCC()   // pull the Mac-published statuses for the command center
                     if (tick % 2 == 0) {
-                        vm.enrichOs(); vm.syncUserData(); vm.flushJournal(); vm.refreshLab()
+                        vm.enrichOs(); vm.refreshWorkspace(); vm.syncUserData(); vm.flushJournal(); vm.refreshLab(); vm.refreshArtifactTransfers()
                     }  // sync user data, journal, and Lab protocol state every ~6s
                     if (screen == SCREEN_WEEKLY_PROGRESS || vm.weeklyProgressCatalog.activeOperation != null) {
                         vm.refreshWeeklyProgress()
@@ -120,6 +130,7 @@ fun App(vm: AppViewModel) {
                     tick++
                     delay(3000)
                 }
+                } finally { vm.terminalVisible = false }
             }
         }
 
@@ -149,6 +160,8 @@ fun App(vm: AppViewModel) {
                     TopAppBar(
                         title = {
                             val sel = vm.selected
+                            Box {
+                            Row(Modifier.clickable { destinationsOpen = true }, verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 when {
                                     screen == 1 -> "Files"
@@ -156,11 +169,22 @@ fun App(vm: AppViewModel) {
                                     screen == 3 -> "Argus"
                                     screen == SCREEN_LAB -> "Lab"
                                     screen == SCREEN_WEEKLY_PROGRESS -> "Weekly Progress"
+                                    screen != 0 -> destinations.firstOrNull { it.first == screen }?.second ?: "Argus"
                                     sel != null -> "${sel.second}  ·  ${sel.first.name}"
                                     else -> "Argus"
                                 },
                                 maxLines = 1,
+                                modifier = Modifier.weight(1f, fill = false),
                             )
+                            Icon(Icons.Default.ArrowDropDown, "Workspace destinations")
+                            }
+                            DropdownMenu(destinationsOpen, onDismissRequest = { destinationsOpen = false }) {
+                                destinations.forEach { (id, title) -> DropdownMenuItem(text = { Text(title) }, onClick = {
+                                    screen = id; destinationsOpen = false
+                                    if (id == SCREEN_WORKSPACE) vm.refreshWorkspace(true)
+                                }) }
+                            }
+                            }
                         },
                         navigationIcon = {
                             IconButton(onClick = { scope.launch { drawerState.open() } }) {
@@ -171,7 +195,7 @@ fun App(vm: AppViewModel) {
                             // The action icons scroll horizontally so adding features never
                             // crowds the bar or squeezes the title off-screen.
                             Row(
-                                Modifier.widthIn(max = 232.dp).horizontalScroll(rememberScrollState()),
+                                Modifier.widthIn(max = 144.dp).horizontalScroll(rememberScrollState()),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                             if (screen == 0 && vm.selected != null) {
@@ -188,7 +212,7 @@ fun App(vm: AppViewModel) {
                                 IconButton(onClick = {
                                     val fallback = ActiveTerm.rt?.renderableText() ?: return@IconButton
                                     val id = System.nanoTime()
-                                    renderDocument = RenderContent(id, fallback, "terminal")
+                                    renderDocument = RenderContent(id, fallback, "terminal", panel = vm.artifactPanel(sel.first), brokerID = sel.first.brokerID)
                                     // Open instantly, then replace only this still-open render
                                     // with authored source when the broker can screen-match it.
                                     scope.launch {
@@ -196,7 +220,7 @@ fun App(vm: AppViewModel) {
                                             Net.renderSource(sel.first, sel.second)
                                         }
                                         if (rich != null && renderDocument?.id == id) {
-                                            renderDocument = RenderContent(id, rich.source, rich.origin)
+                                            renderDocument = renderDocument?.copy(text = rich.source, sourceOrigin = rich.origin)
                                         }
                                     }
                                 }) {
@@ -257,7 +281,24 @@ fun App(vm: AppViewModel) {
                 },
             ) { pad ->
                 Box(Modifier.padding(pad).fillMaxSize().background(ink)) {
-                    if (screen == 1) {
+                    screenState.SaveableStateProvider(screen) {
+                    if (screen == SCREEN_JOURNAL || screen == SCREEN_WRAPPED) {
+                        JournalScreen(vm, wrapped = screen == SCREEN_WRAPPED)
+                    } else if (screen == SCREEN_ARTIFACTS) {
+                        ArtifactsScreen(vm)
+                    } else if (screen == SCREEN_DASHBOARDS || screen == SCREEN_NOTEBOOKS) {
+                        WorkspaceCatalogScreen(vm, notebooks = screen == SCREEN_NOTEBOOKS)
+                    } else if (screen == SCREEN_GIT) {
+                        GitScreen(vm)
+                    } else if (screen == SCREEN_HISTORY) {
+                        HistoryScreen(vm) { broker, name -> vm.selected = broker to name; screen = 0 }
+                    } else if (screen == SCREEN_USAGE) {
+                        UsageScreen(vm)
+                    } else if (screen == SCREEN_PLANNER) {
+                        PlannerScreen(vm)
+                    } else if (screen == SCREEN_WORKSPACE) {
+                        WorkspaceScreen(vm)
+                    } else if (screen == 1) {
                         FilesScreen(vm)
                     } else if (screen == 2) {
                         PortsScreen(vm)
@@ -290,8 +331,9 @@ fun App(vm: AppViewModel) {
                             }
                         }
                         renderDocument?.let { document ->
-                            RenderOverlay(document, onClose = { renderDocument = null })
+                            RenderOverlay(document, onClose = { renderDocument = null }, vm = vm)
                         }
+                    }
                     }
                 }
             }

@@ -28,7 +28,11 @@ private class ProgressBody(private val data: ByteArray, private val onProgress: 
 
 /** A reachable broker. tsnet brokers serve real *.ts.net TLS (https/wss); a broker
  *  bound to a host's own tailnet IP (e.g. Windows via the Tailscale app) serves http/ws. */
-data class Broker(val host: String, val scheme: String, val name: String, val os: String = "") {
+data class Broker(
+    val host: String, val scheme: String, val name: String, val os: String = "",
+    val brokerID: String = "", val workspaceID: String = "", val workspaceEnabled: Boolean = false,
+    val capabilities: Set<String> = emptySet(),
+) {
     val httpBase get() = "$scheme://$host:8722"
     val wsBase get() = (if (scheme == "https") "wss" else "ws") + "://$host:8722"
     val id get() = host
@@ -43,6 +47,8 @@ data class SessionInfo(
     val agent: Boolean = false,   // background/unclassified: hidden unless "Show agent sessions"
     val hidden: Boolean = false,  // user-hidden; broker-owned so the hide syncs across devices
     val tmuxId: String? = null,   // broker's STABLE session handle ($N): unchanged across rename — connect by it so a renamed pane never sticks on "reconnecting"
+    val lineageID: String = "",
+    val activityRevision: Long = 0,
 )
 
 /** One session's AI status, published by the macOS client and read here. */
@@ -64,6 +70,8 @@ data class FileEntry(
 )
 
 data class FsHome(val home: String, val roots: List<String>, val sep: String)
+data class FileDocument(val path: String, val text: String, val revision: String)
+data class FileSaveResult(val document: FileDocument? = null, val conflict: FileDocument? = null, val error: String? = null)
 
 data class PortInfo(val port: Int, val address: String, val process: String, val pid: Int)
 
@@ -115,7 +123,12 @@ object Net {
                     if (r.isSuccessful && body != null) {
                         val o = JSONObject(body)
                         if (o.optString("service") == "universal-tmux-broker") {
-                            return Broker(host, scheme, o.optString("name", host), o.optString("os", ""))
+                            val workspace = o.optJSONObject("workspace")
+                            val capabilities = o.optJSONArray("capabilities")
+                            return Broker(host, scheme, o.optString("name", host), o.optString("os", ""),
+                                o.optString("brokerID"), workspace?.optString("workspaceID").orEmpty(),
+                                workspace?.optBoolean("enabled") ?: false,
+                                if (capabilities == null) emptySet() else (0 until capabilities.length()).map { capabilities.getString(it) }.toSet())
                         }
                     }
                 }
@@ -128,6 +141,7 @@ object Net {
     fun sessions(b: Broker): List<SessionInfo>? = try {
         val req = Request.Builder().url("${b.httpBase}/sessions").build()
         client.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) return null
             val o = JSONObject(r.body!!.string())
             val arr = o.getJSONArray("sessions")
             (0 until arr.length()).map { i ->
@@ -142,6 +156,7 @@ object Net {
                     s.optBoolean("agent", true),
                     s.optBoolean("hidden", false),
                     s.optString("id", "").ifEmpty { null },
+                    s.optString("lineageID"), s.optLong("activityRevision"),
                 )
             }
         }
@@ -166,11 +181,12 @@ object Net {
     }
 
     /** Command-center statuses this broker holds (published by the Mac), keyed by
-     *  session name. Returns empty if the broker has none / doesn't support it. */
-    fun ccStatus(b: Broker): List<AgentCardStatus> = try {
+     *  session name. Null means unknown/unavailable, not authoritative deletion. */
+    fun ccStatus(b: Broker): List<AgentCardStatus>? = try {
         val req = Request.Builder().url("${b.httpBase}/ccstatus").build()
         client.newCall(req).execute().use { r ->
-            val arr = JSONObject(r.body!!.string()).optJSONArray("items") ?: return emptyList()
+            if (!r.isSuccessful) return null
+            val arr = JSONObject(r.body!!.string()).optJSONArray("items") ?: return null
             (0 until arr.length()).map { i ->
                 val e = arr.getJSONObject(i)
                 AgentCardStatus(
@@ -179,17 +195,15 @@ object Net {
                 )
             }
         }
-    } catch (_: Exception) { emptyList() }
+    } catch (_: Exception) { null }
 
     /** Set a manual command-center status for a session. The phone can't run the status
      *  model, so it queues this on the broker; the Mac applies it and re-publishes. */
-    fun setCCOverride(b: Broker, session: String, label: String) {
+    fun setCCOverride(b: Broker, session: String, label: String): Boolean =
         try {
             val u = "${b.httpBase}/ccoverride?session=${enc(session)}&label=${enc(label)}"
-            client.newCall(Request.Builder().url(u).post(RequestBody.create(null, ByteArray(0))).build()).execute().close()
-        } catch (_: Exception) {
-        }
-    }
+            client.newCall(Request.Builder().url(u).post(RequestBody.create(null, ByteArray(0))).build()).execute().use { it.isSuccessful }
+        } catch (_: Exception) { false }
 
     /** Toggle a session's hidden flag on its owning broker (broker-owned → syncs across devices). */
     fun setHidden(b: Broker, session: String, hidden: Boolean) {
@@ -266,6 +280,28 @@ object Net {
 
     /** A streamable URL for the file (images/media in a viewer). */
     fun fsReadUrl(b: Broker, path: String) = "${b.httpBase}/fs/read?path=${enc(path)}"
+
+    fun fsDocument(b: Broker, path: String): FileDocument? = try {
+        val value = WorkspaceNet.get(b, "/fs/document?path=${enc(path)}")
+        FileDocument(value.getString("path"), value.getString("text"), value.getString("revision"))
+    } catch (_: Exception) { null }
+
+    fun fsSaveDocument(b: Broker, path: String, revision: String, text: String): FileSaveResult = try {
+        if (revision.isEmpty()) FileSaveResult(error = "This broker needs conditional file-save support. Your draft is saved on this phone.")
+        else {
+            val request = Request.Builder().url("${b.httpBase}/fs/document?path=${enc(path)}")
+                .header("If-Match", revision).post(RequestBody.create(null, text.toByteArray(Charsets.UTF_8))).build()
+            client.newCall(request).execute().use { response ->
+                val value = JSONObject(response.body?.string() ?: "{}")
+                fun document(o: JSONObject) = FileDocument(o.getString("path"), o.getString("text"), o.getString("revision"))
+                when {
+                    response.isSuccessful -> FileSaveResult(document = document(value))
+                    response.code == 409 -> FileSaveResult(conflict = document(value.getJSONObject("current")), error = "The remote file changed. Your draft has been retained.")
+                    else -> FileSaveResult(error = value.optString("error", "Save failed (HTTP ${response.code}); your draft is retained."))
+                }
+            }
+        }
+    } catch (_: Exception) { FileSaveResult(error = "Save was not acknowledged. Your draft is retained.") }
 
     /** Stream a file into `sink`, reporting (bytesRead, total) progress. */
     fun fsDownloadTo(b: Broker, path: String, sink: java.io.OutputStream, onProgress: (Long, Long) -> Unit): Boolean = try {
