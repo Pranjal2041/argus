@@ -1,5 +1,21 @@
 import Foundation
 
+/// Keep the authored bytes and exact terminal snapshot, not just their visual
+/// projection. A saved render is committed only after this archive is durable.
+struct RenderSourceArchive: Codable, Equatable {
+    let schemaVersion: Int
+    let document: RenderDocument
+    let presentation: String
+    let fontSize: Double
+
+    init(document: RenderDocument, presentation: String, fontSize: Double) {
+        schemaVersion = 1
+        self.document = document
+        self.presentation = presentation
+        self.fontSize = fontSize
+    }
+}
+
 enum ArtifactKind {
     static let renderPDF = "render-pdf"
     static let screenshotPNG = "screenshot-png"
@@ -149,6 +165,8 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
     /// existing V1 render/screenshot manifests fully backwards compatible.
     let sourcePath: String?
     let contentType: String?
+    /// Absent for PDFs saved before source archival was introduced.
+    let renderSourcePath: String?
     /// `nil` is a legacy manifest. New records distinguish untouched fallback
     /// names, Codex-generated titles, and user-authored names so asynchronous
     /// naming can never overwrite a manual rename.
@@ -165,7 +183,8 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         byteCount: Int64,
         sourcePath: String? = nil,
         contentType: String? = nil,
-        titleSource: String? = nil
+        titleSource: String? = nil,
+        renderSourcePath: String? = nil
     ) {
         schemaVersion = 1
         self.id = id
@@ -178,6 +197,7 @@ struct ArtifactRecord: Codable, Identifiable, Hashable {
         self.byteCount = byteCount
         self.sourcePath = sourcePath
         self.contentType = contentType
+        self.renderSourcePath = renderSourcePath
         self.titleSource = titleSource
     }
 
@@ -500,6 +520,7 @@ actor ArtifactDiskStore {
         _ data: Data,
         panel: ArtifactPanelContext,
         presentation: String,
+        source: RenderSourceArchive,
         createdAt: Date = Date(),
         id: UUID = UUID()
     ) throws -> ArtifactRecord {
@@ -518,17 +539,26 @@ actor ArtifactDiskStore {
             presentation: presentation,
             relativePath: relativePath,
             byteCount: Int64(data.count),
-            titleSource: ArtifactTitleSource.fallback
+            titleSource: ArtifactTitleSource.fallback,
+            renderSourcePath: "sources/" + id.uuidString.lowercased() + ".json"
         )
         let pdfURL = try contentURL(for: record)
+        let sourceURL = try safeURL(for: record.renderSourcePath!)
         do {
+            try JSONEncoder().encode(source).write(to: sourceURL, options: .atomic)
             try data.write(to: pdfURL, options: .atomic)
             try writeManifest(record)
             return record
         } catch {
             try? FileManager.default.removeItem(at: pdfURL)
+            try? FileManager.default.removeItem(at: sourceURL)
             throw error
         }
+    }
+
+    func loadRenderSource(for record: ArtifactRecord) throws -> RenderSourceArchive? {
+        guard let path = record.renderSourcePath else { return nil }
+        return try JSONDecoder().decode(RenderSourceArchive.self, from: Data(contentsOf: safeURL(for: path)))
     }
 
     func saveScreenshotPNG(
@@ -663,11 +693,15 @@ actor ArtifactDiskStore {
     func delete(_ record: ArtifactRecord) throws {
         let manifest = manifestURL(for: record.id)
         let content = try contentURL(for: record)
+        let source = try record.renderSourcePath.map { try safeURL(for: $0) }
         if FileManager.default.fileExists(atPath: manifest.path) {
             try FileManager.default.removeItem(at: manifest)
         }
         if FileManager.default.fileExists(atPath: content.path) {
             try FileManager.default.removeItem(at: content)
+        }
+        if let source, FileManager.default.fileExists(atPath: source.path) {
+            try FileManager.default.removeItem(at: source)
         }
     }
 
@@ -681,6 +715,7 @@ actor ArtifactDiskStore {
         try FileManager.default.createDirectory(at: pdfURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: filesURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: rootURL.appendingPathComponent("sources", isDirectory: true), withIntermediateDirectories: true)
     }
 
     private func fileRecord(
@@ -724,10 +759,14 @@ actor ArtifactDiskStore {
     }
 
     private func contentURL(for record: ArtifactRecord) throws -> URL {
-        guard !record.relativePath.hasPrefix("/"), !record.relativePath.contains("..") else {
+        try safeURL(for: record.relativePath)
+    }
+
+    private func safeURL(for relativePath: String) throws -> URL {
+        guard !relativePath.hasPrefix("/"), !relativePath.contains("..") else {
             throw ArtifactDiskError.unsafePath
         }
-        let candidate = rootURL.appendingPathComponent(record.relativePath).standardizedFileURL
+        let candidate = rootURL.appendingPathComponent(relativePath).standardizedFileURL
         let rootPath = rootURL.standardizedFileURL.path + "/"
         guard candidate.path.hasPrefix(rootPath) else { throw ArtifactDiskError.unsafePath }
         return candidate
@@ -835,9 +874,10 @@ final class ArtifactStore: ObservableObject {
     func savePDF(
         _ data: Data,
         panel: ArtifactPanelContext,
-        presentation: String
+        presentation: String,
+        source: RenderSourceArchive
     ) async throws -> ArtifactRecord {
-        let record = try await disk.savePDF(data, panel: panel, presentation: presentation)
+        let record = try await disk.savePDF(data, panel: panel, presentation: presentation, source: source)
         publish(record)
         return record
     }
