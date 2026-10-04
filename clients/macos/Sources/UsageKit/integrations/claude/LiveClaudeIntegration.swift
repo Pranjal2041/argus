@@ -21,7 +21,6 @@ struct LiveClaudeIntegration: UsageIntegration {
             catch HTTPFailure.status(401) { throw IntegrationError.authentication("Claude rejected this login. Reconnect this account.") }
         }
         catch HTTPFailure.status(403) { throw IntegrationError.permission("Claude did not grant usage access to this account. Reconnect with a Claude subscription.") }
-        catch HTTPFailure.status(429) { throw IntegrationError.unavailable("Claude is rate-limiting usage checks. The previous reading is preserved.") }
     }
     private func reading(_ values: [String: String]) async throws -> UsageSource {
         let usage = try await Self.get("usage", token: values["accessToken"] ?? "", client: client)
