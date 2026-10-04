@@ -130,6 +130,7 @@ enum IntegrationError: Error, LocalizedError, Sendable {
     case permission(String)
     case unavailable(String)
     case invalidResponse(String)
+    case rateLimited(until: Date)
     case timeout
     case commandFailed
 
@@ -139,6 +140,7 @@ enum IntegrationError: Error, LocalizedError, Sendable {
              .unavailable(let message), .invalidResponse(let message): message
         case .timeout: "The service took too long to respond. The last reading is preserved."
         case .commandFailed: "The provider command failed. Check the connection and try again."
+        case .rateLimited(let until): "The service is rate-limiting usage checks. Requests are paused until \(until.formatted(date: .omitted, time: .shortened)); the previous reading is preserved."
         }
     }
     var needsAuthentication: Bool {
@@ -149,6 +151,7 @@ enum IntegrationError: Error, LocalizedError, Sendable {
         case .authentication: "Connect account"
         case .permission: "Access required"
         case .configuration: "Setup required"
+        case .rateLimited: "Rate limited"
         default: "Unavailable"
         }
     }
