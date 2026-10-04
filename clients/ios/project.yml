@@ -1,0 +1,88 @@
+# Generate the Xcode project with `xcodegen` (brew install xcodegen), then
+# build with Xcode or `bash build-ios.sh`. The generated .xcodeproj is not committed.
+name: ArgusiOS
+options:
+  bundleIdPrefix: dev.universaltmux
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  SwiftTerm:
+    path: ../macos/vendor/SwiftTerm
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ${ARGUS_IOS_TEAM}
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Argus:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Resources
+      # Shared with the macOS app: ArgusJSON + the three-way workspace merge, so
+      # phone edits merge exactly like the Mac and the sync host do.
+      - path: ../macos/Sources/ArgusProtocol/Protocol.swift
+      - path: ../macos/Sources/ArgusProtocol/WorkspaceMerge.swift
+      # W&B run detection, shared with macOS (Android ports the same matchers).
+      - path: ../macos/Sources/UniversalTmuxMac/Wandb.swift
+      # Offline Markdown/LaTeX renderer (window.UTRender), shared with Android.
+      - path: ../android/app/src/main/assets/render
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: SwiftTerm
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Argus
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        LSApplicationCategoryType: public.app-category.developer-tools
+        # Only Apple's TLS (HTTPS/WSS) is used: exempt from export documentation.
+        ITSAppUsesNonExemptEncryption: false
+        NSHumanReadableCopyright: "© 2026 Argus contributors. MIT License."
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Native brokers (a Mac) serve plain http on their tailnet IP; the
+        # tailnet (WireGuard) is the transport security, as on macOS/Android.
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [dev.universaltmux.ios.refresh]
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.universaltmux.ios
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  ArgusTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: Argus
+  ArgusUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: Argus
+schemes:
+  Argus:
+    build:
+      targets:
+        Argus: all
+    test:
+      targets: [ArgusTests, ArgusUITests]
+      environmentVariables:
+        ARGUS_UITEST_HUB: ${ARGUS_UITEST_HUB}
