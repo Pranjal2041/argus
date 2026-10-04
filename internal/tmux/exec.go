@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"universal-tmux/internal/session"
+	"universal-tmux/internal/toolcommand"
 )
 
 const defaultExecTimeout = 120 * time.Second
@@ -36,7 +37,7 @@ func (p *Provider) Exec(req session.ExecRequest) session.ExecResult {
 func execOneShot(cmd, dir string, timeout time.Duration) session.ExecResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	c := toolcommand.CommandContext(ctx, "sh", "-c", cmd)
 	if dir != "" {
 		c.Dir = dir
 	}
@@ -90,10 +91,10 @@ func execInSession(socket, name, cmd string, timeout time.Duration) session.Exec
 	// One line, fixed format (the variable part is the script path, not the
 	// user's command), submitted with Enter.
 	line := fmt.Sprintf("{ . %s ; } >%s 2>%s ; printf %%s \"$?\" >%s", script, out, errf, done)
-	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", sessionID, "-l", line)...).Run(); err != nil {
+	if err := toolcommand.Command("tmux", tmuxArgs(socket, "send-keys", "-t", sessionID, "-l", line)...).Run(); err != nil {
 		return session.ExecResult{Error: "send-keys: " + err.Error(), Exit: -1}
 	}
-	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", sessionID, "Enter")...).Run(); err != nil {
+	if err := toolcommand.Command("tmux", tmuxArgs(socket, "send-keys", "-t", sessionID, "Enter")...).Run(); err != nil {
 		return session.ExecResult{Error: "send-keys Enter: " + err.Error(), Exit: -1}
 	}
 
@@ -124,12 +125,12 @@ func (p *Provider) SendText(name, text string, enter bool) error {
 		return fmt.Errorf("no such session %q", name)
 	}
 	if text != "" {
-		if err := exec.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "-l", text)...).Run(); err != nil {
+		if err := toolcommand.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "-l", text)...).Run(); err != nil {
 			return err
 		}
 	}
 	if enter {
-		if err := exec.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "Enter")...).Run(); err != nil {
+		if err := toolcommand.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "Enter")...).Run(); err != nil {
 			return err
 		}
 	}
@@ -143,7 +144,7 @@ func (p *Provider) SendText(name, text string, enter bool) error {
 // exact stable id once for both execution and this update; a concurrent kill
 // simply makes the best-effort set-option fail harmlessly.
 func touchSessionID(socket, sessionID string) {
-	_ = exec.Command("tmux", tmuxArgs(socket, "set-option", "-t", sessionID, optLastUsed, strconv.FormatInt(time.Now().Unix(), 10))...).Run()
+	_ = toolcommand.Command("tmux", tmuxArgs(socket, "set-option", "-t", sessionID, optLastUsed, strconv.FormatInt(time.Now().Unix(), 10))...).Run()
 }
 
 func mustRead(p string) []byte { b, _ := os.ReadFile(p); return b }

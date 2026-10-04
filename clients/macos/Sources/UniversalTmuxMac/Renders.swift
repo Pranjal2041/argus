@@ -99,7 +99,7 @@ struct RenderDocument: Codable, Equatable, Identifiable {
         )
     }
 
-    private init(id: UUID, source: String, sourceOrigin: String,
+    init(id: UUID = UUID(), source: String, sourceOrigin: String,
                  terminal: RenderTerminalSnapshot) {
         self.id = id
         self.source = source
@@ -249,26 +249,15 @@ enum RenderCapture {
 final class RenderWebProxy: ObservableObject {
     weak var webView: WKWebView?
 
-    /// Snapshot the FULL rendered document (not just the viewport) into a
-    /// one-page PDF via WebKit's native renderer. The caller owns persistence:
+    /// Export the FULL document, expanding overflow and paginating long content
+    /// via WebKit's native renderer. The caller owns persistence:
     /// Render's PDF button archives these exact bytes before any optional export.
     func createPDF(completion: @escaping (Result<Data, Error>) -> Void) {
         guard let wv = webView else {
             completion(.failure(RenderPDFError.webViewUnavailable))
             return
         }
-        wv.evaluateJavaScript("({ width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth), height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) })") { dimensions, _ in
-            let values = dimensions as? [String: Any]
-            let width = (values?["width"] as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.width
-            let height = (values?["height"] as? NSNumber).map { CGFloat(truncating: $0) } ?? wv.bounds.height
-            let cfg = WKPDFConfiguration()
-            cfg.rect = CGRect(x: 0, y: 0,
-                              width: max(width, wv.bounds.width),
-                              height: max(height, wv.bounds.height))
-            wv.createPDF(configuration: cfg) { result in
-                completion(result)
-            }
-        }
+        RenderPDFExporter.create(from: wv, completion: completion)
     }
 }
 
@@ -451,6 +440,7 @@ struct RenderPanel: View {
         savingPDF = true
         state.renderPDFCaptureInProgress = true
         let capturedPresentation = presentation
+        let capturedSource = RenderSourceArchive(document: document, presentation: presentation, fontSize: fontSize)
         web.createPDF { result in
             switch result {
             case .failure(let error):
@@ -463,7 +453,8 @@ struct RenderPanel: View {
                         savedArtifact = try await artifacts.savePDF(
                             data,
                             panel: panel,
-                            presentation: capturedPresentation
+                            presentation: capturedPresentation,
+                            source: capturedSource
                         )
                     } catch {
                         pdfError = error.localizedDescription

@@ -548,15 +548,24 @@ final class AppState: ObservableObject {
         workflows.removeAll { $0.id == wf.id }
     }
 
+    /// A machine-name wildcard (`*` → any run of chars, case-insensitive, full match);
+    /// nil for an empty pattern. Shared by Workflows and machine launchers.
+    nonisolated static func wildcard(_ pattern: String) -> NSRegularExpression? {
+        let p = pattern.trimmingCharacters(in: .whitespaces)
+        guard !p.isEmpty else { return nil }
+        let rx = "^" + NSRegularExpression.escapedPattern(for: p).replacingOccurrences(of: "\\*", with: ".*") + "$"
+        return try? NSRegularExpression(pattern: rx, options: [.caseInsensitive])
+    }
+    nonisolated static func matches(_ re: NSRegularExpression, _ s: String) -> Bool {
+        re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+    }
+
     /// Online machines whose name matches a workflow's wildcard pattern (`*` → any run of
     /// chars, case-insensitive, full match). The local machine also matches its hostname
     /// and the friendly aliases "this mac" / "mac" / "local".
     func machinesMatching(_ pattern: String) -> [Machine] {
-        let p = pattern.trimmingCharacters(in: .whitespaces)
-        guard !p.isEmpty else { return [] }
-        let rx = "^" + NSRegularExpression.escapedPattern(for: p).replacingOccurrences(of: "\\*", with: ".*") + "$"
-        guard let re = try? NSRegularExpression(pattern: rx, options: [.caseInsensitive]) else { return [] }
-        func hit(_ s: String) -> Bool { re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+        guard let re = AppState.wildcard(pattern) else { return [] }
+        func hit(_ s: String) -> Bool { AppState.matches(re, s) }
         return machines.filter { m in
             if hit(m.name) { return true }
             if m.isLocal, hit(ProcessInfo.processInfo.hostName) || hit("this mac") || hit("mac") || hit("local") { return true }

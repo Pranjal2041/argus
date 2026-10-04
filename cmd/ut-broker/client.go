@@ -27,9 +27,22 @@ var meshVerbs = map[string]bool{
 
 func isMeshVerb(s string) bool { return meshVerbs[s] }
 
+// servingLocalPort is set by a running broker to its own loopback control port,
+// so in-process mesh clients (Lab mirror, automation) reach THIS broker even
+// when another broker on the same host owns the default port.
+var servingLocalPort string
+
+// localPort is the loopback control port of the broker this process talks to.
+// UT_LOCAL_PORT separates it from the tailnet port (UT_PORT) so several brokers
+// can share one host while each still publishes the standard tailnet port.
 func localPort() string {
-	if p := os.Getenv("UT_PORT"); p != "" {
-		return p
+	if servingLocalPort != "" {
+		return servingLocalPort
+	}
+	for _, key := range []string{"UT_LOCAL_PORT", "UT_PORT"} {
+		if p := os.Getenv(key); p != "" {
+			return p
+		}
 	}
 	return "8722"
 }
@@ -131,8 +144,7 @@ func httpGet(u string, timeout time.Duration) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return b, resp.StatusCode, nil
+	return readBrokerResponse(resp)
 }
 
 func httpPost(u string, body []byte, timeout time.Duration) ([]byte, int, error) {
@@ -142,8 +154,7 @@ func httpPost(u string, body []byte, timeout time.Duration) ([]byte, int, error)
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return b, resp.StatusCode, nil
+	return readBrokerResponse(resp)
 }
 
 func httpDelete(u string, timeout time.Duration) ([]byte, int, error) {
@@ -156,8 +167,29 @@ func httpDelete(u string, timeout time.Duration) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return b, resp.StatusCode, nil
+	return readBrokerResponse(resp)
+}
+
+func readBrokerResponse(resp *http.Response) ([]byte, int, error) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return body, resp.StatusCode, fmt.Errorf("read broker response (HTTP %d): %w", resp.StatusCode, err)
+	}
+	return body, resp.StatusCode, nil
+}
+
+// A successful transport does not imply a successful broker operation. Keep
+// the actual rejection (JSON from a provider or plain text from a mesh router)
+// instead of printing the nil transport error. No target guessing or retrying:
+// the requested operation must not accidentally run on a different machine.
+func brokerRequestError(body []byte, code int, err error) error {
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("HTTP %d: %s", code, brokerResponseError(body, code))
+	}
+	return nil
 }
 
 // --- ls ---------------------------------------------------------------------
@@ -294,8 +326,8 @@ func cmdSh(args []string) int {
 		} else {
 			q.Set("kind", "agent-shell")
 		}
-		if _, code, err := httpPost(peerURL(host, "/control", q), nil, 15*time.Second); err != nil || code != 200 {
-			fmt.Fprintf(os.Stderr, "ut sh: create failed (%v)\n", err)
+		if err := brokerRequestError(httpPost(peerURL(host, "/control", q), nil, 15*time.Second)); err != nil {
+			fmt.Fprintf(os.Stderr, "ut sh: create on %q failed: %v\n", host, err)
 			return 1
 		}
 		kind := "agent shell"
@@ -364,8 +396,8 @@ func cmdSpawn(args []string) int {
 	if idleSet {
 		q.Set("idle", strconv.Itoa(idleSec))
 	}
-	if _, code, err := httpPost(peerURL(host, "/control", q), []byte(cmd), 20*time.Second); err != nil || code != 200 {
-		fmt.Fprintf(os.Stderr, "ut spawn: failed (%v)\n", err)
+	if err := brokerRequestError(httpPost(peerURL(host, "/control", q), []byte(cmd), 20*time.Second)); err != nil {
+		fmt.Fprintf(os.Stderr, "ut spawn: on %q failed: %v\n", host, err)
 		return 1
 	}
 	fmt.Printf("spawned %q on %s — follow it with:  ut tail %s:%s\n", name, host, host, name)
@@ -433,8 +465,8 @@ func cmdSend(args []string) int {
 		return 2
 	}
 	text := strings.Join(args[1:], " ")
-	if _, code, err := httpPost(peerURL(host, "/send", url.Values{"session": {shell}}), []byte(text), 15*time.Second); err != nil || code != 200 {
-		fmt.Fprintf(os.Stderr, "ut send: failed (%v)\n", err)
+	if err := brokerRequestError(httpPost(peerURL(host, "/send", url.Values{"session": {shell}}), []byte(text), 15*time.Second)); err != nil {
+		fmt.Fprintf(os.Stderr, "ut send: to %q failed: %v\n", host, err)
 		return 1
 	}
 	return 0
@@ -490,8 +522,8 @@ func cmdCp(args []string) int {
 		data = b
 	} else {
 		b, code, err := httpGet(peerURL(srcHost, "/fs/read", url.Values{"path": {srcPath}}), 0)
-		if err != nil || code != 200 {
-			fmt.Fprintf(os.Stderr, "ut cp: read %s failed (%v)\n", args[0], err)
+		if err := brokerRequestError(b, code, err); err != nil {
+			fmt.Fprintf(os.Stderr, "ut cp: read %s failed: %v\n", args[0], err)
 			return 1
 		}
 		data = b
@@ -503,8 +535,8 @@ func cmdCp(args []string) int {
 			return 1
 		}
 	} else {
-		if _, code, err := httpPost(peerURL(dstHost, "/fs/write", url.Values{"path": {dstPath}}), data, 0); err != nil || code != 200 {
-			fmt.Fprintf(os.Stderr, "ut cp: write %s failed (%v)\n", args[1], err)
+		if err := brokerRequestError(httpPost(peerURL(dstHost, "/fs/write", url.Values{"path": {dstPath}}), data, 0)); err != nil {
+			fmt.Fprintf(os.Stderr, "ut cp: write %s failed: %v\n", args[1], err)
 			return 1
 		}
 	}
@@ -740,6 +772,10 @@ ADDRESSING
   @<machine>          a target host, e.g. @babel-p9-16   (the leading @ is optional)
   <machine>:<shell>   a persistent shell on that machine
   <machine>:<path>    a file on that machine
+
+  With a shell variable, use braces: "@${HOST}:job", not "@$HOST:job".
+  zsh treats a colon after an unbraced variable as a modifier and can silently
+  change the hostname before ut receives it. The same rule applies to file paths.
 
 EXAMPLES
   ut ls

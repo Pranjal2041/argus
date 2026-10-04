@@ -110,7 +110,7 @@ struct WeeklyProgressView: View {
                     .foregroundStyle(Theme.textTertiary)
             }
             Spacer()
-            Text("GPT-5.6 SOL · XHIGH")
+            Text(WeeklyProgressModelPresentation.currentLabel)
                 .font(cf(9.5, .semibold))
                 .tracking(0.5)
                 .foregroundStyle(Theme.textTertiary)

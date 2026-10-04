@@ -9,7 +9,24 @@ import (
 	"time"
 
 	"github.com/hinshun/vt10x"
+	"universal-tmux/internal/rendersource"
 )
+
+func TestRenderCaptureKeepsCursorAndGridTogether(t *testing.T) {
+	border := strings.Repeat("─", 40)
+	output := "\x1b[2J\x1b[Hanswer\r\n" + border + "\r\n❯ \r\n" + border + "\r\nstatus words\r\nmore status\x1b[3;3H\x1b[?25h"
+	c := snapshotFixture(t, output, 2, 2)
+	s, err := NewProvider(c.socket).CaptureRenderScreen("fixture", 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CursorY != 2 || s.CursorX != 2 || len(s.Lines) != 8 {
+		t.Fatalf("wrong geometry: %+v", s)
+	}
+	if got := rendersource.MatchingScreen(s); strings.TrimSpace(got) != "answer" {
+		t.Fatalf("wrong answer region: %q", got)
+	}
+}
 
 // These sessions live on their own server, never the user's tmux socket.
 func snapshotFixture(t *testing.T, output string, x, y int) *Client {
@@ -125,7 +142,7 @@ func TestSnapshotPreservesPendingWrapIncludingTrailingSpaces(t *testing.T) {
 
 func TestCapturedControlLookingTextRemainsData(t *testing.T) {
 	c := &Client{primary: "%0", outCh: make(chan Output, 4)}
-	c.handleLine("ARGUS_SNAPSHOT_BEGIN:17 40 8 0 0 0 1 1 0 0 0 7")
+	c.handleLine("ARGUS_SNAPSHOT_BEGIN:17 40 8 0 0 0 1 1 0 0 0 7 0 0 0 0 0")
 	c.handleLine("%end 100 1 1")
 	c.handleLine("%begin 100 2 1")
 	for _, line := range []string{"%output %0 not-live", "ARGUS_SNAPSHOT_END:17", "%layout-change @0 bad", "", "", "", "", ""} {
@@ -140,5 +157,98 @@ func TestCapturedControlLookingTextRemainsData(t *testing.T) {
 	out := <-c.outCh
 	if out.SnapshotID != 17 || !strings.Contains(string(out.Data), "%output %0 not-live") || !strings.Contains(string(out.Data), "ARGUS_SNAPSHOT_END:17") {
 		t.Fatal("capture text was treated as control protocol")
+	}
+}
+
+func TestSnapshotRestoresApplicationMouseModes(t *testing.T) {
+	for _, tc := range []struct {
+		name, modes, tracking, encoding string
+	}{
+		{"full-screen SGR any-event", "\x1b[?1049h\x1b[?1003h\x1b[?1006h", "1003", "1006"},
+		{"normal-screen legacy buttons", "\x1b[?1000h", "1000", ""},
+		{"UTF8 button tracking", "\x1b[?1002h\x1b[?1005h", "1002", "1005"},
+		{"disabled after application exit", "\x1b[?1003h\x1b[?1006h\x1b[?1003l\x1b[?1006l", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := snapshotFixture(t, tc.modes+"\x1b[2J\x1b[Hready", 5, 0)
+			check := func(data []byte) {
+				t.Helper()
+				wire := string(data)
+				for _, mode := range []string{"1000", "1002", "1003", "1005", "1006"} {
+					want := mode == tc.tracking || mode == tc.encoding
+					if strings.Contains(wire, "\x1b[?"+mode+"h") != want {
+						t.Fatalf("mode %s enabled=%v: %q", mode, want, wire)
+					}
+					if !strings.Contains(wire, "\x1b[?"+mode+"l") {
+						t.Fatalf("snapshot does not clear stale mode %s: %q", mode, wire)
+					}
+				}
+			}
+			check(fixture.Snapshot())
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			client, err := Dial(ctx, fixture.socket, "fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if err := client.RequestSnapshot(23); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				select {
+				case out := <-client.Output():
+					if out.SnapshotID == 23 {
+						check(out.Data)
+						return
+					}
+				case <-ctx.Done():
+					t.Fatal("ordered mouse snapshot never arrived")
+				}
+			}
+		})
+	}
+}
+
+func TestSnapshotRestoresRequestedMouseModes(t *testing.T) {
+	for _, tracking := range []int{0, 1000, 1002, 1003} {
+		t.Run(fmt.Sprint(tracking), func(t *testing.T) {
+			output := "\x1b[?1049h\x1b[?1006h"
+			if tracking != 0 {
+				output += fmt.Sprintf("\x1b[?%dh", tracking)
+			}
+			output += "\x1b[Hmouse ready\x1b[2;4H"
+			c := snapshotFixture(t, output, 3, 1)
+			wire := string(c.Snapshot())
+			for _, reset := range []int{1000, 1002, 1003} {
+				if !strings.Contains(wire, fmt.Sprintf("\x1b[?%dl", reset)) {
+					t.Fatalf("stale mode %d was not reset", reset)
+				}
+			}
+			if tracking != 0 && !strings.Contains(wire, fmt.Sprintf("\x1b[?%dh", tracking)) {
+				t.Fatalf("mouse mode %d was lost on attach: %q", tracking, wire)
+			}
+			if !strings.Contains(wire, "\x1b[?1006h") {
+				t.Fatal("SGR mouse encoding lost on attach")
+			}
+		})
+	}
+}
+
+func TestSnapshotRejectsMissingMouseMetadata(t *testing.T) {
+	if got := decodeScreenSnapshot([]byte("40 8 0 0 0 1 1 0 0 0 7\n" + strings.Repeat("\n", 8))).ANSI(); got != nil {
+		t.Fatal("partial metadata must not silently erase application input state")
+	}
+}
+
+func TestFullScreenHistoryCaptureDoesNotNavigateTheApplication(t *testing.T) {
+	c := snapshotFixture(t, "primary output\x1b[?1049h\x1b[Hfullscreen draft\x1b[3;7H", 6, 2)
+	before := c.paneFlag("#{alternate_on},#{cursor_x},#{cursor_y},#{pane_in_mode}")
+	text, err := NewProvider(c.socket).CaptureHistory("fixture", 100)
+	if err != nil || !strings.Contains(text, "primary output") || !strings.Contains(text, "fullscreen draft") {
+		t.Fatalf("history capture=%q, %v", text, err)
+	}
+	if after := c.paneFlag("#{alternate_on},#{cursor_x},#{cursor_y},#{pane_in_mode}"); after != before {
+		t.Fatalf("history changed application state: %s -> %s", before, after)
 	}
 }

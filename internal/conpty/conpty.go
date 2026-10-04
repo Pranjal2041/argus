@@ -65,6 +65,9 @@ type winSession struct {
 func (s *winSession) Output() <-chan session.Output { return s.outCh }
 func (s *winSession) Pane() string                  { return "%0" }
 
+// Queries that survive ConPTY's processing are for the rendering terminal.
+func (s *winSession) QueryOwnership() session.QueryOwnership { return session.ViewerQueries }
+
 func (s *winSession) SendKeys(_ string, data []byte) error {
 	_, err := s.cpty.Write(data)
 	if err == nil && len(data) > 0 {
@@ -203,6 +206,8 @@ type Provider struct {
 	shell    string // command each session hosts (e.g. "cmd.exe", "powershell.exe -NoLogo")
 }
 
+var _ session.TieredStateProvider = (*Provider)(nil)
+
 // NewProvider returns an empty ConPTY provider hosting `shell` per session
 // (empty → defaultShell).
 func NewProvider(shell string) *Provider {
@@ -214,9 +219,15 @@ func NewProvider(shell string) *Provider {
 
 func (p *Provider) SetHistoryLimit(int) {} // n/a: the ring buffer is fixed-size
 
-func (p *Provider) ListInventory() []session.Info {
+func (p *Provider) ListInventory(ctx context.Context) ([]session.Info, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out := make([]session.Info, 0, len(p.sessions))
 	for _, s := range p.sessions {
 		s.mu.Lock()
@@ -228,7 +239,7 @@ func (p *Provider) ListInventory() []session.Info {
 		s.mu.Unlock()
 		out = append(out, info)
 	}
-	return out
+	return out, nil
 }
 
 func (p *Provider) DetectState(name string) string {
@@ -245,7 +256,7 @@ func (p *Provider) DetectState(name string) string {
 }
 
 func (p *Provider) List() []session.Info {
-	out := p.ListInventory()
+	out, _ := p.ListInventory(context.Background())
 	for i := range out {
 		out[i].State = p.DetectState(out[i].Name)
 	}
@@ -292,6 +303,21 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 	text := s.capture.text()
 	s.mu.Unlock()
 	return text, nil
+}
+
+func (p *Provider) CaptureRenderScreen(name string, _ int) (session.ScreenSnapshot, error) {
+	p.mu.Lock()
+	s := p.sessions[name]
+	p.mu.Unlock()
+	if s == nil {
+		return session.ScreenSnapshot{}, fmt.Errorf("no such session: %q", name)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.capture == nil {
+		return session.ScreenSnapshot{}, fmt.Errorf("screen unavailable for session %q", name)
+	}
+	return s.capture.snapshot(), nil
 }
 
 func (p *Provider) Create(name, dir string) error {

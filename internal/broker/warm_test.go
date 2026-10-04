@@ -20,6 +20,12 @@ func (p *warmProvider) List() []session.Info {
 	}
 	return []session.Info{{Name: "shell", Agent: p.agent}}
 }
+func (p *warmProvider) ListInventory(ctx context.Context) ([]session.Info, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return p.List(), nil
+}
 func (p *warmProvider) Create(string, string) error {
 	p.createCalls++
 	p.exists = true
@@ -54,14 +60,15 @@ type warmSession struct {
 	out <-chan session.Output
 }
 
-func (s *warmSession) Output() <-chan session.Output { return s.out }
-func (s *warmSession) SendKeys(string, []byte) error { return nil }
-func (s *warmSession) Resize(int, int) error         { return nil }
-func (s *warmSession) Size() (int, int)              { return 0, 0 }
-func (s *warmSession) Snapshot() []byte              { return nil }
-func (s *warmSession) RequestSnapshot(uint64) error  { return nil }
-func (s *warmSession) Pane() string                  { return "pane" }
-func (s *warmSession) Close()                        {}
+func (s *warmSession) Output() <-chan session.Output          { return s.out }
+func (s *warmSession) QueryOwnership() session.QueryOwnership { return session.BackendQueries }
+func (s *warmSession) SendKeys(string, []byte) error          { return nil }
+func (s *warmSession) Resize(int, int) error                  { return nil }
+func (s *warmSession) Size() (int, int)                       { return 0, 0 }
+func (s *warmSession) Snapshot() []byte                       { return nil }
+func (s *warmSession) RequestSnapshot(uint64) error           { return nil }
+func (s *warmSession) Pane() string                           { return "pane" }
+func (s *warmSession) Close()                                 {}
 
 func TestWarmExistingDoesNotCreateMissingFallback(t *testing.T) {
 	p := &warmProvider{}

@@ -37,6 +37,63 @@ func TestInspectCodexRolloutsRejectsAmbiguousRoots(t *testing.T) {
 	}
 }
 
+func TestClosedTranscriptUsesExactLaunchIdentityWithScreenRequirement(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "sessions")
+	if err := os.MkdirAll(sessions, 0700); err != nil {
+		t.Fatal(err)
+	}
+	id := "019f630d-5663-7722-bc65-5fd298a497ec"
+	otherID := "119f630d-5663-7722-bc65-5fd298a497ec"
+	path := writeCodexRollout(t, sessions, "rollout-any-date-"+id+".jsonl", id, id)
+	other := writeCodexRollout(t, sessions, "rollout-any-date-"+otherID+".jsonl", otherID, otherID)
+	state := processState{Argv: []string{"codex", "resume", id}, Environment: map[string]string{"CODEX_HOME": root}}
+	got, err := inspectCodexTranscript(nil, state)
+	if err != nil || got.ID != id || got.Path != path || !got.RequireScreenMatch {
+		t.Fatalf("closed transcript: %#v, %v", got, err)
+	}
+	// A live descriptor takes precedence over stale launch arguments.
+	got, err = inspectCodexTranscript([]string{other}, state)
+	if err != nil || got.ID != otherID || got.RequireScreenMatch {
+		t.Fatalf("open transcript: %#v, %v", got, err)
+	}
+	if _, err := inspectCodexTranscript([]string{path, other}, state); err == nil {
+		t.Fatal("ambiguous live roots fell back to launch arguments")
+	}
+	writeCodexRollout(t, sessions, "rollout-other-date-"+id+".jsonl", id, id)
+	if _, err := inspectCodexTranscript(nil, state); err == nil {
+		t.Fatal("duplicate exact transcripts were guessed")
+	}
+}
+
+func TestClosedTranscriptRejectsUnprovenMetadataAndLaunchSelectors(t *testing.T) {
+	for _, tc := range []struct {
+		name, actualID, parentID string
+		argv                     []string
+	}{
+		{"wrong metadata", "119f630d-5663-7722-bc65-5fd298a497ec", "", nil},
+		{"child transcript", "019f630d-5663-7722-bc65-5fd298a497ec", "119f630d-5663-7722-bc65-5fd298a497ec", nil},
+		{"no exact selector", "019f630d-5663-7722-bc65-5fd298a497ec", "", []string{"codex", "resume", "--last"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			sessions := filepath.Join(root, "sessions")
+			if err := os.MkdirAll(sessions, 0700); err != nil {
+				t.Fatal(err)
+			}
+			id := "019f630d-5663-7722-bc65-5fd298a497ec"
+			writeCodexRollout(t, sessions, "rollout-date-"+id+".jsonl", tc.actualID, tc.parentID)
+			argv := tc.argv
+			if argv == nil {
+				argv = []string{"codex", "resume", id}
+			}
+			if _, err := inspectCodexTranscript(nil, processState{Argv: argv, Environment: map[string]string{"CODEX_HOME": root}}); err == nil {
+				t.Fatal("unproven transcript accepted")
+			}
+		})
+	}
+}
+
 func writeCodexRollout(t *testing.T, dir, name, id, sessionID string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

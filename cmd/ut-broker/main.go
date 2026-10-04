@@ -71,7 +71,13 @@ func main() {
 	name := flag.String("name", "", "display name reported to clients via /whoami (default: hostname)")
 	shell := flag.String("shell", "", "shell to host for new sessions (Windows ConPTY only; default cmd.exe)")
 	extraListen := flag.String("extra-listen", "", "additional best-effort host:port to ALSO serve the same mux on (e.g. this host's tailnet IP, so remote tailnet clients can reach a loopback-bound broker). A bind failure here is logged and ignored — it never stops the primary --listen.")
+	localListenFlag := flag.String("local-listen", "", "loopback host:port for CLIs and agents on THIS host (default 127.0.0.1:$UT_LOCAL_PORT, else the --listen port). Lets several brokers share a host while each publishes the standard tailnet port.")
 	flag.Parse()
+	localListen, err := resolveLocalListen(*localListenFlag, *listen, os.Getenv("UT_LOCAL_PORT"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	servingLocalPort = portOf(localListen)
 
 	// Display name the client shows for this broker's device, plus the OS hostname.
 	// The hostname is what /history records as a session's `node`; reporting it here
@@ -90,9 +96,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := broker.BackupDurableState(); err != nil {
-		log.Printf("warn: initial durable-state backup: %v", err)
-	}
+	// Initial and periodic backups share one background worker. A slow store must
+	// never delay opening the broker's listeners or reconnecting live sessions.
 	go broker.RunDailyBackupLoop(ctx)
 
 	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
@@ -390,6 +395,28 @@ func main() {
 		}
 		_ = json.NewEncoder(w).Encode(source)
 	})
+	// Read-only scroll surface for full-screen clients. Never sends navigation
+	// keys to the application and never guesses a neighboring agent transcript.
+	mux.HandleFunc("/terminal-history", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		name := r.URL.Query().Get("session")
+		if name == "" {
+			name = *session
+		}
+		history, err := mgr.TerminalHistory(name)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(history)
+	})
 	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -574,7 +601,7 @@ func main() {
 					f = fwdMgr.Find(peer.Host, remotePort)
 				}
 				if f == nil {
-					f, err = fwdMgr.StartViaMesh(routeMachine, peer.Host, peer.Name, peer.Scheme, remotePort, localPort, q.Get("label"), portOf(*listen))
+					f, err = fwdMgr.StartViaMesh(routeMachine, peer.Host, peer.Name, peer.Scheme, remotePort, localPort, q.Get("label"), servingLocalPort)
 				}
 			} else {
 				if q.Get("reuse") == "1" {
@@ -1223,13 +1250,37 @@ func main() {
 	// its local broker (and relay out through the mesh). In tsnet mode the primary
 	// listener is the tailnet interface only — without this, the `ut` mesh client
 	// on a cluster compute node couldn't talk to its own broker.
-	if loopback := "127.0.0.1:" + portOf(*listen); loopback != *listen && loopback != *extraListen {
-		go serveRecoveringListener(ctx, loopback, 5*time.Second, net.Listen, srv.Serve)
+	if localListen != *listen && localListen != *extraListen {
+		go serveRecoveringListener(ctx, localListen, 5*time.Second, net.Listen, srv.Serve)
 	}
 	log.Printf("universal_tmux broker → %s  (tmux -L %s, fallback session %q)", where, *tmuxSock, *session)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// resolveLocalListen picks the loopback control endpoint: an explicit
+// --local-listen, else UT_LOCAL_PORT, else the --listen port. It is only ever a
+// loopback address, so separating it from the tailnet port never widens exposure.
+func resolveLocalListen(explicit, listen, envPort string) (string, error) {
+	addr := explicit
+	if addr == "" && envPort != "" {
+		addr = net.JoinHostPort("127.0.0.1", envPort)
+	}
+	if addr == "" {
+		addr = net.JoinHostPort("127.0.0.1", portOf(listen))
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("local listen %q: %w", addr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("local listen %q: host must be a loopback IP", addr)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("local listen %q: invalid port", addr)
+	}
+	return addr, nil
 }
 
 // portOf returns the port of a host:port (or the string itself if it has no host).

@@ -1,0 +1,6 @@
+[
+  {"name":"off", "tracking":0, "encoding":0, "ansi":"\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l"},
+  {"name":"legacy-buttons", "tracking":1000, "encoding":0, "ansi":"\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l\u001b[?1000h"},
+  {"name":"utf8-drag", "tracking":1002, "encoding":1005, "ansi":"\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l\u001b[?1002h\u001b[?1005h"},
+  {"name":"sgr-any-event", "tracking":1003, "encoding":1006, "ansi":"\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l\u001b[?1003h\u001b[?1006h"}
+]

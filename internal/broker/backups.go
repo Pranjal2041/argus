@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"universal-tmux/internal/statedir"
 )
 
 const backupRetentionDays = 7
@@ -28,7 +30,7 @@ func homeDir() string {
 }
 
 func brokerStateDir() string {
-	dir := filepath.Join(homeDir(), ".universal-tmux")
+	dir := statedir.Dir()
 	_ = os.MkdirAll(dir, 0o755)
 	return dir
 }
@@ -388,23 +390,29 @@ func backupDurableStateAt(now time.Time) error {
 	return pruneBackupsAt(root, now)
 }
 
-// BackupDurableState creates today's immutable recovery point. Calling it repeatedly is
-// cheap: existing files are never overwritten.
+// BackupDurableState creates today's immutable recovery point. Existing files are
+// never overwritten, but scanning a large store can still take substantial time.
 func BackupDurableState() error { return backupDurableStateAt(time.Now()) }
 
-// RunDailyBackupLoop fills any newly-created metadata into today's snapshot hourly and
-// creates a new snapshot after the local calendar day rolls over.
+// RunDailyBackupLoop takes an initial snapshot, fills newly-created metadata into
+// it hourly, and creates a new snapshot after the local calendar day rolls over.
+// Run it in a background goroutine: even the initial pass may be slow. Passes are
+// serialized, errors are retried on the next tick, and cancellation stops new work.
 func RunDailyBackupLoop(ctx context.Context) {
-	ticker := time.NewTicker(time.Hour)
+	runDailyBackupLoop(ctx, time.Hour, BackupDurableState)
+}
+
+func runDailyBackupLoop(ctx context.Context, interval time.Duration, backup func() error) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for {
+	for ctx.Err() == nil {
+		if err := backup(); err != nil {
+			log.Printf("warn: durable-state backup: %v", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := BackupDurableState(); err != nil {
-				log.Printf("warn: durable-state backup: %v", err)
-			}
 		}
 	}
 }

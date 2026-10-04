@@ -47,30 +47,7 @@ final class MarkdownPreviewProxy: ObservableObject {
             completion(.failure(MarkdownArtifactExportError.rendererNotReady))
             return
         }
-        webView.evaluateJavaScript(
-            "(() => { const body = document.body.getBoundingClientRect(); return { x: body.left, "
-                + "width: body.width, height: Math.max(document.body.scrollHeight, "
-                + "document.documentElement.scrollHeight) }; })()"
-        ) { dimensions, error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            let values = dimensions as? [String: Any]
-            let x = (values?["x"] as? NSNumber).map { CGFloat(truncating: $0) } ?? 0
-            let width = (values?["width"] as? NSNumber).map { CGFloat(truncating: $0) }
-                ?? webView.bounds.width
-            let height = (values?["height"] as? NSNumber).map { CGFloat(truncating: $0) }
-                ?? webView.bounds.height
-            let configuration = WKPDFConfiguration()
-            configuration.rect = CGRect(
-                x: max(0, x),
-                y: 0,
-                width: max(1, width),
-                height: max(height, webView.bounds.height)
-            )
-            webView.createPDF(configuration: configuration, completionHandler: completion)
-        }
+        RenderPDFExporter.create(from: webView, completion: completion)
     }
 }
 

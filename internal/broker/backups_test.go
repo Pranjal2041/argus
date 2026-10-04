@@ -1,11 +1,91 @@
 package broker
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestBackupLoopRunsImmediatelyAndRetriesErrorsHourly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var calls atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runDailyBackupLoop(ctx, time.Hour, func() error {
+				if calls.Add(1) == 1 {
+					return errors.New("backup storage temporarily unavailable")
+				}
+				return nil
+			})
+		}()
+		synctest.Wait()
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("initial backup calls = %d, want 1 before first tick", got)
+		}
+		for want := int32(2); want <= 3; want++ {
+			time.Sleep(time.Hour)
+			synctest.Wait()
+			if got := calls.Load(); got != want {
+				t.Fatalf("backup calls = %d, want %d", got, want)
+			}
+		}
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("idle backup worker did not stop on cancellation")
+		}
+	})
+}
+
+func TestBackupLoopSerializesSlowPassesAndCancelsPendingTicks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		release := make(chan struct{})
+		var calls atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runDailyBackupLoop(ctx, time.Hour, func() error {
+				calls.Add(1)
+				<-release
+				return nil
+			})
+		}()
+		synctest.Wait()
+		time.Sleep(2 * time.Hour)
+		synctest.Wait()
+		if got := calls.Load(); got != 1 {
+			t.Errorf("slow initial backup overlapped another pass: calls = %d", got)
+		}
+		cancel()
+		close(release)
+		synctest.Wait()
+		<-done
+		if got := calls.Load(); got != 1 {
+			t.Errorf("cancelled worker started a pending backup: calls = %d", got)
+		}
+	})
+}
+
+func TestBackupLoopSkipsInitialPassWhenAlreadyCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runDailyBackupLoop(ctx, time.Hour, func() error {
+		t.Error("cancelled worker started a backup")
+		return nil
+	})
+}
 
 func TestDailyUserDataBackupKeepsFirstStateAndSevenDays(t *testing.T) {
 	home := isolatedUserDataHome(t)

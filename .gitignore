@@ -16,6 +16,10 @@ ts-state/
 clients/macos/.build/
 clients/macos/Argus.app/
 
+# Local generated reports and scratch artifacts
+/output/
+/tmp/
+
 # Editor / OS
 .DS_Store
 .idea/

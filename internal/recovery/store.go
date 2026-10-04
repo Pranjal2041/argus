@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"universal-tmux/internal/statedir"
 )
 
 type Store struct {
@@ -51,15 +53,11 @@ func NewStore(socket string) *Store {
 	if socket == "" {
 		socket = "ut"
 	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"
 	}
-	root := filepath.Join(home, ".universal-tmux", "recovery")
+	root := filepath.Join(statedir.Dir(), "recovery")
 	return &Store{
 		Socket:  socket,
 		Dir:     filepath.Join(root, safeComponent(host), safeComponent(socket)),

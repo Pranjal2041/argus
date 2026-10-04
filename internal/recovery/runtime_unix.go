@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 var errNoTmuxServer = errors.New("tmux server is not running")
@@ -51,21 +54,8 @@ func tmuxArgs(socket string, args ...string) []string {
 	return append([]string{"-L", socket}, args...)
 }
 
-func toolPath(name string) string {
-	if path, err := exec.LookPath(name); err == nil {
-		return path
-	}
-	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
-		candidate := filepath.Join(directory, name)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate
-		}
-	}
-	return name
-}
-
 func tmuxCommand(socket string, args ...string) *exec.Cmd {
-	cmd := exec.Command(toolPath("tmux"), tmuxArgs(socket, args...)...)
+	cmd := toolcommand.Command("tmux", tmuxArgs(socket, args...)...)
 	// Finder-launched macOS applications commonly have neither LANG nor
 	// LC_CTYPE. tmux sanitizes control characters in format output in that
 	// environment (a tab becomes "_"), which makes structured list output
@@ -195,7 +185,7 @@ func authoritativePaneDirectory(terminalReported, processDirectory string) strin
 }
 
 func readProcessTable() (map[int]processInfo, error) {
-	out, err := exec.Command(toolPath("ps"), "-axo", "pid=,ppid=,pgid=,tpgid=,tty=,comm=").Output()
+	out, err := toolcommand.Command("ps", "-axo", "pid=,ppid=,pgid=,tpgid=,tty=,comm=").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -301,16 +291,8 @@ func inspectClaude(pid int, state processState) (string, string, string, error) 
 	if record.PID != pid || !uuidPattern.MatchString(record.SessionID) {
 		return "", "", registry, fmt.Errorf("Claude active-session registry has invalid process identity")
 	}
-	started, err := platformProcessStart(pid)
-	if err != nil {
-		return "", "", registry, fmt.Errorf("read Claude process start: %w", err)
-	}
-	value := strings.Join(strings.Fields(record.ProcStart), " ")
-	const layout = "Mon Jan 2 15:04:05 2006"
-	recordedUTC, utcErr := time.ParseInLocation(layout, value, time.UTC)
-	recordedLocal, localErr := time.ParseInLocation(layout, value, time.Local)
-	if (utcErr != nil || recordedUTC.Unix() != started.Unix()) && (localErr != nil || recordedLocal.Unix() != started.Unix()) {
-		return "", "", registry, fmt.Errorf("Claude active-session registry is stale (process start mismatch)")
+	if err := verifyRecordedProcessStart(pid, record.ProcStart); err != nil {
+		return "", "", registry, fmt.Errorf("Claude active-session registry is stale or unverifiable: %w", err)
 	}
 	return record.SessionID, findClaudeTranscript(config, record.SessionID), registry, nil
 }
@@ -421,6 +403,44 @@ func inspectCodex(pid int, state processState) (string, string, error) {
 	return inspectCodexRollouts(codexRollouts(files, state))
 }
 
+// inspectCodexTranscript handles agents that close their rollout between writes.
+// Open-file ownership remains preferred; a launch selector is only a candidate
+// and requires current-screen corroboration at the common source boundary.
+func inspectCodexTranscript(files []string, state processState) (AgentSession, error) {
+	rollouts := codexRollouts(files, state)
+	if len(rollouts) > 0 {
+		id, path, err := inspectCodexRollouts(rollouts)
+		return AgentSession{Agent: AgentCodex, ID: id, Path: path}, err
+	}
+	id, ok := codexResumeSessionFromArgv(state.Argv)
+	if !ok {
+		return AgentSession{}, fmt.Errorf("Codex process has no open rollout or explicit conversation selector")
+	}
+	root := filepath.Join(codexHome(state), "sessions")
+	var matches []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") ||
+			!strings.HasSuffix(strings.ToLower(entry.Name()), "-"+id+".jsonl") || !pathWithin(root, path) {
+			return nil
+		}
+		actualID, parentID, readErr := inspectCodexRollout(path)
+		if readErr == nil && strings.EqualFold(actualID, id) && (parentID == "" || strings.EqualFold(parentID, id)) {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return AgentSession{}, err
+	}
+	if len(matches) != 1 {
+		return AgentSession{}, fmt.Errorf("Codex launch selector has %d matching root transcripts", len(matches))
+	}
+	return AgentSession{Agent: AgentCodex, ID: id, Path: matches[0], RequireScreenMatch: true}, nil
+}
+
 // InspectAgentSession identifies the foreground agent conversation in a tmux
 // session from kernel-owned process state. Provider-specific discovery stays
 // here; consumers receive the same process-proven transcript contract.
@@ -448,7 +468,11 @@ func InspectAgentSession(socket, name string) (AgentSession, error) {
 		var id, path string
 		switch agent {
 		case AgentCodex:
-			id, path, err = inspectCodex(process.PID, state)
+			files, fileErr := platformOpenFiles(process.PID)
+			if fileErr != nil {
+				return AgentSession{}, fileErr
+			}
+			return inspectCodexTranscript(files, state)
 		case AgentClaude:
 			id, path, _, err = inspectClaude(process.PID, state)
 		default:
@@ -927,13 +951,13 @@ func (s *Store) Bootstrap(sessionName string) error {
 		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "ut"))
 	}
 	candidates = append(candidates, filepath.Join(home, ".universal-tmux", "ut"))
-	if path, err := exec.LookPath("ut"); err == nil {
+	if path, err := toolcommand.LookPath("ut"); err == nil {
 		candidates = append(candidates, path)
 	}
 	var cli string
 	for _, candidate := range uniqueStrings(candidates) {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			cli = candidate
+		if path, err := toolcommand.LookPath(candidate); err == nil {
+			cli = path
 			break
 		}
 	}
@@ -941,7 +965,7 @@ func (s *Store) Bootstrap(sessionName string) error {
 		return fmt.Errorf("ut launcher was not found")
 	}
 	args := []string{"-L", s.Socket, sessionName}
-	cmd := exec.Command(cli, args...)
+	cmd := toolcommand.Command(cli, args...)
 	path := os.Getenv("PATH")
 	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
 		if !strings.Contains(":"+path+":", ":"+directory+":") {

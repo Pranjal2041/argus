@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
+	"universal-tmux/internal/terminalquery"
 )
 
 const (
@@ -32,6 +34,8 @@ const (
 	// tmux client or another viewer). Viewers must render at exactly this grid
 	// (letterboxing spare pixels): %output bytes are formatted for this width, and
 	// rendering at any other width shears the screen. opResize remains an ask.
+	opSnapshotBegin = 0x06 // server -> client: ordered repaint begins (before its size/data)
+	opSnapshotEnd   = 0x07 // server -> client: ordered repaint is complete
 )
 
 // sizePayload encodes cols/rows the same way clients encode opResize.
@@ -40,11 +44,12 @@ func sizePayload(cols, rows int) []byte {
 }
 
 type subscriber struct {
-	ch         chan []byte
-	done       chan struct{}
-	cancel     context.CancelFunc // cancels this client's serve ctx (used to evict on kill/rename)
-	primed     bool               // protected by hub.mu
-	snapshotID uint64
+	ch          chan []byte
+	done        chan struct{}
+	cancel      context.CancelFunc // cancels this client's serve ctx (used to evict on kill/rename)
+	primed      bool               // protected by hub.mu
+	snapshotID  uint64
+	interactive bool // /stream observers can never be the terminal-query responder
 }
 
 // sessionHub owns one backend session (tmux or ConPTY) and its connected clients.
@@ -55,6 +60,7 @@ type sessionHub struct {
 	lastPane     string
 	dead         chan struct{} // closed when the backend session ended (pump exited)
 	nextSnapshot uint64
+	replyViewer  *subscriber // stable while connected and primed; protected by mu
 }
 
 func newSessionHub(tm session.Session) *sessionHub {
@@ -98,16 +104,44 @@ func outputFrames(pane string, data []byte) [][]byte {
 
 func (h *sessionHub) pump() {
 	defer close(h.dead)
+	filters := make(map[string]*terminalquery.Filter)
 	for out := range h.tm.Output() {
-		var frames [][]byte
+		var sizeFrames [][]byte
 		if out.Cols > 0 && out.Rows > 0 {
 			// In-band size event: broadcast the authoritative pane size in stream
 			// order, so each client re-pins its grid exactly between the bytes
 			// formatted for the old width and those formatted for the new.
-			frames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
+			sizeFrames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
 		}
-		if len(out.Data) > 0 {
-			frames = append(frames, outputFrames(out.Pane, out.Data)...)
+		filter := filters[out.Pane]
+		if filter == nil {
+			filter = &terminalquery.Filter{}
+			filters[out.Pane] = filter
+		}
+		if out.SnapshotID != 0 {
+			// A capture is historical display state, never a new request to the
+			// application. Do not let its parser consume a live partial query.
+			filter = &terminalquery.Filter{}
+		}
+		active, passive := filter.Feed(out.Data)
+		framesFor := func(data []byte) [][]byte {
+			var frames [][]byte
+			if out.SnapshotID != 0 {
+				frames = append(frames, encodeFrame(opSnapshotBegin, out.Pane, nil))
+			}
+			frames = append(frames, sizeFrames...)
+			if len(data) > 0 {
+				frames = append(frames, outputFrames(out.Pane, data)...)
+			}
+			if out.SnapshotID != 0 {
+				frames = append(frames, encodeFrame(opSnapshotEnd, out.Pane, nil))
+			}
+			return frames
+		}
+		passiveFrames := framesFor(passive)
+		var activeFrames [][]byte
+		if out.SnapshotID == 0 && h.tm.QueryOwnership() == session.ViewerQueries {
+			activeFrames = framesFor(active)
 		}
 		h.mu.Lock()
 		h.lastPane = out.Pane
@@ -128,8 +162,27 @@ func (h *sessionHub) pump() {
 			}
 			subs = append(subs, s)
 		}
+		// Multiplexers already own the reply path. Raw backends elect one
+		// interactive viewer; all other viewers and all snapshots are passive.
+		// Keep the owner stable across chunks, joins and resize/snapshot requests.
+		if _, present := h.subs[h.replyViewer]; !present {
+			h.replyViewer = nil
+		}
+		if h.replyViewer == nil && h.tm.QueryOwnership() == session.ViewerQueries {
+			for s := range h.subs {
+				if s.interactive && s.primed {
+					h.replyViewer = s
+					break
+				}
+			}
+		}
+		owner := h.replyViewer
 		h.mu.Unlock()
 		for _, s := range subs {
+			frames := passiveFrames
+			if s == owner && out.SnapshotID == 0 {
+				frames = activeFrames
+			}
 		send:
 			for _, frame := range frames {
 				select {
@@ -185,7 +238,7 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel}
+	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel, interactive: true}
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
@@ -517,6 +570,13 @@ type capturer interface {
 	Capture(name string, lines int) (string, error)
 }
 
+// renderScreenProvider captures grid and cursor together, so matching can
+// distinguish an active editor/status region from conversation output without
+// guessing from provider names or status wording.
+type renderScreenProvider interface {
+	CaptureRenderScreen(name string, lines int) (session.ScreenSnapshot, error)
+}
+
 // agentTranscriptProvider identifies the exact structured conversation owned
 // by the foreground agent process. Provider-specific process discovery belongs
 // at the host provider; selection and fallback consume one shared contract.
@@ -567,7 +627,7 @@ func (m *Manager) Recent(name string, lines int) (string, error) {
 // every supported agent uses the same newest-turn and screen-overlap policy. If
 // that cannot be proved, callers retain their lossless styled terminal snapshot.
 func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
-	text, err := m.Recent(name, 600)
+	text, err := m.renderMatchingScreen(name)
 	if err != nil {
 		return rendersource.Result{}, err
 	}
@@ -593,6 +653,20 @@ func (m *Manager) RenderSource(name string) (rendersource.Result, error) {
 		transcript, _ = provider.AgentTranscript(name)
 	}
 	return rendersource.ResolveWithTranscript(home, cwd, text, transcript)
+}
+
+func (m *Manager) renderMatchingScreen(name string) (string, error) {
+	if !m.prov.Has(name) {
+		return "", fmt.Errorf("no such session: %q", name)
+	}
+	if provider, ok := m.prov.(renderScreenProvider); ok {
+		capture, err := provider.CaptureRenderScreen(name, 600)
+		if err != nil {
+			return "", err
+		}
+		return rendersource.MatchingScreen(capture), nil
+	}
+	return m.Recent(name, 600)
 }
 
 // Sessions returns the cached session list (refreshed in the background). Always
@@ -631,16 +705,11 @@ func (m *Manager) ForegroundSessions() []session.Info {
 // hiddenStatePath is a per-HOST file (not the NFS-shared home key) so brokers on
 // different nodes don't clobber each other's hidden state.
 func hiddenStatePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.TempDir()
-	}
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"
 	}
-	dir := filepath.Join(home, ".universal-tmux")
-	_ = os.MkdirAll(dir, 0o755)
+	dir := brokerStateDir()
 	return filepath.Join(dir, "hidden-"+host+".json")
 }
 
@@ -697,9 +766,18 @@ func (m *Manager) HiddenNames() []string {
 // inventory every session cheaply, but capture/classify hidden and agent panes only
 // on the background pass. Their last classified state is retained between passes.
 func (m *Manager) refreshSessions(includeBackground bool) {
-	var list []session.Info
+	parent := m.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	list, err := m.prov.ListInventory(ctx)
+	cancel()
+	if err != nil {
+		log.Printf("session inventory refresh failed; retaining last successful list: %v", err)
+		return
+	}
 	if provider, ok := m.prov.(session.TieredStateProvider); ok {
-		list = provider.ListInventory()
 
 		m.sessMu.Lock()
 		previous := make(map[string]string, len(m.sessCache))
@@ -743,8 +821,6 @@ func (m *Manager) refreshSessions(includeBackground bool) {
 			}(i)
 		}
 		wg.Wait()
-	} else {
-		list = m.prov.List()
 	}
 	if list == nil {
 		list = []session.Info{}

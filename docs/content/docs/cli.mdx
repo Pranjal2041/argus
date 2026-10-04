@@ -53,6 +53,18 @@ the target host's broker.
 | `ut forward ls` | list active forwards owned by the local broker |
 | `ut forward stop <id>` | stop an active forward |
 
+For a variable-based target, braces preserve the host/session separator in both bash and zsh:
+
+```sh
+HOST=worker-name
+ut spawn "@${HOST}:job" --idle 24h 'python train.py'
+ut cp ./config.yaml "${HOST}:/home/me/config.yaml"
+```
+
+In zsh, `@$HOST:job` can apply a variable modifier and change the hostname before `ut` receives it;
+quotes alone do not prevent that. Broker failures report the requested host, HTTP status, and
+underlying error instead of a nil transport error.
+
 For example, if a dashboard listens on `127.0.0.1:5800` on Babel:
 
 ```sh
@@ -104,14 +116,25 @@ The human approval, policy, curation, archive, and key commands are documented i
 |---|---|---|
 | `UT_HOME` | `$HOME/.universal-tmux` | shared dir (NFS ok): the broker binary + the one auth key |
 | `UT_BROKER` | `$UT_HOME/ut-broker` | path to the broker binary |
-| `UT_PORT` | `8722` | port the broker listens on |
+| `UT_PORT` | `8722` | tailnet port the broker publishes (clients discover brokers on it) |
+| `UT_LOCAL_PORT` | `$UT_PORT` | loopback control port that `ut` commands on this host use |
 | `UT_LOCAL_DIR` | `/tmp/ut-$USER` | **node-local** state: identity, pidfiles, logs (never NFS) |
+| `UT_STATE_DIR` | `$HOME/.universal-tmux` | durable broker state: history, hidden sessions, recovery, journal inbox, web artifacts (host-keyed, NFS ok) |
 
 <Callout type="info">
 Isolation between two allocations on one node is opt-in: each passes a distinct socket
 (`ut -L <name>`), exactly as with `tmux`. By default they share the node's default server and
 one broker.
 </Callout>
+
+Every broker also serves a loopback control port for `ut` commands on its own host. When more
+than one broker runs on a host — another `ut -L` socket, or a second install under a shared
+login — give each a distinct `UT_LOCAL_PORT`. Each still publishes the standard tailnet port, so
+the apps discover all of them, while `ut exec`, `ut ls`, and the broker's own mesh calls reach
+the broker they belong to. Separate installs that also share a home directory should each set
+their own `UT_HOME` (key), `UT_LOCAL_DIR`, `UT_STATE_DIR`, and — to keep Lab records and backups
+apart — `UT_LAB_ROOT` and `UT_BACKUP_ROOT`. `ut` records the state roots in the broker's
+supervisor, so they apply even when the tmux server's environment predates them.
 
 ## tmux version notes
 

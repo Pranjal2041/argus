@@ -5,10 +5,11 @@ package recovery
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 func platformBootID() (string, error) {
@@ -27,7 +28,7 @@ func platformProcessDirectories(pids []int) map[int]string {
 }
 
 func platformProcessState(pid int) (processState, error) {
-	out, err := exec.Command(toolPath("ps"), "-ww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	out, err := toolcommand.Command("ps", "-ww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return processState{}, err
 	}
@@ -35,7 +36,7 @@ func platformProcessState(pid int) (processState, error) {
 }
 
 func platformOpenFiles(pid int) ([]string, error) {
-	out, err := exec.Command(toolPath("lsof"), "-n", "-Fn", "-p", strconv.Itoa(pid)).Output()
+	out, err := toolcommand.Command("lsof", "-n", "-Fn", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return nil, err
 	}

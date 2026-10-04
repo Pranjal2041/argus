@@ -4,7 +4,19 @@ import (
 	"context"
 	"os/exec"
 	"testing"
+	"time"
 )
+
+func testInventory(t *testing.T, provider *Provider) []SessionInfo {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	list, err := provider.ListInventory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
+}
 
 func tmuxIdentityTestProvider(t *testing.T) (*Provider, string) {
 	t.Helper()
@@ -36,14 +48,14 @@ func TestSessionLineageSurvivesRename(t *testing.T) {
 	if err := provider.Create("alpha", ""); err != nil {
 		t.Fatalf("create alpha: %v", err)
 	}
-	before := provider.ListInventory()[0]
+	before := testInventory(t, provider)[0]
 	if before.LineageID == "" {
 		t.Fatal("alpha has no lineage id")
 	}
 	if err := provider.Rename("alpha", "beta"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	after := provider.ListInventory()[0]
+	after := testInventory(t, provider)[0]
 	if after.ID != before.ID || after.LineageID != before.LineageID {
 		t.Fatalf("rename changed identity: before=%+v after=%+v", before, after)
 	}
@@ -54,14 +66,14 @@ func TestSessionLineageDistinguishesTmuxIDReuseAfterServerRestart(t *testing.T) 
 	if err := provider.Create("before", ""); err != nil {
 		t.Fatalf("create before: %v", err)
 	}
-	before := provider.ListInventory()[0]
+	before := testInventory(t, provider)[0]
 	if err := exec.Command("tmux", "-L", socket, "kill-server").Run(); err != nil {
 		t.Fatalf("kill first server: %v", err)
 	}
 	if err := provider.Create("after", ""); err != nil {
 		t.Fatalf("create after: %v", err)
 	}
-	after := provider.ListInventory()[0]
+	after := testInventory(t, provider)[0]
 	if before.ID != after.ID {
 		t.Fatalf("fixture did not reuse a transport id: before=%q after=%q", before.ID, after.ID)
 	}

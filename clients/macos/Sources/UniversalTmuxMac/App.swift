@@ -22,6 +22,7 @@ struct UniversalTmuxApp: App {
     @StateObject private var screenshotArtifacts = ClipboardScreenshotArtifactMonitor()
     @StateObject private var themeStore = ThemeStore()             // selected color theme (default: Argus)
     @StateObject private var recovery = WorkspaceRecoveryController() // restart-safe local tmux workspace recovery
+    @StateObject private var machineLaunchers = MachineLauncherStore() // request machines that don't exist yet
     @StateObject private var weeklyProgress: WeeklyProgressController // manual research-review generations
     @StateObject private var weeklyProgressRemote: WeeklyProgressRemoteService
     @StateObject private var argusControl: ArgusControlService
@@ -54,6 +55,7 @@ struct UniversalTmuxApp: App {
                 .environmentObject(webArtifacts)
                 .environmentObject(themeStore)
                 .environmentObject(recovery)
+                .environmentObject(machineLaunchers)
                 .environmentObject(weeklyProgress)
                 .environmentObject(argusControl)
                 .frame(minWidth: 980, minHeight: 600)
@@ -278,7 +280,8 @@ struct UniversalTmuxApp: App {
 
         Settings {
             SettingsView(terminals: terminals, state: state, lab: lab,
-                         commandCenter: commandCenter, credentialVault: credentialVault)
+                         commandCenter: commandCenter, credentialVault: credentialVault,
+                         machineLaunchers: machineLaunchers)
         }
     }
 }
@@ -290,6 +293,7 @@ struct SettingsView: View {
     @ObservedObject var lab: LabModel
     @ObservedObject var commandCenter: CommandCenterModel
     @ObservedObject var credentialVault: CredentialVaultStore
+    @ObservedObject var machineLaunchers: MachineLauncherStore
     @ObservedObject private var capsLockAttention = CapsLockAttentionController.shared
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     @AppStorage(CapsLockAttentionPrefs.enabledKey) private var capsLockBlinkEnabled = false
@@ -349,6 +353,8 @@ struct SettingsView: View {
                 Text("Agent sessions are started by `ut spawn` (the mesh) as background jobs. They're hidden from the sidebar by default and auto-clean when left idle. Turn this on to see and open them here.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            MachineLaunchersSettingsSection(store: machineLaunchers)
 
             Section {
                 Toggle(
@@ -841,6 +847,7 @@ struct RootView: View {
     @EnvironmentObject var webArtifacts: WebArtifactStore
     @EnvironmentObject var recovery: WorkspaceRecoveryController
     @EnvironmentObject var weeklyProgress: WeeklyProgressController
+    @EnvironmentObject var machineLaunchers: MachineLauncherStore
     @ViewBuilder private var ledgerPane: some View {
         LedgerView(panel: ledgerHost.panel).onAppear { ledgerHost.panel.refresh() }
     }
@@ -945,6 +952,7 @@ struct RootView: View {
             lab.bind(state)   // app-wide: approval notifications fire with the pane closed
             credentialVault.unattendedModeActive = lab.unattendedMode
             recovery.bind(state)
+            machineLaunchers.attach(state)
             recovery.checkForRecovery(offerAutomatically: true)
             AttentionNotifier.shared.requestAuthorizationIfNeeded()
             state.refreshAll(); state.startAutoRefresh()
@@ -1728,6 +1736,20 @@ struct RootView: View {
                     ForEach(state.machines) { m in
                         Button(m.name) { newMachine = m.id }
                     }
+                    Divider()
+                    Section("Request a new machine") {
+                        ForEach(machineLaunchers.launchers) { l in
+                            Button(l.name + "…") { machineLaunchers.request(l) }
+                                .disabled(l.command.trimmingCharacters(in: .whitespaces).isEmpty
+                                          || machineLaunchers.activeRuns.contains { $0.launcher.id == l.id })
+                        }
+                        if !machineLaunchers.hasBabelPreset {
+                            Button("Add Babel 3-day GPU job") { machineLaunchers.addBabelPreset() }
+                        }
+                        Button(machineLaunchers.launchers.isEmpty ? "Add a machine launcher…" : "Manage launchers…") {
+                            openArgusSettings()
+                        }
+                    }
                 } label: {
                     HStack {
                         Text(machineName(newMachine)).foregroundStyle(Theme.textPrimary)
@@ -1739,6 +1761,11 @@ struct RootView: View {
                     .background(fieldChrome)
                 }
                 .menuStyle(.borderlessButton)
+                MachineLaunchRunsView(store: machineLaunchers)
+            }
+            .onChange(of: machineLaunchers.lastReady?.runID) { _ in
+                // A requested machine just came up: offer it in this open sheet.
+                if let id = machineLaunchers.lastReady?.machineID { newMachine = id }
             }
 
             if !newIsNotebook {

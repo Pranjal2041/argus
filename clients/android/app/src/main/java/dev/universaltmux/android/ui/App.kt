@@ -625,6 +625,7 @@ private fun TerminalScreen(vm: AppViewModel, broker: Broker, session: String) {
     }
     val theme = LocalTheme.current
     LaunchedEffect(rt, theme.id) { rt.applyTheme(theme) }   // recolor the terminal on open + theme switch
+    androidx.activity.compose.BackHandler(enabled = rt.historyVisible) { rt.historyView.returnToLive() }
     DisposableEffect(rt) {
         onDispose {
             if (ActiveTerm.rt === rt) ActiveTerm.rt = null
@@ -639,7 +640,7 @@ private fun TerminalScreen(vm: AppViewModel, broker: Broker, session: String) {
     } else {
         Column(Modifier.fillMaxSize()) {
             AndroidView(
-                factory = { rt.view },
+                factory = { rt.historyView },
                 modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
             )
             AccessoryKeys(onBytes = { rt.sendBytes(it) }, onKeyboard = { rt.showKeyboard() })
