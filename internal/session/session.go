@@ -38,7 +38,8 @@ type Info struct {
 
 // Session is one live session the broker streams to/from clients.
 type Session interface {
-	Output() <-chan Output // ordered live bytes, geometry, and requested snapshots (closed when the session ends)
+	Output() <-chan Output          // ordered live bytes, geometry, and requested snapshots (closed when the session ends)
+	QueryOwnership() QueryOwnership // who answers terminal queries in live output
 	SendKeys(pane string, data []byte) error
 	Resize(cols, rows int) error
 	Size() (cols, rows int)          // the pane's CURRENT size (0,0 if unknown)
@@ -47,6 +48,17 @@ type Session interface {
 	Pane() string                    // default pane id for input routing
 	Close()                          // detach this control client (session itself persists)
 }
+
+// QueryOwnership describes the terminal endpoint, not the application running
+// inside it. A multiplexer is already a terminal and answers its own queries;
+// an unhandled query from a raw PTY needs exactly one interactive viewer.
+// Snapshots are always passive, regardless of this live-output policy.
+type QueryOwnership uint8
+
+const (
+	BackendQueries QueryOwnership = iota
+	ViewerQueries
+)
 
 // ExecRequest runs a command on this host (the mesh's remote-exec primitive).
 // With Session set, the command runs INSIDE that persistent shell — preserving

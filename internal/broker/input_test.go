@@ -20,6 +20,9 @@ type recordingInputSession struct {
 }
 
 func (s *recordingInputSession) Output() <-chan session.Output { return s.out }
+func (s *recordingInputSession) QueryOwnership() session.QueryOwnership {
+	return session.BackendQueries
+}
 func (s *recordingInputSession) SendKeys(_ string, data []byte) error {
 	copyOfData := append([]byte(nil), data...)
 	s.input <- copyOfData

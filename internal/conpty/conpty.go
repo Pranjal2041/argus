@@ -65,6 +65,9 @@ type winSession struct {
 func (s *winSession) Output() <-chan session.Output { return s.outCh }
 func (s *winSession) Pane() string                  { return "%0" }
 
+// Queries that survive ConPTY's processing are for the rendering terminal.
+func (s *winSession) QueryOwnership() session.QueryOwnership { return session.ViewerQueries }
+
 func (s *winSession) SendKeys(_ string, data []byte) error {
 	_, err := s.cpty.Write(data)
 	if err == nil && len(data) > 0 {

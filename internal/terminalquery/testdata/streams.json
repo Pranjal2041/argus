@@ -1,0 +1,17 @@
+[
+  {
+    "name": "attributes-colors-and-keyboard",
+    "live": "\u001b[2J\u001b[H\u001b]10;?\u0007\u001b]11;?\u0007\u001b[c\u001b[>c\u001b[?u\u001b[6nConfirm action? [y/n]",
+    "passive": "\u001b[2J\u001b[HConfirm action? [y/n]"
+  },
+  {
+    "name": "full-screen-mouse-and-paste",
+    "live": "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1000;1006h\u001b[?2004h\u001b[?2004$p\u001b[18t\u001bP$qm\u001b\\\u001b[5nConfirm action? [y/n]",
+    "passive": "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1000;1006h\u001b[?2004hConfirm action? [y/n]"
+  },
+  {
+    "name": "mixed-color-commands",
+    "live": "\u001b[2J\u001b[H\u001b]4;0;#101010;1;?;2;#eeeeee\u0007\u001b]10;?;#101010\u0007Confirm action? [y/n]",
+    "passive": "\u001b[2J\u001b[H\u001b]4;0;#101010;2;#eeeeee\u0007\u001b]11;#101010\u0007Confirm action? [y/n]"
+  }
+]

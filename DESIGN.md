@@ -28,6 +28,19 @@ One binary **WebSocket** (gRPC-web and WebTransport rejected: no browser bidi / 
 
 Flow control: `refresh-client -f pause-after=N` so a streaming pane can't back up and trip tmux's slow-control-client disconnect (`%pause`/`%continue`; confirmed working on tmux 3.2a).
 
+Terminal queries have one owner, declared by `Session.QueryOwnership()`: a
+multiplexer such as tmux already answers the pane and its viewers are passive;
+queries emitted by a raw backend go to exactly one primed interactive viewer.
+The broker incrementally separates queries from display output before fan-out,
+so old and new Mac, Android and web clients obey the same contract without a
+wire-protocol migration. Ownership stays with that viewer until disconnection;
+read-only streams are never eligible. Every snapshot/reconnect repaint is
+passive and parsed independently of live output. Queries are not retried on
+handoff (which could inject stale replies). Keyboard, mouse/wheel, focus and
+paste bytes keep their existing unfiltered input path. The query classifier
+must cover any response-producing control added to the supported renderers;
+display commands, including mixed color sets/queries, remain renderable.
+
 **Agent state** travels on the same `/sessions` list as a per-session `state` (`working`/`idle`). The broker computes it **passively** — it reads the visible screen (`tmux capture-pane` on Unix; the ConPTY output ring on Windows, which has no `capture-pane`) and scans the last few non-blank lines for the agent's `esc to interrupt` footer, which both Claude Code and Codex print only during an active turn. Footer present → `working`, else `idle`. No keys are ever sent to the agent, so it classifies sessions with nothing attached and a noisy co-tenant in the pane can't false-positive.
 
 ## Cluster (and any scheduler) specifics
