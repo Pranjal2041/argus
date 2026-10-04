@@ -1,0 +1,111 @@
+---
+title: Shared workspace
+description: Durable state, background collectors, and native Mac and Android clients.
+---
+
+A workspace owns durable app state. Each device owns its navigation, open views,
+keyboard state, and unsaved editor drafts. Terminals, files, Git, ports, and notebook
+servers remain on their machine brokers and do not depend on the workspace host.
+
+## Choosing a workspace
+
+The existing local sync host enrolls through a loopback-only request. Other clients
+select its advertised workspace identity. Android can select the sole enrolled host
+automatically; multiple enrolled hosts require an explicit choice in Workspace.
+The host is never chosen by operating system, hostname, or discovery order.
+
+The Mac settings panel and Android Workspace screen show the selected host, pending
+changes, errors, and concurrent edits requiring review. Switching workspaces selects
+separate document stores, replica caches, and artifact libraries. Pending writes stay
+with their original workspace.
+
+## Ownership
+
+| State | Owner |
+| --- | --- |
+| Notes, Todos, Workflows, Planner | Selected workspace host, using the document three-way merge API |
+| Backlog and activity acknowledgments | Versioned workspace records |
+| Usage settings and warning dismissals | Versioned workspace records |
+| Usage readings, Command Center summaries, journal manifests, Wrapped | Background collectors publishing workspace records |
+| Dashboard and notebook definitions | Workspace catalogs; each client resolves its own connection |
+| Saved artifacts and archived source | Workspace metadata plus immutable content-addressed blobs |
+| Sessions, hidden flags, files, Git, ports, notebook runtimes | Owning machine broker |
+| Editor drafts | Durable local files, keyed by broker identity and path |
+
+## Synchronization contract
+
+`/whoami` advertises stable broker/workspace identities and protocol capabilities.
+Session records include a lifetime identity and broker-issued activity revision.
+Renaming a session retains its identity; recreating one with the same name does not.
+Read acknowledgments refer to an activity revision, so new activity becomes unread.
+
+The versioned API includes:
+
+- `GET /workspace/info`, `/workspace/snapshot`, and `/workspace/record`.
+- `GET /workspace/changes?after=CURSOR&limit=500&wait=25` for resumable updates.
+- `POST /workspace/mutate` with a mutation ID and expected base revision.
+- `POST /workspace/lease` for fenced collector ownership.
+- `PUT`, `HEAD`, and `GET /workspace/blobs/SHA256` for immutable files.
+
+The broker commits records, mutation receipts, and change events in one bbolt
+transaction. Lost acknowledgments are retried with the same mutation ID. Device
+timestamps do not determine the winning edit. A receipt does not advance a client's
+change cursor past unseen events. An expired cursor causes a fresh snapshot.
+
+Both native replicas retain cached content after failure, persist pending changes
+before displaying them, reject older revisions, and preserve conflicting copies.
+Independent object-field changes merge; competing changes require an explicit
+choice. Tombstones prevent stale clients from recreating deleted records.
+
+## Collectors and account controls
+
+The Mac installs a per-user launch agent named `dev.universaltmux.workspace` that
+runs the signed app executable with `--workspace-worker`. Closing the app's windows
+does not stop collection. Expiring leases and fencing tokens prevent a replaced
+worker from publishing a delayed result. The UI requests refresh through the service.
+
+Connections on both clients use `/workspace/service/usage`. This is a bounded,
+memory-only request/reply channel, not a durable mutation queue. Only the local
+lease-owning collector can retrieve or answer requests. Credential inputs and login
+codes never enter replica caches, mutation receipts, change logs, or backups.
+Account credentials remain in the collecting host's existing private stores.
+An unacknowledged account action is not automatically retried; reload Connections
+to check its result. Normalized readings continue to use the durable workspace API.
+
+Manual status changes remain pending until the corrected status is published.
+The collector retains the feedback for its next model response across restarts and
+removes it only after that response is published. A correction is not a permanent
+status lock.
+
+## Files and artifacts
+
+Text editors use `/fs/document` with content revisions and conditional saves.
+A changed remote file is returned for review instead of silently overwritten.
+Drafts retain their exact base and survive navigation or a client restart.
+
+Artifact metadata synchronizes separately from files. Blob transfers are hash
+verified and limited to 128 MiB per file. Android stages outgoing transfers durably;
+Mac retains local originals until synchronization succeeds. Render exports retain
+both a PDF and the authored-source archive.
+
+Dashboard catalogs contain portable website addresses or broker/port/path locators,
+never client-local forwarded URLs, cookies, or authentication parameters. Notebook
+tokens remain in each device's live connection rather than the shared definition.
+
+## Migration and recovery
+
+Existing document files and catalog preferences are retained before migration.
+Legacy session marks migrate once by lifetime, rather than following a reused name.
+The artifact library is partitioned by workspace while preserving its original files.
+
+The broker creates one atomic database backup per UTC day and retains seven daily
+backups beside its workspace database. Immutable blobs are retained separately.
+Restoring requires stopping the owning broker and restoring a matching database
+and blob store. Client caches and pending changes are separate recovery inputs;
+discarding a cache also discards its uncommitted changes.
+
+Shared Swift/Kotlin fixtures and broker tests cover lost acknowledgments, offline
+edits, reordering, conflict queues, workspace switching, tombstones, and session
+lifetime changes across tmux and ConPTY identity formats. The separate Android
+`.qa` application exercises production screens against a loopback fixture server,
+without connecting to accounts or the tailnet.
