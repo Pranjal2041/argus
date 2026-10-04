@@ -12,6 +12,10 @@ struct Machine: Identifiable, Hashable {
     var isLocal: Bool
     var httpBase: String // e.g. http://127.0.0.1:8722
     var wsBase: String   // e.g. ws://127.0.0.1:8722
+    var brokerID: String = ""
+    var workspaceID: String = ""
+    var workspaceEnabled: Bool = false
+    var capabilities: [String] = []
 }
 
 /// Resolve a hostname printed by an agent to one currently-discovered Argus machine.
@@ -69,13 +73,14 @@ struct SessionInfo: Identifiable, Hashable, Codable {
     var hidden: Bool = false     // user-hidden; broker-owned so the hide syncs across devices
     var tmuxID: String?          // broker transport handle ($N): unchanged across rename but reusable after a tmux server restart
     var lineageID: String?       // non-reusable session lifetime id for archival aliases; never used as the transport target
+    var activityRevision: UInt64 = 0
     var id: String { name }
 
     /// True when the broker reports the agent as blocked on the user.
     var isWaiting: Bool { state == "waiting" }
 
     enum CodingKeys: String, CodingKey {
-        case name, windows, attached, activity, path, state, agent, hidden, lineageID
+        case name, windows, attached, activity, path, state, agent, hidden, lineageID, activityRevision
         case tmuxID = "id"
     }
 
@@ -89,7 +94,8 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         agent: Bool = false,
         hidden: Bool = false,
         tmuxID: String? = nil,
-        lineageID: String? = nil
+        lineageID: String? = nil,
+        activityRevision: UInt64 = 0
     ) {
         self.name = name
         self.windows = windows
@@ -101,6 +107,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         self.hidden = hidden
         self.tmuxID = tmuxID
         self.lineageID = lineageID
+        self.activityRevision = activityRevision
     }
 
     // Custom decoder: Swift's synthesized `Decodable` does NOT apply the
@@ -126,6 +133,7 @@ struct SessionInfo: Identifiable, Hashable, Codable {
         // session stuck on "connecting" after a reconnect. Empty id → fall back to the name.
         tmuxID = (try c.decodeIfPresent(String.self, forKey: .tmuxID)).flatMap { $0.isEmpty ? nil : $0 }
         lineageID = (try c.decodeIfPresent(String.self, forKey: .lineageID)).flatMap { $0.isEmpty ? nil : $0 }
+        activityRevision = try c.decodeIfPresent(UInt64.self, forKey: .activityRevision) ?? 0
     }
 }
 
@@ -380,13 +388,16 @@ final class AppState: ObservableObject {
     private var restoringWorkspace = false
     private var workspaceRestoreFailed = false
     @Published var workspaceStorageError: String?
+    lazy var sharedWorkspace = SharedWorkspaceCoordinator(app: self, enabled: persistenceEnabled)
     lazy var workspaceSync: WorkspaceSync = {
         let sync = WorkspaceSync(url: persistenceEnabled ? Self.workspaceDirectory.appendingPathComponent("sync.json") : nil)
         sync.onChange = { [weak self] in self?.objectWillChange.send() }
         return sync
     }()
     static var workspaceDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Argus/workspace")
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Argus/workspace")
+        if let id = UserDefaults.standard.string(forKey: "ut.workspace.id"), !id.isEmpty { return root.appendingPathComponent("documents/" + id) }
+        return root
     }
     private var pendingDestructiveSync: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "ut.pendingDestructiveSync") ?? [])
@@ -421,6 +432,7 @@ final class AppState: ObservableObject {
             showWeeklyProgress = false
             // Visiting a panel clears its orange "done, unseen" flag → back to green.
             if unseen.contains(ref.id) { unseen.remove(ref.id) }
+            acknowledgeSharedSession(ref)
             // Viewing a waiting session acknowledges it → clears it from the inbox AND
             // the Dock badge immediately (and durably: a plain state-flip used to be
             // reverted by the very next poll, since the broker still reports "waiting").
@@ -960,7 +972,10 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(Array(pendingDestructiveSync), forKey: "ut.pendingDestructiveSync")
     }
     /// The sync host is this Mac's own broker (loopback).
-    private var syncHostBase: String? { machines.first { $0.isLocal }?.httpBase }
+    private var syncHostBase: String? {
+        if !sharedWorkspace.replica.workspaceID.isEmpty { return sharedWorkspace.host?.httpBase }
+        return machines.first { $0.isLocal }?.httpBase
+    }
 
     /// Drain phone-captured journal events from the local broker's inbox into
     /// the canonical journal (peek → ingest (id-deduped) → ack by offset).
@@ -999,13 +1014,113 @@ final class AppState: ObservableObject {
     /// timer + at launch.
     func syncUserData() {
         guard persistenceEnabled, !restoringWorkspace, workspaceStorageError == nil, let host = syncHostBase else { return }
+        let identity = sharedWorkspace.replica.workspaceID
+        let initial = workspaceCollections()
         for key in ["workflows", "todos", "notes", "planner"] {
             workspaceSync.sync(key: key, host: host, read: { [weak self] in
-                self?.workspaceCollections()[key] ?? .array([])
-            }, apply: { [weak self] value in try self?.applyWorkspaceCollection(key, value) })
+                guard let self, self.sharedWorkspace.replica.workspaceID == identity else { return initial[key] ?? .array([]) }
+                return self.workspaceCollections()[key] ?? .array([])
+            }, apply: { [weak self] value in
+                guard let self, self.sharedWorkspace.replica.workspaceID == identity else { throw ArgusFailure("workspace_changed", "Workspace changed while synchronizing.") }
+                try self.applyWorkspaceCollection(key, value)
+            })
         }
     }
 
+
+    func bindSharedWorkspace(_ host: Machine) throws {
+        guard persistenceEnabled, host.workspaceEnabled, !host.workspaceID.isEmpty else {
+            throw ArgusFailure("workspace_unavailable", "Select an enrolled workspace host.")
+        }
+        let oldID = sharedWorkspace.replica.workspaceID
+        guard oldID != host.workspaceID else { return }
+        try flushWorkspace()
+        let oldDirectory = Self.workspaceDirectory
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Argus/workspace")
+        let target = root.appendingPathComponent("documents/" + host.workspaceID)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if oldID.isEmpty {
+            for name in ["state.json", "sync.json"] {
+                let source = oldDirectory.appendingPathComponent(name), destination = target.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: source.path), !FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.copyItem(at: source, to: destination)
+                }
+            }
+        }
+        try sharedWorkspace.replica.bind(host.workspaceID)
+        UserDefaults.standard.set(host.workspaceID, forKey: "ut.workspace.id")
+        workspaceSync = WorkspaceSync(url: target.appendingPathComponent("sync.json"))
+        workspaceSync.onChange = { [weak self] in self?.objectWillChange.send() }
+        restoringWorkspace = true
+        workflows = []; todoBoards = []; notes = []; plannerCommitments = []
+        restoringWorkspace = false
+        workspaceRestoreFailed = false; workspaceStorageError = nil
+        restoreWorkspace()
+        applySharedSessionMarks()
+    }
+
+    func sharedSessionKey(_ ref: SessionRef) -> String? {
+        guard let machine = machines.first(where: { $0.id == ref.machineID }), !machine.brokerID.isEmpty,
+              let lineage = session(for: ref)?.lineageID, !lineage.isEmpty else { return nil }
+        return machine.brokerID + "/" + lineage
+    }
+
+    private func sharedSessionRead(_ ref: SessionRef) -> Bool? {
+        guard !sharedWorkspace.replica.workspaceID.isEmpty, let key = sharedSessionKey(ref),
+              let info = session(for: ref), info.activityRevision > 0 else { return nil }
+        return (sharedWorkspace.replica.data("session-read", key)?["seenRevision"].uint64 ?? 0) >= info.activityRevision
+    }
+
+    private func acknowledgeSharedSession(_ ref: SessionRef) {
+        guard navigationOrigin == .human, sharedWorkspace.replica.loaded, let key = sharedSessionKey(ref),
+              let info = session(for: ref), info.activityRevision > 0, sharedSessionRead(ref) != true else { return }
+        sharedWorkspace.change("session-read", id: key, data: .object(["seenRevision": .number(Double(info.activityRevision))]))
+    }
+
+    private func backlogMigrationKey(_ ref: SessionRef) -> String {
+        "ut.backlog.migrated." + sharedWorkspace.replica.workspaceID + "." + ref.id
+    }
+
+    func migrateSharedSessionMarks() {
+        guard persistenceEnabled, sharedWorkspace.replica.loaded else { return }
+        for machine in machines {
+            for session in sessionsByMachine[machine.id] ?? [] {
+                let ref = SessionRef(machineID: machine.id, session: session.name)
+                guard let key = sharedSessionKey(ref), !UserDefaults.standard.bool(forKey: backlogMigrationKey(ref)) else { continue }
+                if backlog.contains(ref.id), sharedWorkspace.replica.record("session-backlog", key) == nil,
+                   sharedWorkspace.replica.data("session-backlog", key) == nil {
+                    do { try sharedWorkspace.replica.enqueue("session-backlog", id: key, data: .object(["value": .bool(true)])) }
+                    catch { workspaceStorageError = error.localizedDescription; continue }
+                }
+                UserDefaults.standard.set(true, forKey: backlogMigrationKey(ref))
+            }
+        }
+    }
+
+    func applySharedSessionMarks() {
+        guard sharedWorkspace.replica.loaded else { objectWillChange.send(); return }
+        var nextBacklog = backlog, nextAcknowledged = acknowledged, nextUnseen = unseen
+        for machine in machines {
+            for info in sessionsByMachine[machine.id] ?? [] {
+                let ref = SessionRef(machineID: machine.id, session: info.name)
+                guard let key = sharedSessionKey(ref) else { continue }
+                if let value = sharedWorkspace.replica.data("session-backlog", key)?["value"].bool {
+                    if value { nextBacklog.insert(ref.id) } else { nextBacklog.remove(ref.id) }
+                } else if UserDefaults.standard.bool(forKey: backlogMigrationKey(ref)) {
+                    nextBacklog.remove(ref.id)
+                }
+                if let read = sharedSessionRead(ref) {
+                    if read { nextAcknowledged.insert(ref.id); nextUnseen.remove(ref.id) }
+                    else { nextAcknowledged.remove(ref.id) }
+                }
+            }
+        }
+        if nextBacklog != backlog { backlog = nextBacklog }
+        if nextAcknowledged != acknowledged { acknowledged = nextAcknowledged }
+        if nextUnseen != unseen { unseen = nextUnseen }
+        if !Self.isRunningTests { AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount) }
+        objectWillChange.send()
+    }
 
     /// Sessions the user has HIDDEN from the sidebar. BROKER-OWNED now (so the hide SYNCS
     /// across devices): each refresh rebuilds this machine's membership from the `hidden`
@@ -1044,11 +1159,20 @@ final class AppState: ObservableObject {
         Set(UserDefaults.standard.stringArray(forKey: "ut.backlog") ?? []) {
         didSet { if persistenceEnabled { UserDefaults.standard.set(Array(backlog), forKey: "ut.backlog") } }
     }
-    func isBacklogged(_ ref: SessionRef) -> Bool { backlog.contains(ref.id) }
+    func isBacklogged(_ ref: SessionRef) -> Bool {
+        if !sharedWorkspace.replica.workspaceID.isEmpty, let key = sharedSessionKey(ref) {
+            return sharedWorkspace.replica.data("session-backlog", key)?["value"].bool ?? false
+        }
+        return backlog.contains(ref.id)
+    }
     func toggleBacklog(_ ref: SessionRef) {
         setBacklog(ref, included: !backlog.contains(ref.id))
     }
     func setBacklog(_ ref: SessionRef, included: Bool) {
+        if sharedWorkspace.replica.loaded, let key = sharedSessionKey(ref) {
+            sharedWorkspace.change("session-backlog", id: key, data: .object(["value": .bool(included)]))
+            return
+        }
         if included { backlog.insert(ref.id) } else { backlog.remove(ref.id) }
     }
 
@@ -1261,7 +1385,7 @@ final class AppState: ObservableObject {
         machines.flatMap { m -> [WaitingSession] in
             (sessionsByMachine[m.id] ?? []).filter { $0.isWaiting && (showAgentSessions || !$0.agent) && !hiddenSessions.contains(SessionRef(machineID: m.id, session: $0.name).id) }.compactMap { s in
                 let ref = SessionRef(machineID: m.id, session: s.name)
-                if acknowledged.contains(ref.id) { return nil } // user already saw/answered it
+                if sharedSessionRead(ref) ?? acknowledged.contains(ref.id) { return nil }
                 return WaitingSession(ref: ref, machineName: m.name, activity: s.activity)
             }
         }
@@ -1281,6 +1405,7 @@ final class AppState: ObservableObject {
     /// immediately (the badge was previously only updated on the periodic poll).
     private func acknowledge(_ ref: SessionRef) {
         if !acknowledged.contains(ref.id) { acknowledged.insert(ref.id) }
+        acknowledgeSharedSession(ref)
         AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount)
     }
 
@@ -1421,13 +1546,14 @@ final class AppState: ObservableObject {
                 tick += 1
                 let scope: SessionRefreshScope = tick % 15 == 0 ? .all : .foreground
                 for m in self.machines { self.refresh(m, scope: scope) }
+                if tick == 1 || tick % 3 == 0 { self.sharedWorkspace.refresh() }
                 if tick % 6 == 0 { self.discoverNewBrokers() }
                 // Pull durable history in the background while machines are reachable, so
                 // it's captured before a node goes offline. ~2s after launch, then ~30s.
                 if tick == 1 || tick % 15 == 0 { self.refreshHistoryCache() }
                 // Sync Workflows, Todo Maps, Notes, and Planner with this Mac's broker so the
                 // phone shares them. ~4s after launch, then ~10s.
-                if tick == 2 || tick % 5 == 0 { self.syncUserData(); self.drainJournalInbox() }
+                if tick == 2 || tick % 5 == 0 { self.syncUserData() }
             }
         }
     }
@@ -1447,9 +1573,13 @@ final class AppState: ObservableObject {
                     self.applyFullBrokerDiscovery(found)
                     return
                 }
-                for m in found where !self.machines.contains(where: { $0.id == m.id }) {
-                    self.machines.append(m)
-                    self.refresh(m, scope: .all)
+                for m in found {
+                    if let index = self.machines.firstIndex(where: { $0.id == m.id }) {
+                        if self.machines[index] != m { self.machines[index] = m }
+                    } else {
+                        self.machines.append(m)
+                        self.refresh(m, scope: .all)
+                    }
                 }
             }
         }
@@ -1633,6 +1763,7 @@ final class AppState: ObservableObject {
         if update.scope == .all { syncHidden(machine: m, sessions: fetched) }
         if current != merged {
             applySessionTransitions(machine: m, changedSessions: fetched, liveSessions: merged)
+            applySharedSessionMarks()
         }
     }
 
@@ -1843,6 +1974,14 @@ struct DiscoveredMeshPeer: Decodable, Equatable {
     let address: String?
     let brokerHost: String?
     let socket: String?
+    var brokerID: String? = nil
+    var workspace: DiscoveredWorkspace? = nil
+    var capabilities: [String]? = nil
+}
+
+struct DiscoveredWorkspace: Decodable, Equatable {
+    let workspaceID: String
+    let enabled: Bool
 }
 
 private struct MeshPeersResponse: Decodable {
@@ -1879,7 +2018,9 @@ func machinesFromMeshPeers(
             os: peer.os,
             isLocal: false,
             httpBase: "\(scheme)://\(endpoint):8722",
-            wsBase: "\(wsScheme)://\(endpoint):8722"
+            wsBase: "\(wsScheme)://\(endpoint):8722",
+            brokerID: peer.brokerID ?? "", workspaceID: peer.workspace?.workspaceID ?? "",
+            workspaceEnabled: peer.workspace?.enabled ?? false, capabilities: peer.capabilities ?? []
         ))
     }
     return machines.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -1889,12 +2030,19 @@ func machinesFromMeshPeers(
 /// deliberately does not run its own tailnet scan: UI refresh, Lab automation,
 /// mirroring, CLI routing, and future consumers must all share one lifecycle.
 func discoverMachines() -> [Machine] {
-    let localIdentity = probeWhoami("http://127.0.0.1:8722/whoami")?.logicalIdentity
+    let who = probeWhoami("http://127.0.0.1:8722/whoami")
+    let localIdentity = who?.logicalIdentity
+    var local = localBrokerMachine
+    if let who {
+        local.brokerID = who.brokerID; local.workspaceID = who.workspaceID
+        local.workspaceEnabled = who.workspaceEnabled; local.capabilities = who.capabilities
+        local.host = who.host; local.os = who.os
+    }
     guard let url = URL(string: "http://127.0.0.1:8722/mesh/peers"),
           let data = blockingBrokerData(from: url, timeout: 9),
           let response = try? JSONDecoder().decode(MeshPeersResponse.self, from: data)
-    else { return [localBrokerMachine] }
-    return [localBrokerMachine] + machinesFromMeshPeers(response.peers, localIdentity: localIdentity)
+    else { return [local] }
+    return [local] + machinesFromMeshPeers(response.peers, localIdentity: localIdentity)
 }
 
 struct BrokerLogicalIdentity: Equatable {
@@ -1942,7 +2090,7 @@ private func blockingBrokerData(from url: URL, timeout: TimeInterval) -> Data? {
     return result
 }
 
-private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?)? {
+private func probeWhoami(_ urlString: String) -> (name: String, host: String, os: String, socket: String, logicalIdentity: BrokerLogicalIdentity?, brokerID: String, workspaceID: String, workspaceEnabled: Bool, capabilities: [String])? {
     guard let url = URL(string: urlString),
           let data = blockingBrokerData(from: url, timeout: 2.5),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1951,5 +2099,8 @@ private func probeWhoami(_ urlString: String) -> (name: String, host: String, os
     let host = (obj["host"] as? String) ?? ""
     let os = (obj["os"] as? String) ?? ""
     let socket = (obj["socket"] as? String) ?? ""
-    return (name, host, os, socket, brokerLogicalIdentity(host: host, socket: socket))
+    let workspace = obj["workspace"] as? [String: Any]
+    return (name, host, os, socket, brokerLogicalIdentity(host: host, socket: socket),
+            obj["brokerID"] as? String ?? "", workspace?["workspaceID"] as? String ?? "",
+            workspace?["enabled"] as? Bool ?? false, obj["capabilities"] as? [String] ?? [])
 }

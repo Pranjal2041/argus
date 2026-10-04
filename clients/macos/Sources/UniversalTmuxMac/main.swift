@@ -3,6 +3,7 @@ import SwiftUI
 import UsageKit
 
 if #available(macOS 14.0, *) { UsageCredentialWorker.runIfRequested() }
+WorkspaceServiceLauncher.runIfRequested()
 
 // Register bundled fonts (MesloLGS NF) so the terminal can render powerline /
 // Nerd-Font glyphs that the system monospace font lacks (otherwise: tofu boxes).

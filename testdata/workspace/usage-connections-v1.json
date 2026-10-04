@@ -1,0 +1,10 @@
+{
+  "connections": [
+    {"id":"fixture-cloud","sourceID":"fixture-cloud","integration":"daytona","label":"Research cloud","enabled":true,"hasSavedCredentials":true,"hasSavedProfile":false,"budget":"100","credentials":{}},
+    {"id":"fixture-storage","sourceID":"fixture-storage","integration":"mac-storage","label":"Workspace disk","enabled":true,"hasSavedCredentials":false,"hasSavedProfile":false,"mountPath":"/","credentials":{}}
+  ],
+  "integrations": [
+    {"id":"daytona","name":"Daytona","help":"Read cloud limits and spending using this connection's saved key.","signIn":false,"fields":[{"id":"label","title":"Connection name"},{"id":"budget","title":"Monthly budget in USD (optional)"}],"credentialFields":[{"id":"DAYTONA_API_KEY","title":"API key"}],"defaults":{"integration":"daytona","label":"","enabled":true,"budget":"","credentials":{}}},
+    {"id":"mac-storage","name":"macOS storage","help":"Read volume capacity on the collecting host.","signIn":false,"fields":[{"id":"label","title":"Connection name"},{"id":"mountPath","title":"Volume paths on collector"}],"credentialFields":[],"defaults":{"integration":"mac-storage","label":"","enabled":true,"mountPath":"/","credentials":{}}}
+  ]
+}

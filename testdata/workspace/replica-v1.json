@@ -1,0 +1,19 @@
+{
+  "protocol": 1,
+  "workspaceID": "fixture-workspace",
+  "brokerID": "fixture-broker",
+  "enabled": true,
+  "cursor": 8,
+  "loaded": true,
+  "pending": [],
+  "records": [
+    {"collection":"session-backlog","id":"fixture-broker/lifetime-1","revision":1,"data":{"value":true},"updatedAt":1791158400000},
+    {"collection":"session-read","id":"fixture-broker/lifetime-1","revision":2,"data":{"seenRevision":12},"updatedAt":1791158400000},
+    {"collection":"dashboards","id":"c401fe78-6ad4-4c28-8a95-66938e2b03a3","revision":3,"data":{"kind":"website","name":"Project overview","url":"https://example.org/projects?view=activity","futureField":{"keep":true}},"updatedAt":1791158400000},
+    {"collection":"notebooks","id":"1e54c5b9-cfd8-46b1-992f-cd7c91c11552","revision":4,"data":{"name":"Training analysis","brokerID":"fixture-broker","path":"/project/notebooks"},"updatedAt":1791158400000},
+    {"collection":"cc-status","id":"fixture-broker/lifetime-1","revision":5,"data":{"label":"needs-decision","summary":"The comparison is ready for review.","updatedAt":1791158400000},"updatedAt":1791158400000},
+    {"collection":"usage-settings","id":"default","revision":6,"data":{"refreshSeconds":120,"cardOrder":["source:storage","source:quota"],"policy":{"enabled":true,"quotaEnabled":true,"budgetEnabled":true,"storageEnabled":true,"quotaRemaining":10,"budgetRemaining":10,"storageRemaining":10,"includeModelLimits":false,"mutedSources":[],"snoozeHours":4}},"updatedAt":1791158400000},
+    {"collection":"usage-dismissals","id":"default","revision":7,"data":{},"updatedAt":1791158400000},
+    {"collection":"journal","id":"wrapped","revision":8,"data":{"kind":"wrapped","periods":{"0":{"window":{"startDay":"2026-10-01","endDay":"2026-10-04","activeDays":4,"spanDays":4},"totals":{"utterances":148,"chars":23400,"agents":12,"machines":4,"sessionsNew":7,"sessionsKilled":2,"phoneMsgs":25},"statusMix":{"working":90,"needs-decision":8,"milestone":12},"archetype":{"name":"The Orchestrator","blurb":"One mind, many machines."}}}},"updatedAt":1791158400000}
+  ]
+}

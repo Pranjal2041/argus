@@ -3,6 +3,49 @@ import XCTest
 
 @available(macOS 14.0, *)
 final class ConnectionSetupTests: XCTestCase {
+    @MainActor func testAccountServiceHandlesDifferentCredentialShapesWithoutExportingSecrets() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let name = "usage.account-service.\(UUID())", defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let secrets = MemoryCredentials(), repo = try repository(directory, secrets: secrets)
+        let store = UsageStore(registry: .live(try repo.load()), defaults: defaults,
+            cache: SnapshotCache(url: directory.appendingPathComponent("cache.json")), connections: repo)
+        // Save does not fetch providers; the scheduled collector owns refresh.
+        for (integration, credentials) in [(IntegrationID.daytona, ["DAYTONA_API_KEY": "private-fixture-one"]),
+                                          (.modal, ["MODAL_TOKEN_ID": "private-fixture-two", "MODAL_TOKEN_SECRET": "private-fixture-three"])] {
+            var draft = ConnectionDraft(integration: integration); draft.label = integration.name; draft.credentials = credentials
+            let state = try await store.handleAccountService(["action": "save", "draft": draft.serviceFields])
+            let serialized = try JSONSerialization.data(withJSONObject: state)
+            XCTAssertFalse(String(decoding: serialized, as: UTF8.self).contains("private-fixture"))
+            XCTAssertFalse(String(decoding: serialized, as: UTF8.self).contains("credentialReference"))
+        }
+        var config = try repo.load()
+        XCTAssertEqual(config.sources.count, 2); XCTAssertEqual(secrets.references.count, 2)
+        var edited = ConnectionDraft(source: config.sources[0]); edited.label = "Renamed on phone"; edited.enabled = false
+        _ = try await store.handleAccountService(["action": "save", "draft": edited.serviceFields])
+        config = try repo.load()
+        XCTAssertEqual(config.sources[0].label, "Renamed on phone"); XCTAssertFalse(config.sources[0].enabled)
+        XCTAssertEqual(secrets.references.count, 2)
+        _ = try await store.handleAccountService(["action": "remove", "sourceID": config.sources[0].id])
+        XCTAssertEqual(try repo.load().sources.count, 1)
+    }
+
+    @MainActor func testConsumerAccountEditsUseServiceInsteadOfLocalRepository() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repo = try repository(directory, secrets: MemoryCredentials())
+        let name = "usage.account-consumer.\(UUID())", defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = UsageStore(registry: .live(try repo.load()), defaults: defaults, connections: repo)
+        var calls: [[String: Any]] = []
+        store.remoteAccountRequest = { request in calls.append(request); return ["connections": []] }
+        var draft = ConnectionDraft(integration: .daytona); draft.label = "Remote"; draft.credentials = ["DAYTONA_API_KEY": "rpc-fixture"]
+        let saved = await store.saveConnection(draft)
+        XCTAssertTrue(saved)
+        XCTAssertTrue(try repo.load().sources.isEmpty)
+        XCTAssertEqual(calls.first?["action"] as? String, "save")
+    }
     func testNewAPIConnectionKeepsSecretsOutOfConfiguration() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

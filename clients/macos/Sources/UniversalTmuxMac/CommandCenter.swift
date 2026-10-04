@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import ArgusProtocol
 
 // MARK: - Status model
 
@@ -411,6 +412,10 @@ enum ManualStatusLog {
 /// is open. Reads the session list + dot state from AppState.
 @MainActor
 final class CommandCenterModel: ObservableObject {
+    let isCollector: Bool
+    var collectionAllowed: () -> Bool = { false }
+    var collectionGeneration: () -> UInt64? = { nil }
+    var statusesChanged: (() -> Void)?
     @Published var statuses: [String: AgentStatus] = [:]   // keyed by SessionRef.id
     @Published var inflight: Set<String> = []              // sessions whose status is being regenerated (drives the spinner)
     @Published var costUSD: Double = 0                     // cumulative tracked model spend
@@ -421,17 +426,29 @@ final class CommandCenterModel: ObservableObject {
     private var timer: Timer?
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
     private var lastOKAt: [String: Double] = [:] // when each session was last successfully summarized (for fair scheduling)
-    private var correction: [String: String] = [:] // one-time note for the model after a manual status change (NOT persisted; no learning)
+    private var correction: [String: String] = [:] // active delivery; the service retains durable feedback until publication
     private var consumedOverrideTS: [String: Int64] = [:] // last phone-set override applied per session (so each is consumed once)
 
     /// The user manually set a card's status. Show it immediately and queue a one-time
     /// note so the NEXT model call is told the user corrected it (and reasons about why) —
-    /// it then re-decides on its own. Nothing is persisted or learned; the label is not locked.
-    func setManualLabel(ref: SessionRef, label: String, actor: String = "human") {
+    /// it then re-decides on its own. The service retains feedback until publication;
+    /// the label is not permanently locked.
+    func setManualLabel(ref: SessionRef, label: String, actor: String = "human", correctionID: String? = nil, note: String? = nil) {
+        if !isCollector {
+            guard let app, let identity = app.sharedSessionKey(ref) else { return }
+            app.sharedWorkspace.change("cc-overrides", id: identity, data: .object([
+                "label": .string(label), "commandID": .string(UUID().uuidString), "actor": .string(actor)
+            ]))
+            readSharedStatuses()
+            return
+        }
         let key = ref.id
+        if let correctionID, correctionIDs[key] == correctionID { return }
+        correctionIDs[key] = correctionID
+        completedCorrections[key] = nil
         let prev = statuses[key]
         let old = prev?.label ?? "idle"
-        guard label != old else { return }
+        correctionGeneration[key, default: 0] &+= 1
         // Durable audit of every manual override (Mac UI + phone, which routes here too).
         // This is the accumulating record of which auto-statuses you correct — what the
         // status prompt should be tuned on. (The status model's transcripts also carry it,
@@ -442,21 +459,33 @@ final class CommandCenterModel: ObservableObject {
         ActivityJournal.shared.log("manualStatus", ActivityJournal.shared.ctx(ref)
             .merging(["from": old, "to": label, "actor": actor]) { a, _ in a })
         statuses[key] = AgentStatus(label: label, oneLiner: prev?.oneLiner ?? "", lookAtThis: prev?.lookAtThis, updatedAt: Date())
-        correction[key] = "[STATUS CORRECTION] A \(actor == "human" ? "human" : "local automation client") changed this session's status from \"\(old)\" to \"\(label)\". Treat this as a correction, not a permanent lock."
+        correction[key] = note ?? "[STATUS CORRECTION] A \(actor == "human" ? "human" : "local automation client") changed this session's status from \"\(old)\" to \"\(label)\". Treat this as a correction, not a permanent lock."
         lastHash[key] = nil   // force the next sweep to re-summarize (and deliver the note) even if the screen is unchanged
         persist(); publish()
     }
     private var lastDot: [String: String] = [:] // last seen dot state — a flip forces a refresh
+    private var sessionLifetimes: [String: String] = [:]
+    private var correctionGeneration: [String: UInt64] = [:]
+    private var correctionIDs: [String: String] = [:]
+    private var completedCorrections: [String: String] = [:]
+    func correctionDelivered(ref: SessionRef, id: String) -> Bool { completedCorrections[ref.id] == id }
     private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
+
+    func collectionOwnershipChanged() {
+        guard isCollector else { return }
+        statuses = [:]; lastHash = [:]; lastDot = [:]; lastOKAt = [:]
+        correctionIDs = [:]; completedCorrections = [:]; correction = [:]
+    }
     private var modelInflight = 0               // concurrent model calls (the expensive part)
     private var pulseN = 0
     private let maxModelCalls = 5
     private let storeKey = "ut.ccStatuses.v1"
 
-    init() {
+    init(collector: Bool = false) {
+        isCollector = collector
         // Show last-known statuses instantly on launch (refreshed within ~30s), so the
         // grid is never a wall of empty tiles after a relaunch.
-        if let d = UserDefaults.standard.data(forKey: storeKey),
+        if !collector, let d = UserDefaults.standard.data(forKey: storeKey),
            let saved = try? JSONDecoder().decode([String: AgentStatus].self, from: d) {
             statuses = saved
         }
@@ -497,6 +526,7 @@ final class CommandCenterModel: ObservableObject {
     /// "Needs You" section. This uses the same ccSection function as the view,
     /// including its broker-dot fallback before the status model has answered.
     func refreshAttention() {
+        guard !isCollector else { return }
         guard let app else { return }
         var needs: Set<String> = []
         for machine in app.machines {
@@ -523,16 +553,25 @@ final class CommandCenterModel: ObservableObject {
     }
 
     func stop() { timer?.invalidate(); timer = nil }
+    func collectTick() { if isCollector { pulse() } }
 
     /// Invalidate cached scheduling evidence; the normal bounded scheduler owns
     /// the work. Repeated refresh commands cannot bypass its concurrency limits.
     func requestRefresh(ref: SessionRef? = nil) {
+        if !isCollector {
+            var request: [String: ArgusJSON] = ["kind": .string("cc-refresh")]
+            if let ref, let identity = app?.sharedSessionKey(ref) { request["sessionID"] = .string(identity) }
+            app?.sharedWorkspace.change("commands", id: UUID().uuidString, data: .object(request))
+            return
+        }
         if let ref { lastHash[ref.id] = nil; lastDot[ref.id] = nil }
         else { lastHash.removeAll(); lastDot.removeAll() }
     }
 
     private func pulse() {
         guard let app else { ccLog("pulse: app nil (not bound)"); return }
+        if !isCollector { readSharedStatuses(); return }
+        guard collectionAllowed() else { return }
         // Pick up manual statuses set on another device (the phone) and apply them here.
         for m in app.machines { Task { [weak self] in await self?.consumeOverrides(machine: m) } }
         pulseN += 1
@@ -550,6 +589,14 @@ final class CommandCenterModel: ObservableObject {
             // in the command center.
             for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent && !s.hidden {
                 let ref = SessionRef(machineID: m.id, session: s.name)
+                guard let lifetime = app.sharedSessionKey(ref) else { continue }
+                if sessionLifetimes[ref.id] != lifetime {
+                    let renamed = sessionLifetimes.first { $0.value == lifetime }?.key
+                    statuses[ref.id] = renamed.flatMap { statuses[$0] }
+                    lastHash[ref.id] = nil; lastDot[ref.id] = nil; correction[ref.id] = nil
+                    provider.forget(key: ref.id)
+                    sessionLifetimes[ref.id] = lifetime
+                }
                 liveKeys.insert(ref.id)
                 let dotChanged = lastDot[ref.id] != s.state   // nil (new session) counts as changed
                 lastDot[ref.id] = s.state
@@ -603,9 +650,12 @@ final class CommandCenterModel: ObservableObject {
     }
 
     private func update(ref: SessionRef, machine: Machine, name: String, state: String, force: Bool = false) {
-        guard !busy.contains(ref.id) else { return }   // one op per session; NO global cap on the cheap fetch
+        guard collectionAllowed(), !busy.contains(ref.id) else { return }
         busy.insert(ref.id)
         let key = ref.id, httpBase = machine.httpBase
+        let lifetime = app?.sharedSessionKey(ref)
+        let generation = correctionGeneration[key, default: 0]
+        let ownership = collectionGeneration()
         Task { [weak self] in
             guard let self else { return }
             defer { self.busy.remove(key) }
@@ -624,6 +674,8 @@ final class CommandCenterModel: ObservableObject {
                     output = retry
                 }
             }
+            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.sharedSessionKey(ref) == lifetime,
+                  self.correctionGeneration[key, default: 0] == generation else { return }
             if ccCaptureLooksTransient(output, state: state) {
                 ccLog("hold-transient \(key) len=\(output.count)")
                 // The blue deterministic dot is authoritative here. Correct a stale
@@ -656,12 +708,14 @@ final class CommandCenterModel: ObservableObject {
             // Output changed → needs a model call. Cap concurrent model calls only;
             // if full, bail WITHOUT setting lastHash so this session retries next tick
             // (no starvation — every session keeps getting fetched + a fair shot).
-            guard self.modelInflight < self.maxModelCalls else { ccLog("gated \(key)"); return }
+            guard self.collectionAllowed(), self.modelInflight < self.maxModelCalls else { ccLog("gated \(key)"); return }
             self.modelInflight += 1
             self.inflight.insert(key)
             let generated = await self.provider.status(forKey: key, output: output, note: self.correction[key])
             self.modelInflight -= 1
             self.inflight.remove(key)
+            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.sharedSessionKey(ref) == lifetime,
+                  self.correctionGeneration[key, default: 0] == generation else { return }
             guard let generated else { ccLog("model-nil \(key)"); NSLog("[cc] %@ model returned nil", key); return }
             // A model call can take several seconds, so reconcile against the CURRENT
             // broker state rather than the state captured when this sweep began.
@@ -672,6 +726,7 @@ final class CommandCenterModel: ObservableObject {
                 ccLog("reconcile-live \(key) \(generated.label)->\(status.label)")
             }
             self.correction[key] = nil   // delivered once; it now lives in the resumed conversation as a turn, so the model keeps it in context going forward
+            self.completedCorrections[key] = self.correctionIDs[key]
             ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
             self.lastHash[key] = h
             self.lastOKAt[key] = Date().timeIntervalSince1970
@@ -701,6 +756,8 @@ final class CommandCenterModel: ObservableObject {
     /// match it to its own session list. ("Mac publishes, phone reads.")
     private func publish() {
         guard let app else { return }
+        guard isCollector, collectionAllowed() else { return }
+        statusesChanged?()
         refreshAttention()
         struct Item: Encodable {
             let session: String; let label: String; let summary: String
@@ -724,6 +781,30 @@ final class CommandCenterModel: ObservableObject {
             var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 6
             brokerSession.dataTask(with: req).resume()
         }
+    }
+
+    private func readSharedStatuses() {
+        guard let app, app.sharedWorkspace.replica.loaded else { return }
+        let replica = app.sharedWorkspace.replica
+        var next: [String: AgentStatus] = [:]
+        for machine in app.machines {
+            for session in app.sessionsByMachine[machine.id] ?? [] {
+                let ref = SessionRef(machineID: machine.id, session: session.name)
+                guard let identity = app.sharedSessionKey(ref) else { continue }
+                if let data = replica.data("cc-status", identity), let label = data["label"].string {
+                    next[ref.id] = AgentStatus(label: label, oneLiner: data["summary"].string ?? "",
+                        lookAtThis: data["lookAtThis"].string,
+                        updatedAt: Date(timeIntervalSince1970: Double(data["updatedAt"].uint64 ?? 0) / 1000))
+                }
+                if let label = replica.data("cc-overrides", identity)?["label"].string {
+                    let previous = next[ref.id] ?? statuses[ref.id]
+                    next[ref.id] = AgentStatus(label: label, oneLiner: previous?.oneLiner ?? "",
+                        lookAtThis: previous?.lookAtThis, updatedAt: previous?.updatedAt ?? .now)
+                }
+            }
+        }
+        statuses = next
+        refreshAttention()
     }
 
     private static func fetchRecent(httpBase: String, session: String) async -> String? {

@@ -7,7 +7,7 @@ public enum UsageCardPlacement { case before, after }
 /// reading or status. Aggregate cards carry their member accounts' anchors so
 /// an unavailable account becoming a reporting group keeps its chosen place.
 @available(macOS 14.0, *)
-struct UsageCardIdentity {
+struct UsageCardIdentity: Codable {
     var primary: String?
     var members: [String] = []
     var keys: [String] { UsageCardOrder.unique([primary].compactMap { $0 } + members) }

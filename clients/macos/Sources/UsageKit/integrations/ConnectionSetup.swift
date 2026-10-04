@@ -8,6 +8,17 @@ struct CredentialField: Identifiable, Sendable {
 
 @available(macOS 14.0, *)
 extension IntegrationID {
+    var serviceFormFields: [[String: String]] {
+        var fields = [["id": "label", "title": "Connection name"]]
+        switch self {
+        case .modal: fields.append(["id": "environment", "title": "Environment"])
+        case .macStorage: fields.append(["id": "mountPath", "title": "Volume paths on collector"])
+        case .windowsStorage: fields.append(["id": "host", "title": "UT machine name"])
+        default: break
+        }
+        if [.daytona, .modal, .openaiAPI].contains(self) { fields.append(["id": "budget", "title": "Monthly budget in USD (optional)"]) }
+        return fields
+    }
     var credentialFields: [CredentialField] {
         switch self {
         case .daytona: [CredentialField(id: "DAYTONA_API_KEY", title: "API key")]
@@ -63,6 +74,26 @@ struct ConnectionDraft: Identifiable, Sendable {
     var startsClaudeLogin: Bool { integration == .claude && enabled && !hasSavedCredentials }
     var startsDevinLogin: Bool { integration == .devin && enabled && !hasSavedProfile }
     var startsAccountLogin: Bool { startsCodexLogin || startsClaudeLogin || startsDevinLogin }
+
+    // An explicit, transient RPC projection; never encode this into workspace state.
+    var serviceFields: [String: Any] {
+        var result: [String: Any] = ["integration": integration.rawValue, "label": label, "enabled": enabled,
+            "credentials": credentials, "environment": environment, "host": host, "mountPath": mountPath,
+            "budget": budget, "useExistingCodexProfile": useExistingCodexProfile, "codexHome": codexHome,
+            "codexLoginMethod": codexLoginMethod.rawValue, "hasSavedCredentials": hasSavedCredentials,
+            "hasSavedProfile": hasSavedProfile]
+        if let sourceID { result["sourceID"] = sourceID; result["id"] = sourceID }
+        return result
+    }
+    mutating func applyServiceFields(_ value: [String: Any]) {
+        label = value["label"] as? String ?? label; enabled = value["enabled"] as? Bool ?? enabled
+        credentials = value["credentials"] as? [String: String] ?? [:]
+        environment = value["environment"] as? String ?? environment; host = value["host"] as? String ?? host
+        mountPath = value["mountPath"] as? String ?? mountPath; budget = value["budget"] as? String ?? budget
+        useExistingCodexProfile = value["useExistingCodexProfile"] as? Bool ?? useExistingCodexProfile
+        codexHome = value["codexHome"] as? String ?? codexHome
+        codexLoginMethod = (value["codexLoginMethod"] as? String).flatMap(CodexLoginMethod.init(rawValue:)) ?? codexLoginMethod
+    }
 }
 
 /// Persists a single connection without altering other accounts or their original dotenv files.

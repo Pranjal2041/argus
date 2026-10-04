@@ -392,16 +392,18 @@ function toggleGrid() {
 }
 
 function show(data) {
+  const sameWindow = state.data && data && JSON.stringify(state.data.window) === JSON.stringify(data.window);
+  const previousIndex = state.idx, previousGrid = state.grid;
   state.data = data;
   if (!data || data.empty || !((data.totals || {}).events)) {
     $('#loading').textContent = 'No activity recorded yet. Come back after you have used Argus for a while.';
     $('#loading').hidden = false; $('#deck').hidden = true; $('#chrome').hidden = true;
     return;
   }
-  state.cards = buildCards(data); state.idx = 0; state.grid = false;
-  $('#loading').hidden = true; $('#grid').hidden = true;
-  $('#deck').hidden = false; $('#chrome').hidden = false;
-  render();
+  state.cards = buildCards(data); state.idx = sameWindow ? Math.min(previousIndex, state.cards.length - 1) : 0; state.grid = sameWindow && previousGrid;
+  $('#loading').hidden = true; $('#grid').hidden = !state.grid;
+  $('#deck').hidden = state.grid; $('#chrome').hidden = false;
+  if (state.grid) populateGrid(); else render();
 }
 
 // ---------- nav wiring ----------
@@ -438,6 +440,8 @@ window.UTWrapped = {
   setTheme(t) { const r = document.documentElement.style; if (t.bg) r.setProperty('--bg', t.bg); if (t.fg) r.setProperty('--ink', t.fg); }
 };
 // tell Swift we are ready for data
-if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ut) {
+if (window.ArgusNative) {
+  window.ArgusNative.postMessage(JSON.stringify({ type: 'ready' }));
+} else if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ut) {
   window.webkit.messageHandlers.ut.postMessage({ type: 'ready' });
 }

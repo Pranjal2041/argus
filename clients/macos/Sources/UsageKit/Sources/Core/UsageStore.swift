@@ -82,6 +82,12 @@ final class UsageStore {
     var now = Date.now
     var lastRefresh: Date?
     var readingsChanged: (() -> Void)?
+    var remoteRefresh: ((String?) async -> Void)?
+    var remoteAccountRequest: (([String: Any]) async throws -> [String: Any])?
+    var remoteAccountConfiguration: IntegrationConfiguration?
+    var remoteAccountFields: [String: [String: Any]] = [:]
+    var remoteLoginIntegration: String?
+    var deferConnectionRefresh = false
     var selectedCategory: SourceCategory?
     var selection: DetailSelection?
     var page = "Overview"
@@ -148,7 +154,7 @@ final class UsageStore {
     }
 
     var isDemo: Bool { registry.origin == .demo }
-    var configuration: IntegrationConfiguration? { registry.configuration }
+    var configuration: IntegrationConfiguration? { remoteAccountRequest == nil ? registry.configuration : remoteAccountConfiguration }
     var refreshInterval: Double { max(60, min(3600, configuration?.refreshIntervalSeconds ?? 120)) }
 
     var filteredSources: [UsageSource] { sources.filter { selectedCategory == nil || $0.category == selectedCategory } }
@@ -162,6 +168,7 @@ final class UsageStore {
 
     func refresh(sourceID: String? = nil) async {
         guard !refreshing, authorizingCredentialID == nil else { return }
+        if let remoteRefresh { await remoteRefresh(sourceID); return }
         refreshing = true
         defer { refreshing = false }
         let fetching = sourceID.map { id in
@@ -210,7 +217,19 @@ final class UsageStore {
         readingsChanged?()
     }
 
+    func reloadCollectorConfiguration() {
+        guard !isDemo else { return }
+        do {
+            let config = try connections.load()
+            let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+            if try encoder.encode(config) != registry.configuration.map({ try encoder.encode($0) }) {
+                registry = makeRegistry(config)
+            }
+        } catch { configurationError = error.localizedDescription }
+    }
+
     func authorizeSavedCredential(_ sourceID: String) async {
+        if remoteAccountRequest != nil { _ = await remoteAccountAction(["action": "authorize", "sourceID": sourceID]); return }
         guard !refreshing, authorizingCredentialID == nil,
               let reference = configuration?.sources.first(where: { $0.id == sourceID })?.credentialReference else { return }
         authorizingCredentialID = sourceID
@@ -259,6 +278,7 @@ final class UsageStore {
     }
 
     func reloadConnections(sourceID: String? = nil) async {
+        if remoteAccountRequest != nil { _ = await remoteAccountAction(["action": "state"]); return }
         guard !isDemo, !refreshing else { return }
         do {
             registry = makeRegistry(try connections.load())
@@ -275,10 +295,22 @@ final class UsageStore {
     func editConnection(_ source: SourceConfiguration) {
         connectionSaveError = nil
         connectionDraft = ConnectionDraft(source: source)
+        if let fields = remoteAccountFields[source.id] {
+            connectionDraft?.applyServiceFields(fields)
+            connectionDraft?.hasSavedCredentials = fields["hasSavedCredentials"] as? Bool ?? false
+            connectionDraft?.hasSavedProfile = fields["hasSavedProfile"] as? Bool ?? false
+        }
     }
 
     @discardableResult
     func saveConnection(_ draft: ConnectionDraft) async -> Bool {
+        if remoteAccountRequest != nil {
+            guard !savingConnection else { return false }
+            savingConnection = true; defer { savingConnection = false }
+            let saved = await remoteAccountAction(["action": "save", "draft": draft.serviceFields])
+            if saved { connectionDraft = nil }
+            return saved
+        }
         guard !isDemo, !refreshing, !savingConnection, loginSourceID == nil else {
             connectionSaveError = "Wait for the current connection check or sign-in to finish."
             return false
@@ -303,7 +335,7 @@ final class UsageStore {
             if draft.startsCodexLogin { connectCodex(saved.id, method: draft.codexLoginMethod) }
             else if draft.startsClaudeLogin { connectClaude(saved.id) }
             else if draft.startsDevinLogin { connectDevin(saved.id) }
-            else if saved.enabled { await refresh(sourceID: saved.id) }
+            else if saved.enabled && !deferConnectionRefresh { await refresh(sourceID: saved.id) }
             return true
         } catch {
             connectionSaveError = (error as? IntegrationError)?.errorDescription ?? "Couldn't save the connection. Check the fields and try again."
@@ -312,6 +344,7 @@ final class UsageStore {
     }
 
     func connectCodex(_ sourceID: String, method: CodexLoginMethod? = nil) {
+        if remoteAccountRequest != nil { Task { _ = await remoteAccountAction(["action": "connect", "sourceID": sourceID, "method": (method ?? loginMethod).rawValue]) }; return }
         guard loginTask == nil, let config = configuration,
               let source = config.sources.first(where: { $0.id == sourceID && $0.integration == .codex }),
               let profile = source.codexHome else { return }
@@ -344,6 +377,7 @@ final class UsageStore {
     }
 
     func connectAccount(_ sourceID: String) {
+        if remoteAccountRequest != nil { Task { _ = await remoteAccountAction(["action": "connect", "sourceID": sourceID, "method": loginMethod.rawValue]) }; return }
         guard let source = configuration?.sources.first(where: { $0.id == sourceID }), source.enabled,
               loginSourceID == nil, !refreshing else { return }
         switch source.integration {
@@ -355,6 +389,7 @@ final class UsageStore {
     }
 
     func connectDevin(_ sourceID: String) {
+        if remoteAccountRequest != nil { connectAccount(sourceID); return }
         guard loginSourceID == nil, let configuration,
               let source = configuration.sources.first(where: { $0.id == sourceID && $0.integration == .devin && $0.enabled }) else { return }
         loginSourceID = sourceID; loginInstructions = nil
@@ -397,6 +432,7 @@ final class UsageStore {
     }
 
     func finishDevinLogin() {
+        if remoteAccountRequest != nil { let code = devinAuthorizationCode; devinAuthorizationCode = ""; Task { _ = await remoteAccountAction(["action": "finish", "code": code]) }; return }
         guard let process = devinLoginProcess, !devinCodeSubmitted else { return }
         do {
             try process.sendCode(devinAuthorizationCode)
@@ -409,6 +445,7 @@ final class UsageStore {
     }
 
     func connectClaude(_ sourceID: String) {
+        if remoteAccountRequest != nil { connectAccount(sourceID); return }
         guard loginSourceID == nil, let source = configuration?.sources.first(where: { $0.id == sourceID && $0.integration == .claude }) else { return }
         do {
             let flow = try ClaudeLoginFlow()
@@ -420,6 +457,7 @@ final class UsageStore {
     }
 
     func finishClaudeLogin() {
+        if remoteAccountRequest != nil { let code = claudeAuthorizationCode; claudeAuthorizationCode = ""; Task { _ = await remoteAccountAction(["action": "finish", "code": code]) }; return }
         guard loginTask == nil, let flow = claudeLoginFlow, let sourceID = loginSourceID,
               let source = configuration?.sources.first(where: { $0.id == sourceID && $0.integration == .claude }) else { return }
         let code = claudeAuthorizationCode
@@ -449,6 +487,7 @@ final class UsageStore {
     }
 
     func cancelLogin() {
+        if remoteAccountRequest != nil { Task { _ = await remoteAccountAction(["action": "cancel"] ) }; return }
         devinAuthorizationCode = ""
         loginTask?.cancel()
         if claudeLoginFlow != nil && loginTask == nil {
@@ -460,5 +499,80 @@ final class UsageStore {
     func addCodexConnection(label: String) {
         showNewConnection(.codex)
         connectionDraft?.label = label
+    }
+
+    func remoteAccountAction(_ request: [String: Any]) async -> Bool {
+        guard let remoteAccountRequest else { return false }
+        do {
+            let state = try await remoteAccountRequest(request)
+            if let error = state["error"] as? String { throw IntegrationError.configuration(error) }
+            let rows = state["connections"] as? [[String: Any]] ?? []
+            remoteAccountFields = Dictionary(uniqueKeysWithValues: rows.compactMap { row in (row["id"] as? String).map { ($0, row) } })
+            remoteAccountConfiguration = IntegrationConfiguration(sources: try JSONDecoder().decode([SourceConfiguration].self, from: JSONSerialization.data(withJSONObject: rows)))
+            loginSourceID = state["loginSourceID"] as? String; loginMessage = state["message"] as? String
+            remoteLoginIntegration = state["loginIntegration"] as? String
+            loginInstructions = nil
+            if let link = state["url"] as? String, let url = URL(string: link) {
+                loginInstructions = CodexLoginInstructions(url: url, userCode: state["userCode"] as? String, browserOpened: false)
+            }
+            configurationError = nil; connectionSaveError = nil
+            return true
+        } catch { connectionSaveError = error.localizedDescription; configurationError = error.localizedDescription; return false }
+    }
+
+    func handleAccountService(_ request: [String: Any]) async throws -> [String: Any] {
+        reloadCollectorConfiguration()
+        let action = request["action"] as? String ?? "state"
+        let sourceID = request["sourceID"] as? String ?? ""
+        let source = configuration?.sources.first { $0.id == sourceID }
+        if action != "state", refreshing || savingConnection { throw IntegrationError.unavailable("A collection is in progress. Try again when it finishes.") }
+        switch action {
+        case "state": break
+        case "save":
+            guard let fields = request["draft"] as? [String: Any], let name = fields["integration"] as? String,
+                  let integration = IntegrationID(rawValue: name) else { throw IntegrationError.configuration("Choose an integration.") }
+            let existingID = fields["sourceID"] as? String
+            let existing = configuration?.sources.first { $0.id == existingID }
+            if existingID != nil && existing == nil { throw IntegrationError.configuration("This connection was removed. Reload Connections.") }
+            var draft = existing.map(ConnectionDraft.init(source:)) ?? ConnectionDraft(integration: integration)
+            guard draft.integration == integration else { throw IntegrationError.configuration("The connection type changed.") }
+            draft.applyServiceFields(fields)
+            deferConnectionRefresh = true
+            defer { deferConnectionRefresh = false }
+            guard await saveConnection(draft) else { throw IntegrationError.configuration(connectionSaveError ?? "Connection was not saved.") }
+        case "connect":
+            guard let source, source.enabled else { throw IntegrationError.configuration("Enable this connection before signing in.") }
+            guard loginSourceID == nil else { throw IntegrationError.unavailable("Finish or cancel the current sign-in first.") }
+            loginMethod = (request["method"] as? String).flatMap(CodexLoginMethod.init(rawValue:)) ?? .deviceCode
+            connectAccount(sourceID)
+        case "finish":
+            guard let code = request["code"] as? String, !code.isEmpty else { throw IntegrationError.configuration("Enter the authorization code.") }
+            if claudeLoginFlow != nil { claudeAuthorizationCode = code; finishClaudeLogin() }
+            else if devinLoginProcess != nil { devinAuthorizationCode = code; finishDevinLogin() }
+            else { throw IntegrationError.configuration("No sign-in is waiting for a code.") }
+        case "cancel": cancelLogin()
+        case "authorize": await authorizeSavedCredential(sourceID)
+        case "remove":
+            guard loginSourceID == nil, source != nil, var config = configuration else { throw IntegrationError.configuration("Finish sign-in before removing this connection.") }
+            config.sources.removeAll { $0.id == sourceID }
+            try connections.saveConfiguration(config, connections.url)
+            registry = makeRegistry(config); sources.removeAll { $0.id == sourceID }; failures.removeAll { $0.descriptor?.sourceID == sourceID }
+            try cache?.save(sources)
+        default: throw IntegrationError.configuration("Unknown account action.")
+        }
+        var state: [String: Any] = ["connections": (configuration?.sources ?? []).map { source -> [String: Any] in
+            var row = ConnectionDraft(source: source).serviceFields
+            row.removeValue(forKey: "credentials")
+            return row
+        }, "integrations": IntegrationID.allCases.map { integration -> [String: Any] in
+            ["id": integration.rawValue, "name": integration.name, "help": integration.connectionHelp,
+             "signIn": integration.supportsAccountSignIn,
+             "fields": integration.serviceFormFields, "defaults": ConnectionDraft(integration: integration).serviceFields,
+             "credentialFields": integration.credentialFields.map { ["id": $0.id, "title": $0.title] }]
+        }]
+        state["loginSourceID"] = loginSourceID; state["message"] = loginMessage
+        state["loginIntegration"] = configuration?.sources.first { $0.id == loginSourceID }?.integration.rawValue
+        state["url"] = loginInstructions?.url.absoluteString; state["userCode"] = loginInstructions?.userCode
+        return state
     }
 }

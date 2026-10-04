@@ -8,7 +8,7 @@ public enum UsageBrowser {
 }
 
 @available(macOS 14.0, *)
-public struct UsageGlance: Identifiable {
+public struct UsageGlance: Identifiable, Codable {
     public var id: String
     public var title: String
     public var value: String
@@ -17,6 +17,7 @@ public struct UsageGlance: Identifiable {
     public var remaining: Double?
     public var sourceID: String?
     var ordering: UsageCardIdentity?
+    enum CodingKeys: String, CodingKey { case id, title, value, detail, symbol, remaining, sourceID, ordering }
 }
 
 @available(macOS 14.0, *)
@@ -32,7 +33,10 @@ public final class UsageController: ObservableObject {
     @Published public var showSettings = false
     @Published var policy: UsageAlertPolicy { didSet { savePolicy(); reconcile() } }
     @Published var refreshSeconds: Double {
-        didSet { defaults.set(refreshSeconds, forKey: "refreshSeconds") }
+        didSet {
+            defaults.set(refreshSeconds, forKey: "refreshSeconds")
+            if !applyingSharedState { sharedSettingsChanged?() }
+        }
     }
     var engine: UsageAlertEngine
     private var refreshTask: Task<Void, Never>?
@@ -40,6 +44,27 @@ public final class UsageController: ObservableObject {
     private static let policyKey = "warningPolicy.v1"
     private static let dismissalKey = "warningDismissals.v1"
     private static let cardOrderKey = "commandCenterCardOrder.v1"
+    public var sharedSettingsChanged: (() -> Void)?
+    public var sharedDismissalsChanged: (() -> Void)?
+    public var remoteRefresh: ((String?) async -> Void)? {
+        didSet { store.remoteRefresh = remoteRefresh }
+    }
+    public var remoteAccountRequest: ((Data) async throws -> Data)? {
+        didSet {
+            store.remoteAccountRequest = remoteAccountRequest.map { request in { value in
+                let data = try await request(JSONSerialization.data(withJSONObject: value))
+                guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.coderReadCorrupt) }
+                return result
+            } }
+        }
+    }
+    public func handleAccountService(_ data: Data) async -> Data {
+        do {
+            guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.coderReadCorrupt) }
+            return try JSONSerialization.data(withJSONObject: await store.handleAccountService(request))
+        } catch { return (try? JSONSerialization.data(withJSONObject: ["error": error.localizedDescription])) ?? Data("{}".utf8) }
+    }
+    private var applyingSharedState = false
 
     public convenience init(demo: Bool = false) {
         let defaults = UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
@@ -118,9 +143,10 @@ public final class UsageController: ObservableObject {
     public func dismiss(_ warning: UsageWarning, snooze: Bool = false) {
         engine.dismiss(warning, until: snooze ? Date().addingTimeInterval(max(1, policy.snoozeHours) * 3600) : nil)
         reconcile()
+        if !applyingSharedState { sharedDismissalsChanged?() }
     }
 
-    func restoreDismissed() { engine.dismissals = [:]; reconcile() }
+    func restoreDismissed() { engine.dismissals = [:]; reconcile(); sharedDismissalsChanged?() }
 
     public var hasCustomCardOrder: Bool { !cardOrder.keys.isEmpty }
 
@@ -128,6 +154,7 @@ public final class UsageController: ObservableObject {
     public func moveGlance(_ id: String, relativeTo targetID: String, placement: UsageCardPlacement) -> Bool {
         guard cardOrder.move(id, relativeTo: targetID, placement: placement, cards: glances) else { return false }
         defaults.set(cardOrder.keys, forKey: Self.cardOrderKey)
+        sharedSettingsChanged?()
         glances = cardOrder.arranged(glances)
         return true
     }
@@ -142,6 +169,7 @@ public final class UsageController: ObservableObject {
     public func resetCardOrder() {
         cardOrder = UsageCardOrder()
         defaults.removeObject(forKey: Self.cardOrderKey)
+        sharedSettingsChanged?()
         reconcile()
     }
 
@@ -164,6 +192,68 @@ public final class UsageController: ObservableObject {
 
     private func savePolicy() {
         if let data = try? JSONEncoder().encode(policy) { defaults.set(data, forKey: Self.policyKey) }
+        if !applyingSharedState { sharedSettingsChanged?() }
+    }
+
+    public func collectForWorkspace(sourceID: String? = nil) async {
+        store.reloadCollectorConfiguration()
+        await store.refresh(sourceID: sourceID)
+        reconcile()
+    }
+
+    public var collectionInterval: Double { refreshSeconds }
+
+    public func clearSharedPresentation() {
+        applyingSharedState = true; defer { applyingSharedState = false }
+        store.sources = []; store.failures = []; store.lastRefresh = nil
+        store.remoteAccountConfiguration = nil; store.remoteAccountFields = [:]; store.loginSourceID = nil
+        store.loginMessage = nil; store.loginInstructions = nil; store.remoteLoginIntegration = nil
+        store.connectionDraft = nil; store.claudeAuthorizationCode = ""; store.devinAuthorizationCode = ""
+        engine.dismissals = [:]; policy = UsageAlertPolicy(); cardOrder = UsageCardOrder()
+        refreshSeconds = 120; reconcile()
+    }
+
+    public func sharedSnapshot() throws -> Data {
+        try UsageWorkspaceWire.encoder.encode(UsageWorkspaceWire.Snapshot(
+            version: 1, observedAt: .now, lastRefresh: store.lastRefresh,
+            sources: store.sources, glances: glances, warnings: warnings,
+            failures: store.failures.map { .init(integration: $0.integration, sourceID: $0.descriptor?.sourceID,
+                                               message: $0.error ?? "Unavailable", needsAuthentication: $0.needsAuthentication) },
+            accounts: store.sources.map { source in
+                .init(id: source.id, title: source.name, account: source.account, observedAt: source.observedAt,
+                      stale: source.isStale, status: source.connectionStatusTitle,
+                      notes: source.notes, cards: Self.summary([source]))
+            }))
+    }
+
+    public func applySharedSnapshot(_ data: Data) throws {
+        let snapshot = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Snapshot.self, from: data)
+        guard snapshot.version == 1 else { throw CocoaError(.coderReadCorrupt) }
+        store.sources = snapshot.sources; store.lastRefresh = snapshot.lastRefresh
+        store.failures = snapshot.failures.map {
+            .init(integration: $0.integration, sources: [], error: $0.message,
+                  descriptor: nil, needsAuthentication: $0.needsAuthentication)
+        }
+        store.now = .now; store.didLoad = true
+        reconcile()
+    }
+
+    public func sharedSettings() throws -> Data {
+        try UsageWorkspaceWire.encoder.encode(UsageWorkspaceWire.Settings(policy: policy, refreshSeconds: refreshSeconds, cardOrder: cardOrder.keys))
+    }
+
+    public func applySharedSettings(_ data: Data) throws {
+        let settings = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Settings.self, from: data)
+        applyingSharedState = true; defer { applyingSharedState = false }
+        policy = settings.policy; refreshSeconds = min(3600, max(60, settings.refreshSeconds))
+        cardOrder = UsageCardOrder(keys: settings.cardOrder)
+        defaults.set(cardOrder.keys, forKey: Self.cardOrderKey); reconcile()
+    }
+
+    public func sharedDismissals() throws -> Data { try UsageWorkspaceWire.encoder.encode(engine.dismissals) }
+    public func applySharedDismissals(_ data: Data) throws {
+        engine.dismissals = try UsageWorkspaceWire.decoder.decode([String: UsageAlertEngine.Dismissal].self, from: data)
+        reconcile()
     }
 
     static func summary(_ sources: [UsageSource]) -> [UsageGlance] {

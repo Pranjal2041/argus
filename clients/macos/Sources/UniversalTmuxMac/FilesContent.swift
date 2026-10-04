@@ -351,8 +351,8 @@ struct FileContentView: View {
             isPresented: Binding(get: { tab.pendingClose != nil }, set: { if !$0 { tab.pendingClose = nil } }),
             titleVisibility: .visible
         ) {
-            Button("Save") { if let d = tab.pendingClose { tab.save(d); tab.closeDoc(d.id) }; tab.pendingClose = nil }
-            Button("Don't Save", role: .destructive) { if let d = tab.pendingClose { tab.closeDoc(d.id) }; tab.pendingClose = nil }
+            Button("Save") { if let d = tab.pendingClose { tab.save(d, onSaved: { tab.closeDoc(d.id) }) }; tab.pendingClose = nil }
+            Button("Don't Save", role: .destructive) { if let d = tab.pendingClose { tab.discardDraftAndClose(d) }; tab.pendingClose = nil }
             Button("Cancel", role: .cancel) { tab.pendingClose = nil }
         } message: {
             Text("Your changes will be lost if you don't save.")
@@ -411,6 +411,7 @@ private struct DocChip: View {
 private struct DocPane: View {
     @ObservedObject var tab: FileTab
     @ObservedObject var doc: OpenDoc
+    @State private var reviewConflict = false
 
     private var isText: Bool { if case .text = doc.content { return true }; return false }
     private var zoomable: Bool {
@@ -418,12 +419,26 @@ private struct DocPane: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+        if let issue = doc.saveIssue {
+            HStack {
+                Text(issue).font(.system(size: 12)).foregroundStyle(.orange)
+                Spacer()
+                if doc.conflictText != nil { Button("Review remote change") { reviewConflict = true } }
+            }.padding(10)
+        }
+        if doc.saving { ProgressView().progressViewStyle(.linear) }
         ZStack(alignment: .topTrailing) {
             pane
             toolbar.padding(10)
             saveShortcut
         }
         .background(zoomShortcuts)
+        }
+        .sheet(isPresented: $reviewConflict) {
+            FileConflictReview(text: doc.conflictText ?? "", cancel: { reviewConflict = false },
+                keepDraft: { tab.rebaseDraft(doc); reviewConflict = false })
+        }
     }
 
     @ViewBuilder private var pane: some View {
@@ -501,7 +516,7 @@ private struct DocPane: View {
                             Image(systemName: doc.dirty ? "arrow.down.circle" : "checkmark.circle").font(.system(size: 10, weight: .semibold))
                             Text(doc.dirty ? "Save" : "Saved").font(.system(size: 11, weight: .medium))
                         }.foregroundStyle(doc.dirty ? Flat.accent : Flat.dim)
-                    }.buttonStyle(.plain).help("Save (⌘S)").disabled(!doc.dirty)
+                    }.buttonStyle(.plain).help("Save (⌘S)").disabled(!doc.dirty || doc.saving)
                     Divider().frame(height: 14)
                 }
                 zBtn("minus") { doc.zoomOut() }
@@ -544,6 +559,24 @@ private struct DocPane: View {
             Button("") { doc.zoomOut() }.keyboardShortcut("-", modifiers: .command)
             Button("") { doc.zoomReset() }.keyboardShortcut("0", modifiers: .command)
         }.opacity(0).frame(width: 0, height: 0)
+    }
+}
+
+struct FileConflictReview: View {
+    let text: String
+    let cancel: () -> Void
+    let keepDraft: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Remote file changed").font(.headline)
+            ScrollView { Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            HStack {
+                Button("Cancel", action: cancel)
+                Spacer()
+                Button("Keep my draft for next save", action: keepDraft)
+                    .accessibilityIdentifier("file-conflict-keep-draft")
+            }
+        }.padding(20).frame(width: 680, height: 440)
     }
 }
 
