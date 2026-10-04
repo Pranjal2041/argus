@@ -51,8 +51,9 @@ type Result struct {
 // agent process in one terminal pane. Provider selects only the format adapter;
 // provenance, turn selection, matching, and fallback remain shared here.
 type TranscriptRef struct {
-	Provider string
-	Path     string
+	Provider           string
+	Path               string
+	RequireScreenMatch bool
 }
 
 type candidateFile struct {

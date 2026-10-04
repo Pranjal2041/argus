@@ -25,6 +25,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures { compose = true }
@@ -34,6 +35,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+
+    testOptions { unitTests.isIncludeAndroidResources = true }
+    testBuildType = "release"
 
     signingConfigs {
         if (hasKeystore) create("release") {
@@ -71,6 +75,11 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 
     // Embedded tsnet core (gomobile .aar): joins the tailnet for native peer
     // discovery. Rebuild with: scripts/build-core.sh

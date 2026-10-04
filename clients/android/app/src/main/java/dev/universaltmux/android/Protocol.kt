@@ -8,6 +8,25 @@ object Op {
     const val REQ_SNAPSHOT = 4  // client -> server: send a fresh idempotent snapshot (clean repaint)
     const val PANE_SIZE = 5     // server -> client: the pane's AUTHORITATIVE cols×rows; output is
     // formatted for exactly this grid, so the emulator must pin to it or full-width lines shear
+    const val SNAPSHOT_BEGIN = 6 // ordered repaint: preserve viewport, do not request another repaint
+    const val SNAPSHOT_END = 7
+}
+
+/** A repaint contains its authoritative size; it must not trigger itself again. */
+class TerminalRepaintPolicy {
+    var inSnapshot = false
+    private var columns = 0
+    private var rows = 0
+
+    fun onSize(columns: Int, rows: Int): Boolean {
+        if (columns < 2 || rows < 2) return false
+        val changed = columns != this.columns || rows != this.rows
+        this.columns = columns
+        this.rows = rows
+        return changed && !inSnapshot
+    }
+
+    fun reset() { columns = 0; rows = 0; inSnapshot = false }
 }
 
 fun frame(op: Int, pane: String, payload: ByteArray): ByteArray {

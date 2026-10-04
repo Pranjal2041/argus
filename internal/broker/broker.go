@@ -32,6 +32,8 @@ const (
 	// tmux client or another viewer). Viewers must render at exactly this grid
 	// (letterboxing spare pixels): %output bytes are formatted for this width, and
 	// rendering at any other width shears the screen. opResize remains an ask.
+	opSnapshotBegin = 0x06 // server -> client: ordered repaint begins (before its size/data)
+	opSnapshotEnd   = 0x07 // server -> client: ordered repaint is complete
 )
 
 // sizePayload encodes cols/rows the same way clients encode opResize.
@@ -100,14 +102,20 @@ func (h *sessionHub) pump() {
 	defer close(h.dead)
 	for out := range h.tm.Output() {
 		var frames [][]byte
+		if out.SnapshotID != 0 {
+			frames = append(frames, encodeFrame(opSnapshotBegin, out.Pane, nil))
+		}
 		if out.Cols > 0 && out.Rows > 0 {
 			// In-band size event: broadcast the authoritative pane size in stream
 			// order, so each client re-pins its grid exactly between the bytes
 			// formatted for the old width and those formatted for the new.
-			frames = [][]byte{encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows))}
+			frames = append(frames, encodeFrame(opPaneSize, out.Pane, sizePayload(out.Cols, out.Rows)))
 		}
 		if len(out.Data) > 0 {
 			frames = append(frames, outputFrames(out.Pane, out.Data)...)
+		}
+		if out.SnapshotID != 0 {
+			frames = append(frames, encodeFrame(opSnapshotEnd, out.Pane, nil))
 		}
 		h.mu.Lock()
 		h.lastPane = out.Pane

@@ -14,6 +14,16 @@ type ScreenSnapshot struct {
 	Cols, Rows, CursorX, CursorY                   int
 	Alternate, CursorVisible, Wrap, Insert, Origin bool
 	ScrollTop, ScrollBottom                        int
+	Mouse                                          *MouseModes
+}
+
+// MouseModes is an input capability, not an inference from full-screen mode.
+// Captures must restore both enabled and disabled modes so attaching after an
+// application's initial DECSET produces the same wheel behavior as a live attach.
+type MouseModes struct {
+	Tracking int // 0, 1000 (press), 1002 (drag), or 1003 (all motion)
+	SGR      bool
+	UTF8     bool
 }
 
 func (s ScreenSnapshot) ANSI() []byte {
@@ -40,6 +50,16 @@ func (s ScreenSnapshot) ANSI() []byte {
 	mode(6, s.Origin)
 	mode(7, s.Wrap)
 	mode(25, s.CursorVisible)
+	if s.Mouse != nil {
+		for _, number := range []int{1000, 1002, 1003} {
+			mode(number, false)
+		}
+		if s.Mouse.Tracking == 1000 || s.Mouse.Tracking == 1002 || s.Mouse.Tracking == 1003 {
+			mode(s.Mouse.Tracking, true)
+		}
+		mode(1005, s.Mouse.UTF8)
+		mode(1006, s.Mouse.SGR)
+	}
 	y := s.CursorY + 1
 	if s.Origin {
 		y -= s.ScrollTop

@@ -67,6 +67,22 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 	return dropDimAndAnsi(out), nil
 }
 
+// CaptureHistory also exposes the saved primary screen when a full-screen
+// application owns the alternate buffer. It is passive: no copy-mode or input
+// state is changed. -q makes the inactive-buffer capture empty in normal mode.
+func (p *Provider) CaptureHistory(name string, lines int) (string, error) {
+	if lines <= 0 || lines > 10000 {
+		lines = 10000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := tmuxArgs(p.socket,
+		"capture-pane", "-a", "-q", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name, ";",
+		"capture-pane", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name)
+	output, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	return string(output), err
+}
+
 // dropDimAndAnsi removes any text drawn in the ANSI FAINT style (SGR 2) — the agent's
 // dim autosuggestion — then strips all remaining escape sequences, yielding plain text.
 // SGR state is tracked across the stream: 2 turns faint on; 0/22 (and a bare ESC[m)
@@ -114,7 +130,9 @@ func (p *Provider) AgentTranscript(name string) (rendersource.TranscriptRef, err
 	if err != nil {
 		return rendersource.TranscriptRef{}, err
 	}
-	return rendersource.TranscriptRef{Provider: result.Agent, Path: result.Path}, nil
+	return rendersource.TranscriptRef{
+		Provider: result.Agent, Path: result.Path, RequireScreenMatch: result.RequireScreenMatch,
+	}, nil
 }
 
 func (p *Provider) Create(name, dir string) error { return CreateSession(p.socket, name, dir) }
@@ -925,6 +943,22 @@ func decodeScreenSnapshot(data []byte) session.ScreenSnapshot {
 		return session.ScreenSnapshot{}
 	}
 	s.Alternate, s.CursorVisible, s.Wrap, s.Insert, s.Origin = alternate == 1, visible == 1, wrap == 1, insert == 1, origin == 1
+	fields := strings.Fields(header)
+	if len(fields) > 11 {
+		var press, drag, all, utf8, sgr int
+		if n, err := fmt.Sscanf(strings.Join(fields[11:], " "), "%d %d %d %d %d", &press, &drag, &all, &utf8, &sgr); err != nil || n != 5 {
+			return session.ScreenSnapshot{}
+		}
+		s.Mouse = &session.MouseModes{UTF8: utf8 == 1, SGR: sgr == 1}
+		switch {
+		case all == 1:
+			s.Mouse.Tracking = 1003
+		case drag == 1:
+			s.Mouse.Tracking = 1002
+		case press == 1:
+			s.Mouse.Tracking = 1000
+		}
+	}
 	// Remove the final record separator ONLY. Empty viewport rows are real
 	// geometry; trimming all newlines shifts the screen relative to scrollback.
 	s.Lines = strings.Split(strings.TrimSuffix(body, "\n"), "\n")
