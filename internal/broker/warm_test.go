@@ -20,6 +20,12 @@ func (p *warmProvider) List() []session.Info {
 	}
 	return []session.Info{{Name: "shell", Agent: p.agent}}
 }
+func (p *warmProvider) ListInventory(ctx context.Context) ([]session.Info, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return p.List(), nil
+}
 func (p *warmProvider) Create(string, string) error {
 	p.createCalls++
 	p.exists = true

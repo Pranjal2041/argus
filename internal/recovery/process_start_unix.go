@@ -4,14 +4,15 @@ package recovery
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"universal-tmux/internal/toolcommand"
 )
 
 func processStartViaPS(pid int) (time.Time, error) {
-	out, err := exec.Command(toolPath("ps"), "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	out, err := toolcommand.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
 	if err != nil {
 		return time.Time{}, err
 	}

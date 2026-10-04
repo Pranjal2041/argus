@@ -30,6 +30,7 @@ import (
 	"universal-tmux/internal/recovery"
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
+	"universal-tmux/internal/toolcommand"
 )
 
 // Output / SessionInfo alias the shared seam types so existing tmux code is
@@ -41,11 +42,15 @@ type SessionInfo = session.Info
 // selected by `-L socket`.
 type Provider struct{ socket string }
 
+var _ session.TieredStateProvider = (*Provider)(nil)
+
 // NewProvider returns a tmux-backed provider for the given server socket.
 func NewProvider(socket string) *Provider { return &Provider{socket: socket} }
 
-func (p *Provider) List() []SessionInfo            { return ListSessions(p.socket) }
-func (p *Provider) ListInventory() []SessionInfo   { return ListSessionInventory(p.socket) }
+func (p *Provider) List() []SessionInfo { return ListSessions(p.socket) }
+func (p *Provider) ListInventory(ctx context.Context) ([]SessionInfo, error) {
+	return readSessionInventory(ctx, p.socket)
+}
 func (p *Provider) DetectState(name string) string { return DetectState(p.socket, name) }
 
 // Capture returns a session's recent scrollback as plain rendered text (no
@@ -60,7 +65,7 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 	// which it renders FAINT (SGR 2). Plain `-p` discards the color that distinguishes
 	// that suggested next message from real input, and the summarizer was reading the
 	// suggestion as the user's intent. dropDimAndAnsi then returns plain text as before.
-	out, err := exec.Command("tmux", tmuxArgs(p.socket, "capture-pane", "-e", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name)...).Output()
+	out, err := toolcommand.Command("tmux", tmuxArgs(p.socket, "capture-pane", "-e", "-p", "-S", "-"+strconv.Itoa(lines), "-t", name)...).Output()
 	if err != nil {
 		return "", err
 	}
@@ -135,7 +140,7 @@ func (p *Provider) SetHistoryLimit(lines int)    { SetHistoryLimit(p.socket, lin
 // by id always reaches the right session no matter how it was renamed. Returns
 // ok=false if the id no longer exists or maps to an internal session.
 func (p *Provider) SessionForID(id string) (string, bool) {
-	out, err := exec.Command("tmux", tmuxArgs(p.socket, "display-message", "-t", id, "-p", "#{session_id}\t#{session_name}")...).Output()
+	out, err := toolcommand.Command("tmux", tmuxArgs(p.socket, "display-message", "-t", id, "-p", "#{session_id}\t#{session_name}")...).Output()
 	if err != nil {
 		return "", false
 	}
@@ -186,7 +191,7 @@ func DetectState(socket, name string) string {
 	// (now-parallel) refresh; a timed-out or failed read falls back to "idle".
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
+	out, err := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
 	if err != nil {
 		return "idle"
 	}
@@ -327,15 +332,51 @@ func isInternalSession(name string) bool { return strings.HasPrefix(name, intern
 // ListSessionInventory returns session metadata without capturing every pane.
 // A missing server / no sessions yields an empty list, not an error.
 func ListSessionInventory(socket string) []SessionInfo {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sessions, _ := readSessionInventory(ctx, socket)
+	if sessions == nil {
+		return []SessionInfo{}
+	}
+	return sessions
+}
+
+func readInventoryOutput(ctx context.Context, socket string) ([]byte, bool, error) {
 	// session_id ($N) is only a transport handle: it survives a rename, but tmux
 	// reuses it after the server restarts. lineageID includes the tmux server PID
 	// and session creation time, so archival clients can bridge a rename without
 	// ever confusing a later `$N` reuse for the same panel. All fixed fields are
 	// placed AFTER pane_current_path (SplitN keeps a tab in the path inside f[4]).
-	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
-		"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}\t#{@ut_visible}")...).Output()
+	query := func() ([]byte, error) {
+		return toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, "list-sessions", "-F",
+			"#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_activity}\t#{pane_current_path}\t#{session_id}\ttmux:#{pid}:#{session_created}:#{session_id}\t#{@ut_agent}\t#{@ut_visible}")...).Output()
+	}
+	out, err := query()
 	if err != nil {
-		return []SessionInfo{}
+		if exit, ok := err.(*exec.ExitError); ok && strings.TrimSpace(string(exit.Stderr)) == "no sessions" && ctx.Err() == nil {
+			return nil, true, nil // live exit-empty=off server, genuinely no sessions
+		}
+		if endpoint := unavailableSocket(err); endpoint != "" {
+			running, recoveryErr := recoverSocket(ctx, endpoint)
+			if recoveryErr != nil {
+				return nil, false, fmt.Errorf("session transport unavailable: %w", recoveryErr)
+			}
+			if !running {
+				return nil, false, nil // no live owner, not merely no pathname
+			}
+			out, err = query() // retry the read, never replay a mutation
+		}
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("list session inventory: %w", err)
+	}
+	return out, true, nil
+}
+
+func readSessionInventory(ctx context.Context, socket string) ([]SessionInfo, error) {
+	out, _, err := readInventoryOutput(ctx, socket)
+	if err != nil {
+		return nil, err
 	}
 	sessions := []SessionInfo{}
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
@@ -374,7 +415,7 @@ func ListSessionInventory(socket string) []SessionInfo {
 			Agent: agent, ID: id, LineageID: lineageID,
 		})
 	}
-	return sessions
+	return sessions, nil
 }
 
 // ListSessions returns a fully-classified snapshot for direct Provider callers.
@@ -439,7 +480,7 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 	// Attach by the already-resolved stable id, avoiding tmux's name-prefix and
 	// $N name/id ambiguity. attach-session cannot create if the session disappears
 	// in the small gap after the lookup.
-	cmd := exec.CommandContext(ctx, "tmux", tmuxArgs(socket, "-CC", "attach-session", "-t", id)...)
+	cmd := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, "-CC", "attach-session", "-t", id)...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("start tmux under pty: %w", err)
@@ -447,7 +488,7 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 30, Cols: 100})
 
 	meshOwned := false
-	if out, e := exec.Command("tmux", tmuxArgs(socket, "show-options", "-v", "-t", id, optAgent)...).Output(); e == nil {
+	if out, e := toolcommand.Command("tmux", tmuxArgs(socket, "show-options", "-v", "-t", id, optAgent)...).Output(); e == nil {
 		meshOwned = strings.TrimSpace(string(out)) == "1"
 	}
 	c := &Client{
@@ -460,7 +501,7 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 
 // SetHistoryLimit sets the server-wide scrollback limit for NEW panes/sessions.
 func SetHistoryLimit(socket string, lines int) {
-	_ = exec.Command("tmux", tmuxArgs(socket, "set", "-g", "history-limit", strconv.Itoa(lines))...).Run()
+	_ = toolcommand.Command("tmux", tmuxArgs(socket, "set", "-g", "history-limit", strconv.Itoa(lines))...).Run()
 }
 
 // literalSessionTarget prevents a session name such as "$0" from being
@@ -475,11 +516,15 @@ func literalSessionTarget(name string) string {
 // CreateSession creates a new detached session. startDir, if non-empty, sets
 // its working directory (so "new session in this folder" works).
 func CreateSession(socket, name, startDir string) error {
+	args, exists, err := sessionCreationArgs(socket, name, startDir)
+	if err != nil {
+		return err
+	}
 	target := literalSessionTarget(name)
-	if HasSession(socket, name) {
+	if exists {
 		// An affirmative visible request also promotes an existing background
 		// session. Merely attaching through plain `ut` never reaches this path.
-		out, err := exec.Command("tmux", tmuxArgs(socket,
+		out, err := toolcommand.Command("tmux", tmuxArgs(socket,
 			"set-option", "-t", target, optVisible, "1",
 			";", "set-option", "-t", target, optOrigin, "explicit-visible",
 			";", "set-option", "-u", "-t", target, optAgent,
@@ -490,10 +535,6 @@ func CreateSession(socket, name, startDir string) error {
 		}
 		return nil
 	}
-	args := []string{"new-session", "-d", "-s", name}
-	if startDir != "" {
-		args = append(args, "-c", startDir)
-	}
 	// Visibility is affirmative provenance. Sessions created through the Argus
 	// UI are marked visible atomically; a session with no marker is background
 	// work and must never surface merely because it was created directly in tmux.
@@ -501,7 +542,7 @@ func CreateSession(socket, name, startDir string) error {
 		";", "set-option", "-t", target, optVisible, "1",
 		";", "set-option", "-t", target, optOrigin, "argus-ui",
 	)
-	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
@@ -515,12 +556,12 @@ func CreateSession(socket, name, startDir string) error {
 // sessions keep their original classification: provenance is assigned only by
 // the path that actually created the session.
 func CreateAgentShell(socket, name, startDir string) error {
-	if HasSession(socket, name) {
-		return nil // attach-or-create without silently reclassifying a user session
+	args, exists, err := sessionCreationArgs(socket, name, startDir)
+	if err != nil {
+		return err
 	}
-	args := []string{"new-session", "-d", "-s", name}
-	if startDir != "" {
-		args = append(args, "-c", startDir)
+	if exists {
+		return nil // attach-or-create without silently reclassifying a user session
 	}
 	// Send one tmux command sequence so no /sessions refresh can observe the new
 	// shell before its agent marker is installed (which would make it flash in
@@ -531,7 +572,7 @@ func CreateAgentShell(socket, name, startDir string) error {
 		";", "set-option", "-t", literalSessionTarget(name), optOrigin, "cli-sh",
 		";", "set-option", "-t", literalSessionTarget(name), optLastUsed, strconv.FormatInt(time.Now().Unix(), 10),
 	)
-	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create agent shell %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
@@ -568,9 +609,9 @@ const (
 // processes per shell), dozens of finished spawns would otherwise pile up; the
 // reaper clears the idle ones.
 func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
-	args := []string{"new-session", "-d", "-s", name}
-	if startDir != "" {
-		args = append(args, "-c", startDir)
+	args, _, err := sessionCreationArgs(socket, name, startDir)
+	if err != nil {
+		return err
 	}
 	// When cmd returns, mark the session done (a tmux option, set from inside the
 	// pane via $TMUX) BEFORE dropping into the interactive shell. This is the
@@ -587,7 +628,7 @@ func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
 		";", "set-option", "-t", literalSessionTarget(name), optOrigin, "cli-spawn",
 		";", "set-option", "-t", literalSessionTarget(name), optReapIdle, strconv.Itoa(idleSec),
 	)
-	out, err := exec.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("spawn %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
@@ -620,7 +661,7 @@ var reapableShells = map[string]bool{
 //
 // Called periodically by the broker.
 func ReapIdleAgentSessions(socket string) []string {
-	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, "list-sessions", "-F",
 		fmt.Sprintf("#{session_name}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{%s}\t#{session_activity}",
 			optAgent, optAgentShell, optDone, optReapIdle, optDoneAt, optLastUsed))...).Output()
 	if err != nil {
@@ -675,7 +716,7 @@ func ReapIdleAgentSessions(socket string) []string {
 			continue
 		}
 		// Finished + expired — reap unless a NEW job is now running.
-		fg, e := exec.Command("tmux", tmuxArgs(socket, "display-message", "-p", "-t", name, "#{pane_current_command}")...).Output()
+		fg, e := toolcommand.Command("tmux", tmuxArgs(socket, "display-message", "-p", "-t", name, "#{pane_current_command}")...).Output()
 		if e != nil || !reapableShells[strings.TrimSpace(string(fg))] {
 			continue
 		}
@@ -695,7 +736,7 @@ func agentShellExpiredAt(now, lastUsed, activity int64) bool {
 
 // KillSession terminates a session and everything running in it.
 func KillSession(socket, name string) error {
-	out, err := exec.Command("tmux", tmuxArgs(socket, "kill-session", "-t", name)...).CombinedOutput()
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, "kill-session", "-t", name)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("kill %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
@@ -709,14 +750,15 @@ func sessionIDForName(socket, name string) (string, bool) {
 	if isInternalSession(name) {
 		return "", false // infra sessions are not attachable by clients
 	}
-	out, err := exec.Command("tmux", tmuxArgs(socket, "list-sessions", "-F", "#{session_name}\t#{session_id}")...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	list, err := readSessionInventory(ctx, socket)
 	if err != nil {
 		return "", false
 	}
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) == 2 && parts[0] == name {
-			return parts[1], true
+	for _, info := range list {
+		if info.Name == name {
+			return info.ID, true
 		}
 	}
 	return "", false
@@ -731,7 +773,7 @@ func HasSession(socket, name string) bool {
 
 // RenameSession renames a session in place.
 func RenameSession(socket, from, to string) error {
-	out, err := exec.Command("tmux", tmuxArgs(socket, "rename-session", "-t", from, to)...).CombinedOutput()
+	out, err := toolcommand.Command("tmux", tmuxArgs(socket, "rename-session", "-t", from, to)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("rename %q->%q: %v: %s", from, to, err, strings.TrimSpace(string(out)))
 	}
@@ -881,7 +923,7 @@ func (c *Client) Size() (int, int) {
 // rename), and a stale name made every name-targeted command fail silently —
 // no snapshot, no size, a freshly-attached viewer stuck on "connecting".
 func (c *Client) paneFlag(format string) string {
-	out, err := exec.Command("tmux", tmuxArgs(c.socket, "display-message", "-p", "-t", c.primary, format)...).Output()
+	out, err := toolcommand.Command("tmux", tmuxArgs(c.socket, "display-message", "-p", "-t", c.primary, format)...).Output()
 	if err != nil {
 		return ""
 	}
@@ -906,7 +948,7 @@ func (c *Client) Snapshot() []byte {
 	args := []string{"display-message", "-p", "-t", c.primary, snapshotMetadata, ";", "capture-pane", "-p", "-e", "-N", "-S", "-10000", "-t", c.primary}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", tmuxArgs(c.socket, args...)...).Output()
+	out, err := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(c.socket, args...)...).Output()
 	if err != nil || len(out) == 0 {
 		return nil
 	}
@@ -995,7 +1037,7 @@ func layoutSize(layout string) (w, h int, ok bool) {
 // session's first pane id, retrying briefly while the session comes up.
 func discoverPane(socket, session string) string {
 	for i := 0; i < 20; i++ {
-		out, err := exec.Command("tmux", tmuxArgs(socket, "list-panes", "-t", session, "-F", "#{pane_id}")...).Output()
+		out, err := toolcommand.Command("tmux", tmuxArgs(socket, "list-panes", "-t", session, "-F", "#{pane_id}")...).Output()
 		if err == nil {
 			if id := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0]); id != "" {
 				return id
