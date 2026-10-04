@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
+	"universal-tmux/internal/session"
 )
 
 // ConPTY default session size, shared with the windows backend (conpty.go).
@@ -120,6 +121,18 @@ func completeUTF8Prefix(b []byte) int {
 
 func (s *captureScreen) text() string {
 	return trimScreen(s.vt.String())
+}
+
+// The caller holds the session lock, just as it does while writing output.
+// Preserve empty rows: trimming them would shift the cursor's coordinate frame.
+func (s *captureScreen) snapshot() session.ScreenSnapshot {
+	cursor := s.vt.Cursor()
+	return session.ScreenSnapshot{
+		Lines: strings.Split(strings.TrimSuffix(s.vt.String(), "\n"), "\n"),
+		Cols:  s.cols, Rows: s.rows, CursorX: cursor.X, CursorY: cursor.Y,
+		CursorVisible: s.vt.Mode()&vt10x.ModeHide == 0,
+		Alternate:     s.vt.Mode()&vt10x.ModeAltScreen != 0,
+	}
 }
 
 func trimScreen(screen string) string {

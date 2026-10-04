@@ -302,6 +302,21 @@ func (p *Provider) Capture(name string, lines int) (string, error) {
 	return text, nil
 }
 
+func (p *Provider) CaptureRenderScreen(name string, _ int) (session.ScreenSnapshot, error) {
+	p.mu.Lock()
+	s := p.sessions[name]
+	p.mu.Unlock()
+	if s == nil {
+		return session.ScreenSnapshot{}, fmt.Errorf("no such session: %q", name)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.capture == nil {
+		return session.ScreenSnapshot{}, fmt.Errorf("screen unavailable for session %q", name)
+	}
+	return s.capture.snapshot(), nil
+}
+
 func (p *Provider) Create(name, dir string) error {
 	s, created, err := p.create(name, dir, false, false, 0, "")
 	if err != nil || created {

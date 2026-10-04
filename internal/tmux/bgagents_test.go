@@ -58,3 +58,10 @@ func TestDropFaintAutosuggestion(t *testing.T) {
 		t.Fatalf("ANSI escapes not stripped: %q", got)
 	}
 }
+
+func TestCapturePlainTextKeepsVisibleHyperlinkLabel(t *testing.T) {
+	raw := "Answer: \x1b]8;id=link;https://example.test/hidden\x1b\\Visible label\x1b]8;;\x1b\\\n❯ \x1b[2mnot submitted\x1b[22m"
+	if got := dropDimAndAnsi([]byte(raw)); got != "Answer: Visible label\n❯ " {
+		t.Fatalf("Capture plain text contract: %q", got)
+	}
+}
