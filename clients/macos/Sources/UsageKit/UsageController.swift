@@ -65,6 +65,19 @@ public final class UsageController: ObservableObject {
         } catch { return (try? JSONSerialization.data(withJSONObject: ["error": error.localizedDescription])) ?? Data("{}".utf8) }
     }
     private var applyingSharedState = false
+    private var presentationWorkspaceID: String?
+
+    /// Missing publication is not deletion. Retain local readings when this
+    /// installation becomes the host, and otherwise restore only this workspace.
+    public func bindSharedWorkspace(_ id: String, isLocal: Bool) {
+        guard !id.isEmpty, presentationWorkspaceID != id else { return }
+        let adoptingLocal = presentationWorkspaceID == nil && isLocal
+        presentationWorkspaceID = id
+        if !adoptingLocal { clearSharedPresentation() }
+        if let cached = defaults.data(forKey: "workspaceSnapshot.v1." + id) {
+            try? applySharedSnapshot(cached)
+        }
+    }
 
     public convenience init(demo: Bool = false) {
         let defaults = UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
@@ -236,6 +249,7 @@ public final class UsageController: ObservableObject {
         }
         store.now = .now; store.didLoad = true
         reconcile()
+        if let id = presentationWorkspaceID { defaults.set(data, forKey: "workspaceSnapshot.v1." + id) }
     }
 
     public func sharedSettings() throws -> Data {

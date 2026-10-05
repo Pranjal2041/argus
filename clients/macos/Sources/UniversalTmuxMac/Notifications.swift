@@ -25,12 +25,13 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     private override init() { super.init() }
 
     func attach(_ s: AppState) {
+        guard s.allowsDesktopEffects else { return }
         state = s
         UNUserNotificationCenter.current().delegate = self
     }
 
     func requestAuthorizationIfNeeded() {
-        guard NotifyPrefs.enabled, !asked else { return }
+        guard state?.allowsDesktopEffects == true, NotifyPrefs.enabled, !asked else { return }
         asked = true
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
@@ -38,6 +39,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// Post a banner for each session that just entered "waiting"; reflect the
     /// total waiting count on the Dock tile.
     func update(enteredWaiting: [(ref: SessionRef, machine: String)], totalWaiting: Int) {
+        guard state?.allowsDesktopEffects == true else { return }
         waitingCount = totalWaiting
         updateBadge()
         // The command-palette and renderer suites construct AppState without an
@@ -59,6 +61,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// supplies the complete current count, so resolved approvals disappear
     /// without relying on notification delivery state.
     func updateLabAttention(ids: Set<String>) {
+        guard state?.allowsDesktopEffects == true else { return }
         labAttentionIDs = ids
         labAttentionCount = ids.count
         updateBadge()
@@ -70,6 +73,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// banners follow raw waiting transitions, while the LED mirrors the UI the
     /// user explicitly asked to monitor.
     func updateCommandCenterAttention(ids: Set<String>) {
+        guard state?.allowsDesktopEffects == true else { return }
         commandCenterNeeds = ids
         updateCapsLockAttention()
     }
@@ -78,6 +82,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// one-shot completion light. This deliberately does not affect badges or
     /// notification banners: becoming idle is informational, not "Needs You".
     func workingBecameIdle(ids: Set<String>) {
+        guard state?.allowsDesktopEffects == true else { return }
         CapsLockAttentionController.shared.workingBecameIdle(ids: ids)
     }
 
@@ -89,7 +94,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     private func updateBadge() {
         let total = waitingCount + labAttentionCount
-        NSApp.dockTile.badgeLabel = (NotifyPrefs.enabled && total > 0) ? String(total) : nil
+        NSApp?.dockTile.badgeLabel = (NotifyPrefs.enabled && total > 0) ? String(total) : nil
     }
 
     func clearBadge() {
@@ -101,7 +106,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// Post a banner for a new Lab approval item (a pending key request or a
     /// gated run proposal). Tapping it opens the Lab pane.
     func labApprovalNeeded(id: String, title: String, body: String, kind: String) {
-        guard NotifyPrefs.enabled else { return }
+        guard state?.allowsDesktopEffects == true, NotifyPrefs.enabled else { return }
         let c = UNMutableNotificationContent()
         c.title = title
         c.body = body

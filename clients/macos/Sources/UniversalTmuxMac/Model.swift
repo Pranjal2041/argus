@@ -381,6 +381,8 @@ struct FolderGroup: Identifiable {
 
 @MainActor
 final class AppState: ObservableObject {
+    enum Runtime { case interactive, background }
+    let allowsDesktopEffects: Bool
     /// Tests import the production executable target, so UserDefaults.standard can point
     /// at the real app domain. Keep every persistence/network side effect disabled under
     /// XCTest even if a future test forgets to request isolation explicitly.
@@ -1065,6 +1067,15 @@ final class AppState: ObservableObject {
         return machine.brokerID + "/" + lineage
     }
 
+    /// Collection still works with the per-broker protocol during rolling
+    /// upgrades. This route-local witness is never exported as a shared ID.
+    func collectionSessionKey(_ ref: SessionRef) -> String? {
+        if let shared = sharedSessionKey(ref) { return shared }
+        guard let machine = machines.first(where: { $0.id == ref.machineID }),
+              let session = session(for: ref) else { return nil }
+        return "route/" + machine.httpBase + "/" + (session.lineageID ?? session.tmuxID ?? session.name)
+    }
+
     private func sharedSessionRead(_ ref: SessionRef) -> Bool? {
         guard !sharedWorkspace.replica.workspaceID.isEmpty, let key = sharedSessionKey(ref),
               let info = session(for: ref), info.activityRevision > 0 else { return nil }
@@ -1118,7 +1129,7 @@ final class AppState: ObservableObject {
         if nextBacklog != backlog { backlog = nextBacklog }
         if nextAcknowledged != acknowledged { acknowledged = nextAcknowledged }
         if nextUnseen != unseen { unseen = nextUnseen }
-        if !Self.isRunningTests { AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount) }
+        if allowsDesktopEffects { AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount) }
         objectWillChange.send()
     }
 
@@ -1406,7 +1417,7 @@ final class AppState: ObservableObject {
     private func acknowledge(_ ref: SessionRef) {
         if !acknowledged.contains(ref.id) { acknowledged.insert(ref.id) }
         acknowledgeSharedSession(ref)
-        AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount)
+        if allowsDesktopEffects { AttentionNotifier.shared.update(enteredWaiting: [], totalWaiting: waitingCount) }
     }
 
     /// Count of sessions currently waiting on the user (for the header badge).
@@ -1420,9 +1431,10 @@ final class AppState: ObservableObject {
     /// selection — rendered as an ORANGE "done, unseen" dot until you open the pane.
     @Published var unseen: Set<String> = []
 
-    init(isolatedForTesting: Bool = false, sessionMonitor: BrokerSessionMonitor? = nil) {
+    init(isolatedForTesting: Bool = false, sessionMonitor: BrokerSessionMonitor? = nil, runtime: Runtime = .interactive) {
         self.sessionMonitor = sessionMonitor ?? BrokerSessionMonitor()
-        let isolated = isolatedForTesting || Self.isRunningTests
+        let isolated = isolatedForTesting || Self.isRunningTests || runtime == .background
+        allowsDesktopEffects = !isolated
         persistenceEnabled = !isolated
         // Local (loopback) is fixed; cluster brokers are discovered from the tailnet.
         machines = [
@@ -1815,8 +1827,10 @@ final class AppState: ObservableObject {
 
         if nextAcknowledged != acknowledged { acknowledged = nextAcknowledged }
         if nextUnseen != unseen { unseen = nextUnseen }
-        AttentionNotifier.shared.update(enteredWaiting: entered, totalWaiting: waitingCount)
-        if !becameIdle.isEmpty { AttentionNotifier.shared.workingBecameIdle(ids: becameIdle) }
+        if allowsDesktopEffects {
+            AttentionNotifier.shared.update(enteredWaiting: entered, totalWaiting: waitingCount)
+            if !becameIdle.isEmpty { AttentionNotifier.shared.workingBecameIdle(ids: becameIdle) }
+        }
     }
 
     // MARK: Session control (POST /control on the owning broker)
@@ -2029,16 +2043,18 @@ func machinesFromMeshPeers(
 /// Ask the local broker for its shared, bounded discovery result. The macOS app
 /// deliberately does not run its own tailnet scan: UI refresh, Lab automation,
 /// mirroring, CLI routing, and future consumers must all share one lifecycle.
-func discoverMachines() -> [Machine] {
-    let who = probeWhoami("http://127.0.0.1:8722/whoami")
+func discoverMachines(base: String = "http://127.0.0.1:8722") -> [Machine] {
+    let who = probeWhoami(base + "/whoami")
     let localIdentity = who?.logicalIdentity
     var local = localBrokerMachine
+    local.httpBase = base
+    local.wsBase = base.replacingOccurrences(of: "http://", with: "ws://")
     if let who {
         local.brokerID = who.brokerID; local.workspaceID = who.workspaceID
         local.workspaceEnabled = who.workspaceEnabled; local.capabilities = who.capabilities
         local.host = who.host; local.os = who.os
     }
-    guard let url = URL(string: "http://127.0.0.1:8722/mesh/peers"),
+    guard let url = URL(string: base + "/mesh/peers"),
           let data = blockingBrokerData(from: url, timeout: 9),
           let response = try? JSONDecoder().decode(MeshPeersResponse.self, from: data)
     else { return [local] }

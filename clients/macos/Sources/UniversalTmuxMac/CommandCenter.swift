@@ -480,14 +480,40 @@ final class CommandCenterModel: ObservableObject {
     private var pulseN = 0
     private let maxModelCalls = 5
     private let storeKey = "ut.ccStatuses.v1"
+    private let defaults: UserDefaults
+    private var presentationWorkspaceID: String?
+    private struct Presentation: Codable {
+        var statuses: [String: AgentStatus]
+        var lifetimes: [String: String]
+    }
+    private var legacyRefreshInFlight = false
+    struct BrokerStatus: Decodable {
+        let session: String; let label: String; let summary: String
+        let lookAtThis: String?; let updatedAt: Double
+    }
+    var fetchBrokerStatuses: (Machine) async -> [BrokerStatus]? = { machine in
+        guard let url = URL(string: machine.httpBase + "/ccstatus") else { return nil }
+        var request = URLRequest(url: url); request.timeoutInterval = 6
+        struct Response: Decodable { let items: [BrokerStatus] }
+        guard let (data, response) = try? await brokerSession.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONDecoder().decode(Response.self, from: data).items
+    }
 
-    init(collector: Bool = false) {
+    init(collector: Bool = false, defaults: UserDefaults = .standard) {
         isCollector = collector
+        self.defaults = defaults
+        presentationWorkspaceID = defaults.string(forKey: "ut.workspace.id")
         // Show last-known statuses instantly on launch (refreshed within ~30s), so the
         // grid is never a wall of empty tiles after a relaunch.
-        if !collector, let d = UserDefaults.standard.data(forKey: storeKey),
+        if !collector, let d = defaults.data(forKey: storeKey),
            let saved = try? JSONDecoder().decode([String: AgentStatus].self, from: d) {
             statuses = saved
+        }
+        if !collector, let id = presentationWorkspaceID,
+           let data = defaults.data(forKey: "ut.ccPresentation.v2." + id),
+           let saved = try? JSONDecoder().decode(Presentation.self, from: data) {
+            statuses = saved.statuses; sessionLifetimes = saved.lifetimes
         }
         costUSD = provider.spendUSD
         costCalls = provider.callCount
@@ -513,8 +539,14 @@ final class CommandCenterModel: ObservableObject {
         // Encode on the caller (tiny); write off-thread — same deadlock rationale
         // as recordCost (this runs in the same resumed-continuation context).
         guard let d = try? JSONEncoder().encode(statuses) else { return }
-        let key = storeKey
-        CodexStatusProvider.writeDefaults { UserDefaults.standard.set(d, forKey: key) }
+        let key = storeKey, defaults = defaults
+        CodexStatusProvider.writeDefaults { defaults.set(d, forKey: key) }
+    }
+
+    private func persistPresentation() {
+        guard let id = presentationWorkspaceID, !id.isEmpty,
+              let data = try? JSONEncoder().encode(Presentation(statuses: statuses, lifetimes: sessionLifetimes)) else { return }
+        defaults.set(data, forKey: "ut.ccPresentation.v2." + id)
     }
 
     func bind(_ app: AppState) {
@@ -527,7 +559,7 @@ final class CommandCenterModel: ObservableObject {
     /// including its broker-dot fallback before the status model has answered.
     func refreshAttention() {
         guard !isCollector else { return }
-        guard let app else { return }
+        guard let app, app.allowsDesktopEffects else { return }
         var needs: Set<String> = []
         for machine in app.machines {
             for session in (app.sessionsByMachine[machine.id] ?? []) where !session.agent {
@@ -570,7 +602,11 @@ final class CommandCenterModel: ObservableObject {
 
     private func pulse() {
         guard let app else { ccLog("pulse: app nil (not bound)"); return }
-        if !isCollector { readSharedStatuses(); return }
+        if !isCollector {
+            readSharedStatuses()
+            Task { [weak self] in await self?.refreshLegacyStatuses() }
+            return
+        }
         guard collectionAllowed() else { return }
         // Pick up manual statuses set on another device (the phone) and apply them here.
         for m in app.machines { Task { [weak self] in await self?.consumeOverrides(machine: m) } }
@@ -589,7 +625,7 @@ final class CommandCenterModel: ObservableObject {
             // in the command center.
             for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent && !s.hidden {
                 let ref = SessionRef(machineID: m.id, session: s.name)
-                guard let lifetime = app.sharedSessionKey(ref) else { continue }
+                guard let lifetime = app.collectionSessionKey(ref) else { continue }
                 if sessionLifetimes[ref.id] != lifetime {
                     let renamed = sessionLifetimes.first { $0.value == lifetime }?.key
                     statuses[ref.id] = renamed.flatMap { statuses[$0] }
@@ -653,7 +689,7 @@ final class CommandCenterModel: ObservableObject {
         guard collectionAllowed(), !busy.contains(ref.id) else { return }
         busy.insert(ref.id)
         let key = ref.id, httpBase = machine.httpBase
-        let lifetime = app?.sharedSessionKey(ref)
+        let lifetime = app?.collectionSessionKey(ref)
         let generation = correctionGeneration[key, default: 0]
         let ownership = collectionGeneration()
         Task { [weak self] in
@@ -674,7 +710,7 @@ final class CommandCenterModel: ObservableObject {
                     output = retry
                 }
             }
-            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.sharedSessionKey(ref) == lifetime,
+            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.collectionSessionKey(ref) == lifetime,
                   self.correctionGeneration[key, default: 0] == generation else { return }
             if ccCaptureLooksTransient(output, state: state) {
                 ccLog("hold-transient \(key) len=\(output.count)")
@@ -714,7 +750,7 @@ final class CommandCenterModel: ObservableObject {
             let generated = await self.provider.status(forKey: key, output: output, note: self.correction[key])
             self.modelInflight -= 1
             self.inflight.remove(key)
-            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.sharedSessionKey(ref) == lifetime,
+            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.collectionSessionKey(ref) == lifetime,
                   self.correctionGeneration[key, default: 0] == generation else { return }
             guard let generated else { ccLog("model-nil \(key)"); NSLog("[cc] %@ model returned nil", key); return }
             // A model call can take several seconds, so reconcile against the CURRENT
@@ -783,27 +819,71 @@ final class CommandCenterModel: ObservableObject {
         }
     }
 
-    private func readSharedStatuses() {
-        guard let app, app.sharedWorkspace.replica.loaded else { return }
+    func readSharedStatuses() {
+        guard let app else { return }
         let replica = app.sharedWorkspace.replica
-        var next: [String: AgentStatus] = [:]
+        if let previous = presentationWorkspaceID, previous != replica.workspaceID {
+            statuses = [:]; sessionLifetimes = [:]
+            if let data = defaults.data(forKey: "ut.ccPresentation.v2." + replica.workspaceID),
+               let saved = try? JSONDecoder().decode(Presentation.self, from: data) {
+                statuses = saved.statuses; sessionLifetimes = saved.lifetimes
+            }
+        }
+        presentationWorkspaceID = replica.workspaceID
+        var next = statuses
         for machine in app.machines {
+            if let sessions = app.sessionsByMachine[machine.id] {
+                let live = Set(sessions.map { SessionRef(machineID: machine.id, session: $0.name).id })
+                next = next.filter { !$0.key.hasPrefix(machine.id + "/") || live.contains($0.key) }
+            }
             for session in app.sessionsByMachine[machine.id] ?? [] {
                 let ref = SessionRef(machineID: machine.id, session: session.name)
+                if let lifetime = app.collectionSessionKey(ref) {
+                    if let previous = sessionLifetimes[ref.id], previous != lifetime { next[ref.id] = nil }
+                    sessionLifetimes[ref.id] = lifetime
+                }
                 guard let identity = app.sharedSessionKey(ref) else { continue }
+                if replica.record("cc-status", identity)?.deleted == true { next[ref.id] = nil }
                 if let data = replica.data("cc-status", identity), let label = data["label"].string {
                     next[ref.id] = AgentStatus(label: label, oneLiner: data["summary"].string ?? "",
                         lookAtThis: data["lookAtThis"].string,
                         updatedAt: Date(timeIntervalSince1970: Double(data["updatedAt"].uint64 ?? 0) / 1000))
                 }
                 if let label = replica.data("cc-overrides", identity)?["label"].string {
-                    let previous = next[ref.id] ?? statuses[ref.id]
+                    let previous = next[ref.id]
                     next[ref.id] = AgentStatus(label: label, oneLiner: previous?.oneLiner ?? "",
                         lookAtThis: previous?.lookAtThis, updatedAt: previous?.updatedAt ?? .now)
                 }
             }
         }
         statuses = next
+        persistPresentation()
+        refreshAttention()
+    }
+
+    func refreshLegacyStatuses() async {
+        guard !isCollector, !legacyRefreshInFlight, let app else { return }
+        legacyRefreshInFlight = true; defer { legacyRefreshInFlight = false }
+        let workspaceID = app.sharedWorkspace.replica.workspaceID
+        for machine in app.machines {
+            let refs = (app.sessionsByMachine[machine.id] ?? []).map { SessionRef(machineID: machine.id, session: $0.name) }
+                .filter { app.sharedSessionKey($0) == nil }
+            guard !refs.isEmpty else { continue }
+            let lifetimes = Dictionary(uniqueKeysWithValues: refs.compactMap { ref in
+                app.collectionSessionKey(ref).map { (ref.id, $0) }
+            })
+            guard let items = await fetchBrokerStatuses(machine), workspaceID == app.sharedWorkspace.replica.workspaceID else { continue }
+            for item in items {
+                let ref = SessionRef(machineID: machine.id, session: item.session)
+                guard let lifetime = lifetimes[ref.id], app.collectionSessionKey(ref) == lifetime,
+                      app.sharedSessionKey(ref) == nil else { continue }
+                let date = Date(timeIntervalSince1970: item.updatedAt)
+                if let current = statuses[ref.id], current.updatedAt > date { continue }
+                statuses[ref.id] = AgentStatus(label: item.label, oneLiner: item.summary,
+                    lookAtThis: item.lookAtThis, updatedAt: date)
+            }
+        }
+        persistPresentation()
         refreshAttention()
     }
 

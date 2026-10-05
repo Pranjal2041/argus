@@ -160,8 +160,15 @@ final class SharedWorkspaceCoordinator: ObservableObject {
         if #available(macOS 14.0, *) {
             let usage = ArgusUsage.shared
             if usageWorkspaceID != replica.workspaceID {
+                // Resolve the authority before adopting the host's pre-service
+                // cache. A different workspace must never inherit that cache.
+                guard let authority = host.flatMap({ $0.workspaceID == replica.workspaceID ? $0 : nil })
+                    ?? app?.machines.first(where: { $0.workspaceID == replica.workspaceID && $0.workspaceEnabled }) else {
+                    if !usageWorkspaceID.isEmpty { usage.clearSharedPresentation() }
+                    return
+                }
                 usageWorkspaceID = replica.workspaceID; usageApplied = [:]
-                usage.clearSharedPresentation()
+                usage.bindSharedWorkspace(replica.workspaceID, isLocal: authority.isLocal)
             }
             guard replica.loaded else { return }
             do {

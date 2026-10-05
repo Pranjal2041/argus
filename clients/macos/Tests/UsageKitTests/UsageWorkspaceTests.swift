@@ -5,6 +5,43 @@ import SwiftUI
 
 @available(macOS 14.0, *)
 final class UsageWorkspaceTests: XCTestCase {
+    @MainActor func testFirstLocalWorkspaceRetainsReadingsUntilPublicationAndOtherWorkspacesStayIsolated() async throws {
+        let suite = "usage.workspace.binding.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        await store.refresh()
+        let controller = UsageController(store: store, defaults: defaults)
+        let expected = store.sources.map(\.id)
+        XCTAssertFalse(expected.isEmpty)
+        controller.bindSharedWorkspace("local-workspace", isLocal: true)
+        XCTAssertEqual(store.sources.map(\.id), expected)
+        if ProcessInfo.processInfo.environment["UT_CAPTURE_WORKSPACE_TEST"] == "1" {
+            let host = NSHostingView(rootView: UsageDashboard(controller: controller))
+            host.frame = NSRect(x: 0, y: 0, width: 1200, height: 900)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            defer { window.contentView = nil }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            host.layoutSubtreeIfNeeded()
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/argus-hotfix-usage.png"))
+        }
+        let published = try controller.sharedSnapshot()
+        try controller.applySharedSnapshot(published)
+        controller.bindSharedWorkspace("other-workspace", isLocal: false)
+        XCTAssertTrue(store.sources.isEmpty)
+        controller.bindSharedWorkspace("local-workspace", isLocal: true)
+        XCTAssertEqual(store.sources.map(\.id), expected)
+        let restartedStore = UsageStore(defaults: defaults)
+        let restarted = UsageController(store: restartedStore, defaults: defaults)
+        restarted.bindSharedWorkspace("local-workspace", isLocal: false)
+        XCTAssertEqual(restartedStore.sources.map(\.id), expected)
+        let empty = UsageController(store: UsageStore(defaults: defaults), defaults: defaults)
+        try restarted.applySharedSnapshot(empty.sharedSnapshot())
+        XCTAssertTrue(restartedStore.sources.isEmpty, "An explicitly published empty snapshot is authoritative")
+    }
+
     @MainActor func testNativeCollectorConnectionsAndEditorRender() async throws {
         let suite = "usage.workspace.visual.\(UUID())", defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }

@@ -40,18 +40,25 @@ enum WorkspaceServiceLauncher {
 
     static func runIfRequested() {
         guard CommandLine.arguments.contains("--workspace-worker") else { return }
-        Task { @MainActor in await WorkspaceCollector().run() }
+        let prefix = "--workspace-endpoint="
+        let base = CommandLine.arguments.first(where: { $0.hasPrefix(prefix) }).map { String($0.dropFirst(prefix.count)) }
+            ?? "http://127.0.0.1:8722"
+        // Collection and credential ownership stay on the local host. An
+        // explicit loopback endpoint also permits isolated process-level checks.
+        guard let url = URL(string: base), url.scheme == "http",
+              ["127.0.0.1", "localhost", "[::1]", "::1"].contains(url.host ?? "") else { exit(2) }
+        Task { @MainActor in await WorkspaceCollector(base: base).run() }
         dispatchMain()
     }
 }
 
 @MainActor
 private final class WorkspaceCollector {
-    private let app = AppState(isolatedForTesting: true)
+    private let app = AppState(runtime: .background)
     private let cc = CommandCenterModel(collector: true)
     private let replica = SharedWorkspaceReplica(directory: nil, transport: sharedWorkspaceRequest)
     private let owner = UUID().uuidString
-    private let base = "http://127.0.0.1:8722"
+    private let base: String
     private var leases: [String: ArgusJSON] = [:]
     private var nextDiscovery = Date.distantPast
     private var nextUsage = Date.distantPast
@@ -61,13 +68,19 @@ private final class WorkspaceCollector {
     private var statusesDirty = false
     private var settingsApplied: ArgusJSON?
     private var dismissalsApplied: ArgusJSON?
-    private var usagePresentationDirty = false
+    private var usagePresentationDirty = true
     private var journalTask: Task<Void, Never>?
     private var journalPublished: [String: String] = [:]
     private var nextJournal = Date.distantPast
     private var nextWrapped = Date.distantPast
     private var personaTask: Task<Void, Never>?
     private var nextPersona = Date.distantPast
+
+    init(base: String) {
+        self.base = base
+        app.machines[0].httpBase = base
+        app.machines[0].wsBase = base.replacingOccurrences(of: "http://", with: "ws://")
+    }
 
     private func owns(_ name: String) -> Bool {
         Double(leases[name]?["expiresAt"].uint64 ?? 0) / 1000 > Date().timeIntervalSince1970 + 10
@@ -79,7 +92,6 @@ private final class WorkspaceCollector {
         cc.collectionAllowed = { [weak self] in self?.owns("cc-status") == true }
         cc.collectionGeneration = { [weak self] in self?.leases["cc-status"]?["fence"].uint64 }
         cc.statusesChanged = { [weak self] in self?.statusesDirty = true }
-        if #available(macOS 14.0, *) { usageController = UsageController() }
         while !Task.isCancelled {
             do { try await tick() }
             catch { statusesDirty = true; NSLog("[workspace-service] %@", error.localizedDescription) }
@@ -102,7 +114,8 @@ private final class WorkspaceCollector {
             if name == "cc-status", previousFence != leases[name]?["fence"] { cc.collectionOwnershipChanged(); statusesDirty = false }
         }
         if Date() >= nextDiscovery {
-            let found = await Task.detached(priority: .utility) { discoverMachines() }.value
+            let base = base
+            let found = await Task.detached(priority: .utility) { discoverMachines(base: base) }.value
             for machine in found {
                 if let index = app.machines.firstIndex(where: { $0.id == machine.id }) { app.machines[index] = machine }
                 else { app.machines.append(machine) }
@@ -177,6 +190,9 @@ private final class WorkspaceCollector {
                     try await publishStatus(identity, status)
                 }
             }
+        }
+        if #available(macOS 14.0, *), owns("usage"), usageController == nil {
+            usageController = UsageController()
         }
         if #available(macOS 14.0, *), let usage = usageController as? UsageController {
             if owns("usage"), accountTask == nil, let lease = leases["usage"] {
