@@ -3,6 +3,27 @@ import Foundation
 import ArgusProtocol
 import UsageKit
 
+/// Independent collection jobs cannot hold up one another, and each remains
+/// single-flight even when its work takes longer than its polling interval.
+@MainActor
+final class WorkspaceRecurringJob {
+    private let interval: TimeInterval
+    private var nextRun = Date.distantPast
+    private var task: Task<Void, Never>?
+    init(interval: TimeInterval) { self.interval = interval }
+
+    @discardableResult
+    func runIfDue(now: Date = Date(), operation: @escaping @MainActor () async -> Void) -> Bool {
+        guard task == nil, now >= nextRun else { return false }
+        nextRun = now.addingTimeInterval(interval)
+        task = Task {
+            defer { task = nil }
+            await operation()
+        }
+        return true
+    }
+}
+
 /// The service is a separate launchd-owned process. Opening/closing an app view
 /// cannot start a second collector or stop the workspace's collection work.
 enum WorkspaceServiceLauncher {
@@ -69,10 +90,9 @@ private final class WorkspaceCollector {
     private var settingsApplied: ArgusJSON?
     private var dismissalsApplied: ArgusJSON?
     private var usagePresentationDirty = true
-    private var journalTask: Task<Void, Never>?
+    private let journalJob = WorkspaceRecurringJob(interval: 30)
+    private let wrappedJob = WorkspaceRecurringJob(interval: 300)
     private var journalPublished: [String: String] = [:]
-    private var nextJournal = Date.distantPast
-    private var nextWrapped = Date.distantPast
     private var personaTask: Task<Void, Never>?
     private var nextPersona = Date.distantPast
 
@@ -127,13 +147,15 @@ private final class WorkspaceCollector {
             app.machines[index].workspaceID = id; app.machines[index].workspaceEnabled = true
         }
         for machine in app.machines { app.refresh(machine, scope: .all) }
-        if owns("journal"), journalTask == nil, Date() >= nextJournal {
-            nextJournal = Date().addingTimeInterval(30)
+        if owns("journal") {
             let brokerID = info["brokerID"].string ?? ""
-            journalTask = Task {
-                defer { journalTask = nil }
+            journalJob.runIfDue { [self] in
                 do { try await collectJournal(brokerID: brokerID) }
                 catch { NSLog("[workspace-service] Journal: %@", error.localizedDescription) }
+            }
+            wrappedJob.runIfDue { [self] in
+                do { try await collectWrapped() }
+                catch { NSLog("[workspace-service] Wrapped: %@", error.localizedDescription) }
             }
         }
         if owns("cc-status") { cc.collectTick() }
@@ -282,17 +304,15 @@ private final class WorkspaceCollector {
             uploaded += 1
             if uploaded >= 4 { break }
         }
-        if Date() >= nextWrapped, owns("journal") {
-            nextWrapped = Date().addingTimeInterval(300)
-            let stats = try await Task.detached(priority: .utility) { () throws -> ArgusJSON in
-                var periods: [String: ArgusJSON] = [:]
-                for days in [0, 7, 30, 90, 365] {
-                    periods[String(days)] = try JSONDecoder().decode(ArgusJSON.self, from: JSONSerialization.data(withJSONObject: WrappedStats.compute(days: days)))
-                }
-                return .object(["kind": .string("wrapped"), "periods": .object(periods)])
-            }.value
-            try await publish("journal", id: "wrapped", data: stats, expectedLease: lease)
-        }
+    }
+
+    private func collectWrapped() async throws {
+        guard ActivityJournal.isEnabled, let lease = leases["journal"], owns("journal") else { return }
+        let stats = try await Task.detached(priority: .utility) { () throws -> ArgusJSON in
+            let periods = WrappedStats.compute(periods: [0, 7, 30, 90, 365])
+            return try JSONDecoder().decode(ArgusJSON.self, from: JSONSerialization.data(withJSONObject: ["kind": "wrapped", "periods": periods]))
+        }.value
+        try await publish("journal", id: "wrapped", data: stats, expectedLease: lease)
     }
     private func reference(_ identity: String) -> SessionRef? {
         for machine in app.machines {

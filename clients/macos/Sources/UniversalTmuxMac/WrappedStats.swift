@@ -11,9 +11,18 @@ enum WrappedStats {
 
     /// Compute the full stats blob for a window. `days == 0` means "all time".
     static func compute(days: Int) -> [String: Any] {
-        let events = loadEvents()
+        compute(events: loadEvents(), days: days, now: Date())
+    }
+
+    /// One consistent journal read serves every requested window. Re-reading
+    /// and parsing the entire archive per card window multiplies service work.
+    static func compute(periods: [Int], now: Date = Date(), load: () -> [Event] = loadEvents) -> [String: [String: Any]] {
+        let events = load()
+        return Dictionary(uniqueKeysWithValues: periods.map { (String($0), compute(events: events, days: $0, now: now)) })
+    }
+
+    static func compute(events: [Event], days: Int, now: Date) -> [String: Any] {
         let cal = Calendar.current
-        let now = Date()
         let cutoff = days > 0 ? cal.date(byAdding: .day, value: -days, to: now) : nil
         let evs = events.filter { e in
             guard let d = e.date else { return false }
@@ -53,7 +62,7 @@ enum WrappedStats {
         let cleanRunIds = allRunIds.filter(isCanonicalRun)
 
         // ---- totals (assigned incrementally: one big [String:Any] literal blows the type-checker) ----
-        let chars = saidUtter.reduce(0) { $0 + $1.str("said").count }
+        let chars = saidUtter.reduce(0) { $0 + $1.saidCharacterCount }
         var totals: [String: Any] = [:]
         totals["events"] = evs.count
         totals["utterances"] = messages.count
@@ -122,10 +131,8 @@ enum WrappedStats {
         var mach: [String: (events: Int, sessions: Set<String>)] = [:]
         for e in evs {
             guard let m = e.strOrNil("machine") else { continue }
-            var v = mach[m] ?? (0, [])
-            v.events += 1
-            if let s = e.sessionKey { v.sessions.insert(s) }
-            mach[m] = v
+            mach[m, default: (0, [])].events += 1
+            if let s = e.sessionKey { mach[m, default: (0, [])].sessions.insert(s) }
         }
         out["machines"] = mach.map { ["name": $0.key, "events": $0.value.events, "sessions": $0.value.sessions.count] }
             .sorted { ($0["events"] as! Int) > ($1["events"] as! Int) }
@@ -133,7 +140,7 @@ enum WrappedStats {
         // ---- top words / catchphrase ----
         var firstWords: [String: Int] = [:]
         for e in saidUtter {
-            let w = e.str("said").split(whereSeparator: { $0 == " " || $0 == "\n" }).first.map { String($0).lowercased() } ?? ""
+            let w = e.str("said").split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\n" }).first.map { String($0).lowercased() } ?? ""
             let clean = w.trimmingCharacters(in: CharacterSet.alphanumerics.inverted.subtracting(CharacterSet(charactersIn: "!/")))
             if !clean.isEmpty { firstWords[clean, default: 0] += 1 }
         }
@@ -147,7 +154,7 @@ enum WrappedStats {
         // ---- message length histogram ----
         let buckets = [(0, 20, "≤20"), (20, 50, "20–50"), (50, 100, "50–100"), (100, 200, "100–200"), (200, 500, "200–500"), (500, .max, "500+")]
         out["lengthHistogram"] = buckets.map { lo, hi, label in
-            ["label": label, "count": saidUtter.filter { let c = $0.str("said").count; return c >= lo && c < hi }.count]
+            ["label": label, "count": saidUtter.filter { let c = $0.saidCharacterCount; return c >= lo && c < hi }.count]
         }
 
         // ---- projects (by folder basename) ----
@@ -156,10 +163,8 @@ enum WrappedStats {
             let f = e.strOrNil("folder") ?? ""
             guard !f.isEmpty, f != "—" else { continue }
             let base = (f as NSString).lastPathComponent
-            var v = proj[base] ?? (0, [])
-            v.events += 1
-            if let s = e.sessionKey { v.sessions.insert(s) }
-            proj[base] = v
+            proj[base, default: (0, [])].events += 1
+            if let s = e.sessionKey { proj[base, default: (0, [])].sessions.insert(s) }
         }
         out["projects"] = proj.map { ["name": $0.key, "events": $0.value.events, "sessions": $0.value.sessions.count] }
             .sorted { ($0["events"] as! Int) > ($1["events"] as! Int) }.prefix(12).map { $0 }
@@ -282,8 +287,8 @@ enum WrappedStats {
 
     private static func superlatives(evs: [Event], saidUtter: [Event], cal: Calendar) -> [String: Any] {
         var out: [String: Any] = [:]
-        if let lm = saidUtter.max(by: { $0.str("said").count < $1.str("said").count }) {
-            out["longestMessage"] = ["chars": lm.str("said").count]
+        if let lm = saidUtter.max(by: { $0.saidCharacterCount < $1.saidCharacterCount }) {
+            out["longestMessage"] = ["chars": lm.saidCharacterCount]
         }
         // fastest kill
         var born: [String: Date] = [:]
@@ -438,21 +443,27 @@ enum WrappedStats {
         let raw: [String: Any]
         let kind: String
         let date: Date?
+        let saidCharacterCount: Int
+        let localHour: Int?
+        let localDay: String?
+        let sessionKey: String?
         init(_ raw: [String: Any]) {
             self.raw = raw
             self.kind = (raw["kind"] as? String) ?? "?"
-            self.date = Self.parse(raw["ts"] as? String ?? "")
+            let date = Self.parse(raw["ts"] as? String ?? "")
+            self.date = date
+            saidCharacterCount = (raw["said"] as? String)?.count ?? 0
+            localHour = date.map { Calendar.current.component(.hour, from: $0) }
+            localDay = date.map { WrappedStats.localDayString($0) }
+            if let session = raw["session"] as? String, !session.isEmpty {
+                let machine = raw["machineID"] as? String ?? ""
+                sessionKey = (machine.isEmpty ? "?" : machine) + "|" + session
+            } else { sessionKey = nil }
         }
         func str(_ k: String) -> String { (raw[k] as? String) ?? "" }
         func strOrNil(_ k: String) -> String? { let s = raw[k] as? String; return (s?.isEmpty ?? true) ? nil : s }
         func bool(_ k: String) -> Bool { (raw[k] as? Bool) ?? false }
         func dbl(_ k: String) -> Double { (raw[k] as? Double) ?? Double((raw[k] as? Int) ?? 0) }
-        var sessionKey: String? {
-            guard let s = strOrNil("session") else { return nil }
-            return (strOrNil("machineID") ?? "?") + "|" + s
-        }
-        var localHour: Int? { date.map { Calendar.current.component(.hour, from: $0) } }
-        var localDay: String? { date.map { WrappedStats.localDayString($0) } }
         private static let iso1: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"; f.timeZone = TimeZone(identifier: "UTC"); f.locale = Locale(identifier: "en_US_POSIX"); return f }()
         private static let iso2: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"; f.timeZone = TimeZone(identifier: "UTC"); f.locale = Locale(identifier: "en_US_POSIX"); return f }()
         static func parse(_ s: String) -> Date? { iso1.date(from: s) ?? iso2.date(from: s) }
