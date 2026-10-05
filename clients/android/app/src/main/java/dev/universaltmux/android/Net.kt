@@ -58,6 +58,7 @@ data class AgentCardStatus(
     val summary: String,
     val lookAtThis: String?,
     val updatedAt: Double,
+    val appliedOverrideTS: Long? = null,
 )
 
 data class FileEntry(
@@ -192,6 +193,7 @@ object Net {
                 AgentCardStatus(
                     e.optString("session"), e.optString("label"), e.optString("summary"),
                     e.optString("lookAtThis").ifEmpty { null }, e.optDouble("updatedAt", 0.0),
+                    if (e.has("appliedOverrideTS") && !e.isNull("appliedOverrideTS")) e.getLong("appliedOverrideTS") else null,
                 )
             }
         }
@@ -199,11 +201,20 @@ object Net {
 
     /** Set a manual command-center status for a session. The phone can't run the status
      *  model, so it queues this on the broker; the Mac applies it and re-publishes. */
-    fun setCCOverride(b: Broker, session: String, label: String): Boolean =
-        try {
+    fun setCCOverride(b: Broker, session: String, label: String): Long? {
             val u = "${b.httpBase}/ccoverride?session=${enc(session)}&label=${enc(label)}"
-            client.newCall(Request.Builder().url(u).post(RequestBody.create(null, ByteArray(0))).build()).execute().use { it.isSuccessful }
-        } catch (_: Exception) { false }
+            client.newCall(Request.Builder().url(u).post(RequestBody.create(null, ByteArray(0))).build()).execute().use {
+                check(it.isSuccessful && JSONObject(it.body?.string() ?: "{}").optBoolean("ok")) { "The broker did not accept the status change. Try again." }
+            }
+            return runCatching {
+                client.newCall(Request.Builder().url("${b.httpBase}/ccoverride").build()).execute().use {
+                    if (!it.isSuccessful) return@use null
+                    val rows = JSONObject(it.body?.string() ?: "{}").optJSONArray("overrides") ?: return@use null
+                    (0 until rows.length()).map { rows.getJSONObject(it) }
+                        .firstOrNull { it.optString("session") == session && it.optString("label") == label }?.getLong("ts") ?: 0L
+                }
+            }.getOrNull()
+    }
 
     /** Toggle a session's hidden flag on its owning broker (broker-owned → syncs across devices). */
     fun setHidden(b: Broker, session: String, hidden: Boolean) {

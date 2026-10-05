@@ -213,7 +213,7 @@ final class ArgusControlService: ObservableObject {
             let ref = try resolveSession(text(p, "id")), label = try text(p, "label")
             guard ["needs-decision", "stuck", "drifting", "working", "look", "milestone", "idle"].contains(label) else { throw ArgusFailure("invalid_arguments", "Unknown Command Center label.") }
             try checkRevision((try? ArgusJSON.encode(cc.statuses[ref.id])) ?? .null, p)
-            cc.setManualLabel(ref: ref, label: label, actor: "cli:" + r.actor)
+            try await cc.submitManualLabel(ref: ref, label: label, actor: "cli:" + r.actor)
             return sessionRows(includeAll: true).first { $0["alias"].string == ref.id }!
         case "command-center.backlog":
             let ref = try resolveSession(text(p, "id")), desired = try text(p, "state")

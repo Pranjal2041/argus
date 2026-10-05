@@ -122,7 +122,7 @@ fun CommandCenterScreen(vm: AppViewModel, onOpen: (Broker, String) -> Unit) {
     LazyColumn(Modifier.fillMaxSize().background(ccInk).padding(horizontal = 12.dp)) {
         item { UsageGlances(vm) { vm.requestUsage() } }
         item {
-            (vm.workspaceSelectionIssue ?: vm.workspace.issue ?: vm.ccIssues.values.firstOrNull())?.let {
+            (vm.ccCorrectionIssues.values.firstOrNull() ?: vm.workspaceSelectionIssue ?: vm.workspace.issue ?: vm.ccIssues.values.firstOrNull())?.let {
                 Text(it, color = cWaiting, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
             }
         }

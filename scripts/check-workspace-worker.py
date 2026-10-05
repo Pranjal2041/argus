@@ -8,11 +8,14 @@ import subprocess
 import tempfile
 import threading
 import time
+from urllib.parse import parse_qs, urlsplit
 
 
-def check(binary, backend):
+def check(binary, backend, corrections=False):
     requests = []
     snapshots = []
+    publications = []
+    cleared = []
     info = {"protocol": 1, "enabled": True, "workspaceID": "worker-check", "brokerID": "check-broker"}
 
     class Broker(http.server.BaseHTTPRequestHandler):
@@ -49,12 +52,40 @@ def check(binary, backend):
                     "attached": False, "activity": len(snapshots), "state": state,
                     "agent": False, "id": "$1" if backend == "linux" else "",
                     "lineageID": backend + "-lifetime", "activityRevision": len(snapshots)}]})
+            elif corrections and path == "/ccoverride":
+                self.reply(200, {"overrides": [] if cleared else [{"session": "fixture-session", "label": "stuck", "ts": 1234}]})
+            elif path == "/recent":
+                # Empty output prevents any model invocation, even with the
+                # status lease granted in the correction publication check.
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             else:
                 self.reply(404, {"error": "not_found"})
 
         def do_POST(self):
-            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             requests.append(self.path)
+            path = urlsplit(self.path).path
+            if corrections and path == "/workspace/lease":
+                lease = json.loads(body)
+                if lease.get("name") == "cc-status":
+                    self.reply(200, dict(lease, fence=1, expiresAt=int(time.time() * 1000) + 120000))
+                    return
+            if corrections and path == "/ccstatus":
+                publications.append(json.loads(body))
+                # Retry after a rejected publication; never clear beforehand.
+                self.reply(503 if len(publications) == 1 else 200, {"ok": len(publications) > 1})
+                return
+            if corrections and path == "/ccoverride":
+                query = parse_qs(urlsplit(self.path).query)
+                if query.get("clear") == ["1234"]:
+                    assert len(publications) > 1, "Relay cleared before publication was accepted"
+                    rows = publications[-1]["items"]
+                    assert any(row["label"] == "stuck" and row.get("appliedOverrideTS") == 1234 for row in rows), rows
+                    cleared.append(1234)
+                self.reply(200, {"ok": True})
+                return
             # Another owner holds all leases: no providers, credentials, journal
             # ingestion, or real accounts are touched by this process check.
             self.reply(409, {"error": "lease_held"})
@@ -70,13 +101,16 @@ def check(binary, backend):
             try:
                 deadline = time.monotonic() + 25
                 while time.monotonic() < deadline and process.poll() is None:
-                    if snapshots[-3:] == ["waiting", "working", "idle"]:
+                    if snapshots[:3] == ["waiting", "working", "idle"] and (not corrections or cleared):
                         time.sleep(0.5)  # allow the final transition callback to run
                         break
                     time.sleep(0.1)
                 assert process.poll() is None, process.communicate()[0].decode(errors="replace")
                 assert snapshots[:3] == ["waiting", "working", "idle"], (snapshots, requests)
                 assert "/workspace/changes" in requests, requests
+                if corrections:
+                    assert cleared, (publications, requests)
+                    print(f"PASS {backend}: rejected publication retried; correction receipt published before relay clear")
                 print(f"PASS {backend}: real worker survived waiting → working → idle without an application window")
             finally:
                 if process.poll() is None:
@@ -90,6 +124,7 @@ def check(binary, backend):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("binary")
+    parser.add_argument("--corrections", action="store_true")
     args = parser.parse_args()
     for implementation in ("linux", "windows"):
-        check(os.path.abspath(args.binary), implementation)
+        check(os.path.abspath(args.binary), implementation, args.corrections)

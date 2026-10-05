@@ -26,6 +26,22 @@ class ParityFixtureActivity : ComponentActivity() {
     private lateinit var server: ParityFixtureServer
     private var screen by mutableStateOf(SCREEN_USAGE)
     fun showScreen(value: Int) { screen = value }
+    fun configureStatusTest(stable: Boolean, reject: Boolean) {
+        val broker = vm.brokers.first().copy(brokerID = if (stable) "fixture-broker" else "")
+        vm.brokers[0] = broker
+        server.rejectStatus = reject
+        vm.ccStatus[broker.id + "/analysis"] = AgentCardStatus("analysis", "idle", "The comparison is ready for review.", null, 100.0)
+        screen = 32
+    }
+    fun refreshStatusTest() { vm.refreshCC() }
+    fun configurePartialStatusTest() {
+        configureStatusTest(false, false)
+        val broker = vm.brokers.first().copy(brokerID = "fixture-broker")
+        vm.brokers[0] = broker
+        vm.sessions[broker.id] = vm.sessions[broker.id]!!.map { it.copy(lineageID = "", tmuxId = "\$17") }
+    }
+    fun completeStatusTest() { server.statusApplied = true; vm.refreshCC() }
+    fun currentStatusTest(): String = vm.ccFor(vm.brokers.first(), "analysis")?.label.orEmpty()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,6 +94,9 @@ class ParityFixtureActivity : ComponentActivity() {
 }
 
 private class ParityFixtureServer(private val fixture: JSONObject, private val connections: JSONObject) : AutoCloseable {
+    @Volatile var rejectStatus = false
+    @Volatile var statusApplied = false
+    private var statusQueued = false
     private val socket = ServerSocket(8722, 20, InetAddress.getByName("127.0.0.1"))
     private val blobs = mutableMapOf<String, ByteArray>()
     private var revision = fixture.getLong("cursor")
@@ -143,6 +162,12 @@ private class ParityFixtureServer(private val fixture: JSONObject, private val c
             return blobs[key]?.let { 200 to it } ?: (404 to ByteArray(0))
         }
         return when (path) {
+            "/ccoverride" -> if (method == "POST") {
+                if (rejectStatus) 503 to "{}".toByteArray() else { statusQueued = true; ok("{\"ok\":true}") }
+            } else ok(JSONObject().put("overrides", JSONArray().also { if (statusQueued && !statusApplied) it.put(JSONObject().put("session", "analysis").put("label", "working").put("ts", 1234)) }))
+            "/ccstatus" -> ok(JSONObject().put("items", JSONArray().put(JSONObject().put("session", "analysis").put("label", "idle")
+                .put("summary", "The comparison is ready for review.").put("updatedAt", if (statusApplied) 102 else 101)
+                .put("appliedOverrideTS", if (statusApplied) 1234 else 0))))
             "/workspace/service/usage" -> {
                 val request = JSONObject(String(bytes))
                 if (request.optString("action") == "save") {

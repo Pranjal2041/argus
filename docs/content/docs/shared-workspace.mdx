@@ -72,10 +72,22 @@ Account credentials remain in the collecting host's existing private stores.
 An unacknowledged account action is not automatically retried; reload Connections
 to check its result. Normalized readings continue to use the durable workspace API.
 
-Manual status changes remain pending until the corrected status is published.
-The collector retains the feedback for its next model response across restarts and
+Shared-session status changes remain pending until the corrected status is published.
+The collector retains their feedback for its next model response across restarts and
 removes it only after that response is published. A correction is not a permanent
 status lock.
+
+Sessions without shared identities use their broker's existing `/ccoverride` relay.
+Both clients show the pending label, retain its session lifetime, and report rejected
+saves. The collector publishes the relay receipt as `appliedOverrideTS` before clearing
+the relay; clients can acknowledge delivery even if the model has already reconsidered
+the label. Older publications can still acknowledge a fresh matching label. Native
+status publications are serialized and coalesced per broker. Route-local session
+witnesses are never written as shared session identities.
+
+Journal ingestion and Wrapped computation run as independent, single-flight jobs.
+All Wrapped periods share one archive snapshot, so a slow computation does not stop
+journal publication.
 
 ## Files and artifacts
 

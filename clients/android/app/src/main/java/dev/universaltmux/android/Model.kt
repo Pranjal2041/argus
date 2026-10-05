@@ -15,6 +15,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -416,7 +418,7 @@ class AppViewModel @JvmOverloads constructor(app: Application, startServices: Bo
         prevState.keys.removeAll { it.startsWith(sessionPrefix) }
         val ccPrefix = "${b.id}/"
         ccStatus.keys.filter { it.startsWith(ccPrefix) }.forEach { ccStatus.remove(it) }
-        pendingOverride.keys.removeAll { it.startsWith(ccPrefix) }
+        corrections.discardMatching { it.substringAfter('/').startsWith(ccPrefix) }
         val backlogChanged = backlog.removeAll { it.startsWith(sessionPrefix) }
         if (backlogChanged) prefs.edit().putString("backlog", backlog.joinToString("\n")).apply()
     }
@@ -938,6 +940,7 @@ class AppViewModel @JvmOverloads constructor(app: Application, startServices: Bo
     /** AI statuses published by the Mac, read per broker. Key = "<brokerId>/<session>". */
     val ccStatus = mutableStateMapOf<String, AgentCardStatus>()
     val ccIssues = mutableStateMapOf<String, String>()
+    val ccCorrectionIssues = mutableStateMapOf<String, String>()
     private val ccRefreshInFlight = mutableSetOf<String>()
     private fun ccKey(b: Broker, name: String) = "${b.id}/$name"
     fun ccFor(b: Broker, name: String): AgentCardStatus? {
@@ -951,52 +954,95 @@ class AppViewModel @JvmOverloads constructor(app: Application, startServices: Bo
                 (value?.optDouble("updatedAt") ?: 0.0) / 1000)
             return null
         }
-        return ccStatus[ccKey(b, name)]
+        val status = ccStatus[ccKey(b, name)]
+        val lifetime = correctionLifetime(b, name) ?: return status
+        val pending = corrections.current(correctionKey(b, name), lifetime) ?: return status
+        return (status ?: AgentCardStatus(name, "idle", "", null, 0.0)).copy(label = pending.label)
     }
 
     // A status the user set on THIS device, shown optimistically until the Mac reflects
     // it back via /ccstatus — acknowledgment, not an arbitrary timer, ends pending.
     // label on the next poll before the Mac has processed the override.
-    private val pendingOverride = mutableStateMapOf<String, Pair<String, Long>>()
+    private val corrections = StatusCorrections(prefs.getString("ut.ccCorrections.v1", null)) {
+        check(prefs.edit().putString("ut.ccCorrections.v1", it).commit()) { "Could not save the pending status change." }
+    }
+    private val correctionWrites = mutableMapOf<String, Mutex>()
+    private fun correctionKey(b: Broker, name: String) = workspace.workspaceID + "/" + ccKey(b, name)
+    private fun correctionLifetime(b: Broker, name: String): String? = sessions[b.id].orEmpty().firstOrNull { it.name == name }?.let {
+        b.httpBase + "/" + it.lineageID.ifEmpty { it.tmuxId ?: it.name }
+    }
+    internal var sendStatusCorrection: suspend (Broker, String, String) -> Long? = { b, name, label ->
+        withContext(Dispatchers.IO) { Net.setCCOverride(b, name, label) }
+    }
 
     /** Manually set a card's status from the phone: optimistic locally + relayed to the
      *  Mac (the only generator) via the broker, which applies it and re-publishes. */
     fun setManualStatus(b: Broker, name: String, label: String) {
+        if (label !in listOf("working", "idle", "needs-decision", "stuck", "milestone", "look", "drifting")) {
+            ccCorrectionIssues[b.id] = "Unknown status label."; return
+        }
+        ccCorrectionIssues.remove(b.id)
         val identity = sharedSessionKey(b, name)
-        if (!workspace.loaded || identity == null) { ccIssues[b.id] = "Connect the shared workspace before changing status."; return }
-        changeShared("cc-overrides", identity, JSONObject().put("label", label)
-            .put("commandID", java.util.UUID.randomUUID().toString()).put("actor", "human"))
+        if (identity != null) {
+            try {
+                workspace.enqueue("cc-overrides", identity, JSONObject().put("label", label)
+                    .put("commandID", java.util.UUID.randomUUID().toString()).put("actor", "human"))
+                refreshWorkspace(force = true)
+            } catch (e: Exception) { ccCorrectionIssues[b.id] = "Could not save status for $name: ${e.message}" }
+            return
+        }
+        val lifetime = correctionLifetime(b, name)
+        if (lifetime == null) { ccCorrectionIssues[b.id] = "The session is no longer available."; return }
+        val key = correctionKey(b, name)
+        val pending = try { corrections.begin(key, lifetime, label, ccStatus[ccKey(b, name)]) }
+            catch (e: Exception) { ccCorrectionIssues[b.id] = e.message ?: "Could not save status."; return }
+        val lock = correctionWrites.getOrPut(key) { Mutex() }
+        viewModelScope.launch {
+            try {
+                lock.withLock {
+                    if (key != correctionKey(b, name) || lifetime != correctionLifetime(b, name) || corrections.current(key, lifetime)?.id != pending.id) return@withLock
+                    corrections.accepted(key, pending, sendStatusCorrection(b, name, label))
+                }
+            } catch (e: Exception) {
+                val current = corrections.current(key, lifetime)?.id == pending.id
+                runCatching { corrections.reject(key, pending) }
+                if (current && key == correctionKey(b, name) && lifetime == correctionLifetime(b, name)) {
+                    ccCorrectionIssues[b.id] = "Could not save status for $name: ${e.message}"
+                }
+            }
+        }
     }
 
     /** Pull each broker's /ccstatus and merge (each broker holds only its own sessions). */
     fun refreshCC() {
         brokers.toList().forEach { b ->
-            if (workspace.loaded && b.brokerID.isNotEmpty()) { ccIssues.remove(b.id); return@forEach }
+            // Read and write routing must use the same per-session capability;
+            // a broker identity alone does not guarantee every session has one.
+            if (workspace.loaded && sessions[b.id].orEmpty().all { sharedSessionKey(b, it.name) != null }) { ccIssues.remove(b.id); return@forEach }
             if (!ccRefreshInFlight.add(b.id)) return@forEach
             viewModelScope.launch {
               try {
+                val workspaceID = workspace.workspaceID
+                val lifetimes = sessions[b.id].orEmpty().associate { it.name to correctionLifetime(b, it.name) }
                 val items = withContext(Dispatchers.IO) { Net.ccStatus(b) }
                 if (items == null) { ccIssues[b.id] = "Status refresh unavailable; showing last known status."; return@launch }
-                if (brokers.none { it.id == b.id }) return@launch
+                if (brokers.none { it.id == b.id } || workspaceID != workspace.workspaceID) return@launch
                 ccIssues.remove(b.id)
                 val prefix = "${b.id}/"
                 val live = HashSet<String>()
                 items.forEach { item ->
                     val k = ccKey(b, item.session)
-                    val pend = pendingOverride[k]
-                    // Keep showing a just-set override until the Mac's published status
-                    // matches it (or it ages out) — otherwise the card flickers back.
+                    val lifetime = lifetimes[item.session] ?: return@forEach
+                    if (lifetime != correctionLifetime(b, item.session)) return@forEach
                     val prior = ccStatus[k]
-                    if (prior != null && item.updatedAt < prior.updatedAt && pend == null) { live.add(k); return@forEach }
-                    ccStatus[k] = if (pend != null && pend.first != item.label) {
-                        item.copy(label = pend.first)
-                    } else {
-                        pendingOverride.remove(k)
-                        item
-                    }
+                    if (prior != null && item.updatedAt < prior.updatedAt) { live.add(k); return@forEach }
+                    corrections.merge(correctionKey(b, item.session), lifetime, item)
+                    ccStatus[k] = item
                     live.add(k)
                 }
-                ccStatus.keys.filter { it.startsWith(prefix) && it !in live && it !in pendingOverride }.forEach { ccStatus.remove(it) }
+                ccStatus.keys.filter { it.startsWith(prefix) && it !in live }.forEach { ccStatus.remove(it) }
+              } catch (e: Exception) {
+                ccIssues[b.id] = "Status refresh failed: ${e.message}"
               } finally { ccRefreshInFlight.remove(b.id) }
             }
         }

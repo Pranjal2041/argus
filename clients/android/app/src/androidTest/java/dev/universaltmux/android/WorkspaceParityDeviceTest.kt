@@ -21,6 +21,38 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class WorkspaceParityDeviceTest {
+    @Test fun statusMenusSaveOnSharedAndNativeBrokersAndShowFailures() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assumeTrue(context.packageName.endsWith(".qa") && (Build.FINGERPRINT.contains("generic") || Build.MODEL.contains("sdk")))
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val directory = File(context.getExternalFilesDir(null), "parity-screenshots").apply { mkdirs() }
+        for ((mode, stable, reject) in listOf(Triple("shared", true, false), Triple("native", false, false), Triple("partial", false, false), Triple("failed", false, true))) {
+            val intent = Intent().setClassName(context.packageName, "dev.universaltmux.android.ParityFixtureActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ActivityScenario.launch<Activity>(intent).use { scenario ->
+                scenario.onActivity { it.javaClass.getMethod("configureStatusTest", Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType).invoke(it, stable, reject) }
+                if (mode == "partial") scenario.onActivity { it.javaClass.getMethod("configurePartialStatusTest").invoke(it) }
+                assertTrue(device.wait(Until.hasObject(By.text("analysis")), 8000))
+                device.findObject(By.text("analysis")).longClick()
+                assertTrue(device.wait(Until.hasObject(By.text("SET STATUS")), 5000))
+                assertTrue(device.takeScreenshot(File(directory, "status-$mode-menu.png")))
+                device.findObject(By.text("    Working")).click()
+                device.waitForIdle(); Thread.sleep(900)
+                scenario.onActivity { it.javaClass.getMethod("refreshStatusTest").invoke(it) }
+                device.waitForIdle(); Thread.sleep(900)
+                scenario.onActivity {
+                    assertEquals(if (reject) "idle" else "working", it.javaClass.getMethod("currentStatusTest").invoke(it))
+                }
+                if (reject) assertTrue(device.wait(Until.hasObject(By.textContains("Could not save status for analysis")), 5000))
+                assertTrue(device.takeScreenshot(File(directory, "status-$mode-result.png")))
+                if (!stable && !reject) {
+                    scenario.onActivity { it.javaClass.getMethod("completeStatusTest").invoke(it) }
+                    device.waitForIdle(); Thread.sleep(900)
+                    scenario.onActivity { assertEquals("idle", it.javaClass.getMethod("currentStatusTest").invoke(it)) }
+                    assertTrue(device.takeScreenshot(File(directory, "status-$mode-receipt.png")))
+                }
+            }
+        }
+    }
     @Test fun fixtureScreensAndInteractions() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

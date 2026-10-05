@@ -420,6 +420,97 @@ final class CommandCenterModel: ObservableObject {
     @Published var inflight: Set<String> = []              // sessions whose status is being regenerated (drives the spinner)
     @Published var costUSD: Double = 0                     // cumulative tracked model spend
     @Published var costCalls: Int = 0
+    @Published var correctionIssue: String?
+    private struct PendingCorrection: Codable {
+        let id: String
+        let workspace: String
+        let lifetime: String
+        let label: String
+        let previous: AgentStatus?
+        var receipt: Int64?
+    }
+    private var pendingCorrections: [String: PendingCorrection] = [:]
+    private var correctionWrites: [String: Task<Void, Error>] = [:]
+    private var uiCorrectionActions: [String: UUID] = [:]
+    var sendBrokerCorrection: (Machine, SessionRef, String) async throws -> Int64? = { machine, ref, label in
+        guard var url = URLComponents(string: machine.httpBase + "/ccoverride") else {
+            throw ArgusFailure("invalid_endpoint", "Invalid status endpoint.")
+        }
+        // Preserve mesh routing query parameters when appending the operation.
+        url.queryItems = (url.queryItems ?? []) + [URLQueryItem(name: "session", value: ref.session), URLQueryItem(name: "label", value: label)]
+        guard let endpoint = url.url else { throw ArgusFailure("invalid_endpoint", "Invalid status endpoint.") }
+        var request = URLRequest(url: endpoint); request.httpMethod = "POST"; request.timeoutInterval = 8
+        let (data, response) = try await brokerSession.data(for: request)
+        let reply = try? JSONDecoder().decode(ArgusJSON.self, from: data)
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+              reply?["ok"].bool == true else {
+            throw ArgusFailure("status_save_failed", "The broker did not accept the status change.")
+        }
+        // Carry the relay's existing receipt through publication, even when the
+        // model immediately chooses a different status after the correction.
+        guard let endpoint = URL(string: machine.httpBase + "/ccoverride") else { return nil }
+        var lookup = URLRequest(url: endpoint); lookup.timeoutInterval = 6
+        guard let (data, response) = try? await brokerSession.data(for: lookup),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let reply = try? JSONDecoder().decode(ArgusJSON.self, from: data) else { return nil }
+        guard let rows = reply["overrides"].array else { return nil }
+        // Absence after an accepted POST means the relay was already consumed
+        // (or superseded); the next publication is authoritative.
+        return rows.first { $0["session"].string == ref.session && $0["label"].string == label }?["ts"].uint64.flatMap { Int64(exactly: $0) } ?? 0
+    }
+
+    /// Both UI and automation use the same acknowledgement and capability path.
+    /// Older brokers retain their native correction relay; a route-local lifetime
+    /// is never promoted into a durable shared session identity.
+    func submitManualLabel(ref: SessionRef, label: String, actor: String = "human") async throws {
+        guard ["working", "idle", "needs-decision", "stuck", "milestone", "look", "drifting"].contains(label) else {
+            throw ArgusFailure("invalid_arguments", "Unknown Command Center label.")
+        }
+        guard let app, let machine = app.machines.first(where: { $0.id == ref.machineID }),
+              let lifetime = app.collectionSessionKey(ref) else {
+            throw ArgusFailure("session_unavailable", "The session is no longer available.")
+        }
+        correctionIssue = nil
+        readSharedStatuses()
+        if let identity = app.sharedSessionKey(ref) {
+            try app.sharedWorkspace.replica.enqueue("cc-overrides", id: identity, data: .object([
+                "label": .string(label), "commandID": .string(UUID().uuidString), "actor": .string(actor)
+            ]))
+            app.sharedWorkspace.refresh()
+            readSharedStatuses()
+            return
+        }
+        let key = ref.id, workspace = app.sharedWorkspace.replica.workspaceID
+        let prior = pendingCorrections[key]?.previous ?? statuses[key]
+        let pending = PendingCorrection(id: UUID().uuidString, workspace: workspace, lifetime: lifetime, label: label, previous: prior, receipt: nil)
+        pendingCorrections[key] = pending
+        statuses[key] = AgentStatus(label: label, oneLiner: prior?.oneLiner ?? "", lookAtThis: prior?.lookAtThis, updatedAt: prior?.updatedAt ?? .distantPast)
+        sessionLifetimes[key] = lifetime
+        refreshAttention()
+        let preceding = correctionWrites[key]
+        let task = Task { @MainActor [self] in
+            _ = try? await preceding?.value
+            guard pendingCorrections[key]?.id == pending.id,
+                  app.collectionSessionKey(ref) == lifetime, app.sharedWorkspace.replica.workspaceID == workspace else {
+                throw ArgusFailure("status_superseded", "The target or status selection changed before the save.")
+            }
+            let receipt = try await sendBrokerCorrection(machine, ref, label)
+            if pendingCorrections[key]?.id == pending.id { pendingCorrections[key]?.receipt = receipt }
+        }
+        correctionWrites[key] = task
+        do {
+            try await task.value
+            if pendingCorrections[key]?.id == pending.id { persistPresentation() }
+        } catch {
+            if pendingCorrections[key]?.id == pending.id {
+                pendingCorrections[key] = nil
+                if app.collectionSessionKey(ref) == lifetime, app.sharedWorkspace.replica.workspaceID == workspace { statuses[key] = prior }
+                correctionIssue = "Could not save status for \(ref.session): \(error.localizedDescription)"
+                persistPresentation(); refreshAttention()
+            }
+            throw error
+        }
+    }
 
     private let provider: AgentStatusProvider = CodexStatusProvider()
     private weak var app: AppState?
@@ -428,6 +519,9 @@ final class CommandCenterModel: ObservableObject {
     private var lastOKAt: [String: Double] = [:] // when each session was last successfully summarized (for fair scheduling)
     private var correction: [String: String] = [:] // active delivery; the service retains durable feedback until publication
     private var consumedOverrideTS: [String: Int64] = [:] // last phone-set override applied per session (so each is consumed once)
+    private var appliedOverrideTS: [String: Int64] = [:]
+    private var brokerPublications: [String: Task<Bool, Never>] = [:]
+    private var dirtyBrokerPublications: Set<String> = []
 
     /// The user manually set a card's status. Show it immediately and queue a one-time
     /// note so the NEXT model call is told the user corrected it (and reasons about why) —
@@ -435,11 +529,13 @@ final class CommandCenterModel: ObservableObject {
     /// the label is not permanently locked.
     func setManualLabel(ref: SessionRef, label: String, actor: String = "human", correctionID: String? = nil, note: String? = nil) {
         if !isCollector {
-            guard let app, let identity = app.sharedSessionKey(ref) else { return }
-            app.sharedWorkspace.change("cc-overrides", id: identity, data: .object([
-                "label": .string(label), "commandID": .string(UUID().uuidString), "actor": .string(actor)
-            ]))
-            readSharedStatuses()
+            let action = UUID(); uiCorrectionActions[ref.id] = action
+            Task {
+                do { try await submitManualLabel(ref: ref, label: label, actor: actor) }
+                catch {
+                    if uiCorrectionActions[ref.id] == action { correctionIssue = "Could not save status for \(ref.session): \(error.localizedDescription)" }
+                }
+            }
             return
         }
         let key = ref.id
@@ -475,6 +571,7 @@ final class CommandCenterModel: ObservableObject {
         guard isCollector else { return }
         statuses = [:]; lastHash = [:]; lastDot = [:]; lastOKAt = [:]
         correctionIDs = [:]; completedCorrections = [:]; correction = [:]
+        consumedOverrideTS = [:]; appliedOverrideTS = [:]
     }
     private var modelInflight = 0               // concurrent model calls (the expensive part)
     private var pulseN = 0
@@ -485,11 +582,13 @@ final class CommandCenterModel: ObservableObject {
     private struct Presentation: Codable {
         var statuses: [String: AgentStatus]
         var lifetimes: [String: String]
+        var corrections: [String: PendingCorrection]?
     }
     private var legacyRefreshInFlight = false
     struct BrokerStatus: Decodable {
         let session: String; let label: String; let summary: String
         let lookAtThis: String?; let updatedAt: Double
+        var appliedOverrideTS: Int64? = nil
     }
     var fetchBrokerStatuses: (Machine) async -> [BrokerStatus]? = { machine in
         guard let url = URL(string: machine.httpBase + "/ccstatus") else { return nil }
@@ -513,7 +612,7 @@ final class CommandCenterModel: ObservableObject {
         if !collector, let id = presentationWorkspaceID,
            let data = defaults.data(forKey: "ut.ccPresentation.v2." + id),
            let saved = try? JSONDecoder().decode(Presentation.self, from: data) {
-            statuses = saved.statuses; sessionLifetimes = saved.lifetimes
+            statuses = saved.statuses; sessionLifetimes = saved.lifetimes; pendingCorrections = saved.corrections ?? [:]
         }
         costUSD = provider.spendUSD
         costCalls = provider.callCount
@@ -545,7 +644,7 @@ final class CommandCenterModel: ObservableObject {
 
     private func persistPresentation() {
         guard let id = presentationWorkspaceID, !id.isEmpty,
-              let data = try? JSONEncoder().encode(Presentation(statuses: statuses, lifetimes: sessionLifetimes)) else { return }
+              let data = try? JSONEncoder().encode(Presentation(statuses: statuses, lifetimes: sessionLifetimes, corrections: pendingCorrections)) else { return }
         defaults.set(data, forKey: "ut.ccPresentation.v2." + id)
     }
 
@@ -630,6 +729,7 @@ final class CommandCenterModel: ObservableObject {
                     let renamed = sessionLifetimes.first { $0.value == lifetime }?.key
                     statuses[ref.id] = renamed.flatMap { statuses[$0] }
                     lastHash[ref.id] = nil; lastDot[ref.id] = nil; correction[ref.id] = nil
+                    consumedOverrideTS[ref.id] = nil; appliedOverrideTS[ref.id] = nil
                     provider.forget(key: ref.id)
                     sessionLifetimes[ref.id] = lifetime
                 }
@@ -665,6 +765,12 @@ final class CommandCenterModel: ObservableObject {
     /// model is told the user corrected it, and it re-publishes /ccstatus so the change
     /// syncs back to every device — then clear it on the broker.
     private func consumeOverrides(machine: Machine) async {
+        guard collectionAllowed(), let app else { return }
+        let ownership = collectionGeneration()
+        let lifetimes = Dictionary(uniqueKeysWithValues: (app.sessionsByMachine[machine.id] ?? []).compactMap { session in
+            let ref = SessionRef(machineID: machine.id, session: session.name)
+            return app.collectionSessionKey(ref).map { (ref.id, $0) }
+        })
         guard let url = URL(string: machine.httpBase + "/ccoverride") else { return }
         var req = URLRequest(url: url); req.timeoutInterval = 6
         guard let (data, resp) = try? await brokerSession.data(for: req),
@@ -674,14 +780,20 @@ final class CommandCenterModel: ObservableObject {
         guard let w = try? JSONDecoder().decode(Wrap.self, from: data) else { return }
         for ov in w.overrides {
             let ref = SessionRef(machineID: machine.id, session: ov.session)
+            guard collectionAllowed(), collectionGeneration() == ownership,
+                  let lifetime = lifetimes[ref.id], app.collectionSessionKey(ref) == lifetime else { continue }
             guard consumedOverrideTS[ref.id] != ov.ts else { continue }   // consume each once
-            consumedOverrideTS[ref.id] = ov.ts
-            setManualLabel(ref: ref, label: ov.label)
+            appliedOverrideTS[ref.id] = ov.ts
+            setManualLabel(ref: ref, label: ov.label, correctionID: "relay-\(ov.ts)")
+            // Delete the relay only after its status AND receipt are published.
+            guard await publishBrokerStatuses(machine), collectionAllowed(), collectionGeneration() == ownership,
+                  app.collectionSessionKey(ref) == lifetime else { continue }
             // Clear it on the broker (compare-and-clear by ts, so a newer one survives).
             guard let enc = ov.session.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                   let cu = URL(string: machine.httpBase + "/ccoverride?session=\(enc)&clear=\(ov.ts)") else { continue }
             var creq = URLRequest(url: cu); creq.httpMethod = "POST"; creq.timeoutInterval = 6
-            brokerSession.dataTask(with: creq).resume()
+            if let (_, response) = try? await brokerSession.data(for: creq),
+               (response as? HTTPURLResponse)?.statusCode == 200 { consumedOverrideTS[ref.id] = ov.ts }
         }
     }
 
@@ -795,38 +907,55 @@ final class CommandCenterModel: ObservableObject {
         guard isCollector, collectionAllowed() else { return }
         statusesChanged?()
         refreshAttention()
-        struct Item: Encodable {
-            let session: String; let label: String; let summary: String
-            let lookAtThis: String?; let updatedAt: Double
-        }
-        // Per-broker: each broker stores ITS sessions' statuses, keyed by session name.
-        // The phone reads each broker's /ccstatus and joins by name — no cross-client
-        // machine-name ambiguity (the Mac calls its host "this mac"; the phone sees a
-        // tailnet hostname for the same broker).
-        for m in app.machines {
-            var items: [Item] = []
-            // Hidden sessions are excluded from the published blob too, so the phone's
-            // command center never sees them (matches this Mac hiding them from view).
-            for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent && !s.hidden {
-                guard let st = statuses[SessionRef(machineID: m.id, session: s.name).id] else { continue }
-                items.append(Item(session: s.name, label: st.label, summary: st.oneLiner,
-                                  lookAtThis: st.lookAtThis, updatedAt: st.updatedAt.timeIntervalSince1970))
+        for machine in app.machines { Task { await publishBrokerStatuses(machine) } }
+    }
+
+    /// Serialize full-blob writes so an older HTTP request cannot land after a
+    /// correction's publication. The same acknowledged path serves relay clears.
+    private func publishBrokerStatuses(_ machine: Machine) async -> Bool {
+        dirtyBrokerPublications.insert(machine.id)
+        if let running = brokerPublications[machine.id] { return await running.value }
+        let ownership = collectionGeneration()
+        let task = Task { @MainActor [self] in
+            defer { brokerPublications[machine.id] = nil }
+            struct Item: Encodable {
+                let session: String; let label: String; let summary: String
+                let lookAtThis: String?; let updatedAt: Double
+                let appliedOverrideTS: Int64?
             }
-            guard let url = URL(string: m.httpBase + "/ccstatus"),
-                  let body = try? JSONEncoder().encode(["items": items]) else { continue }
-            var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 6
-            brokerSession.dataTask(with: req).resume()
+            let m = machine
+            repeat {
+                dirtyBrokerPublications.remove(m.id)
+                guard isCollector, collectionAllowed(), collectionGeneration() == ownership, let app else { return false }
+                // Each broker stores its own sessions; hidden sessions stay out
+                // of the blob. Coalesce changes while a request is in flight.
+                var items: [Item] = []
+                for s in (app.sessionsByMachine[m.id] ?? []) where !s.agent && !s.hidden {
+                    let key = SessionRef(machineID: m.id, session: s.name).id
+                    guard let st = statuses[key] else { continue }
+                    items.append(Item(session: s.name, label: st.label, summary: st.oneLiner,
+                        lookAtThis: st.lookAtThis, updatedAt: st.updatedAt.timeIntervalSince1970, appliedOverrideTS: appliedOverrideTS[key]))
+                }
+                guard let url = URL(string: m.httpBase + "/ccstatus"),
+                      let body = try? JSONEncoder().encode(["items": items]) else { return false }
+                var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 6
+                guard let (_, response) = try? await brokerSession.data(for: req),
+                      (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
+            } while dirtyBrokerPublications.contains(m.id)
+            return true
         }
+        brokerPublications[machine.id] = task
+        return await task.value
     }
 
     func readSharedStatuses() {
         guard let app else { return }
         let replica = app.sharedWorkspace.replica
         if let previous = presentationWorkspaceID, previous != replica.workspaceID {
-            statuses = [:]; sessionLifetimes = [:]
+            statuses = [:]; sessionLifetimes = [:]; pendingCorrections = [:]; correctionIssue = nil
             if let data = defaults.data(forKey: "ut.ccPresentation.v2." + replica.workspaceID),
                let saved = try? JSONDecoder().decode(Presentation.self, from: data) {
-                statuses = saved.statuses; sessionLifetimes = saved.lifetimes
+                statuses = saved.statuses; sessionLifetimes = saved.lifetimes; pendingCorrections = saved.corrections ?? [:]
             }
         }
         presentationWorkspaceID = replica.workspaceID
@@ -839,7 +968,7 @@ final class CommandCenterModel: ObservableObject {
             for session in app.sessionsByMachine[machine.id] ?? [] {
                 let ref = SessionRef(machineID: machine.id, session: session.name)
                 if let lifetime = app.collectionSessionKey(ref) {
-                    if let previous = sessionLifetimes[ref.id], previous != lifetime { next[ref.id] = nil }
+                    if let previous = sessionLifetimes[ref.id], previous != lifetime { next[ref.id] = nil; pendingCorrections[ref.id] = nil }
                     sessionLifetimes[ref.id] = lifetime
                 }
                 guard let identity = app.sharedSessionKey(ref) else { continue }
@@ -879,7 +1008,15 @@ final class CommandCenterModel: ObservableObject {
                       app.sharedSessionKey(ref) == nil else { continue }
                 let date = Date(timeIntervalSince1970: item.updatedAt)
                 if let current = statuses[ref.id], current.updatedAt > date { continue }
-                statuses[ref.id] = AgentStatus(label: item.label, oneLiner: item.summary,
+                var label = item.label
+                if let pending = pendingCorrections[ref.id], pending.workspace == workspaceID, pending.lifetime == lifetime {
+                    let acknowledged = (pending.receipt.map { (item.appliedOverrideTS ?? 0) >= $0 } ?? false) ||
+                        (item.label == pending.label && date > (pending.previous?.updatedAt ?? .distantPast))
+                    if acknowledged {
+                        pendingCorrections[ref.id] = nil
+                    } else { label = pending.label }
+                }
+                statuses[ref.id] = AgentStatus(label: label, oneLiner: item.summary,
                     lookAtThis: item.lookAtThis, updatedAt: date)
             }
         }
@@ -922,6 +1059,14 @@ func ccSection(state: String, status: AgentStatus?) -> Int {
 }
 
 // MARK: - View
+
+struct CommandCenterStatusNotice: View {
+    let issue: String
+    var body: some View {
+        Text(issue).font(.system(size: 12)).foregroundStyle(Theme.waiting)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
 
 /// The command center: a grid of agent tiles sorted by attention. Needs-you sit on
 /// top, larger, with the line worth reading; the rest follow as uniform cards. EVERY
@@ -968,6 +1113,9 @@ struct CommandCenterView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 glance(needsYou: needsCount, rest: all.count - sessionNeeds.count)
+                if let issue = cc.correctionIssue ?? state.sharedWorkspace.replica.issue {
+                    CommandCenterStatusNotice(issue: issue)
+                }
                 if #available(macOS 14.0, *) {
                     UsageCommandCenterSection(usage: ArgusUsage.shared) { try? state.navigate(to: .usage) }
                 }
