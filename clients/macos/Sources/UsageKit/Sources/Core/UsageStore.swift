@@ -87,6 +87,13 @@ final class UsageStore {
     var remoteAccountConfiguration: IntegrationConfiguration?
     var remoteAccountFields: [String: [String: Any]] = [:]
     var remoteLoginIntegration: String?
+    var remoteAccountActionPending = false
+    var loginBrowserError: String?
+    var loginContext: AccountLoginContext?
+    @ObservationIgnored var openAccountLoginURL: @MainActor (URL) -> Bool = { UsageBrowser.open($0) }
+    @ObservationIgnored private var loginHandoff = AccountLoginHandoff()
+    @ObservationIgnored private var remoteAccountGeneration = 0
+    @ObservationIgnored private var remoteStateRequestID: UUID?
     var deferConnectionRefresh = false
     var selectedCategory: SourceCategory?
     var selection: DetailSelection?
@@ -309,7 +316,7 @@ final class UsageStore {
     }
 
     @discardableResult
-    func saveConnection(_ draft: ConnectionDraft) async -> Bool {
+    func saveConnection(_ draft: ConnectionDraft, loginContext: AccountLoginContext? = nil) async -> Bool {
         if remoteAccountRequest != nil {
             guard !savingConnection else { return false }
             savingConnection = true; defer { savingConnection = false }
@@ -338,9 +345,9 @@ final class UsageStore {
             do { try cache?.save(sources) }
             catch { configurationError = "Connection saved, but its local reading cache could not be updated." }
             connectionDraft = nil
-            if draft.startsCodexLogin { connectCodex(saved.id, method: draft.codexLoginMethod) }
-            else if draft.startsClaudeLogin { connectClaude(saved.id) }
-            else if draft.startsDevinLogin { connectDevin(saved.id) }
+            if draft.startsCodexLogin { connectCodex(saved.id, method: draft.codexLoginMethod, context: loginContext) }
+            else if draft.startsClaudeLogin { connectClaude(saved.id, context: loginContext) }
+            else if draft.startsDevinLogin { connectDevin(saved.id, context: loginContext) }
             else if saved.enabled && !deferConnectionRefresh { await refresh(sourceID: saved.id) }
             return true
         } catch {
@@ -349,28 +356,35 @@ final class UsageStore {
         }
     }
 
-    func connectCodex(_ sourceID: String, method: CodexLoginMethod? = nil) {
+    func connectCodex(_ sourceID: String, method: CodexLoginMethod? = nil, context: AccountLoginContext? = nil) {
         if remoteAccountRequest != nil { Task { _ = await remoteAccountAction(["action": "connect", "sourceID": sourceID, "method": (method ?? loginMethod).rawValue]) }; return }
-        guard loginTask == nil, let config = configuration,
+        guard loginSourceID == nil, loginTask == nil, let config = configuration,
               let source = config.sources.first(where: { $0.id == sourceID && $0.integration == .codex }),
               let profile = source.codexHome else { return }
         loginSourceID = sourceID
+        let context = context ?? AccountLoginContext()
+        loginContext = context; loginBrowserError = nil
         let selectedMethod = method ?? loginMethod
         loginInstructions = nil
         loginMessage = "Starting a private Codex sign-in…"
         loginTask = Task {
-            defer { loginTask = nil; loginSourceID = nil; loginInstructions = nil }
+            defer { loginTask = nil; loginSourceID = nil; loginInstructions = nil; loginContext = nil }
             do {
                 let existingEmails = Set(sources.filter { $0.id != sourceID && $0.integration == .codex }.compactMap(\.accountIdentity))
                 let authenticator = CodexAuthenticator(executable: config.executables.codex)
-                let login = try await authenticator.signIn(profile: profile, existingEmails: existingEmails, method: selectedMethod) { [weak self] instructions in
+                let login = try await authenticator.signIn(profile: profile, existingEmails: existingEmails, method: selectedMethod,
+                    opensBrowser: context.presenter == .local) { [weak self] instructions in
                     await MainActor.run {
+                        guard self?.loginContext?.id == context.id, !Task.isCancelled else { return }
                         self?.loginInstructions = instructions
                         self?.loginMessage = instructions.userCode != nil
                             ? "Open the authorization link and enter this code to connect \(source.label)."
-                            : (instructions.browserOpened ? "Finish signing in to \(source.label) in UT Browser." : "UT Browser couldn't open automatically. Open or copy the sign-in link below.")
+                            : (context.presenter == .requestingClient || instructions.browserOpened
+                                ? "Finish signing in to \(source.label) in UT Browser."
+                                : "UT Browser couldn't open automatically. Open or copy the sign-in link below.")
                     }
                 }
+                try Task.checkCancellation()
                 try CodexAuthenticator.save(login, sourceID: sourceID, originalProfile: profile, to: connections.url)
                 loginMessage = "Connected. Refreshing the account's real limits…"
                 while refreshing { try await Task.sleep(for: .milliseconds(50)) }
@@ -382,29 +396,30 @@ final class UsageStore {
         }
     }
 
-    func connectAccount(_ sourceID: String) {
+    func connectAccount(_ sourceID: String, context: AccountLoginContext? = nil) {
         if remoteAccountRequest != nil { Task { _ = await remoteAccountAction(["action": "connect", "sourceID": sourceID, "method": loginMethod.rawValue]) }; return }
         guard let source = configuration?.sources.first(where: { $0.id == sourceID }), source.enabled,
               loginSourceID == nil, !refreshing else { return }
         switch source.integration {
-        case .codex: connectCodex(sourceID)
-        case .claude: connectClaude(sourceID)
-        case .devin: connectDevin(sourceID)
+        case .codex: connectCodex(sourceID, context: context)
+        case .claude: connectClaude(sourceID, context: context)
+        case .devin: connectDevin(sourceID, context: context)
         default: break
         }
     }
 
-    func connectDevin(_ sourceID: String) {
+    func connectDevin(_ sourceID: String, context: AccountLoginContext? = nil) {
         if remoteAccountRequest != nil { connectAccount(sourceID); return }
         guard loginSourceID == nil, let configuration,
               let source = configuration.sources.first(where: { $0.id == sourceID && $0.integration == .devin && $0.enabled }) else { return }
         loginSourceID = sourceID; loginInstructions = nil
+        loginContext = context ?? AccountLoginContext(); loginBrowserError = nil
         devinAuthorizationCode = ""; devinCodeSubmitted = false
         loginMessage = "Starting a private Devin sign-in…"
         loginTask = Task {
             var profile: AccountProfile?, committed = false
             defer {
-                loginTask = nil; loginSourceID = nil; loginInstructions = nil
+                loginTask = nil; loginSourceID = nil; loginInstructions = nil; loginContext = nil
                 devinLoginProcess = nil; devinAuthorizationCode = ""; devinCodeSubmitted = false
                 // The authenticator stops its owned process before returning,
                 // including cancellation. Failed attempts cannot modify the old
@@ -450,13 +465,14 @@ final class UsageStore {
         }
     }
 
-    func connectClaude(_ sourceID: String) {
+    func connectClaude(_ sourceID: String, context: AccountLoginContext? = nil) {
         if remoteAccountRequest != nil { connectAccount(sourceID); return }
         guard loginSourceID == nil, let source = configuration?.sources.first(where: { $0.id == sourceID && $0.integration == .claude }) else { return }
         do {
             let flow = try ClaudeLoginFlow()
             claudeLoginFlow = flow; claudeOriginalReference = source.credentialReference
             claudeAuthorizationCode = ""; loginSourceID = sourceID
+            loginContext = context ?? AccountLoginContext(); loginBrowserError = nil
             loginInstructions = CodexLoginInstructions(url: flow.url, userCode: nil, browserOpened: false)
             loginMessage = "Sign in to \(source.label) using the link below, then paste the complete authorization code."
         } catch { loginMessage = "Couldn't start Claude sign-in. Try again." }
@@ -472,7 +488,7 @@ final class UsageStore {
         loginMessage = "Verifying this Claude account…"
         loginTask = Task {
             defer {
-                loginTask = nil; loginSourceID = nil; loginInstructions = nil
+                loginTask = nil; loginSourceID = nil; loginInstructions = nil; loginContext = nil
                 claudeLoginFlow = nil; claudeOriginalReference = nil
             }
             do {
@@ -495,10 +511,11 @@ final class UsageStore {
     func cancelLogin() {
         if remoteAccountRequest != nil { Task { _ = await remoteAccountAction(["action": "cancel"] ) }; return }
         devinAuthorizationCode = ""
+        loginBrowserError = nil
         loginTask?.cancel()
         if claudeLoginFlow != nil && loginTask == nil {
             claudeLoginFlow = nil; claudeOriginalReference = nil; claudeAuthorizationCode = ""
-            loginSourceID = nil; loginInstructions = nil; loginMessage = "Claude sign-in cancelled."
+            loginSourceID = nil; loginInstructions = nil; loginContext = nil; loginMessage = "Claude sign-in cancelled."
         }
     }
 
@@ -507,23 +524,79 @@ final class UsageStore {
         connectionDraft?.label = label
     }
 
+    func resetRemoteAccountPresentation() {
+        remoteAccountGeneration += 1
+        remoteStateRequestID = nil
+        remoteAccountActionPending = false
+        loginHandoff.reset()
+        loginContext = nil; loginBrowserError = nil
+    }
+
+    func openAccountLoginPage() {
+        guard let url = loginInstructions?.url, AccountLoginHandoff.isSafe(url) else { return }
+        let opened = openAccountLoginURL(url)
+        loginInstructions?.browserOpened = opened
+        loginBrowserError = opened ? nil : "UT Browser couldn't open. Use Open sign-in page to try again, or copy the link."
+    }
+
     func remoteAccountAction(_ request: [String: Any]) async -> Bool {
         guard let remoteAccountRequest else { return false }
+        var request = request
+        let action = request["action"] as? String ?? "state"
+        let isState = action == "state"
+        guard !remoteAccountActionPending else { return isState }
+        let stateRequestID = UUID()
+        if isState {
+            guard remoteStateRequestID == nil else { return true }
+            remoteStateRequestID = stateRequestID
+        } else {
+            remoteAccountGeneration += 1
+            remoteAccountActionPending = true
+            if action == "connect" || action == "save" {
+                let id = UUID().uuidString
+                request["loginAttemptID"] = id
+                loginHandoff.begin(id); loginBrowserError = nil
+            } else if action == "cancel" || action == "finish" {
+                request["loginAttemptID"] = loginContext?.id
+                if action == "cancel" { loginHandoff.reset(); loginBrowserError = nil }
+            }
+        }
+        let generation = remoteAccountGeneration
+        defer {
+            if isState, remoteStateRequestID == stateRequestID { remoteStateRequestID = nil }
+            if !isState, generation == remoteAccountGeneration { remoteAccountActionPending = false }
+        }
         do {
             let state = try await remoteAccountRequest(request)
+            // A response from before a mutation/workspace switch cannot resurrect
+            // an old attempt, clear a newer one, or launch its browser.
+            guard generation == remoteAccountGeneration else { return false }
             if let error = state["error"] as? String { throw IntegrationError.configuration(error) }
             let rows = state["connections"] as? [[String: Any]] ?? []
             remoteAccountFields = Dictionary(uniqueKeysWithValues: rows.compactMap { row in (row["id"] as? String).map { ($0, row) } })
             remoteAccountConfiguration = IntegrationConfiguration(sources: try JSONDecoder().decode([SourceConfiguration].self, from: JSONSerialization.data(withJSONObject: rows)))
+            let previousAttemptID = loginContext?.id
             loginSourceID = state["loginSourceID"] as? String; loginMessage = state["message"] as? String
+            loginContext = (state["loginAttemptID"] as? String).map { AccountLoginContext(id: $0, presenter: .requestingClient) }
+            if loginContext?.id != previousAttemptID || loginSourceID == nil { loginBrowserError = nil }
             remoteLoginIntegration = state["loginIntegration"] as? String
+            let browserOpened = previousAttemptID == loginContext?.id && loginInstructions?.browserOpened == true
             loginInstructions = nil
             if let link = state["url"] as? String, let url = URL(string: link) {
-                loginInstructions = CodexLoginInstructions(url: url, userCode: state["userCode"] as? String, browserOpened: false)
+                loginInstructions = CodexLoginInstructions(url: url, userCode: state["userCode"] as? String,
+                    browserOpened: browserOpened, opensBrowserAutomatically: state["opensBrowserAutomatically"] as? Bool ?? false)
+            }
+            if loginHandoff.consume(attemptID: loginSourceID == nil ? nil : loginContext?.id,
+                url: loginInstructions?.url, automatically: loginInstructions?.opensBrowserAutomatically == true) != nil {
+                openAccountLoginPage()
             }
             configurationError = nil; connectionSaveError = nil
             return true
-        } catch { connectionSaveError = error.localizedDescription; configurationError = error.localizedDescription; return false }
+        } catch {
+            guard generation == remoteAccountGeneration else { return false }
+            connectionSaveError = error.localizedDescription; configurationError = error.localizedDescription
+            return false
+        }
     }
 
     func handleAccountService(_ request: [String: Any]) async throws -> [String: Any] {
@@ -531,7 +604,8 @@ final class UsageStore {
         let action = request["action"] as? String ?? "state"
         let sourceID = request["sourceID"] as? String ?? ""
         let source = configuration?.sources.first { $0.id == sourceID }
-        if action != "state", refreshing || savingConnection { throw IntegrationError.unavailable("A collection is in progress. Try again when it finishes.") }
+        if action != "state", action != "cancel", refreshing || savingConnection { throw IntegrationError.unavailable("A collection is in progress. Try again when it finishes.") }
+        let context = AccountLoginContext(id: request["loginAttemptID"] as? String ?? UUID().uuidString, presenter: .requestingClient)
         switch action {
         case "state": break
         case "save":
@@ -545,18 +619,28 @@ final class UsageStore {
             draft.applyServiceFields(fields)
             deferConnectionRefresh = true
             defer { deferConnectionRefresh = false }
-            guard await saveConnection(draft) else { throw IntegrationError.configuration(connectionSaveError ?? "Connection was not saved.") }
+            guard await saveConnection(draft, loginContext: context) else { throw IntegrationError.configuration(connectionSaveError ?? "Connection was not saved.") }
         case "connect":
             guard let source, source.enabled else { throw IntegrationError.configuration("Enable this connection before signing in.") }
             guard loginSourceID == nil else { throw IntegrationError.unavailable("Finish or cancel the current sign-in first.") }
             loginMethod = (request["method"] as? String).flatMap(CodexLoginMethod.init(rawValue:)) ?? .deviceCode
-            connectAccount(sourceID)
+            connectAccount(sourceID, context: context)
         case "finish":
+            if let id = request["loginAttemptID"] as? String, id != loginContext?.id {
+                throw IntegrationError.configuration("This sign-in has ended. Start a new sign-in.")
+            }
             guard let code = request["code"] as? String, !code.isEmpty else { throw IntegrationError.configuration("Enter the authorization code.") }
             if claudeLoginFlow != nil { claudeAuthorizationCode = code; finishClaudeLogin() }
             else if devinLoginProcess != nil { devinAuthorizationCode = code; finishDevinLogin() }
             else { throw IntegrationError.configuration("No sign-in is waiting for a code.") }
-        case "cancel": cancelLogin()
+        case "cancel":
+            if request["loginAttemptID"] == nil || request["loginAttemptID"] as? String == loginContext?.id {
+                let pending = loginTask
+                cancelLogin()
+                // Acknowledge only after the owned process/flow has released its
+                // resources and cleared the login state, not one poll later.
+                await pending?.value
+            }
         case "authorize": await authorizeSavedCredential(sourceID)
         case "remove":
             guard loginSourceID == nil, source != nil, var config = configuration else { throw IntegrationError.configuration("Finish sign-in before removing this connection.") }
@@ -577,8 +661,10 @@ final class UsageStore {
              "credentialFields": integration.credentialFields.map { ["id": $0.id, "title": $0.title] }]
         }]
         state["loginSourceID"] = loginSourceID; state["message"] = loginMessage
+        state["loginAttemptID"] = loginContext?.id
         state["loginIntegration"] = configuration?.sources.first { $0.id == loginSourceID }?.integration.rawValue
         state["url"] = loginInstructions?.url.absoluteString; state["userCode"] = loginInstructions?.userCode
+        state["opensBrowserAutomatically"] = loginContext?.presenter == .requestingClient && loginInstructions?.opensBrowserAutomatically == true
         return state
     }
 }

@@ -91,6 +91,36 @@ final class DevinAuthenticationTests: XCTestCase {
 
     private func temporaryRoot() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("argus-devin-auth-test-\(UUID())") }
 
+    @MainActor func testServiceCancellationAcknowledgesOnlyAfterOwnedProcessAndProfileCleanup() async throws {
+        let directory = temporaryRoot(); defer { try? FileManager.default.removeItem(at: directory) }
+        let old = try AccountProfile.create(in: directory.appendingPathComponent("original"))
+        var source = SourceConfiguration(id: "devin-fixture", integration: .devin, label: "Work")
+        source.loginProfile = old.root.path; source.accountIdentity = "existing@example.test"
+        let config = IntegrationConfiguration(sources: [source]), url = directory.appendingPathComponent("config.json")
+        try config.save(to: url)
+        let before = try Data(contentsOf: url), attempts = directory.appendingPathComponent("attempts")
+        let suite = "argus.devin.cancel-tests.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(registry: .init(adapters: [], origin: .live, configuration: config), defaults: defaults,
+            cache: .init(url: directory.appendingPathComponent("cache.json")),
+            connections: .init(url: url, profilesDirectory: attempts))
+        let process = FixtureLoginProcess(profile: old.root)
+        store.makeDevinAuthenticator = { executable in DevinAuthenticator(executable: executable, makeSession: { _, _ in process }) }
+        let started = try await store.handleAccountService(["action": "connect", "sourceID": source.id, "loginAttemptID": "owned"])
+        XCTAssertEqual(started["loginAttemptID"] as? String, "owned")
+        for _ in 0..<100 where store.devinLoginProcess == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNotNil(store.devinLoginProcess)
+        store.refreshing = true
+        let cancelled = try await store.handleAccountService(["action": "cancel", "loginAttemptID": "owned"])
+        XCTAssertTrue(process.closed, "The response must wait for cleanup, not merely schedule it")
+        XCTAssertNil(cancelled["loginSourceID"])
+        XCTAssertNil(cancelled["loginAttemptID"])
+        XCTAssertNil(cancelled["url"])
+        XCTAssertEqual(try Data(contentsOf: url), before)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.root.path))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: attempts.path).isEmpty)
+    }
+
     func testInstalledCLIStartsAndCancelsInsideAnEmptyPrivateProfile() async throws {
         guard ProcessInfo.processInfo.environment["UT_DEVIN_CLI_PROBE"] == "1" else { throw XCTSkip("Opt-in installed CLI probe; no login code, browser or model run") }
         let executable = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/devin").path

@@ -17,6 +17,7 @@ struct CodexLoginInstructions: Sendable {
     var url: URL
     var userCode: String?
     var browserOpened: Bool
+    var opensBrowserAutomatically = true
 }
 
 /// Provider-owned authentication, usable by the CLI probe without launching the app.
@@ -29,7 +30,7 @@ struct CodexAuthenticator: Sendable {
         try CodexRPCSession(executable: $0, profile: $1)
     }
 
-    func signIn(profile: String, existingEmails: Set<String>, method: CodexLoginMethod = .browser,
+    func signIn(profile: String, existingEmails: Set<String>, method: CodexLoginMethod = .browser, opensBrowser: Bool = true,
                 onInstructions: @Sendable (CodexLoginInstructions) async -> Void = { _ in }) async throws -> CodexLogin {
         let original = URL(fileURLWithPath: profile, isDirectory: true)
         let hasExistingAuth = FileManager.default.fileExists(atPath: original.appendingPathComponent("auth.json").path)
@@ -60,9 +61,10 @@ struct CodexAuthenticator: Sendable {
         if method == .deviceCode && (code?.isEmpty != false) {
             throw IntegrationError.invalidResponse("Codex did not return a device authorization code. Try browser sign-in.")
         }
-        let opened = method == .browser ? await browser.open(url) : false
+        let opened = method == .browser && opensBrowser ? await browser.open(url) : false
         // A blocked browser launch still leaves a usable copyable link in the app.
-        await onInstructions(CodexLoginInstructions(url: url, userCode: code, browserOpened: opened))
+        await onInstructions(CodexLoginInstructions(url: url, userCode: code, browserOpened: opened,
+            opensBrowserAutomatically: method == .browser))
         let completed = try await session.waitForNotification("account/login/completed", timeout: 600)
         guard completed["success"].bool == true else {
             throw IntegrationError.authentication("Sign-in did not complete. You can try again.")

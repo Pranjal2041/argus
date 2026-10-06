@@ -218,6 +218,7 @@ public final class UsageController: ObservableObject {
 
     public func clearSharedPresentation() {
         applyingSharedState = true; defer { applyingSharedState = false }
+        store.resetRemoteAccountPresentation()
         store.sources = []; store.failures = []; store.lastRefresh = nil
         store.remoteAccountConfiguration = nil; store.remoteAccountFields = [:]; store.loginSourceID = nil
         store.loginMessage = nil; store.loginInstructions = nil; store.remoteLoginIntegration = nil

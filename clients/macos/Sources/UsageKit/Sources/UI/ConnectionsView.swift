@@ -27,8 +27,8 @@ struct ConnectionsView: View {
                             Text(code).font(.system(size: 22, weight: .semibold, design: .monospaced)).textSelection(.enabled)
                             Button("Copy code") { copy(code) }.buttonStyle(SecondaryButtonStyle())
                         }
-                        Link(instructions.userCode == nil ? "Open sign-in page" : "Open authorization page", destination: instructions.url)
-                            .font(.system(size: 12))
+                        Button(instructions.userCode == nil ? "Open sign-in page" : "Open authorization page") { store.openAccountLoginPage() }
+                            .buttonStyle(.link).font(.system(size: 12))
                             .accessibilityIdentifier("open-account-sign-in")
                         Button("Copy link") { copy(instructions.url.absoluteString) }.buttonStyle(SecondaryButtonStyle())
                     }
@@ -36,6 +36,7 @@ struct ConnectionsView: View {
                         Text(instructions.url.absoluteString).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                     }
                   }
+                  if let message = store.loginBrowserError { InfoNote(text: message, warning: true) }
                   if store.claudeLoginFlow != nil || (store.remoteLoginIntegration == "claude" && store.loginSourceID != nil) {
                     HStack(spacing: 12) {
                         SecureField("Complete authorization code (code#state)", text: $store.claudeAuthorizationCode)
@@ -104,6 +105,7 @@ struct ConnectionsView: View {
               }.padding(.vertical, 10)
             }.font(.system(size: 11)).foregroundStyle(Palette.secondary) }
         }
+        .disabled(store.remoteAccountActionPending)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("connections-page")
         .confirmationDialog("Remove this connection?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
