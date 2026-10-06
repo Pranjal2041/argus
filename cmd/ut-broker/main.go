@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 
 	"universal-tmux/internal/broker"
@@ -97,12 +98,23 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// Resolve the runtime's durable installation identity before selecting a
+	// workspace store. OS machine IDs can be absent or cloned in containers;
+	// display names and route addresses are not installation identities.
+	ln, where, ts, installationID, err := listener(ctx, *listen, *tsHost, *tsDir)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	if ts != nil {
+		defer ts.Close()
+	}
 	// Initial and periodic backups share one background worker. A slow store must
 	// never delay opening the broker's listeners or reconnecting live sessions.
 	go broker.RunDailyBackupLoop(ctx)
 
 	var workspaceStore *workspace.Store
-	if root, err := workspace.DefaultRoot(*tmuxSock); err != nil {
+	if root, err := workspace.DefaultRootForInstallation(*tmuxSock, installationID); err != nil {
 		log.Printf("workspace service unavailable: %v", err)
 	} else if workspaceStore, err = workspace.Open(root); err != nil {
 		log.Printf("workspace service unavailable: %v", err)
@@ -1234,12 +1246,6 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"mirror": ms})
 	})
 
-	ln, where, ts, err := listener(ctx, *listen, *tsHost, *tsDir)
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
 	// Mesh: this broker can reach peer brokers over the tailnet (through its own
 	// tsnet node, or — local mode — the host's Tailscale), so an agent talks only
 	// to its LOCAL broker and we relay to any machine. /mesh/peers lists the
@@ -1360,10 +1366,10 @@ func fsResult(w http.ResponseWriter, err error) {
 // tsHost is set — the rootless, no-TUN inbound path for owned/cluster nodes.
 // The returned *tsnet.Server (nil in local mode) lets the mesh dial peer
 // brokers over the tailnet.
-func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, string, *tsnet.Server, error) {
+func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, string, *tsnet.Server, string, error) {
 	if tsHost == "" {
 		ln, err := net.Listen("tcp", listen)
-		return ln, "http://" + listen, nil, err
+		return ln, "http://" + listen, nil, "", err
 	}
 	port := "8722"
 	if _, p, err := net.SplitHostPort(listen); err == nil && p != "" {
@@ -1377,19 +1383,28 @@ func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, 
 		s.AuthKey = k
 	}
 	if err := s.Start(); err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	status, err := s.Up(ctx)
 	if err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
+	}
+	installationID, err := tailnetInstallationIdentity(status)
+	if err != nil {
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	lc, err := s.LocalClient()
 	if err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	ln, err := s.Listen("tcp", ":"+port)
 	if err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	// Real *.ts.net certificate (requires Tailscale HTTPS enabled on the tailnet).
 	// A valid chain is what macOS ATS demands for a remote host — no client hacks.
@@ -1398,5 +1413,12 @@ func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, 
 	if status != nil && status.Self != nil && status.Self.DNSName != "" {
 		name = strings.TrimSuffix(status.Self.DNSName, ".")
 	}
-	return ln, "https://" + name + ":" + port + "  (tailnet, TLS)", s, nil
+	return ln, "https://" + name + ":" + port + "  (tailnet, TLS)", s, installationID, nil
+}
+
+func tailnetInstallationIdentity(status *ipnstate.Status) (string, error) {
+	if status == nil || status.Self == nil || status.Self.ID == "" {
+		return "", fmt.Errorf("tailnet runtime did not supply a stable installation identity")
+	}
+	return "tailscale:" + string(status.Self.ID), nil
 }

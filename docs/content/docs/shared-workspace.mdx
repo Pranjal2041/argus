@@ -39,6 +39,20 @@ Session records include a lifetime identity and broker-issued activity revision.
 Renaming a session retains its identity; recreating one with the same name does not.
 Read acknowledgments refer to an activity revision, so new activity becomes unread.
 
+Broker storage is namespaced by installation identity and session-provider socket.
+Embedded network runtimes supply their durable installation identity (tsnet uses
+its stable node ID), not their hostname, address, or a container's cloned machine
+ID. Local brokers retain their OS-derived roots. `UT_MACHINE_ID` overrides either
+source when an installation identity is managed explicitly. Runtime identity state
+must be preserved with the installation; re-registering a new node is a new identity.
+
+When upgrading a network broker with an existing OS-derived store, verify which
+installation owns that store and map the new root to the existing directory before
+restarting. The broker reports both paths and refuses to guess ownership or silently
+replace that store. A distinct installation sharing the cloned OS identity requires
+an explicitly created separate root. Existing records, receipts, broker IDs, and
+session lifetimes remain in the original owner's store.
+
 The versioned API includes:
 
 - `GET /workspace/info`, `/workspace/snapshot`, and `/workspace/record`.
