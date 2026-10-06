@@ -128,8 +128,7 @@ struct ConnectionsView: View {
 
     private func connectionRow(_ configuration: SourceConfiguration) -> some View {
         let source = store.sources.first { $0.id == configuration.id }
-        let failure = store.failures.first { $0.descriptor?.sourceID == configuration.id }
-        let needsWork = failure != nil || source?.unavailable != nil || source?.hasLimitedAccess == true
+        let status = store.connectionStatus(sourceID: configuration.id)
         return VStack(alignment: .leading, spacing: 9) {
             Hairline()
             HStack(alignment: .top, spacing: 12) {
@@ -140,8 +139,7 @@ struct ConnectionsView: View {
                     }
                 }
                 Spacer()
-                SoftBadge(text: !configuration.enabled ? "Disabled" : (source?.connectionStatusTitle ?? failure?.errorTitle ?? "Waiting"),
-                          symbol: needsWork ? "exclamationmark.circle" : "checkmark.circle", warning: needsWork)
+                SoftBadge(text: status.title, symbol: status.symbol, warning: status.needsAttention)
                 if configuration.integration.supportsAccountSignIn {
                     Button(configuration.hasSavedAccount ? "Change account" : "Sign in") { store.connectAccount(configuration.id) }
                         .buttonStyle(SecondaryButtonStyle()).disabled(store.loginSourceID != nil || store.refreshing || !configuration.enabled)
@@ -159,8 +157,9 @@ struct ConnectionsView: View {
                     .buttonStyle(.plain).foregroundStyle(Palette.secondary)
                     .disabled(store.refreshing || store.savingConnection || !configuration.enabled || store.loginSourceID != nil)
                     .accessibilityLabel("Check \(configuration.label) connection")
+                    .accessibilityIdentifier("check-\(configuration.id)")
             }
-            if let message = failure?.error ?? source?.unavailable?.message {
+            if let message = status.message {
                 Text(message).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let source, source.capabilities != nil { SourceAccessView(source: source) }

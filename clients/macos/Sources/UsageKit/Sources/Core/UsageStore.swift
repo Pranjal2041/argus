@@ -157,6 +157,12 @@ final class UsageStore {
     var configuration: IntegrationConfiguration? { remoteAccountRequest == nil ? registry.configuration : remoteAccountConfiguration }
     var refreshInterval: Double { max(60, min(3600, configuration?.refreshIntervalSeconds ?? 120)) }
 
+    func connectionStatus(sourceID: String) -> UsageConnectionStatus {
+        UsageConnectionStatus(source: sources.first { $0.id == sourceID },
+            failure: failures.first { $0.descriptor?.sourceID == sourceID },
+            enabled: configuration?.sources.first { $0.id == sourceID }?.enabled ?? true)
+    }
+
     var filteredSources: [UsageSource] { sources.filter { selectedCategory == nil || $0.category == selectedCategory } }
     var attention: [AttentionItem] { DashboardLogic.attention(in: filteredSources) }
     var selectedSource: UsageSource? { sources.first { $0.id == selection?.sourceID } }
