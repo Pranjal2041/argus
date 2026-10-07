@@ -12,7 +12,7 @@ enum Op {
 
 /// Live state of a broker socket, surfaced to the UI (header status chip).
 enum ConnState: Equatable {
-    case connecting, connected, reconnecting, closed
+    case connecting, connected, reconnecting, suspended, closed
 }
 
 /// Client-to-broker input framing. The broker protocol has no logical-message
@@ -155,324 +155,352 @@ final class BrokerOutboundQueue {
 /// lets retired WebSocket transports accumulate for the lifetime of the app.
 /// Keeping the pair together gives every reconnect a hard ownership boundary:
 /// invalidating this object cancels the task and releases its private session.
-final class BrokerWebSocketTransport {
+protocol BrokerTransportServing: AnyObject {
+    func resume()
+    func receive(_ completion: @escaping (Result<URLSessionWebSocketTask.Message, Error>) -> Void)
+    func send(_ data: Data, completion: @escaping (Error?) -> Void)
+    func ping(_ completion: @escaping (Error?) -> Void)
+    func invalidate()
+}
+
+private final class BrokerSocketDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    let opened: () -> Void
+    init(opened: @escaping () -> Void) { self.opened = opened }
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        DispatchQueue.main.async(execute: opened)
+    }
+}
+
+final class BrokerWebSocketTransport: BrokerTransportServing {
     let session: URLSession
     let task: URLSessionWebSocketTask
     private(set) var isInvalidated = false
 
-    init(url: URL) {
-        let session = makeBrokerSession(configuration: .ephemeral)
+    init(url: URL, onOpen: @escaping () -> Void = {}) {
+        let session = makeBrokerSession(configuration: .ephemeral, delegate: BrokerSocketDelegate(opened: onOpen))
         self.session = session
         task = session.webSocketTask(with: url)
+        task.maximumMessageSize = 64 * 1024 * 1024
     }
-
+    func resume() { task.resume() }
+    func receive(_ completion: @escaping (Result<URLSessionWebSocketTask.Message, Error>) -> Void) {
+        task.receive(completionHandler: completion)
+    }
+    func send(_ data: Data, completion: @escaping (Error?) -> Void) {
+        task.send(.data(data), completionHandler: completion)
+    }
+    func ping(_ completion: @escaping (Error?) -> Void) { task.sendPing(pongReceiveHandler: completion) }
     func invalidate() {
         guard !isInvalidated else { return }
         isInvalidated = true
         task.cancel()
         session.invalidateAndCancel()
     }
-
-    deinit {
-        invalidate()
-    }
+    deinit { invalidate() }
 }
 
-/// One WebSocket connection to a broker session (binary frame protocol).
-/// Auto-reconnects with exponential backoff; fires `onConnect` on every
-/// (re)connect so the owner can re-send the pane geometry.
+/// All lifecycle transitions run on the main queue. Transport callbacks from
+/// retired epochs cannot change status, release new slots, or replay old input.
 final class BrokerClient {
+    typealias TransportFactory = (URL, @escaping () -> Void) -> any BrokerTransportServing
     private let traceID = String(UUID().uuidString.prefix(8))
     private let traceRef: String
     private var url: URL
-    private var transport: BrokerWebSocketTransport?
-    private var task: URLSessionWebSocketTask? { transport?.task }
+    private var transport: (any BrokerTransportServing)?
+    private var transportURL: URL?
     private var closed = false
-    private var live = false          // received at least one frame on the current socket
-    private var everConnected = false // distinguishes first connect from a reconnect
+    private var suspended = false
+    private var live = false
+    private var opened = false
+    private var everConnected = false
     private var backoff: TimeInterval = 0.5
-    private var epoch = 0             // bumped on each start(); a stale receive/reconnect callback bails on mismatch (no double socket)
+    private var epoch = 0
     private let outbound = BrokerOutboundQueue()
+    private let scheduler: BrokerDialScheduler
+    private let recovery: BrokerRecoveryConfiguration
+    private let makeTransport: TransportFactory
+    private var dialTicket: UUID?
+    private var deadline: DispatchWorkItem?
+    private var retry: DispatchWorkItem?
+    private var heartbeat: DispatchWorkItem?
+    private var pingDeadline: DispatchWorkItem?
+    private var pingID: UUID?
+    private var lastTraffic: TimeInterval = 0
+    private var recoveryObserver: NSObjectProtocol?
 
     var onOutput: (([UInt8]) -> Void)?
-    var onPaneSize: ((_ cols: Int, _ rows: Int) -> Void)?  // authoritative pane size (op 5)
+    var onPaneSize: ((_ cols: Int, _ rows: Int) -> Void)?
     var onStatus: ((ConnState) -> Void)?
-    var onConnect: (() -> Void)?      // each (re)connect — used to re-send geometry
+    var onConnect: (() -> Void)?
 
-    init(url: URL, traceRef: String) {
-        self.url = url
-        self.traceRef = traceRef
+    init(url: URL, traceRef: String, scheduler: BrokerDialScheduler = .shared,
+         recovery: BrokerRecoveryConfiguration = .init(),
+         observeNetwork: Bool = true,
+         makeTransport: @escaping TransportFactory = { BrokerWebSocketTransport(url: $0, onOpen: $1) }) {
+        self.url = url; self.traceRef = traceRef
+        self.scheduler = scheduler; self.recovery = recovery; self.makeTransport = makeTransport
+        if observeNetwork {
+            _ = BrokerNetworkRecovery.shared
+            recoveryObserver = NotificationCenter.default.addObserver(forName: BrokerNetworkRecovery.recovered, object: nil, queue: .main) { [weak self] _ in
+                guard let self, !closed, !suspended else { return }
+                backoff = 0.5
+                if live { probeLiveness() } else { start(trigger: "network-recovered") }
+            }
+        }
         trace("client_created")
     }
 
-    /// Point (re)connections at a new session URL. On a LIVE socket this only
-    /// affects future reconnects, so a seamless rename keeps streaming (the broker
-    /// holds the session open across the rename). When NOT live — e.g. stuck
-    /// reconnecting because the session's stable id ($N) went stale after it was
-    /// re-created (resumed from history) — adopt the new URL and reconnect at once,
-    /// so it dials the new id immediately instead of waiting out the backoff.
-    func updateURL(_ u: URL) {
-        guard u != url else { return }
-        let oldTarget = targetDescription
-        url = u
-        trace("url_changed", ["oldTarget": oldTarget, "live": live])
-        guard !closed, !live else { return }
+    var relaxed = false {
+        didSet {
+            guard oldValue != relaxed else { return }
+            trace("reconnect_policy_changed", ["relaxed": relaxed])
+            if let dialTicket { scheduler.prioritize(dialTicket, foreground: !relaxed) }
+        }
+    }
+
+    /// Pause the local transport, not the remote session or its running jobs.
+    /// Cached terminal history remains available; resume gets a fresh broker snapshot.
+    func setSuspended(_ value: Bool) {
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.setSuspended(value) }; return }
+        guard !closed, suspended != value else { return }
+        suspended = value
+        if value {
+            retire()
+            trace("suspended")
+            onStatus?(.suspended)
+        } else {
+            backoff = 0.5
+            start(trigger: "resumed")
+        }
+    }
+
+    func updateURL(_ value: URL) {
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.updateURL(value) }; return }
+        guard value != url else { return }
+        url = value
+        guard !closed, !suspended, !live else { return }
         backoff = 0.5
         start(trigger: "url-change")
     }
 
-    // ---- thundering-herd control -------------------------------------------
-    // At app (re)launch every pane dials at once. A burst of simultaneous flows
-    // from one client can poison the broker's tsnet data plane for MINUTES (flows
-    // handshake, then frames blackhole), and the resulting mass flapping both
-    // sustains the blackhole and storms SwiftUI with connection-state churn.
-    // Two standard measures: PACE dials per host (max a few in the connecting
-    // state at once) and JITTER the backoff so retries can't march in waves.
-    private static let paceLock = NSLock()
-    private static var dialing: [String: Int] = [:]   // host → conns in pre-first-frame state
-    private static let maxDialingPerHost = 3
-
-    private var pacedHost: String?   // host this conn currently counts against
-    private func paceRelease() {
-        guard let h = pacedHost else { return }
-        pacedHost = nil
-        Self.paceLock.lock()
-        Self.dialing[h] = max(0, (Self.dialing[h] ?? 1) - 1)
-        Self.paceLock.unlock()
-    }
-
-    /// Broker ALWAYS sends the pane-size frame right after accept, so a socket
-    /// that opens but stays silent is a poisoned flow (blackholed in transit) —
-    /// it will never error out on its own. Recycle it.
-    private var firstFrameWork: DispatchWorkItem?
-
-    /// HIDDEN panes reconnect lazily (60s backoff cap, 45s watchdog) instead of
-    /// hot-recycling every few seconds: with a flapping broker, N background
-    /// panes churning connection state was enough continuous invalidation to
-    /// pin SwiftUI layout on macOS 26 (the whole-Mac "hanging" storms). The
-    /// visible pane keeps the snappy caps, and unhiding nudges an immediate dial.
-    var relaxed = false {
-        didSet {
-            if oldValue != relaxed { trace("reconnect_policy_changed", ["relaxed": relaxed]) }
-        }
-    }
-    private var backoffCap: Double { relaxed ? 60 : 10 }
-    private var watchdogDelay: Double { relaxed ? 45 : 6 }
-
-    /// Un-hidden and not live → dial NOW (skip whatever long backoff remains).
     func nudge(trigger: String = "visible") {
-        guard !closed else {
-            trace("nudge_skipped", ["reason": "closed", "trigger": trigger])
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.nudge(trigger: trigger) }; return }
+        guard !closed, !suspended else { return }
+        if live {
+            if ProcessInfo.processInfo.systemUptime - lastTraffic >= recovery.heartbeatInterval { probeLiveness() }
             return
         }
-        guard !live else {
-            trace("nudge_skipped", ["reason": "already-live", "trigger": trigger])
-            return
-        }
-        trace("nudge", ["trigger": trigger, "hadTask": task != nil, "epoch": epoch])
+        // Revealing a pane must not restart an already progressing handshake.
+        if let dialTicket { scheduler.prioritize(dialTicket, foreground: !relaxed); return }
+        if transport != nil { return }
         backoff = 0.5
+        trace("nudge", ["trigger": trigger])
         start(trigger: "nudge:\(trigger)")
     }
 
     func start(trigger: String = "initial") {
-        guard !closed else { return }
-        // NO GHOSTS: a superseded dial/socket must die here, not linger. start()
-        // used to just overwrite `task`; during restart churn (updateURL fires as
-        // /sessions refreshes tmux ids, while a pacing gate-retry is pending) that
-        // orphaned LIVE sockets — open on the broker, frames ignored client-side,
-        // never cancelled — inflating the very per-pair flow pressure that causes
-        // the babel blackhole. Cancel first, always.
-        if task != nil { trace("dial_superseded", ["trigger": trigger, "epoch": epoch]) }
-        retireTransport()
-        // Re-entry safety (found by the git-insights review): updateURL — and any
-        // future caller — can restart mid-dial while this client still holds a
-        // pacing slot; the abandoned dial's callbacks bail on the epoch check and
-        // would never release it. Release before claiming anew.
-        paceRelease()
-        let host = url.host ?? "?"
-        Self.paceLock.lock()
-        let inFlight = Self.dialing[host] ?? 0
-        if inFlight >= Self.maxDialingPerHost {
-            Self.paceLock.unlock()
-            trace("pace_wait", ["trigger": trigger, "inFlight": inFlight, "epoch": epoch])
-            // Too many conns to this host mid-dial — wait a beat and retry the
-            // gate. STALENESS GUARD: only if nothing superseded this attempt
-            // (epoch unchanged) and the pane didn't connect meanwhile — a stale
-            // retry used to tear down a healthy connection and redial it, which
-            // showed as a pane flipping to "reconnecting" for no reason.
-            let retryEpoch = epoch
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.4...1.2)) { [weak self] in
-                guard let self, !self.closed, self.epoch == retryEpoch, !self.live else { return }
-                self.start(trigger: "pace-retry")
-            }
-            return
-        }
-        Self.dialing[host] = inFlight + 1
-        Self.paceLock.unlock()
-        pacedHost = host
-
-        epoch &+= 1
-        let myEpoch = epoch
-        let transport = BrokerWebSocketTransport(url: url)
-        let t = transport.task
-        // A session's scrollback snapshot can exceed URLSession's default 1 MiB
-        // message cap — which fails the receive with EMSGSIZE and, since the
-        // reconnect re-sends it, loops forever ("reconnecting"). The broker now
-        // chunks large frames; this raised cap is belt-and-suspenders (and fixes
-        // it immediately against any broker not yet updated).
-        t.maximumMessageSize = 64 * 1024 * 1024
-        self.transport = transport
-        outbound.activate(generation: myEpoch)
-        live = false
-        t.resume()
-        trace("dial_started", ["trigger": trigger, "epoch": myEpoch, "state": everConnected ? "reconnecting" : "connecting", "relaxed": relaxed])
-        onStatus?(everConnected ? .reconnecting : .connecting)
-        onConnect?() // queued by URLSession until the socket opens; re-sends geometry
-        firstFrameWork?.cancel()
-        let watchdog = DispatchWorkItem { [weak self] in
-            guard let self, !self.closed, myEpoch == self.epoch, !self.live else { return }
-            // Opened but silent for 6s — poisoned flow. Cancel; the receive
-            // failure path reconnects with jittered backoff.
-            self.trace("first_frame_watchdog", ["epoch": myEpoch, "delay": self.watchdogDelay])
-            self.transport?.invalidate()
-        }
-        firstFrameWork = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDelay, execute: watchdog)
-        receiveLoop(myEpoch)
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.start(trigger: trigger) }; return }
+        guard !closed, !suspended else { return }
+        retire()
+        let ticket = UUID()
+        dialTicket = ticket
+        trace("dial_queued", ["trigger": trigger, "relaxed": relaxed])
+        scheduler.request(id: ticket, host: "\(url.host ?? "?"):\(url.port ?? (url.scheme == "wss" ? 443 : 80))",
+            foreground: !relaxed, grant: { [weak self] in
+                guard let self, !closed, !suspended, dialTicket == ticket else { return }
+                beginDial(trigger: trigger)
+            }, revoke: { [weak self] in
+                guard let self, dialTicket == ticket else { return }
+                // The scheduler retains this ticket in its waiting queue.
+                retire(releaseTicket: false)
+                trace("dial_yielded")
+            })
     }
 
-    // Insurance for the static pacing registry (flagged by the git-insights
-    // review): a client deallocated without stop() must not leak its dial slot —
-    // that would silently cap its host below maxDialingPerHost forever.
-    deinit {
-        firstFrameWork?.cancel()
-        paceRelease()
-        retireTransport()
+    private func beginDial(trigger: String) {
+        let current = epoch
+        let connectedURL = url
+        let transport = makeTransport(url) { [weak self] in
+            guard let self else { return }
+            onMain { [weak self] in self?.didOpen(current) }
+        }
+        self.transport = transport
+        transportURL = connectedURL
+        outbound.activate(generation: current)
+        trace("dial_started", ["trigger": trigger, "epoch": current, "relaxed": relaxed])
+        onStatus?(everConnected ? .reconnecting : .connecting)
+        armDeadline(recovery.handshakeTimeout, event: "handshake_timeout", epoch: current)
+        transport.resume()
+        receiveLoop(current, connectedURL: connectedURL)
+    }
+
+    private func didOpen(_ current: Int) {
+        guard valid(current), !opened else { return }
+        opened = true
+        trace("socket_opened", ["epoch": current])
+        if !live { armDeadline(recovery.firstFrameTimeout, event: "first_frame_watchdog", epoch: current) }
+        onConnect?()
+        scheduleHeartbeat(current)
+    }
+
+    private func armDeadline(_ delay: TimeInterval, event: String, epoch current: Int) {
+        deadline?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, valid(current), !live else { return }
+            trace(event, ["epoch": current, "delay": delay])
+            fail(current, error: URLError(.timedOut))
+        }
+        deadline = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func receiveLoop(_ current: Int, connectedURL: URL) {
+        transport?.receive { [weak self] result in
+            self?.onMain { [weak self] in
+                guard let self, valid(current) else { return }
+                switch result {
+                case .success(let message):
+                    BrokerReachabilityEvidence.shared.record(url: connectedURL)
+                    noteTraffic()
+                    if !live {
+                        live = true; everConnected = true; backoff = 0.5
+                        deadline?.cancel(); deadline = nil
+                        releaseDial()
+                        trace("first_frame", ["epoch": current])
+                        onStatus?(.connected)
+                    }
+                    if case .data(let data) = message { handle(data) }
+                    receiveLoop(current, connectedURL: connectedURL)
+                case .failure(let error): fail(current, error: error)
+                }
+            }
+        }
+    }
+
+    private func noteTraffic() {
+        lastTraffic = ProcessInfo.processInfo.systemUptime
+        pingID = nil; pingDeadline?.cancel(); pingDeadline = nil
+    }
+
+    private func scheduleHeartbeat(_ current: Int) {
+        heartbeat?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, valid(current) else { return }
+            if ProcessInfo.processInfo.systemUptime - lastTraffic >= recovery.heartbeatInterval { probeLiveness() }
+            scheduleHeartbeat(current)
+        }
+        heartbeat = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + recovery.heartbeatInterval, execute: work)
+    }
+
+    private func probeLiveness() {
+        guard !closed, !suspended, opened, pingID == nil, let transport, let connectedURL = transportURL else { return }
+        let current = epoch, id = UUID()
+        pingID = id
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, valid(current), pingID == id else { return }
+            trace("heartbeat_timeout", ["epoch": current])
+            fail(current, error: URLError(.timedOut))
+        }
+        pingDeadline = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + recovery.heartbeatTimeout, execute: timeout)
+        transport.ping { [weak self] error in
+            self?.onMain { [weak self] in
+                guard let self, valid(current), pingID == id else { return }
+                if let error { fail(current, error: error) }
+                else {
+                    noteTraffic()
+                    BrokerReachabilityEvidence.shared.record(url: connectedURL)
+                }
+            }
+        }
+    }
+
+    private func fail(_ current: Int, error: Error) {
+        guard valid(current) else { return }
+        trace("receive_failed", ["epoch": current, "error": error.localizedDescription])
+        retire()
+        onStatus?(.reconnecting)
+        let nextEpoch = epoch
+        let delay = backoff * Double.random(in: 0.7...1.3)
+        backoff = min(backoff * 2, relaxed ? 60 : 10)
+        trace("reconnect_scheduled", ["epoch": nextEpoch, "delay": delay, "relaxed": relaxed])
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !closed, !suspended, epoch == nextEpoch else { return }
+            start(trigger: "backoff-retry")
+        }
+        retry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     func stop() {
-        trace("client_stopped", ["epoch": epoch, "live": live])
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.stop() }; return }
         closed = true
-        firstFrameWork?.cancel()
-        paceRelease()
-        retireTransport()
+        retire()
+        trace("client_stopped")
     }
 
-    private func receiveLoop(_ myEpoch: Int) {
-        let connectedURL = task?.originalRequest?.url
-        task?.receive { [weak self] result in
-            // A reconnect (or updateURL) bumps `epoch`; a callback from a superseded
-            // socket bails so we never run two receive loops at once.
-            guard let self, !self.closed else { return }
-            guard myEpoch == self.epoch else {
-                self.trace("stale_receive_ignored", ["callbackEpoch": myEpoch, "epoch": self.epoch])
-                return
-            }
-            switch result {
-            case .success(let message):
-                if let connectedURL { BrokerReachabilityEvidence.shared.record(url: connectedURL) }
-                if !self.live {
-                    self.live = true
-                    self.everConnected = true
-                    self.backoff = 0.5
-                    self.firstFrameWork?.cancel()
-                    self.paceRelease()
-                    self.trace("first_frame", ["epoch": myEpoch])
-                    self.onStatus?(.connected)
-                }
-                if case .data(let data) = message { self.handle(data) }
-                self.receiveLoop(myEpoch)
-            case .failure(let error):
-                guard !self.closed, myEpoch == self.epoch else { return }
-                self.live = false
-                self.firstFrameWork?.cancel()
-                self.paceRelease()
-                self.trace("receive_failed", ["epoch": myEpoch, "error": error.localizedDescription])
-                self.onStatus?(.reconnecting)
-                self.retireTransport()
-                self.scheduleReconnect(myEpoch)
-            }
-        }
+    private func valid(_ current: Int) -> Bool { !closed && !suspended && epoch == current && transport != nil }
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
     }
-
-    private func scheduleReconnect(_ myEpoch: Int) {
-        let delay = backoff * Double.random(in: 0.7...1.3)   // jitter: no synchronized waves
-        backoff = min(backoff * 2, backoffCap) // 0.5,1,2,4,8,… capped (60s when hidden)
-        trace("reconnect_scheduled", ["epoch": myEpoch, "delay": delay, "nextBackoff": backoff, "relaxed": relaxed])
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.closed, myEpoch == self.epoch else { return }
-            self.start(trigger: "backoff-retry")
-        }
+    private func releaseDial() {
+        if let dialTicket { scheduler.release(dialTicket); self.dialTicket = nil }
     }
-
-    private func retireTransport() {
+    private func retire(releaseTicket: Bool = true) {
+        epoch &+= 1
+        deadline?.cancel(); deadline = nil
+        retry?.cancel(); retry = nil
+        heartbeat?.cancel(); heartbeat = nil
+        pingDeadline?.cancel(); pingDeadline = nil; pingID = nil
         outbound.deactivate()
-        transport?.invalidate()
-        transport = nil
+        let previous = transport
+        transport = nil; transportURL = nil; live = false; opened = false
+        previous?.invalidate()
+        if releaseTicket { releaseDial() }
     }
-
-    private var targetDescription: String {
-        let session = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?.first(where: { $0.name == "session" })?.value ?? ""
-        return "\(url.host ?? "?")\(url.path)#\(session)"
+    deinit {
+        deadline?.cancel(); retry?.cancel(); heartbeat?.cancel(); pingDeadline?.cancel()
+        if let recoveryObserver { NotificationCenter.default.removeObserver(recoveryObserver) }
+        if let dialTicket { scheduler.release(dialTicket) }
+        transport?.invalidate()
+        outbound.deactivate()
     }
 
     private func trace(_ event: String, _ fields: [String: Any] = [:]) {
         var all = fields
-        all["client"] = traceID
-        all["ref"] = traceRef
-        all["target"] = targetDescription
+        all["client"] = traceID; all["ref"] = traceRef
+        all["target"] = "\(url.host ?? "?")\(url.path)"
         TerminalConnectionTrace.record("broker.\(event)", all)
     }
 
     private func handle(_ data: Data) {
-        let b = [UInt8](data)
-        guard b.count >= 2 else { return }
-        let op = b[0]
-        let paneLen = Int(b[1])
-        guard b.count >= 2 + paneLen else { return }
-        let payload = b[(2 + paneLen)...]
-        switch op {
-        case Op.output:
-            onOutput?(Array(payload))
+        let bytes = [UInt8](data)
+        guard bytes.count >= 2 else { return }
+        let paneLength = Int(bytes[1])
+        guard bytes.count >= 2 + paneLength else { return }
+        let payload = bytes[(2 + paneLength)...]
+        switch bytes[0] {
+        case Op.output: onOutput?(Array(payload))
         case Op.paneSize:
             guard payload.count >= 4 else { return }
             let i = payload.startIndex
-            let cols = Int(payload[i]) << 8 | Int(payload[i + 1])
-            let rows = Int(payload[i + 2]) << 8 | Int(payload[i + 3])
-            onPaneSize?(cols, rows)
-        default:
-            break
+            onPaneSize?(Int(payload[i]) << 8 | Int(payload[i + 1]),
+                        Int(payload[i + 2]) << 8 | Int(payload[i + 3]))
+        default: break
         }
     }
 
     func send(op: UInt8, pane: String, payload: [UInt8]) {
-        guard let task else {
-            trace("send_dropped", ["op": op, "bytes": payload.count, "reason": "no-task"])
-            return
-        }
-        let frames = BrokerWireFrames.encode(op: op, pane: pane, payload: payload)
-        guard !frames.isEmpty else {
-            trace("send_dropped", ["op": op, "bytes": payload.count, "reason": "invalid-pane"])
-            return
-        }
-        let myEpoch = epoch
-        if frames.count > 1 {
-            trace("input_chunked", ["bytes": payload.count, "frames": frames.count, "epoch": myEpoch])
-        }
-        outbound.enqueue(
-            frames,
-            generation: myEpoch,
-            sender: { data, completion in
-                task.send(.data(data), completionHandler: completion)
-            },
-            onFailure: { [weak self, weak task] error in
-                DispatchQueue.main.async {
-                    guard let self, self.epoch == myEpoch else { return }
-                    self.trace("send_failed", ["epoch": myEpoch, "error": error.localizedDescription])
-                    task?.cancel()
-                }
-            }
-        )
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.send(op: op, pane: pane, payload: payload) }; return }
+        guard !suspended, let transport else { return }
+        let current = epoch
+        outbound.enqueue(BrokerWireFrames.encode(op: op, pane: pane, payload: payload), generation: current,
+            sender: { [weak transport] data, completion in
+                guard let transport else { completion(CancellationError()); return }
+                transport.send(data, completion: completion)
+            }, onFailure: { [weak self] error in
+                self?.onMain { [weak self] in self?.fail(current, error: error) }
+            })
     }
 }

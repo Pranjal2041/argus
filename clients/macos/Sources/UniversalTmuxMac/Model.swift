@@ -441,7 +441,7 @@ final class AppState: ObservableObject {
             if isWaiting(ref) { acknowledge(ref) }
             // Re-poll that host shortly so we converge to the broker's truth fast.
             if let m = machines.first(where: { $0.id == ref.machineID }) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.refresh(m) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.refresh(m, coalesce: false) }
             }
         }
     }
@@ -1424,6 +1424,8 @@ final class AppState: ObservableObject {
     var waitingCount: Int { waitingSessions.count }
 
     private var pollTimer: Timer?
+    private var networkCadence = NetworkCadence()
+    private var networkObservers: [NSObjectProtocol] = []
     private var brokerDiscoveryInFlight = false
     private var pendingFullBrokerDiscovery = false
     private var prevState: [String: String] = [:]  // ref.id -> last agent state (for waiting-transition notifications)
@@ -1460,6 +1462,19 @@ final class AppState: ObservableObject {
                 self?.sessionsByMachine[mid]?.first(where: { $0.name == session })?.path
             }
         }
+        if !isolatedForTesting && !Self.isRunningTests {
+            _ = BrokerNetworkRecovery.shared
+            networkObservers.append(NotificationCenter.default.addObserver(forName: BrokerNetworkRecovery.recovered, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.networkCadence.reset()
+                self.sessionMonitor.networkRecovered()
+            })
+        }
+    }
+
+    deinit {
+        pollTimer?.invalidate()
+        networkObservers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     func toggleSidebar() {
@@ -1551,21 +1566,27 @@ final class AppState: ObservableObject {
     /// fresh node) appears on its own instead of only on a manual refresh.
     func startAutoRefresh() {
         pollTimer?.invalidate()
-        var tick = 0
+        networkCadence.reset()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                tick += 1
-                let scope: SessionRefreshScope = tick % 15 == 0 ? .all : .foreground
-                for m in self.machines { self.refresh(m, scope: scope) }
-                if tick == 1 || tick % 3 == 0 { self.sharedWorkspace.refresh() }
-                if tick % 6 == 0 { self.discoverNewBrokers() }
+                let policy = NetworkPreferences.policy
+                let full = self.networkCadence.due("full", every: policy.fullSessions)
+                for m in self.machines {
+                    let foreground = NSApp.isActive && self.selection?.machineID == m.id
+                    let interval = foreground ? policy.foregroundSessions : policy.backgroundSessions
+                    if self.networkCadence.due("sessions:\(m.id)", every: interval, force: full) {
+                        self.refresh(m, scope: full ? .all : .foreground)
+                    }
+                }
+                if self.networkCadence.due("workspace", every: policy.workspaceSync) { self.sharedWorkspace.refresh() }
+                if self.networkCadence.due("discovery", every: policy.discovery) { self.discoverNewBrokers() }
                 // Pull durable history in the background while machines are reachable, so
                 // it's captured before a node goes offline. ~2s after launch, then ~30s.
-                if tick == 1 || tick % 15 == 0 { self.refreshHistoryCache() }
+                if self.networkCadence.due("history", every: policy.history) { self.refreshHistoryCache() }
                 // Sync Workflows, Todo Maps, Notes, and Planner with this Mac's broker so the
                 // phone shares them. ~4s after launch, then ~10s.
-                if tick == 2 || tick % 5 == 0 { self.syncUserData() }
+                if self.networkCadence.due("user-data", every: policy.userDataSync) { self.syncUserData() }
             }
         }
     }

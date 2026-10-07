@@ -8,14 +8,14 @@ import UsageKit
 @MainActor
 final class WorkspaceRecurringJob {
     private let interval: TimeInterval
-    private var nextRun = Date.distantPast
+    private var lastRun = Date.distantPast
     private var task: Task<Void, Never>?
     init(interval: TimeInterval) { self.interval = interval }
 
     @discardableResult
-    func runIfDue(now: Date = Date(), operation: @escaping @MainActor () async -> Void) -> Bool {
-        guard task == nil, now >= nextRun else { return false }
-        nextRun = now.addingTimeInterval(interval)
+    func runIfDue(now: Date = Date(), intervalOverride: TimeInterval? = nil, operation: @escaping @MainActor () async -> Void) -> Bool {
+        guard task == nil, now.timeIntervalSince(lastRun) >= (intervalOverride ?? interval) else { return false }
+        lastRun = now
         task = Task {
             defer { task = nil }
             await operation()
@@ -81,8 +81,9 @@ private final class WorkspaceCollector {
     private let owner = UUID().uuidString
     private let base: String
     private var leases: [String: ArgusJSON] = [:]
-    private var nextDiscovery = Date.distantPast
-    private var nextUsage = Date.distantPast
+    private var networkCadence = NetworkCadence()
+    private var lastUsage = Date.distantPast
+    private var usageRefreshRequested = false
     private var usageTask: Task<Void, Never>?
     private var accountTask: Task<Void, Never>?
     private var usageController: AnyObject?
@@ -107,6 +108,7 @@ private final class WorkspaceCollector {
     }
 
     func run() async {
+        _ = BrokerNetworkRecovery.shared
         cc.bind(app)
         ActivityJournal.shared.nameResolver = { [weak app] id in app?.machines.first { $0.id == id }?.name }
         cc.collectionAllowed = { [weak self] in self?.owns("cc-status") == true }
@@ -120,6 +122,7 @@ private final class WorkspaceCollector {
     }
 
     private func tick() async throws {
+        let policy = NetworkPreferences.policy
         let info = try await sharedWorkspaceRequest(base, "/workspace/info")
         guard info["enabled"].bool == true, let id = info["workspaceID"].string else { return }
         if replica.workspaceID != id { try replica.bind(id) }
@@ -133,27 +136,28 @@ private final class WorkspaceCollector {
             } catch { leases[name] = nil }
             if name == "cc-status", previousFence != leases[name]?["fence"] { cc.collectionOwnershipChanged(); statusesDirty = false }
         }
-        if Date() >= nextDiscovery {
+        if networkCadence.due("discovery", every: max(30, policy.discovery)) {
             let base = base
             let found = await Task.detached(priority: .utility) { discoverMachines(base: base) }.value
             for machine in found {
                 if let index = app.machines.firstIndex(where: { $0.id == machine.id }) { app.machines[index] = machine }
                 else { app.machines.append(machine) }
             }
-            nextDiscovery = Date().addingTimeInterval(30)
         }
         if let index = app.machines.firstIndex(where: \.isLocal) {
             app.machines[index].brokerID = info["brokerID"].string ?? ""
             app.machines[index].workspaceID = id; app.machines[index].workspaceEnabled = true
         }
-        for machine in app.machines { app.refresh(machine, scope: .all) }
+        if networkCadence.due("sessions", every: policy.collectorSessions) {
+            for machine in app.machines { app.refresh(machine, scope: .all) }
+        }
         if owns("journal") {
             let brokerID = info["brokerID"].string ?? ""
-            journalJob.runIfDue { [self] in
+            journalJob.runIfDue(intervalOverride: policy.journal) { [self] in
                 do { try await collectJournal(brokerID: brokerID) }
                 catch { NSLog("[workspace-service] Journal: %@", error.localizedDescription) }
             }
-            wrappedJob.runIfDue { [self] in
+            wrappedJob.runIfDue(intervalOverride: policy.wrapped) { [self] in
                 do { try await collectWrapped() }
                 catch { NSLog("[workspace-service] Wrapped: %@", error.localizedDescription) }
             }
@@ -227,7 +231,7 @@ private final class WorkspaceCollector {
                             guard owns("usage"), leases["usage"]?["fence"] == lease["fence"] else { return }
                             _ = try await sharedWorkspaceRequest(base, "/workspace/service/usage/reply", .object([
                                 "id": .string(id), "lease": lease, "body": try JSONDecoder().decode(ArgusJSON.self, from: result)]))
-                            if call["body"]["action"].string != "state" { nextUsage = .distantPast }
+                            if call["body"]["action"].string != "state" { usageRefreshRequested = true }
                         } catch { NSLog("[workspace-service] Account request was not acknowledged.") }
                     }
                 }
@@ -243,8 +247,9 @@ private final class WorkspaceCollector {
                 usagePresentationDirty = false
             }
             let commands = replica.collection("commands").filter { $0.data?["kind"].string == "usage-refresh" }
-            if owns("usage"), usageTask == nil, accountTask == nil, Date() >= nextUsage || !commands.isEmpty {
-                nextUsage = Date().addingTimeInterval(usage.collectionInterval)
+            if owns("usage"), usageTask == nil, accountTask == nil,
+               usageRefreshRequested || Date().timeIntervalSince(lastUsage) >= policy.usage(usage.collectionInterval) || !commands.isEmpty {
+                lastUsage = Date(); usageRefreshRequested = false
                 let fence = leases["usage"]?["fence"]
                 usageTask = Task {
                     defer { usageTask = nil }

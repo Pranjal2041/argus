@@ -297,9 +297,9 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         view.needsDisplay = true
     }
 
-    init(url: URL, traceRef: String, mouseReporting: Bool = false) {
+    init(url: URL, traceRef: String, mouseReporting: Bool = false, client: BrokerClient? = nil) {
         view = TerminalView(frame: .zero)
-        client = BrokerClient(url: url, traceRef: traceRef)
+        self.client = client ?? BrokerClient(url: url, traceRef: traceRef)
         self.traceRef = traceRef
         httpBase = PaneConn.httpBase(from: url)
         connURL = url
@@ -328,7 +328,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // Seamless theme: terminal background == window background. Applied here and
         // re-applied live on theme switch (see applyTheme + TerminalController).
         applyTheme()
-        client.onOutput = { [weak self] bytes in
+        self.client.onOutput = { [weak self] bytes in
             guard let self else { return }
             self.ingestForWandb(bytes)
             self.streamPump.enqueueOutput(bytes)
@@ -337,16 +337,16 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // grid to exactly this and ask for a clean repaint. Arrives in stream
         // order relative to output, so the re-pin lands precisely between bytes
         // formatted for the old width and bytes formatted for the new.
-        client.onPaneSize = { [weak self] cols, rows in
+        self.client.onPaneSize = { [weak self] cols, rows in
             self?.streamPump.enqueueSize(cols: cols, rows: rows)
         }
-        client.onStatus = { [weak self] st in DispatchQueue.main.async { self?.onState?(st) } }
+        self.client.onStatus = { [weak self] st in DispatchQueue.main.async { self?.onState?(st) } }
         // On every (re)connect, push the current geometry so the remote pane
         // adopts the live window size instead of tmux's default.
-        client.onConnect = { [weak self] in
+        self.client.onConnect = { [weak self] in
             DispatchQueue.main.async { self?.sendCurrentGeometry() }
         }
-        client.start()
+        self.client.start()
 
     }
 
@@ -372,6 +372,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     func disconnect() {
         streamPump.stop()
         client.stop()
+    }
+
+    func applyNetworkPolicy(_ policy: NetworkPolicy, appActive: Bool) {
+        client.setSuspended(policy.lowData && (!visibility.isVisible || !appActive))
     }
 
     // MARK: W&B run detection (off the raw output stream)
@@ -785,6 +789,8 @@ final class TerminalController: ObservableObject {
     private var lastShownID: String?
     private var warmPaneOrder: [String] = []
     private static let maxWarmPaneCount = 8
+    private var networkPolicy = NetworkPreferences.policy
+    private var networkObservers: [NSObjectProtocol] = []
 
     // MARK: W&B runs — detected per session, shown in-place instead of the terminal
     /// Runs each session advertised (first-seen order; `.last` = latest), keyed by ref.id.
@@ -1033,6 +1039,7 @@ final class TerminalController: ObservableObject {
             if id == lastShownID { c.utter.finalize() }
             c.view.isHidden = true
             c.setVisible(false)
+            c.applyNetworkPolicy(networkPolicy, appActive: NSApp.isActive)
         }
         lastShownID = nil
     }
@@ -1040,6 +1047,14 @@ final class TerminalController: ObservableObject {
     private var keyMonitor: Any?
     init() {
         loadWandb()   // restore the growing W&B run list (pruning entries >7 days old)
+        _ = BrokerNetworkRecovery.shared
+        for name in [NetworkPreferences.changed, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+            networkObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.networkPolicy = NetworkPreferences.policy
+                self.conns.values.forEach { $0.applyNetworkPolicy(self.networkPolicy, appActive: NSApp.isActive) }
+            })
+        }
         container.onDetached = { [weak self] in self?.hideAllPanes(reason: "host-detached") }
         // Live re-theme: when the user picks a theme, recolor every cached pane IN PLACE
         // (no reconnect, scrollback kept) plus the container background.
@@ -1066,7 +1081,10 @@ final class TerminalController: ObservableObject {
             return self.interceptKey(event)
         }
     }
-    deinit { if let m = keyMonitor { NSEvent.removeMonitor(m) } }
+    deinit {
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        networkObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
 
     /// Returns nil to swallow the event, or the event to let it pass through.
     private func interceptKey(_ event: NSEvent) -> NSEvent? {
@@ -1301,6 +1319,7 @@ final class TerminalController: ObservableObject {
             if id != ref.id, !c.view.isHidden { c.utter.finalize() }
             c.view.isHidden = (id != ref.id)
             c.setVisible(id == ref.id)
+            c.applyNetworkPolicy(networkPolicy, appActive: NSApp.isActive)
         }
 
         // Only do the expensive work (refocus, geometry push) on an ACTUAL

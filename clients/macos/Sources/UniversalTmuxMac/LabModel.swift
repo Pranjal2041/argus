@@ -277,6 +277,8 @@ final class LabModel: ObservableObject {
     private weak var boundState: AppState?
     private var timer: Timer?
     private var paneVisible = false
+    private var networkCadence = NetworkCadence()
+    private var explicitRefreshPending = false
     private var generation = 0
 
     private var notifiedList: [String] = UserDefaults.standard.stringArray(forKey: "ut.lab.notified.v1") ?? []
@@ -300,15 +302,21 @@ final class LabModel: ObservableObject {
 
     private func schedule() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: paneVisible ? 5 : 20, repeats: true) { [weak self] _ in
+        networkCadence.reset()
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let s = self.boundState else { return }
-                self.refresh(s)
+                guard self.networkCadence.due("lab", every: NetworkPreferences.policy.lab(visible: self.paneVisible)) else { return }
+                self.refresh(s, force: false)
             }
         }
     }
 
-    func refresh(_ state: AppState) {
+    func refresh(_ state: AppState, force: Bool = true) {
+        guard !refreshing else {
+            explicitRefreshPending = explicitRefreshPending || force
+            return
+        }
         let machines = state.machines
         generation += 1
         let gen = generation
@@ -352,6 +360,10 @@ final class LabModel: ObservableObject {
             }
             AttentionNotifier.shared.updateLabAttention(ids: Set(attentionItems.map(\.id)))
             notifyNewPendings()
+            if explicitRefreshPending {
+                explicitRefreshPending = false
+                refresh(state)
+            }
         }
     }
 
