@@ -6,6 +6,8 @@ enum Op {
     static let resize: UInt8 = 3
     static let requestSnapshot: UInt8 = 4 // ask the broker for a fresh authoritative redraw
     static let paneSize: UInt8 = 5 // broker → us: the pane's AUTHORITATIVE cols×rows.
+    static let snapshotBegin: UInt8 = 6
+    static let snapshotEnd: UInt8 = 7
     // %output bytes are formatted for exactly this grid; rendering at any other
     // width shears the screen, so the terminal pins to it (opResize is only an ask).
 }
@@ -227,9 +229,14 @@ final class BrokerClient {
     private var pingID: UUID?
     private var lastTraffic: TimeInterval = 0
     private var recoveryObserver: NSObjectProtocol?
+    private var backgroundRetention: BrokerBackgroundRetention?
+    private var backgroundTimer: DispatchWorkItem?
+    private var backgroundToken: UUID?
+    private var backgroundBytes = 0
 
     var onOutput: (([UInt8]) -> Void)?
     var onPaneSize: ((_ cols: Int, _ rows: Int) -> Void)?
+    var onSnapshot: ((Bool) -> Void)?
     var onStatus: ((ConnState) -> Void)?
     var onConnect: (() -> Void)?
 
@@ -244,7 +251,8 @@ final class BrokerClient {
             recoveryObserver = NotificationCenter.default.addObserver(forName: BrokerNetworkRecovery.recovered, object: nil, queue: .main) { [weak self] _ in
                 guard let self, !closed, !suspended else { return }
                 backoff = 0.5
-                if live { probeLiveness() } else { start(trigger: "network-recovered") }
+                if live { probeLiveness() }
+                else if backgroundRetention == nil { nudge(trigger: "network-recovered") }
             }
         }
         trace("client_created")
@@ -272,6 +280,36 @@ final class BrokerClient {
             backoff = 0.5
             start(trigger: "resumed")
         }
+    }
+
+    /// A brief visibility/focus change must not throw away a healthy or still
+    /// progressing connection. Repeated UI updates must not renew this lease.
+    /// Hidden traffic and elapsed time independently bound its cost.
+    func retainInBackground(_ budget: BrokerBackgroundRetention?) {
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.retainInBackground(budget) }; return }
+        guard !closed, backgroundRetention != budget else { return }
+        backgroundTimer?.cancel(); backgroundTimer = nil; backgroundToken = nil
+        backgroundRetention = budget
+        backgroundBytes = 0
+        guard let budget else {
+            setSuspended(false)
+            return
+        }
+        guard budget.grace > 0, budget.byteLimit > 0,
+              !suspended, transport != nil || dialTicket != nil else {
+            setSuspended(true)
+            return
+        }
+        let token = UUID()
+        backgroundToken = token
+        trace("background_retained", ["seconds": budget.grace, "byteLimit": budget.byteLimit])
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, backgroundToken == token else { return }
+            trace("background_budget_expired", ["reason": "time", "bytes": backgroundBytes])
+            setSuspended(true)
+        }
+        backgroundTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + budget.grace, execute: work)
     }
 
     func updateURL(_ value: URL) {
@@ -370,6 +408,18 @@ final class BrokerClient {
                         onStatus?(.connected)
                     }
                     if case .data(let data) = message { handle(data) }
+                    if let budget = backgroundRetention {
+                        switch message {
+                        case .data(let data): backgroundBytes += data.count
+                        case .string(let value): backgroundBytes += value.utf8.count
+                        @unknown default: break
+                        }
+                        if backgroundBytes >= budget.byteLimit {
+                            trace("background_budget_expired", ["reason": "bytes", "bytes": backgroundBytes])
+                            setSuspended(true)
+                            return
+                        }
+                    }
                     receiveLoop(current, connectedURL: connectedURL)
                 case .failure(let error): fail(current, error: error)
                 }
@@ -419,6 +469,12 @@ final class BrokerClient {
     private func fail(_ current: Int, error: Error) {
         guard valid(current) else { return }
         trace("receive_failed", ["epoch": current, "error": error.localizedDescription])
+        // Keeping a warm socket is cheap; reconnecting a hidden one is not.
+        // Foreground promotion resumes immediately instead of waiting on backoff.
+        if backgroundRetention != nil {
+            setSuspended(true)
+            return
+        }
         retire()
         onStatus?(.reconnecting)
         let nextEpoch = epoch
@@ -436,6 +492,7 @@ final class BrokerClient {
     func stop() {
         if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.stop() }; return }
         closed = true
+        backgroundTimer?.cancel(); backgroundTimer = nil; backgroundToken = nil
         retire()
         trace("client_stopped")
     }
@@ -460,6 +517,7 @@ final class BrokerClient {
         if releaseTicket { releaseDial() }
     }
     deinit {
+        backgroundTimer?.cancel()
         deadline?.cancel(); retry?.cancel(); heartbeat?.cancel(); pingDeadline?.cancel()
         if let recoveryObserver { NotificationCenter.default.removeObserver(recoveryObserver) }
         if let dialTicket { scheduler.release(dialTicket) }
@@ -482,6 +540,8 @@ final class BrokerClient {
         let payload = bytes[(2 + paneLength)...]
         switch bytes[0] {
         case Op.output: onOutput?(Array(payload))
+        case Op.snapshotBegin: onSnapshot?(true)
+        case Op.snapshotEnd: onSnapshot?(false)
         case Op.paneSize:
             guard payload.count >= 4 else { return }
             let i = payload.startIndex

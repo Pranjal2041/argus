@@ -47,6 +47,7 @@ final class TerminalStreamPump {
     private enum Event {
         case output([UInt8])
         case size(Int, Int)
+        case snapshot(Bool)
     }
 
     private let lock = NSLock()
@@ -57,11 +58,14 @@ final class TerminalStreamPump {
     private var visible = true
     private let applyOutput: (ArraySlice<UInt8>) -> Void
     private let applySize: (Int, Int) -> Void
+    private let applySnapshot: (Bool) -> Void
 
     init(applyOutput: @escaping (ArraySlice<UInt8>) -> Void,
-         applySize: @escaping (Int, Int) -> Void) {
+         applySize: @escaping (Int, Int) -> Void,
+         applySnapshot: @escaping (Bool) -> Void = { _ in }) {
         self.applyOutput = applyOutput
         self.applySize = applySize
+        self.applySnapshot = applySnapshot
     }
 
     func enqueueOutput(_ bytes: [UInt8]) {
@@ -77,6 +81,14 @@ final class TerminalStreamPump {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         events.append(.size(cols, rows))
+        lock.unlock()
+        TerminalDrainCoordinator.shared.wake(self)
+    }
+
+    func enqueueSnapshot(_ active: Bool) {
+        lock.lock()
+        guard !stopped else { lock.unlock(); return }
+        events.append(.snapshot(active))
         lock.unlock()
         TerminalDrainCoordinator.shared.wake(self)
     }
@@ -107,6 +119,7 @@ final class TerminalStreamPump {
         precondition(Thread.isMainThread)
         var output: ArraySlice<UInt8>?
         var size: (Int, Int)?
+        var snapshot: Bool?
 
         lock.lock()
         guard !stopped, head < events.count else {
@@ -125,6 +138,9 @@ final class TerminalStreamPump {
         case .size(let cols, let rows):
             size = (cols, rows)
             head += 1
+        case .snapshot(let active):
+            snapshot = active
+            head += 1
         }
         compactIfNeeded()
         let remains = head < events.count
@@ -132,6 +148,7 @@ final class TerminalStreamPump {
 
         if let output { applyOutput(output) }
         if let size { applySize(size.0, size.1) }
+        if let snapshot { applySnapshot(snapshot) }
         return remains
     }
 
@@ -306,7 +323,12 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         super.init()
         streamPump = TerminalStreamPump(
             applyOutput: { [weak self] bytes in self?.view.feed(byteArray: bytes) },
-            applySize: { [weak self] cols, rows in self?.setPin(cols: cols, rows: rows) }
+            applySize: { [weak self] cols, rows in self?.setPin(cols: cols, rows: rows) },
+            applySnapshot: { [weak self] active in
+                self?.snapshotInProgress = active
+                if active { self?.snapshotWork?.cancel(); self?.snapshotWork = nil }
+                else { self?.view.requestDisplayRefresh() }
+            }
         )
         view.terminalDelegate = self
         // Keep text selectable. With mouse reporting ON (SwiftTerm's default),
@@ -340,11 +362,20 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         self.client.onPaneSize = { [weak self] cols, rows in
             self?.streamPump.enqueueSize(cols: cols, rows: rows)
         }
+        self.client.onSnapshot = { [weak self] active in
+            if active { self?.snapshotWork?.cancel(); self?.snapshotWork = nil }
+            self?.streamPump.enqueueSnapshot(active)
+        }
         self.client.onStatus = { [weak self] st in DispatchQueue.main.async { self?.onState?(st) } }
         // On every (re)connect, push the current geometry so the remote pane
         // adopts the live window size instead of tmux's default.
         self.client.onConnect = { [weak self] in
-            DispatchQueue.main.async { self?.sendCurrentGeometry() }
+            guard let self else { return }
+            // Discard an old generation's pending repaint, but retain all
+            // already received output in stream order before the new snapshot.
+            self.snapshotWork?.cancel(); self.snapshotWork = nil
+            self.streamPump.enqueueSnapshot(false)
+            self.sendCurrentGeometry()
         }
         self.client.start()
 
@@ -374,8 +405,10 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         client.stop()
     }
 
-    func applyNetworkPolicy(_ policy: NetworkPolicy, appActive: Bool) {
-        client.setSuspended(policy.lowData && (!visibility.isVisible || !appActive))
+    func applyNetworkPolicy(_ policy: NetworkPolicy, appActive: Bool, allowWarm: Bool = true,
+                            retention: BrokerBackgroundRetention? = nil) {
+        let background = policy.lowData && (!visibility.isVisible || !appActive)
+        client.retainInBackground(background ? (allowWarm ? (retention ?? policy.terminalRetention) : .immediate) : nil)
     }
 
     // MARK: W&B run detection (off the raw output stream)
@@ -508,7 +541,9 @@ final class PaneConn: NSObject, TerminalViewDelegate {
         // snapshot captured now is at the confirmed width — the deterministic
         // redraw the old timed-guess approach couldn't provide. Debounced so a
         // drag-resize storm coalesces into one repaint of the settled size.
-        scheduleSnapshotRedraw()
+        // A snapshot already contains the screen at this size. Asking for
+        // another one here doubled initial/reconnect traffic on the Mac.
+        if !snapshotInProgress { scheduleSnapshotRedraw() }
     }
 
     /// The user's chosen font — the MAXIMUM the pane renders at. When a wider
@@ -609,6 +644,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     private var pendingRows = 0
     private var resizeWork: DispatchWorkItem?
     private var snapshotWork: DispatchWorkItem?
+    private var snapshotInProgress = false
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         // Intentionally NOT an ask: the view's grid now echoes either the pin we
@@ -1031,6 +1067,21 @@ final class TerminalController: ObservableObject {
         }
     }
 
+    /// Keyboard focus is not visibility: a terminal beside another app is
+    /// still being watched. Only a genuinely hidden/occluded window is idle.
+    private var networkWindowVisible: Bool {
+        guard !NSApp.isHidden else { return false }
+        guard let window = container.window else { return NSApp.isActive }
+        return !window.isMiniaturized && window.occlusionState.contains(.visible)
+    }
+
+    private func applyNetworkPolicies() {
+        let warm = Set(warmPaneOrder.suffix(networkPolicy.warmTerminalLimit))
+        for (id, connection) in conns {
+            connection.applyNetworkPolicy(networkPolicy, appActive: networkWindowVisible, allowWarm: warm.contains(id))
+        }
+    }
+
     private func hideAllPanes(reason: String) {
         if let lastShownID {
             TerminalConnectionTrace.record("pane.all_hidden", ["ref": lastShownID, "reason": reason])
@@ -1039,8 +1090,8 @@ final class TerminalController: ObservableObject {
             if id == lastShownID { c.utter.finalize() }
             c.view.isHidden = true
             c.setVisible(false)
-            c.applyNetworkPolicy(networkPolicy, appActive: NSApp.isActive)
         }
+        applyNetworkPolicies()
         lastShownID = nil
     }
 
@@ -1048,11 +1099,12 @@ final class TerminalController: ObservableObject {
     init() {
         loadWandb()   // restore the growing W&B run list (pruning entries >7 days old)
         _ = BrokerNetworkRecovery.shared
-        for name in [NetworkPreferences.changed, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+        for name in [NetworkPreferences.changed, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
+                     NSApplication.didHideNotification, NSApplication.didUnhideNotification, NSWindow.didChangeOcclusionStateNotification] {
             networkObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.networkPolicy = NetworkPreferences.policy
-                self.conns.values.forEach { $0.applyNetworkPolicy(self.networkPolicy, appActive: NSApp.isActive) }
+                self.applyNetworkPolicies()
             })
         }
         container.onDetached = { [weak self] in self?.hideAllPanes(reason: "host-detached") }
@@ -1319,8 +1371,8 @@ final class TerminalController: ObservableObject {
             if id != ref.id, !c.view.isHidden { c.utter.finalize() }
             c.view.isHidden = (id != ref.id)
             c.setVisible(id == ref.id)
-            c.applyNetworkPolicy(networkPolicy, appActive: NSApp.isActive)
         }
+        applyNetworkPolicies()
 
         // Only do the expensive work (refocus, geometry push) on an ACTUAL
         // selection change — updateNSView fires on every SwiftUI invalidation,

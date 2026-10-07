@@ -19,6 +19,9 @@ final class NetworkPolicyTests: XCTestCase {
         XCTAssertEqual(low.usage(120), 600)
         XCTAssertEqual(low.usage(1800), 1800)
         XCTAssertGreaterThan(low.lab(visible: false), low.lab(visible: true))
+        XCTAssertEqual(low.warmTerminalLimit, 3)
+        XCTAssertEqual(low.terminalRetention.grace, 60)
+        XCTAssertEqual(low.terminalRetention.byteLimit, 64 * 1024)
     }
 
     func testCadenceAdaptsImmediatelyAndExplicitWorkBypassesOnlyTheTimer() {
@@ -61,7 +64,7 @@ final class NetworkPolicyTests: XCTestCase {
         let host = NSHostingView(rootView: Form {
             NetworkSettingsSection(defaults: defaults) { enabled in
                 changed.append(enabled)
-                connection.applyNetworkPolicy(.init(lowData: enabled), appActive: true)
+                connection.applyNetworkPolicy(.init(lowData: enabled), appActive: true, retention: .immediate)
             }
         }.formStyle(.grouped).frame(width: 460, height: 250))
         host.frame = NSRect(x: 0, y: 0, width: 460, height: 250)
@@ -210,18 +213,142 @@ final class BrokerRecoveryTests: XCTestCase {
         defer { connection.disconnect() }
         try await Task.sleep(for: .milliseconds(20))
         connection.setVisible(false)
-        connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
+        connection.applyNetworkPolicy(.init(lowData: true), appActive: true, allowWarm: false)
         XCTAssertTrue(harness.transports[0].invalidated)
         connection.setVisible(true)
         connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(harness.transports.count, 2)
         XCTAssertTrue(connection.view === view)
-        connection.applyNetworkPolicy(.init(lowData: true), appActive: false)
+        connection.applyNetworkPolicy(.init(lowData: true), appActive: false, allowWarm: false)
         XCTAssertTrue(harness.transports[1].invalidated)
         connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(harness.transports.count, 3)
+    }
+
+    func testBriefSwitchesAndFocusChangesKeepTheSameSocketOnBothTransportPaths() async throws {
+        for scheme in ["ws", "wss"] {
+            let harness = BrokerClientHarness(url: URL(string: "\(scheme)://example.test:8722/ws")!)
+            harness.onCreate = { $0.openDelay = 0.001; $0.firstFrame = true }
+            let connection = PaneConn(url: harness.url, traceRef: "warm-\(scheme)", client: harness.client)
+            connection.onState = { harness.statuses.append($0) }
+            defer { connection.disconnect() }
+            try await Task.sleep(for: .milliseconds(20))
+            let original = harness.transports[0]
+            let view = connection.view
+            for _ in 0..<4 {
+                connection.setVisible(false)
+                connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
+                try await Task.sleep(for: .milliseconds(10))
+                connection.setVisible(true)
+                connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
+                connection.applyNetworkPolicy(.init(lowData: true), appActive: false)
+                connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
+            }
+            XCTAssertFalse(original.invalidated)
+            XCTAssertEqual(harness.transports.count, 1)
+            XCTAssertEqual(harness.statuses.last, .connected)
+            XCTAssertTrue(connection.view === view)
+        }
+    }
+
+    func testRepeatedBackgroundUpdatesDoNotExtendTheGracePeriod() async throws {
+        let harness = BrokerClientHarness()
+        harness.onCreate = { $0.openDelay = 0.001; $0.firstFrame = true }
+        harness.client.start()
+        defer { harness.client.stop() }
+        try await Task.sleep(for: .milliseconds(20))
+        let budget = BrokerBackgroundRetention(grace: 0.08, byteLimit: 1024)
+        harness.client.retainInBackground(budget)
+        for _ in 0..<6 {
+            try await Task.sleep(for: .milliseconds(20))
+            harness.client.retainInBackground(budget)
+        }
+        XCTAssertTrue(harness.transports[0].invalidated)
+        XCTAssertEqual(harness.transports.count, 1)
+        XCTAssertEqual(harness.statuses.last, .suspended)
+        harness.client.retainInBackground(nil)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(harness.transports.count, 2)
+        XCTAssertEqual(harness.statuses.last, .connected)
+    }
+
+    func testForegroundPromotionCancelsOldExpiryWithoutRedialing() async throws {
+        let harness = BrokerClientHarness()
+        harness.onCreate = { $0.openDelay = 0.001; $0.firstFrame = true }
+        harness.client.start()
+        defer { harness.client.stop() }
+        try await Task.sleep(for: .milliseconds(20))
+        harness.client.retainInBackground(.init(grace: 0.04, byteLimit: 1024))
+        harness.client.retainInBackground(nil)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(harness.transports.count, 1)
+        XCTAssertFalse(harness.transports[0].invalidated)
+    }
+
+    func testNoisyBackgroundStopsAtItsByteBudgetAndKeepsDeliveredOutput() async throws {
+        let harness = BrokerClientHarness()
+        harness.onCreate = { $0.openDelay = 0.001; $0.firstFrame = true }
+        var bytes = 0
+        harness.client.onOutput = { bytes += $0.count }
+        harness.client.start()
+        defer { harness.client.stop() }
+        try await Task.sleep(for: .milliseconds(20))
+        harness.client.retainInBackground(.init(grace: 60, byteLimit: 12))
+        harness.transports[0].emit(.data(Data([1, 0, 1, 2, 3, 4])))
+        XCTAssertFalse(harness.transports[0].invalidated)
+        harness.transports[0].emit(.data(Data([1, 0, 5, 6, 7, 8])))
+        XCTAssertEqual(bytes, 8)
+        XCTAssertTrue(harness.transports[0].invalidated)
+        XCTAssertEqual(harness.statuses.last, .suspended)
+    }
+
+    func testHiddenFailureDoesNotRedialUntilForegroundEvenAfterNetworkRecovery() async throws {
+        let harness = BrokerClientHarness()
+        harness.onCreate = { $0.openDelay = 0.001; $0.firstFrame = true }
+        harness.client.start()
+        defer { harness.client.stop() }
+        try await Task.sleep(for: .milliseconds(20))
+        harness.client.retainInBackground(.init(grace: 60, byteLimit: 1024))
+        harness.transports[0].fail()
+        harness.client.nudge(trigger: "network-recovered")
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertEqual(harness.transports.count, 1)
+        XCTAssertEqual(harness.statuses.last, .suspended)
+        harness.client.retainInBackground(nil)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(harness.transports.count, 2)
+    }
+
+    func testSlowInFlightHandshakeSurvivesBriefBackgrounding() async throws {
+        let harness = BrokerClientHarness(recovery: .init(handshakeTimeout: 1))
+        harness.onCreate = { $0.openDelay = 0.12; $0.firstFrame = true }
+        harness.client.start()
+        defer { harness.client.stop() }
+        try await Task.sleep(for: .milliseconds(20))
+        harness.client.retainInBackground(.init(grace: 0.5, byteLimit: 1024))
+        try await Task.sleep(for: .milliseconds(20))
+        harness.client.retainInBackground(nil)
+        harness.client.nudge()
+        try await Task.sleep(for: .milliseconds(140))
+        XCTAssertEqual(harness.transports.count, 1)
+        XCTAssertEqual(harness.statuses.last, .connected)
+    }
+
+    func testEvictionCanShortenWarmBudgetAndModeOffCancelsThePause() async throws {
+        let harness = BrokerClientHarness()
+        let connection = PaneConn(url: harness.url, traceRef: "budget-eviction", client: harness.client)
+        defer { connection.disconnect() }
+        try await Task.sleep(for: .milliseconds(20))
+        connection.setVisible(false)
+        connection.applyNetworkPolicy(.init(lowData: true), appActive: true)
+        XCTAssertFalse(harness.transports[0].invalidated)
+        connection.applyNetworkPolicy(.init(lowData: true), appActive: true, allowWarm: false)
+        XCTAssertTrue(harness.transports[0].invalidated)
+        connection.applyNetworkPolicy(.init(lowData: false), appActive: true)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(harness.transports.count, 2)
     }
 }
 
@@ -315,6 +442,7 @@ final class FixtureBrokerTransport: BrokerTransportServing {
     var openDelay: TimeInterval?
     var firstFrame = false, answersPings = false, invalidated = false
     var pings = 0
+    var sent: [Data] = []
     private var receiver: ((Result<URLSessionWebSocketTask.Message, Error>) -> Void)?
     init(opened: @escaping () -> Void) { self.opened = opened }
     func resume() {
@@ -327,7 +455,8 @@ final class FixtureBrokerTransport: BrokerTransportServing {
     }
     func receive(_ completion: @escaping (Result<URLSessionWebSocketTask.Message, Error>) -> Void) { receiver = completion }
     func emit(_ message: URLSessionWebSocketTask.Message) { let receive = receiver; receiver = nil; receive?(.success(message)) }
-    func send(_ data: Data, completion: @escaping (Error?) -> Void) { completion(nil) }
+    func fail() { let receive = receiver; receiver = nil; receive?(.failure(URLError(.networkConnectionLost))) }
+    func send(_ data: Data, completion: @escaping (Error?) -> Void) { sent.append(data); completion(nil) }
     func ping(_ completion: @escaping (Error?) -> Void) { pings += 1; if answersPings { completion(nil) } }
     func invalidate() { invalidated = true }
 }

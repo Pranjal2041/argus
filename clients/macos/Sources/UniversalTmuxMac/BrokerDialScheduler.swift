@@ -68,3 +68,11 @@ struct BrokerRecoveryConfiguration {
     var heartbeatInterval: TimeInterval = 20
     var heartbeatTimeout: TimeInterval = 10
 }
+
+/// A background connection may be retained, never repeatedly redialed, within
+/// both limits. This policy is independent of broker/provider and transport.
+struct BrokerBackgroundRetention: Equatable {
+    var grace: TimeInterval
+    var byteLimit: Int
+    static let immediate = Self(grace: 0, byteLimit: 0)
+}

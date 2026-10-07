@@ -51,8 +51,13 @@ once connected, subsequent output and panel switches retain the full local histo
 **Settings → Network → Low Data Mode** reduces this Mac's automatic network traffic. It is off by
 default and applies to both the app and its workspace background collector.
 
-- Only the visible terminal stays connected while Argus is active. Other terminal connections pause,
-  retaining their local views; returning to a panel reconnects and requests the current screen.
+- The visible terminal and two recently used panes stay ready for quick switching. A hidden pane
+  pauses after 60 seconds or after receiving 64 KiB of data, whichever comes first.
+  Older panes pause immediately, retaining their local views. A failed hidden connection waits until
+  you return instead of retrying in the background.
+- Changing keyboard focus does not disconnect a terminal that is still visible. When the window is
+  hidden or fully covered, the same bounded grace period applies. A quick return reuses the connection;
+  returning after a pause reconnects and requests the current screen.
 - Remote sessions and their jobs keep running. An intentional pause appears as **paused · Low Data
   Mode**, not as an unreachable broker.
 - The selected machine's session list refreshes every 10 seconds; other machines and the collector
@@ -63,6 +68,8 @@ default and applies to both the app and its workspace background collector.
 
 Opening a terminal and explicit refresh actions bypass the automatic cadence limits. Turning the
 mode off resumes warm background terminal connections and the normal refresh intervals.
+The Mac honors ordered screen-snapshot boundaries, so receiving a snapshot does not trigger a
+second download of the same screen. Older brokers retain the settled-resize repaint fallback.
 
 ## Restore a workspace after a restart or Babel node change
 

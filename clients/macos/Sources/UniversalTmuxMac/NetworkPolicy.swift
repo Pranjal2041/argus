@@ -7,6 +7,10 @@ import SwiftUI
 /// Explicit user actions bypass cadence limits, never transport ownership limits.
 struct NetworkPolicy: Equatable {
     var lowData = false
+    /// Keep a small recent set ready for a quick return, with a hard traffic
+    /// budget even if a hidden terminal is producing output continuously.
+    var warmTerminalLimit: Int { lowData ? 3 : 8 }
+    var terminalRetention: BrokerBackgroundRetention { .init(grace: 60, byteLimit: 64 * 1024) }
     var foregroundSessions: TimeInterval { lowData ? 10 : 2 }
     var backgroundSessions: TimeInterval { lowData ? 60 : 2 }
     var fullSessions: TimeInterval { lowData ? 120 : 30 }
@@ -96,7 +100,7 @@ struct NetworkSettingsSection: View {
         } header: {
             Text("Network")
         } footer: {
-            Text("Only the visible terminal stays connected while Argus is active. Background lists, summaries, and usage refresh less often. Remote jobs keep running; opening a panel or refreshing manually still works immediately.")
+            Text("Recent terminals stay ready for quick switching, with time and data limits on hidden panes. Background lists, summaries, and usage refresh less often. Remote jobs keep running.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
