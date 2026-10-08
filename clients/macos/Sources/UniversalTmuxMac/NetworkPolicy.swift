@@ -75,10 +75,10 @@ final class BrokerNetworkRecovery {
             }
         }
         monitor.start(queue: DispatchQueue(label: "argus.network-path"))
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+        observers.append(MainActorNotification.observe(NSWorkspace.didWakeNotification, center: NSWorkspace.shared.notificationCenter) {
             NotificationCenter.default.post(name: Self.recovered, object: nil)
         })
-        observers.append(DistributedNotificationCenter.default().addObserver(forName: NetworkPreferences.changed, object: nil, queue: .main) { _ in
+        observers.append(MainActorNotification.observe(NetworkPreferences.changed, center: DistributedNotificationCenter.default()) {
             UserDefaults.standard.synchronize()
             NotificationCenter.default.post(name: NetworkPreferences.changed, object: nil)
         })

@@ -1464,7 +1464,7 @@ final class AppState: ObservableObject {
         }
         if !isolatedForTesting && !Self.isRunningTests {
             _ = BrokerNetworkRecovery.shared
-            networkObservers.append(NotificationCenter.default.addObserver(forName: BrokerNetworkRecovery.recovered, object: nil, queue: .main) { [weak self] _ in
+            networkObservers.append(MainActorNotification.observe(BrokerNetworkRecovery.recovered) { [weak self] in
                 guard let self else { return }
                 self.networkCadence.reset()
                 self.sessionMonitor.networkRecovered()

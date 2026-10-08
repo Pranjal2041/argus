@@ -365,9 +365,11 @@ final class BrokerMonitoringTransportTests: XCTestCase {
         let base = "http://127.0.0.1:\(port.rawValue)"
         let general = makeBrokerSession(configuration: .ephemeral)
         let monitoring = makeBrokerSession(configuration: .ephemeral, traffic: .monitoring)
+        let workspace = makeBrokerSession(configuration: .ephemeral, traffic: .workspace)
         defer {
             general.invalidateAndCancel()
             monitoring.invalidateAndCancel()
+            workspace.invalidateAndCancel()
             listener.cancel()
             connections.cancel()
         }
@@ -377,6 +379,10 @@ final class BrokerMonitoringTransportTests: XCTestCase {
         XCTAssertEqual(monitoring.configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
         XCTAssertEqual(monitoring.configuration.timeoutIntervalForRequest, 20)
         XCTAssertEqual(monitoring.configuration.timeoutIntervalForResource, 20)
+        XCTAssertEqual(workspace.configuration.httpMaximumConnectionsPerHost, 2)
+        XCTAssertNil(workspace.configuration.urlCache)
+        XCTAssertEqual(workspace.configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+        XCTAssertEqual(workspace.configuration.timeoutIntervalForResource, 60)
         for index in 0..<4 {
             general.dataTask(with: try XCTUnwrap(URL(string: base + "/bulk/\(index)"))).resume()
         }
@@ -386,6 +392,9 @@ final class BrokerMonitoringTransportTests: XCTestCase {
         guard case .success(let sessions) = result else { return XCTFail("monitoring was starved by bulk traffic") }
         XCTAssertEqual(sessions.map(\.name), ["live"])
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+        let controlResult = await BrokerSessionMonitor.fetchSnapshot(testMachine(base), .foreground, session: workspace)
+        guard case .success(let sharedSessions) = controlResult else { return XCTFail("workspace control traffic was starved by bulk transfers") }
+        XCTAssertEqual(sharedSessions.map(\.name), ["live"])
     }
 
     private static func readRequest(_ connection: NWConnection, buffer: Data, handler: @escaping (String) -> Void) {

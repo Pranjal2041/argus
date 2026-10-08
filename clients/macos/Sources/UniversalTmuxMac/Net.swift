@@ -289,7 +289,7 @@ private final class BrokerProxyTunnel {
 }
 
 enum BrokerTrafficClass {
-    case general, monitoring, discovery
+    case general, monitoring, discovery, workspace
 }
 
 private func brokerConfiguration(
@@ -300,7 +300,7 @@ private func brokerConfiguration(
     // features accumulate transport attempts to the same broker. Long-lived
     // WebSockets use their own disposable sessions, so this bound covers the
     // shared HTTP control plane without limiting terminal panes.
-    configuration.httpMaximumConnectionsPerHost = traffic == .general ? 4 : (traffic == .monitoring ? 2 : 1)
+    configuration.httpMaximumConnectionsPerHost = traffic == .general ? 4 : (traffic == .discovery ? 1 : 2)
     if traffic != .general {
         // Liveness and mutable session snapshots must neither queue behind bulk
         // work nor be satisfied by an old URLCache response. Bound the complete
@@ -308,7 +308,7 @@ private func brokerConfiguration(
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = traffic == .discovery ? 8 : 20
-        configuration.timeoutIntervalForResource = traffic == .discovery ? 12 : 20
+        configuration.timeoutIntervalForResource = traffic == .discovery ? 12 : (traffic == .workspace ? 60 : 20)
         configuration.waitsForConnectivity = false
     }
     BrokerHTTPSProxy.shared.apply(to: configuration)
@@ -318,6 +318,9 @@ private func brokerConfiguration(
 /// All broker calls share the normal URLSession behavior. HTTPS alone is sent
 /// through the loopback tunnel above; plain loopback/native-broker HTTP is direct.
 let brokerSession = URLSession(configuration: brokerConfiguration(.default))
+// Workspace leases, RPC, and publications cannot queue behind bulk transfers.
+// The complete deadline accommodates the bounded 50-second account-service RPC.
+let workspaceSession = URLSession(configuration: brokerConfiguration(.ephemeral, traffic: .workspace))
 
 // Reserved capacity for short monitoring requests, independent of file transfers,
 // Git operations, command-center captures, and all other general-purpose traffic.

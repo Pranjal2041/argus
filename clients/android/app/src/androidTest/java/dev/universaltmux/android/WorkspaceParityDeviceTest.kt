@@ -21,6 +21,32 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class WorkspaceParityDeviceTest {
+    @Test fun usageFreshnessFollowsTheCollectorsActualCadence() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assumeTrue(context.packageName.endsWith(".qa") && (Build.FINGERPRINT.contains("generic") || Build.MODEL.contains("sdk")))
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val directory = File(context.getExternalFilesDir(null), "parity-screenshots").apply { mkdirs() }
+        val intent = Intent().setClassName(context.packageName, "dev.universaltmux.android.ParityFixtureActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        ActivityScenario.launch<Activity>(intent).use { scenario ->
+            fun configure(interval: Int, age: Int) {
+                scenario.onActivity { it.javaClass.getMethod("configureUsageCadenceTest", Integer.TYPE, Integer.TYPE).invoke(it, interval, age) }
+                device.waitForIdle(); Thread.sleep(600)
+            }
+            configure(600, 8)
+            assertTrue(device.wait(Until.hasObject(By.text("Research account")), 8000))
+            assertFalse(device.hasObject(By.textContains("Cached readings")))
+            assertTrue(device.takeScreenshot(File(directory, "usage-low-data-fresh.png")))
+            configure(120, 8)
+            assertTrue(device.wait(Until.hasObject(By.textContains("Cached readings")), 5000))
+            assertTrue(device.takeScreenshot(File(directory, "usage-expired.png")))
+            configure(120, 1)
+            assertTrue(device.wait(Until.gone(By.textContains("Cached readings")), 5000))
+            assertTrue(device.takeScreenshot(File(directory, "usage-recovered.png")))
+            device.findObject(By.text("Refresh")).click()
+            assertTrue(device.wait(Until.hasObject(By.text("Queued")), 5000))
+        }
+    }
+
     @Test fun statusMenusSaveOnSharedAndNativeBrokersAndShowFailures() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         assumeTrue(context.packageName.endsWith(".qa") && (Build.FINGERPRINT.contains("generic") || Build.MODEL.contains("sdk")))

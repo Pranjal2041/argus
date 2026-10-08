@@ -10,7 +10,7 @@ func sharedWorkspaceRequest(_ base: String, _ path: String, _ body: ArgusJSON? =
         request.httpMethod = "POST"; request.httpBody = try ArgusWire.encoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     }
-    let (data, response) = try await brokerSession.data(for: request)
+    let (data, response) = try await workspaceSession.data(for: request)
     guard let response = response as? HTTPURLResponse else { throw ArgusFailure("invalid_response", "Invalid workspace response.") }
     let value = (try? JSONDecoder().decode(ArgusJSON.self, from: data)) ?? .null
     guard (200..<300).contains(response.statusCode) else { throw SharedWorkspaceHTTPError(status: response.statusCode, document: value) }
@@ -132,6 +132,7 @@ final class SharedWorkspaceCoordinator: ObservableObject {
                       let data = try? JSONDecoder().decode(ArgusJSON.self, from: usage.sharedDismissals()) else { return }
                 self.change("usage-dismissals", id: "default", data: data)
             }
+            usage.startPresentation()
         }
         applyUsage()
     }

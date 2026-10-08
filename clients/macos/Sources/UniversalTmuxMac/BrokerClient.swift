@@ -248,7 +248,7 @@ final class BrokerClient {
         self.scheduler = scheduler; self.recovery = recovery; self.makeTransport = makeTransport
         if observeNetwork {
             _ = BrokerNetworkRecovery.shared
-            recoveryObserver = NotificationCenter.default.addObserver(forName: BrokerNetworkRecovery.recovered, object: nil, queue: .main) { [weak self] _ in
+            recoveryObserver = MainActorNotification.observe(BrokerNetworkRecovery.recovered) { [weak self] in
                 guard let self, !closed, !suspended else { return }
                 backoff = 0.5
                 if live { probeLiveness() }

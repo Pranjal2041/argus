@@ -42,6 +42,10 @@ class ParityFixtureActivity : ComponentActivity() {
     }
     fun completeStatusTest() { server.statusApplied = true; vm.refreshCC() }
     fun currentStatusTest(): String = vm.ccFor(vm.brokers.first(), "analysis")?.label.orEmpty()
+    fun configureUsageCadenceTest(interval: Int, ageMinutes: Int) {
+        vm.workspace.acceptSnapshot(server.usageCadenceSnapshot(interval, ageMinutes))
+        screen = SCREEN_USAGE
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,6 +109,14 @@ private class ParityFixtureServer(private val fixture: JSONObject, private val c
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     private fun record(collection: String, id: String, data: JSONObject) {
         fixture.getJSONArray("records").put(WorkspaceRecord(collection, id, ++revision, data).json()); fixture.put("cursor", revision)
+    }
+    @Synchronized fun usageCadenceSnapshot(interval: Int, ageMinutes: Int): JSONObject {
+        val records = fixture.getJSONArray("records").objects()
+        val usage = JSONObject(records.last { it.optString("collection") == "usage" }.getJSONObject("data").toString())
+            .put("refreshIntervalSeconds", interval).put("lastRefresh", System.currentTimeMillis() - ageMinutes * 60000L)
+        fixture.put("records", JSONArray(records.filterNot { it.optString("collection") == "usage" }))
+        record("usage", "current", usage)
+        return JSONObject(fixture.toString())
     }
     init {
         val now = System.currentTimeMillis()
