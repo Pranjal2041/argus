@@ -291,6 +291,26 @@ struct UniversalTmuxApp: App {
     }
 }
 
+/// Intentional local suspension is not evidence that the broker is offline.
+struct TerminalConnectionLabel: View {
+    let state: ConnState
+    var scale: Double = 1
+    var body: some View {
+        Group {
+            switch state {
+            case .connecting: Text("connecting…")
+            case .reconnecting: Text("reconnecting…")
+            case .suspended:
+                Text("paused · Low Data Mode")
+                    .help("Return to this terminal in Argus to reconnect. Remote jobs are still running.")
+            case .connected, .closed: EmptyView()
+            }
+        }
+        .font(.system(size: 11 * scale, weight: .medium))
+        .foregroundStyle(state == .suspended ? Theme.textSecondary : Color(hex: "#E0AF68"))
+    }
+}
+
 /// Preferences window (⌘,). Live font-size control for the terminal pane.
 struct SettingsView: View {
     @ObservedObject var terminals: TerminalController
@@ -312,6 +332,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section { SharedWorkspaceSettingsView(app: state) }
+            NetworkSettingsSection()
             Section {
                 HStack {
                     Text("Text size")
@@ -1608,11 +1629,7 @@ struct RootView: View {
                                      isLocal: machineIsLocal(ref.machineID), font: cf(11))
                     meta("·"); activityMeta(s.activity)
                 }
-                if st == .reconnecting || st == .connecting {
-                    Text(st == .connecting ? "connecting…" : "reconnecting…")
-                        .font(cf(11, .medium))
-                        .foregroundStyle(Color(hex: "#E0AF68"))
-                }
+                if let st { TerminalConnectionLabel(state: st, scale: uiScale) }
             } else {
                 Text("No session selected")
                     .font(cf(13, .medium))
@@ -1676,6 +1693,7 @@ struct RootView: View {
         case .connected: return Theme.attached
         case .connecting, .reconnecting: return Color(hex: "#E0AF68")
         case .closed: return Theme.unreachable
+        case .suspended: return Theme.textTertiary
         case .none: return Theme.textTertiary
         }
     }

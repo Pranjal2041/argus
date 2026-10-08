@@ -66,6 +66,11 @@ struct BrokerHealth {
     var retryDelay: TimeInterval {
         failureCount == 0 ? 0 : min(30, pow(2, Double(min(failureCount, 5))))
     }
+
+    mutating func resetRetryBudget() {
+        failureCount = 0
+        firstFailureAt = nil
+    }
 }
 
 /// Positive, expiring evidence only: an idle socket's `connected` flag is not a
@@ -183,6 +188,23 @@ final class BrokerSessionMonitor {
         retired.forEach { retire($0) }
     }
 
+    func networkRecovered() {
+        for entry in entries.values {
+            let needsRetry = entry.task != nil || entry.health.failureCount > 0
+            entry.task?.cancel(); entry.task = nil
+            entry.nextPoll = 0
+            entry.health.resetRetryBudget()
+            if needsRetry {
+                let scope: SessionRefreshScope = entry.wantsFull ? .all : entry.scope
+                if scope == .all {
+                    entry.completions += entry.fullCompletions
+                    entry.fullCompletions.removeAll()
+                }
+                start(entry, scope: scope)
+            }
+        }
+    }
+
     private func retire(_ id: String) {
         guard let entry = entries.removeValue(forKey: id) else { return }
         entry.task?.cancel()
@@ -268,7 +290,7 @@ final class BrokerSessionMonitor {
         var components = URLComponents(string: machine.httpBase + "/sessions")
         if scope == .foreground { components?.queryItems = [URLQueryItem(name: "scope", value: "foreground")] }
         guard let url = components?.url else { return .failure(.invalidURL) }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         do {
             let (data, response) = try await session.data(for: request)

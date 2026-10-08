@@ -307,8 +307,8 @@ private func brokerConfiguration(
         // operation too, including a server that keeps trickling response bytes.
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 8
-        configuration.timeoutIntervalForResource = traffic == .discovery ? 12 : 8
+        configuration.timeoutIntervalForRequest = traffic == .discovery ? 8 : 20
+        configuration.timeoutIntervalForResource = traffic == .discovery ? 12 : 20
         configuration.waitsForConnectivity = false
     }
     BrokerHTTPSProxy.shared.apply(to: configuration)
@@ -327,9 +327,10 @@ let brokerDiscoverySession = makeBrokerSession(configuration: .ephemeral, traffi
 
 func makeBrokerSession(
     configuration: URLSessionConfiguration,
-    traffic: BrokerTrafficClass = .general
+    traffic: BrokerTrafficClass = .general,
+    delegate: URLSessionDelegate? = nil
 ) -> URLSession {
-    URLSession(configuration: brokerConfiguration(configuration, traffic: traffic))
+    URLSession(configuration: brokerConfiguration(configuration, traffic: traffic), delegate: delegate, delegateQueue: nil)
 }
 
 func registerBrokerTLSAddress(_ address: String, dnsName: String) {

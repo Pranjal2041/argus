@@ -65,6 +65,60 @@ final class BrokerHealthTests: XCTestCase {
 
 @MainActor
 final class BrokerSessionMonitorTests: XCTestCase {
+    func testNetworkReturnRetriesImmediatelyWithoutClaimingReachability() async {
+        for base in ["http://127.0.0.1:8123", "https://broker.example:8722"] {
+            let failed = expectation(description: "initial failure")
+            let recovered = expectation(description: "network retry")
+            var requests = 0, clock: TimeInterval = 0
+            var states: [BrokerConnectionStatus] = []
+            let monitor = BrokerSessionMonitor(fetch: { _, _ in
+                requests += 1
+                return requests == 1 ? .failure(.transport(-1001)) : .success([])
+            }, probe: { _ in false }, now: { clock }, evidence: { _ in nil })
+            monitor.onUpdate = { _, update in
+                states.append(update.status)
+                (requests == 1 ? failed : recovered).fulfill()
+            }
+            monitor.refresh(testMachine(base), scope: .foreground)
+            await fulfillment(of: [failed], timeout: 2)
+            clock = 0.1
+            monitor.refresh(testMachine(base), scope: .foreground)
+            XCTAssertEqual(requests, 1)
+            monitor.networkRecovered()
+            XCTAssertEqual(states, [.delayed])
+            await fulfillment(of: [recovered], timeout: 2)
+            XCTAssertEqual(requests, 2)
+            XCTAssertEqual(states, [.delayed, .reachable])
+        }
+    }
+
+    func testNetworkReturnPreservesFullWaitersAndRejectsCancelledReply() async {
+        let first = expectation(description: "old request")
+        let replacement = expectation(description: "new request")
+        let foregroundDone = expectation(description: "foreground waiter")
+        let fullDone = expectation(description: "full waiter")
+        var held: [CheckedContinuation<BrokerSnapshotResult, Never>] = []
+        var requests: [SessionRefreshScope] = [], snapshots: [String] = []
+        let monitor = BrokerSessionMonitor(fetch: { _, scope in
+            requests.append(scope)
+            return await withCheckedContinuation {
+                held.append($0)
+                (requests.count == 1 ? first : replacement).fulfill()
+            }
+        }, probe: { _ in false })
+        monitor.onUpdate = { _, update in snapshots += update.sessions?.map(\.name) ?? [] }
+        monitor.refresh(testMachine(), scope: .foreground) { foregroundDone.fulfill() }
+        await fulfillment(of: [first], timeout: 2)
+        monitor.refresh(testMachine(), scope: .all) { fullDone.fulfill() }
+        monitor.networkRecovered()
+        await fulfillment(of: [replacement], timeout: 2)
+        XCTAssertEqual(requests, [.foreground, .all])
+        held[0].resume(returning: .success([SessionInfo(name: "stale")]))
+        held[1].resume(returning: .success([SessionInfo(name: "current")]))
+        await fulfillment(of: [foregroundDone, fullDone], timeout: 2)
+        XCTAssertEqual(snapshots, ["current"])
+    }
+
     func testManualAndPeriodicRefreshesCoalesceAndFullWaitersWaitForFullSnapshot() async {
         let first = expectation(description: "foreground started")
         let full = expectation(description: "full started")
@@ -321,7 +375,8 @@ final class BrokerMonitoringTransportTests: XCTestCase {
         XCTAssertEqual(monitoring.configuration.httpMaximumConnectionsPerHost, 2)
         XCTAssertNil(monitoring.configuration.urlCache)
         XCTAssertEqual(monitoring.configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
-        XCTAssertEqual(monitoring.configuration.timeoutIntervalForResource, 8)
+        XCTAssertEqual(monitoring.configuration.timeoutIntervalForRequest, 20)
+        XCTAssertEqual(monitoring.configuration.timeoutIntervalForResource, 20)
         for index in 0..<4 {
             general.dataTask(with: try XCTUnwrap(URL(string: base + "/bulk/\(index)"))).resume()
         }

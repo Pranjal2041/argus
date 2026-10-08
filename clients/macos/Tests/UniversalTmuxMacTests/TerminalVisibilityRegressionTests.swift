@@ -20,12 +20,14 @@ final class TerminalVisibilityRegressionTests: XCTestCase {
         XCTAssertEqual(state.update(true), .unchanged)
     }
 
-    func testRepeatedVisiblePaneUpdatesDoNotRestartTheSocket() throws {
+    @MainActor func testRepeatedVisiblePaneUpdatesDoNotRestartTheSocket() async throws {
         let ref = "test/repeated-visible-\(UUID().uuidString)"
         let connection = PaneConn(
             url: try XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws?session=diagnostic")),
             traceRef: ref
         )
+        // Dial grants are queued by the shared foreground-priority scheduler.
+        try await Task.sleep(for: .milliseconds(30))
 
         for _ in 0..<20 { connection.setVisible(true) }
         connection.disconnect()

@@ -33,15 +33,43 @@ selection: click-and-drag still selects locally in normal terminal panels. Recon
 session restores its mouse tracking and encoding modes, including when the application enabled them
 before Argus attached. This requires the updated Mac app and broker on the session's host.
 
-Reconnects are visibility-aware. The pane you are reading uses an eager first-frame watchdog and
-retry schedule; background panes back off more calmly so one unhealthy host cannot churn the whole
-sidebar. On macOS, the eight most-recent panes stay warm and protocol-current. Off-screen panes keep
+Reconnects are visibility-aware. On macOS, foreground connection attempts have priority and reserved
+capacity; opening a panel does not restart an in-progress handshake. Connection setup has a 20-second
+deadline, followed by a separate 10-second first-frame deadline. Idle sockets use a bounded heartbeat,
+and network changes or wake-up reset failed-request backoff. Background panes retry less frequently.
+
+With Low Data Mode off, the eight most-recent Mac panes stay warm and protocol-current. Off-screen panes keep
 parsing output into their existing 100k-line local history, but skip invisible paints; one shared,
 bounded main-thread scheduler keeps a burst from several agents from starving clicks or panel
 switches. Revealing a pane therefore does not shrink its history or replace it with a reconnect
 snapshot. On Windows, a genuinely new connection can initially recover only the recent output held
 by the bounded ConPTY ring, but that snapshot preserves DEC private modes such as bracketed paste;
 once connected, subsequent output and panel switches retain the full local history normally.
+
+## Low Data Mode on Mac
+
+**Settings → Network → Low Data Mode** reduces this Mac's automatic network traffic. It is off by
+default and applies to both the app and its workspace background collector.
+
+- The visible terminal and two recently used panes stay ready for quick switching. A hidden pane
+  pauses after 60 seconds or after receiving 64 KiB of data, whichever comes first.
+  Older panes pause immediately, retaining their local views. A failed hidden connection waits until
+  you return instead of retrying in the background.
+- Changing keyboard focus does not disconnect a terminal that is still visible. When the window is
+  hidden or fully covered, the same bounded grace period applies. A quick return reuses the connection;
+  returning after a pause reconnects and requests the current screen.
+- Remote sessions and their jobs keep running. An intentional pause appears as **paused · Low Data
+  Mode**, not as an unreachable broker.
+- The selected machine's session list refreshes every 10 seconds; other machines and the collector
+  refresh every 60 seconds. Discovery runs every two minutes, and history every five minutes.
+- Automatic Command Center, Lab, journal, workspace-sync, and usage collection also run less often.
+  Usage collection runs no more frequently than every ten minutes, while preserving a longer interval
+  if one is already configured.
+
+Opening a terminal and explicit refresh actions bypass the automatic cadence limits. Turning the
+mode off resumes warm background terminal connections and the normal refresh intervals.
+The Mac honors ordered screen-snapshot boundaries, so receiving a snapshot does not trigger a
+second download of the same screen. Older brokers retain the settled-resize repaint fallback.
 
 ## Restore a workspace after a restart or Babel node change
 

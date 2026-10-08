@@ -38,6 +38,26 @@ final class TerminalStreamPumpTests: XCTestCase {
         XCTAssertEqual(output, "")
     }
 
+    func testSnapshotBoundariesStayOrderedAcrossOutputSlicesAndSizeChanges() {
+        var events: [String] = []
+        let pump = TerminalStreamPump(
+            applyOutput: { events.append(String(decoding: $0, as: UTF8.self)) },
+            applySize: { events.append("size:\($0)x\($1)") },
+            applySnapshot: { events.append($0 ? "begin" : "end") }
+        )
+        pump.enqueueOutput(Array("live".utf8))
+        pump.enqueueSnapshot(true)
+        pump.enqueueSize(cols: 80, rows: 24)
+        pump.enqueueOutput(Array("snapshot".utf8))
+        pump.enqueueSnapshot(false)
+        pump.enqueueOutput(Array("tail".utf8))
+        while pump.hasPendingEvents { pump.consumeOne(maxOutputBytes: 4) }
+        XCTAssertEqual(events, ["live", "begin", "size:80x24", "snap", "shot", "end", "tail"])
+        pump.stop()
+        pump.enqueueSnapshot(true)
+        XCTAssertFalse(pump.hasPendingEvents)
+    }
+
     func testHiddenPumpKeepsCompleteOrderedHistory() {
         var replayed: [UInt8] = []
         let pump = TerminalStreamPump(

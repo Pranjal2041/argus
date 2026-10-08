@@ -515,6 +515,8 @@ final class CommandCenterModel: ObservableObject {
     private let provider: AgentStatusProvider = CodexStatusProvider()
     private weak var app: AppState?
     private var timer: Timer?
+    private var networkCadence = NetworkCadence()
+    private var explicitRefreshPending = false
     private var lastHash: [String: Int] = [:]   // content fingerprint of the last summarized output
     private var lastOKAt: [String: Double] = [:] // when each session was last successfully summarized (for fair scheduling)
     private var correction: [String: String] = [:] // active delivery; the service retains durable feedback until publication
@@ -540,6 +542,7 @@ final class CommandCenterModel: ObservableObject {
         }
         let key = ref.id
         if let correctionID, correctionIDs[key] == correctionID { return }
+        explicitRefreshPending = true
         correctionIDs[key] = correctionID
         completedCorrections[key] = nil
         let prev = statuses[key]
@@ -557,6 +560,7 @@ final class CommandCenterModel: ObservableObject {
         statuses[key] = AgentStatus(label: label, oneLiner: prev?.oneLiner ?? "", lookAtThis: prev?.lookAtThis, updatedAt: Date())
         correction[key] = note ?? "[STATUS CORRECTION] A \(actor == "human" ? "human" : "local automation client") changed this session's status from \"\(old)\" to \"\(label)\". Treat this as a correction, not a permanent lock."
         lastHash[key] = nil   // force the next sweep to re-summarize (and deliver the note) even if the screen is unchanged
+        lastDot[key] = nil    // explicit corrections are eligible on the next pulse, not the next full sweep
         persist(); publish()
     }
     private var lastDot: [String: String] = [:] // last seen dot state — a flip forces a refresh
@@ -697,16 +701,21 @@ final class CommandCenterModel: ObservableObject {
         }
         if let ref { lastHash[ref.id] = nil; lastDot[ref.id] = nil }
         else { lastHash.removeAll(); lastDot.removeAll() }
+        explicitRefreshPending = true
     }
 
     private func pulse() {
         guard let app else { ccLog("pulse: app nil (not bound)"); return }
         if !isCollector {
             readSharedStatuses()
-            Task { [weak self] in await self?.refreshLegacyStatuses() }
+            if networkCadence.due("legacy", every: NetworkPreferences.policy.commandCenter) {
+                Task { [weak self] in await self?.refreshLegacyStatuses() }
+            }
             return
         }
         guard collectionAllowed() else { return }
+        guard networkCadence.due("collector", every: NetworkPreferences.policy.commandCenter, force: explicitRefreshPending) else { return }
+        explicitRefreshPending = false
         // Pick up manual statuses set on another device (the phone) and apply them here.
         for m in app.machines { Task { [weak self] in await self?.consumeOverrides(machine: m) } }
         pulseN += 1
