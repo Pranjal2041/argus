@@ -143,7 +143,7 @@ private final class WorkspaceCollector {
                 leases[name] = try await sharedWorkspaceRequest(base, "/workspace/lease", .object([
                     "name": .string(name), "owner": .string(owner), "ttlSeconds": .number(120)]))
             } catch { leases[name] = nil }
-            if name == "cc-status", previousFence != leases[name]?["fence"] { cc.collectionOwnershipChanged(); statusesDirty = false }
+            if name == "cc-status", previousFence != leases[name]?["fence"] { cc.collectionOwnershipChanged(workspaceID: id); statusesDirty = false }
         }
         if networkCadence.due("discovery", every: max(30, policy.discovery)) {
             let base = base
