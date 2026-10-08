@@ -891,11 +891,7 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		fsResult(w, fsvc.Remove(r.URL.Query().Get("path")))
 	})
-	mux.HandleFunc("/fs/write", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		data, _ := io.ReadAll(r.Body)
-		fsResult(w, fsvc.Write(r.URL.Query().Get("path"), data))
-	})
+	mux.HandleFunc("/fs/write", serveFileWrite)
 	mux.HandleFunc("/fs/document", fsvc.ServeDocument)
 
 	// Argus Lab (LAB-DESIGN.md): read routes for the hub plus key decisions for
@@ -1360,6 +1356,21 @@ func fsResult(w http.ResponseWriter, err error) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// A file mutation is committed only after its entire request has arrived.
+// Atomic rename alone cannot protect an existing file from a truncated upload.
+func serveFileWrite(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	data, err := io.ReadAll(r.Body)
+	if err == nil && r.ContentLength >= 0 && int64(len(data)) != r.ContentLength {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		fsResult(w, fmt.Errorf("incomplete file upload: %w", err))
+		return
+	}
+	fsResult(w, fsvc.Write(r.URL.Query().Get("path"), data))
 }
 
 // listener returns a local TCP listener, or a tailnet (tsnet) listener when
