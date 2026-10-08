@@ -95,8 +95,12 @@ def check(binary, backend, corrections=False):
     try:
         with tempfile.TemporaryDirectory(prefix="argus-worker-check-") as home:
             env = dict(os.environ, HOME=home, CFFIXED_USER_HOME=home)
+            # HOME does not isolate preferences cached by macOS cfprefsd. Pin
+            # this short lifecycle check to normal cadence in the process-only
+            # argument domain, without changing the user's saved network mode.
             process = subprocess.Popen([binary, "--workspace-worker",
-                f"--workspace-endpoint=http://127.0.0.1:{server.server_port}"],
+                f"--workspace-endpoint=http://127.0.0.1:{server.server_port}",
+                "-ut.network.lowData", "NO"],
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 25
