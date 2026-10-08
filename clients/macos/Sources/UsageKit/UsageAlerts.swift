@@ -28,7 +28,7 @@ struct UsageAlertPolicy: Codable, Equatable {
 }
 
 @available(macOS 14.0, *)
-public struct UsageWarning: Identifiable, Equatable {
+public struct UsageWarning: Identifiable, Equatable, Codable {
     public let id: String
     public let sourceID: String
     public let title: String

@@ -142,7 +142,11 @@ fun PortsScreen(vm: AppViewModel) {
                             Text("${af.brokerName}:${af.remotePort} → localhost:${af.localPort}  ·  ${af.health}",
                                 color = pDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        TextButton(onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://localhost:${af.localPort}"))) }) {
+                        TextButton(onClick = {
+                            vm.brokers.firstOrNull { it.host == af.brokerHost }?.let { host ->
+                                vm.openSharedService(host, af.remotePort, af.label.ifEmpty { "${af.brokerName}:${af.remotePort}" })
+                            }
+                        }) {
                             Text("Open", color = pAccent)
                         }
                         IconButton(onClick = { Forwards.stop(af) }) { Icon(Icons.Filled.StopCircle, "Stop", tint = pBad) }

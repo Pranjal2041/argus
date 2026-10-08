@@ -15,16 +15,44 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
 /** App state: the saved brokers, their sessions, and the current selection. */
-class AppViewModel(app: Application) : AndroidViewModel(app) {
+class AppViewModel @JvmOverloads constructor(app: Application, startServices: Boolean = true) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("ut", 0)
+    val brokerDocuments = BrokerDocumentCache(app, viewModelScope)
+    private val workspaceBrowsers = mutableMapOf<String, WorkspaceBrowserSession>()
+    val workspaceBlobs = WorkspaceBlobs(app)
+    val artifactTransfers by lazy { ArtifactTransfers(app, workspace, workspaceBlobs) }
+    fun workspaceBrowser(id: String) = workspaceBrowsers.getOrPut(workspace.workspaceID + "/" + id) { WorkspaceBrowserSession(id) }
+    override fun onCleared() { workspaceBrowsers.values.forEach { it.close() }; super.onCleared() }
+    val workspace = WorkspaceRepository(object : WorkspacePersistence {
+        override fun read(workspaceID: String) = prefs.getString("ut.replica.$workspaceID", null)
+        override fun write(workspaceID: String, document: String) {
+            check(prefs.edit().putString("ut.replica.$workspaceID", document).commit()) { "Could not persist workspace changes." }
+        }
+    })
+    var workspaceSelectionIssue by mutableStateOf<String?>(null)
+        private set
+    var terminalVisible = false
+    private var workspaceRefreshInFlight = false
+    private val fileControllers = mutableMapOf<String, FilesController>()
+    fun filesFor(broker: Broker): FilesController = fileControllers.getOrPut(broker.id) {
+        FilesController(broker, getApplication<Application>())
+    }.also { it.broker = broker }
+    fun saveFile(controller: FilesController, file: OpenFile, text: String, complete: (Boolean) -> Unit) {
+        viewModelScope.launch { complete(controller.save(file, text)) }
+    }
 
     val brokers = mutableStateListOf<Broker>()
     private val brokerSources = mutableMapOf<String, BrokerSource>()
     private val discoveryMisses = mutableMapOf<String, Int>()
+    private val sessionRefreshInFlight = mutableSetOf<String>()
+    private val identityRefreshInFlight = mutableSetOf<String>()
+    private val identityRefreshedAt = mutableMapOf<String, Long>()
     private var discoveryInFlight = false
     private var discoveryPruneRequested = false
     val sessions = mutableStateMapOf<String, List<SessionInfo>>()
@@ -37,7 +65,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** True if this pane is in the orange "done, unseen" state. The UI MUST use this
      *  rather than building the key itself, so the lookup key can never drift from the
      *  one stored in [unseen] (a past separator mismatch silently broke the orange dot). */
-    fun isUnseen(b: Broker, name: String): Boolean = unseen.contains(unseenKey(b, name))
+    fun isUnseen(b: Broker, name: String): Boolean = unseen.contains(unseenKey(b, name)) &&
+        !isSharedRead(b, sessions[b.id].orEmpty().firstOrNull { it.name == name })
 
     private val _selected = mutableStateOf<Pair<Broker, String>?>(null)
     var selected: Pair<Broker, String>?
@@ -48,6 +77,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val k = unseenKey(value.first, value.second)
                 unseen.remove(k)                  // visiting clears orange
                 if (k !in acknowledged) acknowledged.add(k) // viewing a prompt acknowledges it
+                acknowledgeShared(value.first, value.second)
                 AttentionNotifier.clear(getApplication(), value.first, value.second)
                 recomputeAttention()
             }
@@ -173,9 +203,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val workflows = mutableStateListOf<Workflow>()
     val todoBoards = mutableStateListOf<TodoBoard>()
     val notes = mutableStateListOf<Note>()
+    val planner = mutableStateListOf<PlannerCommitment>()
     private var workflowsTs = 0L
     private var todosTs = 0L
     private var notesTs = 0L
+    private var plannerTs = 0L
     private var workflowsDestructive = prefs.getBoolean("ut.workflows.pendingDestructive", false)
     private var todosDestructive = prefs.getBoolean("ut.todos.pendingDestructive", false)
     private var notesDestructive = prefs.getBoolean("ut.notes.pendingDestructive", false)
@@ -235,10 +267,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         loadBrokers()
         loadWandb()
         loadUserData()
+        prefs.getString("ut.workspace.id", null)?.let { workspace.bind(it) }
+        workspace.onChange = {
+            brokers.forEach { broker -> sessions[broker.id].orEmpty().filter { isSharedRead(broker, it) }.forEach {
+                unseen.remove(unseenKey(broker, it.name))
+                AttentionNotifier.clear(getApplication(), broker, it.name)
+            } }
+            recomputeAttention()
+        }
         weeklyProgressCatalog = WeeklyProgressNet.loadCachedCatalog(app) ?: WeeklyProgressCatalog()
-        refreshAll()
-        refreshLab()
-        if (authKey.isNotEmpty()) joinTailnet(authKey) // auto-join + auto-discover on startup
+        if (startServices) {
+            refreshAll()
+            refreshLab()
+            if (authKey.isNotEmpty()) joinTailnet(authKey) // auto-join + auto-discover on startup
+        }
     }
 
     /** Join the tailnet with the shared auth key, then auto-discover brokers (no manual hostnames). */
@@ -305,7 +347,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val arr = JSONArray(prefs.getString("brokers", "[]") ?: "[]")
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            val broker = Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")), o.optString("os", ""))
+            val capabilities = o.optJSONArray("capabilities") ?: JSONArray()
+            val broker = Broker(o.getString("host"), o.getString("scheme"), o.optString("name", o.getString("host")), o.optString("os", ""),
+                o.optString("brokerID"), o.optString("workspaceID"), o.optBoolean("workspaceEnabled"),
+                (0 until capabilities.length()).map { capabilities.getString(it) }.toSet())
             brokers.add(broker)
             val source = when (o.optString("source")) {
                 "manual" -> BrokerSource.MANUAL
@@ -321,7 +366,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         brokers.forEach {
             val source = brokerSources[BrokerDiscoveryPolicy.key(it.host)] ?: BrokerSource.DISCOVERED
             arr.put(JSONObject().put("host", it.host).put("scheme", it.scheme).put("name", it.name)
-                .put("os", it.os).put("source", if (source == BrokerSource.MANUAL) "manual" else "discovered"))
+                .put("os", it.os).put("brokerID", it.brokerID).put("workspaceID", it.workspaceID)
+                .put("workspaceEnabled", it.workspaceEnabled).put("capabilities", JSONArray(it.capabilities.toList()))
+                .put("source", if (source == BrokerSource.MANUAL) "manual" else "discovered"))
         }
         prefs.edit().putString("brokers", arr.toString()).apply()
     }
@@ -371,7 +418,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         prevState.keys.removeAll { it.startsWith(sessionPrefix) }
         val ccPrefix = "${b.id}/"
         ccStatus.keys.filter { it.startsWith(ccPrefix) }.forEach { ccStatus.remove(it) }
-        pendingOverride.keys.removeAll { it.startsWith(ccPrefix) }
+        corrections.discardMatching { it.substringAfter('/').startsWith(ccPrefix) }
         val backlogChanged = backlog.removeAll { it.startsWith(sessionPrefix) }
         if (backlogChanged) prefs.edit().putString("backlog", backlog.joinToString("\n")).apply()
     }
@@ -381,9 +428,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun pollKnown() { brokers.toList().forEach { refresh(it) } }
 
     fun refresh(b: Broker) {
+        if (!sessionRefreshInFlight.add(b.id)) return
         viewModelScope.launch {
+          try {
             val list = withContext(Dispatchers.IO) { Net.sessions(b) }
-            if (list != null) {
+            if (list != null && brokers.any { it.id == b.id }) {
                 // Orange "done, unseen": a turn just finished (working → not-working) on a
                 // pane you weren't viewing; cleared when working resumes or you open it.
                 // working → WAITING is "needs attention" (amber + notification), not
@@ -408,8 +457,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 unseen.removeAll { it.startsWith(prefix) && it !in live }
                 acknowledged.removeAll { it.startsWith(prefix) && it !in live }
                 sessions[b.id] = list
+                if (terminalVisible) selected?.takeIf { it.first.id == b.id }?.let { acknowledgeShared(it.first, it.second) }
                 recomputeAttention()
             }
+          } finally { sessionRefreshInFlight.remove(b.id) }
         }
     }
 
@@ -546,6 +597,49 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun consumeScreenRequest() { requestedScreen = null }
+    fun requestUsage() { requestedScreen = SCREEN_USAGE }
+    var requestedArtifactID by mutableStateOf<String?>(null)
+    fun requestArtifacts(id: String? = null) { requestedArtifactID = id?.lowercase(); requestedScreen = SCREEN_ARTIFACTS }
+    fun refreshArtifactTransfers() {
+        viewModelScope.launch { artifactTransfers.flush(workspaceHost()); if (workspace.pending.isNotEmpty()) refreshWorkspace() }
+    }
+    fun artifactPanel(broker: Broker? = selected?.first): JSONObject {
+        val name = selected?.takeIf { it.first.id == broker?.id }?.second.orEmpty()
+        val session = broker?.let { b -> sessions[b.id]?.firstOrNull { it.name == name } }
+        return JSONObject().put("machineID", broker?.id ?: "phone").put("machineName", broker?.name ?: "Phone")
+            .put("machineHost", broker?.host.orEmpty()).put("sessionName", name)
+            .put("sessionLineageID", session?.lineageID).put("stableSessionID", session?.tmuxId).put("folder", session?.path.orEmpty())
+    }
+    fun snapshotArtifact(broker: Broker, path: String, filename: String) {
+        val panel = artifactPanel(broker)
+        viewModelScope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    val temp = java.io.File.createTempFile("artifact-snapshot-", ".tmp", getApplication<Application>().cacheDir)
+                    try {
+                        temp.outputStream().use { output ->
+                            check(Net.fsDownloadTo(broker, path, output) { bytes, _ -> require(bytes <= WorkspaceBlobs.LIMIT) { "File exceeds 128 MiB" } }) { "File download failed" }
+                            output.fd.sync()
+                        }; temp
+                    } catch (e: Exception) { temp.delete(); throw e }
+                }
+                try { artifactTransfers.stage(file.inputStream(), filename, null, panel, broker.brokerID, path) }
+                finally { file.delete() }
+                requestArtifacts(); refreshArtifactTransfers()
+            } catch (e: Exception) { workspaceSelectionIssue = e.message; requestedScreen = SCREEN_WORKSPACE }
+        }
+    }
+    fun requestDashboard() { requestedScreen = SCREEN_DASHBOARDS }
+    var requestedDashboardID by mutableStateOf<String?>(null); private set
+    fun consumeDashboardRequest() { requestedDashboardID = null }
+    fun openSharedService(broker: Broker, port: Int, name: String) {
+        try {
+            val id = java.util.UUID.randomUUID().toString()
+            val data = WorkspaceLocators.service(broker.brokerID, port, "/").put("name", name)
+            workspace.enqueue("dashboards", id, data)
+            requestedDashboardID = id; requestDashboard(); refreshWorkspace(true)
+        } catch (e: Exception) { workspaceSelectionIssue = e.message; requestedScreen = SCREEN_WORKSPACE }
+    }
     fun clearLabError() { labError = null }
 
     fun requestWeeklyProgress() {
@@ -845,45 +939,111 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** AI statuses published by the Mac, read per broker. Key = "<brokerId>/<session>". */
     val ccStatus = mutableStateMapOf<String, AgentCardStatus>()
+    val ccIssues = mutableStateMapOf<String, String>()
+    val ccCorrectionIssues = mutableStateMapOf<String, String>()
+    private val ccRefreshInFlight = mutableSetOf<String>()
     private fun ccKey(b: Broker, name: String) = "${b.id}/$name"
-    fun ccFor(b: Broker, name: String): AgentCardStatus? = ccStatus[ccKey(b, name)]
+    fun ccFor(b: Broker, name: String): AgentCardStatus? {
+        val key = sharedSessionKey(b, name)
+        if (workspace.loaded && key != null) {
+            val value = workspace.data("cc-status", key)
+            val override = workspace.data("cc-overrides", key)
+            if (value != null || override != null) return AgentCardStatus(name,
+                override?.optString("label") ?: value!!.optString("label", "idle"),
+                value?.optString("summary").orEmpty(), value?.optString("lookAtThis")?.takeIf { it.isNotEmpty() },
+                (value?.optDouble("updatedAt") ?: 0.0) / 1000)
+            return null
+        }
+        val status = ccStatus[ccKey(b, name)]
+        val lifetime = correctionLifetime(b, name) ?: return status
+        val pending = corrections.current(correctionKey(b, name), lifetime) ?: return status
+        return (status ?: AgentCardStatus(name, "idle", "", null, 0.0)).copy(label = pending.label)
+    }
 
     // A status the user set on THIS device, shown optimistically until the Mac reflects
-    // it back via /ccstatus (or a 15s timeout) — so the card doesn't flicker to the old
+    // it back via /ccstatus — acknowledgment, not an arbitrary timer, ends pending.
     // label on the next poll before the Mac has processed the override.
-    private val pendingOverride = mutableStateMapOf<String, Pair<String, Long>>()
+    private val corrections = StatusCorrections(prefs.getString("ut.ccCorrections.v1", null)) {
+        check(prefs.edit().putString("ut.ccCorrections.v1", it).commit()) { "Could not save the pending status change." }
+    }
+    private val correctionWrites = mutableMapOf<String, Mutex>()
+    private fun correctionKey(b: Broker, name: String) = workspace.workspaceID + "/" + ccKey(b, name)
+    private fun correctionLifetime(b: Broker, name: String): String? = sessions[b.id].orEmpty().firstOrNull { it.name == name }?.let {
+        b.httpBase + "/" + it.lineageID.ifEmpty { it.tmuxId ?: it.name }
+    }
+    internal var sendStatusCorrection: suspend (Broker, String, String) -> Long? = { b, name, label ->
+        withContext(Dispatchers.IO) { Net.setCCOverride(b, name, label) }
+    }
 
     /** Manually set a card's status from the phone: optimistic locally + relayed to the
      *  Mac (the only generator) via the broker, which applies it and re-publishes. */
     fun setManualStatus(b: Broker, name: String, label: String) {
-        val k = ccKey(b, name)
-        val cur = ccStatus[k]
-        ccStatus[k] = AgentCardStatus(name, label, cur?.summary ?: "", cur?.lookAtThis, System.currentTimeMillis() / 1000.0)
-        pendingOverride[k] = label to System.currentTimeMillis()
-        viewModelScope.launch { withContext(Dispatchers.IO) { Net.setCCOverride(b, name, label) } }
+        if (label !in listOf("working", "idle", "needs-decision", "stuck", "milestone", "look", "drifting")) {
+            ccCorrectionIssues[b.id] = "Unknown status label."; return
+        }
+        ccCorrectionIssues.remove(b.id)
+        val identity = sharedSessionKey(b, name)
+        if (identity != null) {
+            try {
+                workspace.enqueue("cc-overrides", identity, JSONObject().put("label", label)
+                    .put("commandID", java.util.UUID.randomUUID().toString()).put("actor", "human"))
+                refreshWorkspace(force = true)
+            } catch (e: Exception) { ccCorrectionIssues[b.id] = "Could not save status for $name: ${e.message}" }
+            return
+        }
+        val lifetime = correctionLifetime(b, name)
+        if (lifetime == null) { ccCorrectionIssues[b.id] = "The session is no longer available."; return }
+        val key = correctionKey(b, name)
+        val pending = try { corrections.begin(key, lifetime, label, ccStatus[ccKey(b, name)]) }
+            catch (e: Exception) { ccCorrectionIssues[b.id] = e.message ?: "Could not save status."; return }
+        val lock = correctionWrites.getOrPut(key) { Mutex() }
+        viewModelScope.launch {
+            try {
+                lock.withLock {
+                    if (key != correctionKey(b, name) || lifetime != correctionLifetime(b, name) || corrections.current(key, lifetime)?.id != pending.id) return@withLock
+                    corrections.accepted(key, pending, sendStatusCorrection(b, name, label))
+                }
+            } catch (e: Exception) {
+                val current = corrections.current(key, lifetime)?.id == pending.id
+                runCatching { corrections.reject(key, pending) }
+                if (current && key == correctionKey(b, name) && lifetime == correctionLifetime(b, name)) {
+                    ccCorrectionIssues[b.id] = "Could not save status for $name: ${e.message}"
+                }
+            }
+        }
     }
 
     /** Pull each broker's /ccstatus and merge (each broker holds only its own sessions). */
     fun refreshCC() {
         brokers.toList().forEach { b ->
+            // Read and write routing must use the same per-session capability;
+            // a broker identity alone does not guarantee every session has one.
+            if (workspace.loaded && sessions[b.id].orEmpty().all { sharedSessionKey(b, it.name) != null }) { ccIssues.remove(b.id); return@forEach }
+            if (!ccRefreshInFlight.add(b.id)) return@forEach
             viewModelScope.launch {
+              try {
+                val workspaceID = workspace.workspaceID
+                val lifetimes = sessions[b.id].orEmpty().associate { it.name to correctionLifetime(b, it.name) }
                 val items = withContext(Dispatchers.IO) { Net.ccStatus(b) }
+                if (items == null) { ccIssues[b.id] = "Status refresh unavailable; showing last known status."; return@launch }
+                if (brokers.none { it.id == b.id } || workspaceID != workspace.workspaceID) return@launch
+                ccIssues.remove(b.id)
                 val prefix = "${b.id}/"
                 val live = HashSet<String>()
                 items.forEach { item ->
                     val k = ccKey(b, item.session)
-                    val pend = pendingOverride[k]
-                    // Keep showing a just-set override until the Mac's published status
-                    // matches it (or it ages out) — otherwise the card flickers back.
-                    ccStatus[k] = if (pend != null && pend.first != item.label && System.currentTimeMillis() - pend.second < 15_000) {
-                        item.copy(label = pend.first)
-                    } else {
-                        pendingOverride.remove(k)
-                        item
-                    }
+                    val lifetime = lifetimes[item.session] ?: return@forEach
+                    if (lifetime != correctionLifetime(b, item.session)) return@forEach
+                    val prior = ccStatus[k]
+                    if (prior != null && item.updatedAt < prior.updatedAt) { live.add(k); return@forEach }
+                    corrections.merge(correctionKey(b, item.session), lifetime, item)
+                    ccStatus[k] = item
                     live.add(k)
                 }
                 ccStatus.keys.filter { it.startsWith(prefix) && it !in live }.forEach { ccStatus.remove(it) }
+              } catch (e: Exception) {
+                ccIssues[b.id] = "Status refresh failed: ${e.message}"
+              } finally { ccRefreshInFlight.remove(b.id) }
             }
         }
     }
@@ -891,8 +1051,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Sessions the user has "ticked" to set aside in the command center. Key = "<id> name". */
     val backlog = mutableStateListOf<String>().also { it.addAll((prefs.getString("backlog", "") ?: "").split("\n").filter(String::isNotEmpty)) }
     private fun blKey(b: Broker, name: String) = "${b.id} $name"
-    fun isBacklogged(b: Broker, name: String) = backlog.contains(blKey(b, name))
+    fun isBacklogged(b: Broker, name: String): Boolean {
+        val key = sharedSessionKey(b, name)
+        if (workspace.loaded && key != null) return workspace.data("session-backlog", key)?.optBoolean("value") ?: false
+        return backlog.contains(blKey(b, name))
+    }
     fun toggleBacklog(b: Broker, name: String) {
+        val sharedKey = sharedSessionKey(b, name)
+        if (workspace.loaded && sharedKey != null) {
+            changeShared("session-backlog", sharedKey, JSONObject().put("value", !isBacklogged(b, name)))
+            return
+        }
         val k = blKey(b, name)
         if (backlog.contains(k)) backlog.remove(k) else backlog.add(k)
         prefs.edit().putString("backlog", backlog.joinToString("\n")).apply()
@@ -916,7 +1085,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun recomputeAttention() {
         val next = brokers.flatMap { b ->
             visibleSessions(b)
-                .filter { !it.hidden && it.state == "waiting" && unseenKey(b, it.name) !in acknowledged }
+                .filter { !it.hidden && it.state == "waiting" &&
+                    if (workspace.loaded && it.activityRevision > 0 && sharedSessionKey(b, it.name) != null) !isSharedRead(b, it)
+                    else unseenKey(b, it.name) !in acknowledged }
                 .map { b to it }
         }
         if (next != attention.toList()) {
@@ -952,7 +1123,90 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // non-null when init's loadUserData() runs.
 
     private fun now() = System.currentTimeMillis()
-    private fun syncHost(): Broker? = brokers.firstOrNull { it.isMac }
+    fun workspaceHost(): Broker? = brokers.firstOrNull { it.workspaceEnabled && it.workspaceID == workspace.workspaceID }
+    private fun syncHost(): Broker? = workspaceHost()
+
+    fun selectWorkspace(broker: Broker) {
+        if (workspaceRefreshInFlight || workspaceSyncInflight.isNotEmpty()) { workspaceSelectionIssue = "Wait for the current sync to finish."; return }
+        if (!broker.workspaceEnabled || broker.workspaceID.isEmpty()) { workspaceSelectionIssue = "This broker is not a workspace host."; return }
+        val previous = workspace.workspaceID
+        if (previous != broker.workspaceID) {
+            // Store documents and merge baselines per workspace. Switching hosts
+            // must never import another workspace's records as new local edits.
+            val keys = listOf("ut.workflows.v1", "ut.todoBoards.v1", "ut.notes.v1", "ut.planner.v1") +
+                listOf("workflows", "todos", "notes", "planner").flatMap { listOf("ut.sync.base.$it", "ut.sync.conflict.$it") }
+            val saved = JSONObject()
+            keys.forEach { key -> prefs.getString(key, null)?.let { saved.put(key, it) } }
+            val editor = prefs.edit()
+            if (previous.isNotEmpty()) editor.putString("ut.documents.$previous", saved.toString())
+            val target = prefs.getString("ut.documents.${broker.workspaceID}", null)?.let(::JSONObject)
+            if (previous.isNotEmpty() || target != null) keys.forEach { key ->
+                if (target?.has(key) == true) editor.putString(key, target.getString(key)) else editor.remove(key)
+            }
+            check(editor.putString("ut.workspace.id", broker.workspaceID).commit()) { "Could not save workspace selection." }
+            workspace.bind(broker.workspaceID)
+            if (previous.isNotEmpty() || target != null) {
+                workflows.clear(); todoBoards.clear(); notes.clear(); planner.clear()
+                workflowsTs = 0; todosTs = 0; notesTs = 0; plannerTs = 0
+                workspaceSyncIssues.clear(); loadUserData()
+            }
+        }
+        workspaceSelectionIssue = null
+        refreshWorkspace(force = true)
+    }
+
+    fun refreshWorkspace(force: Boolean = false) {
+        if (workspaceRefreshInFlight) return
+        if (workspace.workspaceID.isEmpty()) {
+            val candidates = brokers.filter { it.workspaceEnabled && it.workspaceID.isNotEmpty() }.distinctBy { it.workspaceID }
+            if (candidates.size == 1) { selectWorkspace(candidates.single()); return }
+            workspaceSelectionIssue = if (candidates.isEmpty()) "No shared workspace host is connected." else "Choose a workspace host."
+            return
+        }
+        val host = workspaceHost()
+        if (host == null) { workspaceSelectionIssue = "Workspace host is offline; cached data and pending changes are retained."; return }
+        workspaceSelectionIssue = null; workspaceRefreshInFlight = true
+        viewModelScope.launch {
+            try {
+                workspace.synchronize(host, force)
+                if (workspace.loaded) migrateSessionMarks()
+            } finally { workspaceRefreshInFlight = false }
+        }
+    }
+
+    fun sharedSessionKey(b: Broker, name: String): String? {
+        val broker = brokers.firstOrNull { it.id == b.id } ?: b
+        val session = sessions[b.id].orEmpty().firstOrNull { it.name == name } ?: return null
+        if (broker.brokerID.isEmpty() || session.lineageID.isEmpty()) return null
+        return "${broker.brokerID}/${session.lineageID}"
+    }
+    private fun isSharedRead(b: Broker, session: SessionInfo?): Boolean {
+        if (session == null || session.activityRevision == 0L) return false
+        val key = sharedSessionKey(b, session.name) ?: return false
+        return (workspace.data("session-read", key)?.optLong("seenRevision") ?: 0L) >= session.activityRevision
+    }
+    private fun acknowledgeShared(b: Broker, name: String) {
+        if (!workspace.loaded) return
+        val session = sessions[b.id].orEmpty().firstOrNull { it.name == name } ?: return
+        val key = sharedSessionKey(b, name) ?: return
+        if (session.activityRevision == 0L || isSharedRead(b, session)) return
+        changeShared("session-read", key, JSONObject().put("seenRevision", session.activityRevision))
+    }
+    fun changeShared(collection: String, id: String, data: JSONObject?, delete: Boolean = false) {
+        try { workspace.enqueue(collection, id, data, delete); refreshWorkspace(force = true) }
+        catch (e: Exception) { workspaceSelectionIssue = e.message }
+    }
+    private fun migrateSessionMarks() {
+        brokers.forEach { b -> sessions[b.id].orEmpty().forEach { session ->
+            val key = sharedSessionKey(b, session.name) ?: return@forEach
+            val marker = "ut.migrated.backlog.${workspace.workspaceID}.${blKey(b, session.name)}"
+            if (prefs.getBoolean(marker, false)) return@forEach
+            if (backlog.contains(blKey(b, session.name)) && workspace.record("session-backlog", key) == null && workspace.data("session-backlog", key) == null) {
+                workspace.enqueue("session-backlog", key, JSONObject().put("value", true))
+            }
+            prefs.edit().putBoolean(marker, true).apply()
+        } }
+    }
 
     private fun loadUserData() {
         UserDataJson.parseWorkflows(prefs.getString("ut.workflows.v1", null))?.let { (ts, list) ->
@@ -965,6 +1219,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         UserDataJson.parseNotes(prefs.getString("ut.notes.v1", null))?.let { (ts, list) ->
             notesTs = ts; notes.clear(); notes.addAll(list)
         }
+        UserDataJson.parsePlanner(prefs.getString("ut.planner.v1", null))?.let { (ts, list) ->
+            plannerTs = ts; planner.clear(); planner.addAll(list)
+        }
+    }
+    private fun savePlannerLocal() {
+        check(prefs.edit().putString("ut.planner.v1", UserDataJson.plannerEnvelope(plannerTs, planner.toList())).commit()) { "Could not save Planner." }
+    }
+    fun savePlan(item: PlannerCommitment) {
+        val index = planner.indexOfFirst { it.id == item.id }
+        val next = item.copy(title = item.title.trim(), project = item.project.trim(), editedAt = nowIso())
+        if (next.title.isEmpty()) return
+        if (index < 0) planner.add(next) else planner[index] = next
+        plannerTs = now(); savePlannerLocal(); syncUserData()
+    }
+    fun togglePlan(item: PlannerCommitment) = savePlan(item.copy(completedAt = if (item.isCompleted) null else nowIso()))
+    fun deletePlan(item: PlannerCommitment) {
+        planner.removeAll { it.id == item.id }; plannerTs = now(); savePlannerLocal(); syncUserData()
     }
     private fun saveWorkflowsLocal() {
         prefs.edit().putString("ut.workflows.v1", UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())).apply()
@@ -1103,12 +1374,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      *  may not carry it yet. Runs after discovery + on the poll. */
     fun enrichOs() {
         brokers.toList().forEach { b ->
-            if (b.os.isEmpty()) viewModelScope.launch {
+            if (System.currentTimeMillis() - (identityRefreshedAt[b.id] ?: 0) < 30_000 || !identityRefreshInFlight.add(b.id)) return@forEach
+            viewModelScope.launch {
+              try {
                 val probed = withContext(Dispatchers.IO) { Net.probe(b.host) }
-                if (probed != null && probed.os.isNotEmpty()) {
+                if (probed != null) {
                     val i = brokers.indexOfFirst { it.host == b.host }
-                    if (i >= 0 && brokers[i].os.isEmpty()) { brokers[i] = brokers[i].copy(os = probed.os); saveBrokers() }
+                    if (i >= 0) { brokers[i] = probed; saveBrokers() }
                 }
+                identityRefreshedAt[b.id] = System.currentTimeMillis()
+              } finally { identityRefreshInFlight.remove(b.id) }
             }
         }
     }
@@ -1129,6 +1404,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun workspaceData(key: String): JSONArray {
         val raw = when (key) {
+            "planner" -> UserDataJson.plannerEnvelope(plannerTs, planner.toList())
             "notes" -> UserDataJson.notesEnvelope(notesTs, notes.toList())
             "todos" -> UserDataJson.todosEnvelope(todosTs, todoBoards.toList())
             else -> UserDataJson.workflowsEnvelope(workflowsTs, workflows.toList())
@@ -1138,6 +1414,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyWorkspaceData(key: String, data: JSONArray, ts: Long) {
         val envelope = JSONObject().put("updatedAt", ts).put("data", data).toString()
         when (key) {
+            "planner" -> {
+                val parsed = UserDataJson.parsePlanner(envelope) ?: error("Invalid planner")
+                planner.clear(); planner.addAll(parsed.second); plannerTs = ts; savePlannerLocal()
+            }
             "notes" -> {
                 val parsed = UserDataJson.parseNotes(envelope) ?: error("Invalid notes")
                 notes.clear(); notes.addAll(parsed.second); notesTs = ts; saveNotesLocal()
@@ -1154,7 +1434,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
     private fun commitWorkspaceData(key: String, data: JSONArray, base: JSONArray, ts: Long) {
         UserDataJson.validateWorkspace(key, data)
-        val localKey = when(key) { "notes" -> "ut.notes.v1"; "todos" -> "ut.todoBoards.v1"; else -> "ut.workflows.v1" }
+        val localKey = when(key) { "notes" -> "ut.notes.v1"; "todos" -> "ut.todoBoards.v1"; "planner" -> "ut.planner.v1"; else -> "ut.workflows.v1" }
         val envelope = JSONObject().put("updatedAt", ts).put("data", data).toString()
         check(prefs.edit().putString(localKey, envelope).putString("ut.sync.base.$key", base.toString())
             .remove("ut.sync.conflict.$key").commit()) { "Could not persist synchronized workspace." }
@@ -1171,7 +1451,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun syncUserData() {
         val h = syncHost() ?: return
-        for (key in listOf("workflows", "todos", "notes")) {
+        for (key in listOf("workflows", "todos", "notes", "planner")) {
             if (key in workspaceSyncInflight) continue
             val conflict = workspaceConflict(key)
             if (conflict != null) {

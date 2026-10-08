@@ -42,6 +42,13 @@ auto-removes.
 
 ## Protocol
 
+### Shared app state
+
+Native Mac and Android clients use an explicitly selected [shared workspace](/docs/shared-workspace)
+for durable documents, session marks, catalogs, artifacts, and collector results.
+Its background service is independent of the app's windows. Machine runtime APIs
+remain direct, so terminal traffic does not pass through the workspace host.
+
 ### macOS monitoring and reachability
 
 Session snapshots, discovery, and general HTTP work use separate bounded connection pools.

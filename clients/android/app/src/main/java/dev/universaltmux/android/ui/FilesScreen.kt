@@ -3,14 +3,13 @@ package dev.universaltmux.android
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.pdf.PdfRenderer
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -40,6 +39,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 private val fInk: Color @Composable get() = LocalTheme.current.bgDeep
 private val fPanel: Color @Composable get() = LocalTheme.current.panel
@@ -51,14 +52,15 @@ private val fBorder: Color @Composable get() = LocalTheme.current.border
 private val fBad: Color @Composable get() = LocalTheme.current.bad
 private val fPanelAlt: Color @Composable get() = LocalTheme.current.panelAlt
 
-private enum class Kind { TEXT, IMAGE, PDF, BINARY }
-private class OpenFile(
+enum class Kind { TEXT, IMAGE, PDF, BINARY }
+class OpenFile(
     val path: String, val name: String, val kind: Kind,
-    val text: String? = null, val image: Bitmap? = null, val pages: List<Bitmap>? = null,
+    val text: String? = null, val image: Bitmap? = null, val previewFile: File? = null,
+    val revision: String = "", val draftText: String? = null,
 )
 
 /** Per-host browsing state (single-directory navigation, mobile-style). */
-private class FilesController(var broker: Broker, val ctx: Context) {
+class FilesController(var broker: Broker, val ctx: Context) {
     var path by mutableStateOf("")
     var sep = "/"
     var entries by mutableStateOf<List<FileEntry>>(emptyList())
@@ -66,50 +68,161 @@ private class FilesController(var broker: Broker, val ctx: Context) {
     var open by mutableStateOf<OpenFile?>(null)
     var uploading by mutableStateOf<Pair<String, Float>?>(null)   // (name, 0..1)
     var downloading by mutableStateOf<Pair<String, Float>?>(null)
+    var error by mutableStateOf<String?>(null)
+    var saving by mutableStateOf(false)
+    var conflict by mutableStateOf<FileDocument?>(null)
+    var tabs by mutableStateOf<List<String>>(emptyList()); private set
+    var contentResults by mutableStateOf<List<JSONObject>>(emptyList()); private set
+    var searchingContents by mutableStateOf(false); private set
+    var searchTruncated by mutableStateOf(false); private set
+    var gitMarks by mutableStateOf<Map<String, String>>(emptyMap()); private set
+    private var listing = 0L
+    private var searching = 0L
+    private val drafts = EditorDraftStore(File(ctx.filesDir, "editor-drafts"))
+    private val prefs = ctx.getSharedPreferences("ut.files", Context.MODE_PRIVATE)
+    private val identity get() = broker.brokerID.ifEmpty { broker.id }
+    private var started = false
+    private var opening = 0L
+
+    private fun readDraft(path: String): EditorDraft? = try {
+        drafts.read(identity, path) ?: if (identity != broker.id) drafts.read(broker.id, path) else null
+    } catch (_: Exception) { error = "A saved draft could not be read. Its file has been retained."; null }
+
+    fun rememberDraft(file: OpenFile, text: String) {
+        try { drafts.save(identity, file.path, EditorDraft(file.revision, file.text ?: "", text)) }
+        catch (_: Exception) { error = "Could not persist the latest draft. Keep this editor open." }
+    }
+
+    fun closeFile() { open = null; opening++; prefs.edit().remove("open.${broker.id}").apply() }
+    fun closeTab(path: String) {
+        tabs = tabs - path
+        prefs.edit().putString("tabs.${broker.id}", JSONArray(tabs).toString()).apply()
+        if (open?.path == path) closeFile()
+    }
 
     suspend fun start() {
+        if (started) return
+        started = true
+        tabs = runCatching { JSONArray(prefs.getString("tabs.${broker.id}", "[]")).strings() }.getOrDefault(emptyList())
         val h = withContext(Dispatchers.IO) { Net.fsHome(broker) }
-        if (h != null) { sep = h.sep; go(h.home) } else go("")
+        if (h != null) { sep = h.sep; go(prefs.getString("path.${broker.id}", h.home) ?: h.home) } else go(prefs.getString("path.${broker.id}", "") ?: "")
+        prefs.getString("open.${broker.id}", null)?.let { path ->
+            openEntry(FileEntry(path.substringAfterLast(sep), path, false, 0, 0, ""))
+        }
     }
     suspend fun go(p: String) {
+        val request = ++listing
         loading = true
         val list = withContext(Dispatchers.IO) { Net.fsList(broker, p) }
+        if (request != listing) return
         loading = false
         if (list != null) {
+            if (path != p) { contentResults = emptyList(); searchTruncated = false; searching++; searchingContents = false; gitMarks = emptyMap() }
             path = p
+            prefs.edit().putString("path.${broker.id}", p).apply()
             entries = list.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name.lowercase() })
-        }
+            error = null
+            val summary = withContext(Dispatchers.IO) { runCatching { JSONObject(BrokerDocuments.read(broker, "/git/summary", mapOf("dir" to p))) }.getOrNull() }
+            if (request != listing) return
+            val root = summary?.optString("root").orEmpty().replace('\\', '/').trimEnd('/')
+            gitMarks = summary?.optJSONArray("files").objects().associate { row ->
+                val mark = if (row.optBoolean("untracked")) "?" else (row.optString("staged") + row.optString("unstaged")).filter { it != '.' && it != ' ' }.ifEmpty { "M" }
+                (root + "/" + row.optString("path").replace('\\', '/')) to mark
+            }
+        } else error = "Could not refresh this folder. The previous listing is retained."
+    }
+    suspend fun searchContents(query: String) {
+        val request = ++searching; val root = path
+        searchingContents = true
+        try {
+            val result = withContext(Dispatchers.IO) { JSONObject(BrokerDocuments.read(broker, "/fs/grep", mapOf("path" to root, "query" to query))) }
+            if (request == searching && root == path) { contentResults = result.optJSONArray("matches").objects(); searchTruncated = result.optBoolean("truncated"); error = null }
+        } catch (failure: Exception) { if (request == searching) error = failure.message }
+        finally { if (request == searching) searchingContents = false }
+    }
+    fun gitMark(entry: FileEntry): String? {
+        val path = entry.path.replace('\\', '/')
+        return gitMarks[path] ?: if (entry.isDir && gitMarks.keys.any { it.startsWith(path.trimEnd('/') + "/") }) "M" else null
     }
     suspend fun up() = go(parent(path))
 
     suspend fun openEntry(e: FileEntry) {
         if (e.isDir) { go(e.path); return }
+        val request = ++opening
+        error = null; conflict = null
+        var resolved: OpenFile
+        var remoteConflict: FileDocument? = null
+        var loadIssue: String? = null
         when (kindOf(e.name)) {
             Kind.IMAGE -> {
                 val bytes = withContext(Dispatchers.IO) { Net.fsReadBytes(broker, e.path) }
                 val bmp = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
-                open = OpenFile(e.path, e.name, if (bmp != null) Kind.IMAGE else Kind.BINARY, image = bmp)
+                resolved = OpenFile(e.path, e.name, if (bmp != null) Kind.IMAGE else Kind.BINARY, image = bmp)
             }
             Kind.PDF -> {
-                val bytes = withContext(Dispatchers.IO) { Net.fsReadBytes(broker, e.path) }
-                val pages = bytes?.let { withContext(Dispatchers.Default) { renderPdf(ctx, it) } }
-                open = OpenFile(e.path, e.name, if (!pages.isNullOrEmpty()) Kind.PDF else Kind.BINARY, pages = pages)
+                val file = try { withContext(Dispatchers.IO) {
+                    val target = File(ctx.cacheDir, "remote-previews/" + BrokerDocuments.digest(identity + "\u0000" + e.path) + ".pdf")
+                    target.parentFile?.mkdirs()
+                    val temp = File.createTempFile("download-", ".tmp", target.parentFile)
+                    try {
+                        val downloaded = temp.outputStream().use { output ->
+                            val ok = Net.fsDownloadTo(broker, e.path, output) { received, total -> check(received <= 128L * 1024 * 1024 && total <= 128L * 1024 * 1024) { "PDF exceeds 128 MiB" } }
+                            output.fd.sync(); ok
+                        }
+                        if (downloaded) check(temp.renameTo(target)) { "PDF could not be cached" }
+                        else if (!target.isFile) error("PDF download failed")
+                        else loadIssue = "Host unavailable; showing the cached PDF."
+                        target
+                    } finally { temp.delete() }
+                } } catch (failure: Exception) { loadIssue = failure.message; null }
+                resolved = OpenFile(e.path, e.name, if (file != null) Kind.PDF else Kind.BINARY, previewFile = file)
             }
             Kind.TEXT -> {
-                if (e.size > 5_000_000) { open = OpenFile(e.path, e.name, Kind.BINARY); return }
-                val bytes = withContext(Dispatchers.IO) { Net.fsReadBytes(broker, e.path) }
-                val text = bytes?.let { runCatching { it.toString(Charsets.UTF_8) }.getOrNull() }
-                open = if (text != null) OpenFile(e.path, e.name, Kind.TEXT, text = text)
-                       else OpenFile(e.path, e.name, Kind.BINARY)
+                if (e.size > 5_000_000) { if (request == opening) open = OpenFile(e.path, e.name, Kind.BINARY); return }
+                val draft = readDraft(e.path)
+                val document = withContext(Dispatchers.IO) { Net.fsDocument(broker, e.path) }
+                val text = document?.text ?: if (draft == null) withContext(Dispatchers.IO) { Net.fsReadBytes(broker, e.path)?.toString(Charsets.UTF_8) } else null
+                resolved = when {
+                    draft != null -> OpenFile(e.path, e.name, Kind.TEXT, text = draft.base, revision = draft.revision, draftText = draft.text)
+                    text != null -> OpenFile(e.path, e.name, Kind.TEXT, text = text, revision = document?.revision.orEmpty())
+                    else -> OpenFile(e.path, e.name, Kind.BINARY)
+                }
+                if (draft != null && document != null && draft.revision != document.revision) {
+                    remoteConflict = document
+                }
             }
-            Kind.BINARY -> open = OpenFile(e.path, e.name, Kind.BINARY)
+            Kind.BINARY -> resolved = OpenFile(e.path, e.name, Kind.BINARY)
         }
+        if (request != opening) return
+        open = resolved; conflict = remoteConflict
+        if (loadIssue != null) error = loadIssue
+        if (remoteConflict != null) error = "The remote file changed. Your recovered draft is retained."
+        if (e.path !in tabs) tabs = tabs + e.path
+        prefs.edit().putString("open.${broker.id}", e.path).putString("tabs.${broker.id}", JSONArray(tabs).toString()).apply()
     }
 
-    suspend fun save(path: String, text: String): Boolean =
-        withContext(Dispatchers.IO) { Net.fsWrite(broker, path, text.toByteArray(Charsets.UTF_8)) }
-    suspend fun mkdir(name: String) { if (withContext(Dispatchers.IO) { Net.fsMkdir(broker, joined(path, name)) }) go(path) }
+    suspend fun save(file: OpenFile, text: String): Boolean {
+        if (saving) return false
+        saving = true; rememberDraft(file, text)
+        try {
+            val result = withContext(Dispatchers.IO) { Net.fsSaveDocument(broker, file.path, file.revision, text) }
+            error = result.error; conflict = result.conflict
+            val document = result.document ?: return false
+            withContext(Dispatchers.IO) { drafts.remove(identity, file.path); if (identity != broker.id) drafts.remove(broker.id, file.path) }
+            if (open?.path == file.path) open = OpenFile(file.path, file.name, Kind.TEXT, text = document.text, revision = document.revision)
+            return true
+        } catch (e: Exception) { error = e.message ?: "Save failed; draft retained."; return false }
+        finally { saving = false }
+    }
+
+    fun rebaseDraft(file: OpenFile, text: String) {
+        val remote = conflict ?: return
+        val rebased = OpenFile(file.path, file.name, Kind.TEXT, text = remote.text, revision = remote.revision, draftText = text)
+        rememberDraft(rebased, text); open = rebased; conflict = null; error = null
+    }
+    suspend fun mkdir(name: String) { if (name.isBlank()) return; if (withContext(Dispatchers.IO) { Net.fsMkdir(broker, joined(path, name)) }) go(path) }
     suspend fun rename(e: FileEntry, name: String) {
+        if (name.isBlank()) return
         if (withContext(Dispatchers.IO) { Net.fsRename(broker, e.path, joined(parent(e.path), name)) }) go(path)
     }
     suspend fun delete(e: FileEntry) { if (withContext(Dispatchers.IO) { Net.fsDelete(broker, e.path) }) go(path) }
@@ -168,7 +281,7 @@ fun FilesScreen(vm: AppViewModel) {
     val ctx = LocalContext.current
     var brokerId by remember { mutableStateOf(vm.selected?.first?.id ?: brokers.first().id) }
     val broker = brokers.firstOrNull { it.id == brokerId } ?: brokers.first()
-    val ctrl = remember(broker.id) { FilesController(broker, ctx) }
+    val ctrl = vm.filesFor(broker)
     val scope = rememberCoroutineScope()
     LaunchedEffect(broker.id) { ctrl.start() }
 
@@ -186,9 +299,13 @@ fun FilesScreen(vm: AppViewModel) {
 
     val open = ctrl.open
     if (open != null) {
-        FileViewer(open, onBack = { ctrl.open = null },
-            onSave = { text -> scope.launch { ctrl.save(open.path, text) } },
-            onDownload = { download(open.path, open.name) })
+        Column(Modifier.fillMaxSize()) {
+        FileTabs(ctrl) { path -> scope.launch { ctrl.openEntry(FileEntry(path.substringAfterLast(ctrl.sep), path, false, 0, 0, "")) } }
+        Box(Modifier.weight(1f)) { FileViewer(open, saving = ctrl.saving, error = ctrl.error, conflict = ctrl.conflict,
+            onDraft = { ctrl.rememberDraft(open, it) }, onRebase = { ctrl.rebaseDraft(open, it) }, onBack = { ctrl.closeFile() },
+            onSave = { text, complete -> vm.saveFile(ctrl, open, text, complete) },
+            onDownload = { download(open.path, open.name) }) }
+        }
         return
     }
 
@@ -198,9 +315,11 @@ fun FilesScreen(vm: AppViewModel) {
     var deleteTarget by remember { mutableStateOf<FileEntry?>(null) }
     var searching by remember { mutableStateOf(false) }
     var search by remember { mutableStateOf("") }
+    var contentSearch by remember { mutableStateOf(false) }
     LaunchedEffect(ctrl.path) { search = "" }   // filter is depth-1: reset it when the folder changes
 
     Column(Modifier.fillMaxSize().background(fInk)) {
+        FileTabs(ctrl) { path -> scope.launch { ctrl.openEntry(FileEntry(path.substringAfterLast(ctrl.sep), path, false, 0, 0, "")) } }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box {
                 Row(Modifier.clickable { menuOpen = true }, verticalAlignment = Alignment.CenterVertically) {
@@ -235,15 +354,32 @@ fun FilesScreen(vm: AppViewModel) {
         if (searching) {
             OutlinedTextField(
                 value = search, onValueChange = { search = it }, singleLine = true,
-                placeholder = { Text("Filter this folder") },
+                placeholder = { Text(if (contentSearch) "Search file contents recursively" else "Filter this folder") },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             )
+            Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilterChip(selected = contentSearch, onClick = { contentSearch = !contentSearch }, label = { Text("File contents") })
+                if (contentSearch) TextButton(onClick = { scope.launch { ctrl.searchContents(search) } }, enabled = search.isNotBlank() && !ctrl.searchingContents) { Text("Search contents") }
+            }
         }
+        ctrl.error?.let { Text(it, color = fBad, modifier = Modifier.padding(12.dp), fontSize = 12.sp) }
         ctrl.uploading?.let { (n, p) -> TransferBanner("Uploading", n, p) }
         ctrl.downloading?.let { (n, p) -> TransferBanner("Downloading", n, p) }
 
         val shown = if (search.isBlank()) ctrl.entries else ctrl.entries.filter { it.name.contains(search, ignoreCase = true) }
-        if (ctrl.loading && ctrl.entries.isEmpty()) {
+        if (searching && contentSearch) {
+            if (ctrl.searchingContents) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (ctrl.searchTruncated) Text("Showing the first matches; narrow your search for more.", color = fDim, modifier = Modifier.padding(12.dp), fontSize = 12.sp)
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(ctrl.contentResults) { match ->
+                    val target = match.getString("path")
+                    Column(Modifier.fillMaxWidth().clickable { scope.launch { ctrl.openEntry(FileEntry(target.substringAfterLast(ctrl.sep), target, false, 0, 0, "")) } }.padding(12.dp)) {
+                        Text(target + ":" + match.optInt("line"), color = fAccent, fontSize = 12.sp)
+                        Text(match.optString("text"), color = fText, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        } else if (ctrl.loading && ctrl.entries.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = fAccent) }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
@@ -259,6 +395,7 @@ fun FilesScreen(vm: AppViewModel) {
                         Spacer(Modifier.width(12.dp))
                         Text(e.name, color = fText.copy(alpha = 0.9f), fontSize = 14.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        ctrl.gitMark(e)?.let { Text(it, color = fAccent, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(horizontal = 8.dp)) }
                         if (!e.isDir) Text(byteSize(e.size), color = fFaint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                         Box {
                             IconButton(onClick = { rowMenu = true }, modifier = Modifier.size(30.dp)) {
@@ -267,6 +404,7 @@ fun FilesScreen(vm: AppViewModel) {
                             DropdownMenu(rowMenu, onDismissRequest = { rowMenu = false }) {
                                 DropdownMenuItem(text = { Text("Open") }, onClick = { rowMenu = false; scope.launch { ctrl.openEntry(e) } })
                                 if (!e.isDir) DropdownMenuItem(text = { Text("Download") }, onClick = { rowMenu = false; download(e.path, e.name) })
+                                if (!e.isDir) DropdownMenuItem(text = { Text("Save to artifacts") }, onClick = { rowMenu = false; vm.snapshotArtifact(broker, e.path, e.name) })
                                 DropdownMenuItem(text = { Text("Rename…") }, onClick = { rowMenu = false; renameTarget = e })
                                 DropdownMenuItem(text = { Text("Delete", color = fBad) }, onClick = { rowMenu = false; deleteTarget = e })
                             }
@@ -292,9 +430,25 @@ fun FilesScreen(vm: AppViewModel) {
 }
 
 @Composable
-private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> Unit, onDownload: () -> Unit) {
-    var editing by remember { mutableStateOf(false) }
-    var draft by remember(file.path) { mutableStateOf(file.text ?: "") }
+private fun FileTabs(controller: FilesController, select: (String) -> Unit) {
+    if (controller.tabs.isEmpty()) return
+    Row(Modifier.fillMaxWidth().background(fPanel).horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        controller.tabs.forEach { path ->
+            InputChip(selected = controller.open?.path == path, onClick = { select(path) }, enabled = !controller.saving,
+                label = { Text(path.substringAfterLast(controller.sep), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp)) },
+                trailingIcon = { IconButton(onClick = { controller.closeTab(path) }, enabled = !controller.saving, modifier = Modifier.size(24.dp)) { Icon(Icons.Default.Close, "Close tab", modifier = Modifier.size(14.dp)) } },
+                modifier = Modifier.padding(end = 6.dp))
+        }
+    }
+}
+
+@Composable
+private fun FileViewer(file: OpenFile, saving: Boolean, error: String?, conflict: FileDocument?,
+                       onDraft: (String) -> Unit, onRebase: (String) -> Unit, onBack: () -> Unit,
+                       onSave: (String, (Boolean) -> Unit) -> Unit, onDownload: () -> Unit) {
+    var editing by remember(file.path, file.revision) { mutableStateOf(file.draftText != null) }
+    var draft by remember(file.path, file.revision) { mutableStateOf(file.draftText ?: file.text ?: "") }
+    var confirmRebase by remember { mutableStateOf(false) }
     var fontSize by remember { mutableStateOf(13f) }
     var scale by remember { mutableStateOf(1f) }
     val dirty = file.kind == Kind.TEXT && draft != (file.text ?: "")
@@ -314,7 +468,7 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
             IconButton(onClick = onDownload) { Icon(Icons.Filled.Download, "Download", tint = fDim) }
             if (file.kind == Kind.TEXT) {
                 if (editing) {
-                    IconButton(onClick = { onSave(draft); editing = false }, enabled = dirty) {
+                    IconButton(onClick = { onSave(draft) { success -> if (success) editing = false } }, enabled = dirty && !saving) {
                         Icon(Icons.Filled.Done, "Save", tint = if (dirty) fAccent else fFaint)
                     }
                 } else {
@@ -322,11 +476,16 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
                 }
             }
         }
+        if (saving) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (error != null) {
+            Text(error, color = fBad, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
+            if (conflict != null) TextButton(onClick = { confirmRebase = true }) { Text("Review remote change") }
+        }
         when (file.kind) {
             Kind.TEXT -> {
                 if (editing) {
                     BasicTextField(
-                        value = draft, onValueChange = { draft = it },
+                        value = draft, onValueChange = { draft = it; onDraft(it) }, enabled = !saving,
                         textStyle = TextStyle(color = fText, fontFamily = FontFamily.Monospace, fontSize = fontSize.sp),
                         cursorBrush = androidx.compose.ui.graphics.SolidColor(fAccent),
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
@@ -353,22 +512,21 @@ private fun FileViewer(file: OpenFile, onBack: () -> Unit, onSave: (String) -> U
                 } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Couldn't decode image", color = fDim) }
             }
             Kind.PDF -> {
-                val pages = file.pages.orEmpty()
-                if (pages.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Couldn't render PDF", color = fDim) }
-                else LazyColumn(Modifier.fillMaxSize().background(fPanelAlt)) {
-                    items(pages) { bmp ->
-                        androidx.compose.foundation.Image(
-                            bitmap = bmp.asImageBitmap(), contentDescription = null,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-                        )
-                    }
-                }
+                file.previewFile?.let { NativeDocumentPreview(it, file.name, "application/pdf", Modifier.fillMaxSize()) }
             }
             Kind.BINARY -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("${file.name}\nnot a previewable file — use Download", color = fDim, modifier = Modifier.padding(24.dp))
             }
         }
     }
+    if (confirmRebase && conflict != null) AlertDialog(
+        onDismissRequest = { confirmRebase = false }, title = { Text("Remote file changed") },
+        text = { Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+            Text("Remote version", fontSize = 12.sp); Text(conflict.text, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        } },
+        confirmButton = { TextButton(onClick = { onRebase(draft); confirmRebase = false }) { Text("Keep my draft for next save") } },
+        dismissButton = { TextButton(onClick = { confirmRebase = false }) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -392,28 +550,6 @@ private fun NameDialog(title: String, initial: String, onConfirm: (String) -> Un
         dismissButton = { TextButton(onClick = { onConfirm("") }) { Text("Cancel") } },
     )
 }
-
-private fun renderPdf(ctx: Context, bytes: ByteArray): List<Bitmap> = try {
-    val tmp = File.createTempFile("ut-pdf", ".pdf", ctx.cacheDir).apply { writeBytes(bytes) }
-    val pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
-    val renderer = PdfRenderer(pfd)
-    val out = ArrayList<Bitmap>()
-    val count = minOf(renderer.pageCount, 80)   // cap to keep memory sane
-    for (i in 0 until count) {
-        val page = renderer.openPage(i)
-        val targetW = 1080
-        val scale = (targetW.toFloat() / page.width).coerceIn(1f, 3f)
-        val w = (page.width * scale).toInt()
-        val h = (page.height * scale).toInt()
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        bmp.eraseColor(android.graphics.Color.WHITE)
-        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-        page.close()
-        out.add(bmp)
-    }
-    renderer.close(); pfd.close(); tmp.delete()
-    out
-} catch (_: Exception) { emptyList() }
 
 private fun displayName(ctx: Context, uri: Uri): String {
     var name = "upload"

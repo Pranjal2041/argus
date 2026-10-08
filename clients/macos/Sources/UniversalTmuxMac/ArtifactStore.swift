@@ -1,4 +1,5 @@
 import Foundation
+import ArgusProtocol
 
 /// Keep the authored bytes and exact terminal snapshot, not just their visual
 /// projection. A saved render is committed only after this archive is durable.
@@ -561,6 +562,22 @@ actor ArtifactDiskStore {
         return try JSONDecoder().decode(RenderSourceArchive.self, from: Data(contentsOf: safeURL(for: path)))
     }
 
+    func importShared(_ sourceRecord: ArtifactRecord, content: Data, source: Data?) throws -> ArtifactRecord {
+        try prepareDirectories()
+        guard sourceRecord.schemaVersion == 1, sourceRecord.byteCount == Int64(content.count) else { throw ArtifactDiskError.unsafePath }
+        let ext = ArtifactFilename.safeExtension(sourceRecord.fileExtension)
+        let relativePath = "files/" + sourceRecord.id.uuidString.lowercased() + (ext.isEmpty ? "" : "." + ext)
+        let sourcePath = source.map { _ in "sources/" + sourceRecord.id.uuidString.lowercased() + ".json" }
+        let imported = ArtifactRecord(id: sourceRecord.id, filename: ArtifactFilename.normalized(sourceRecord.filename, fileExtension: ext),
+            createdAt: sourceRecord.createdAt, kind: sourceRecord.kind, panel: sourceRecord.panel, presentation: sourceRecord.presentation,
+            relativePath: relativePath, byteCount: sourceRecord.byteCount, sourcePath: sourceRecord.sourcePath,
+            contentType: sourceRecord.contentType, titleSource: sourceRecord.titleSource, renderSourcePath: sourcePath)
+        try content.write(to: safeURL(for: relativePath), options: .atomic)
+        if let source, let sourcePath { try source.write(to: safeURL(for: sourcePath), options: .atomic) }
+        try writeManifest(imported)
+        return imported
+    }
+
     func saveScreenshotPNG(
         _ data: Data,
         panel: ArtifactPanelContext,
@@ -796,8 +813,12 @@ final class ArtifactStore: ObservableObject {
     @Published var query = ""
     @Published var sortOrder: ArtifactSortOrder = .newest
 
-    let rootURL: URL
-    private let disk: ArtifactDiskStore
+    private(set) var rootURL: URL
+    private let initialRootURL: URL
+    private var disk: ArtifactDiskStore
+    private(set) var workspaceID = ""
+    private(set) var activeOperations = 0
+    var recordsChanged: (() -> Void)?
     private let logEvents: Bool
     private let titleProvider: (any ArtifactTitleProviding)?
     private var automaticTitleQueue: [UUID] = []
@@ -812,6 +833,7 @@ final class ArtifactStore: ObservableObject {
         titleProvider: (any ArtifactTitleProviding)? = nil
     ) {
         self.rootURL = rootURL
+        self.initialRootURL = rootURL
         disk = ArtifactDiskStore(rootURL: rootURL)
         self.logEvents = logEvents && !AppState.isRunningTests
         self.titleProvider = titleProvider ?? (AppState.isRunningTests ? nil : CodexArtifactTitleProvider())
@@ -825,6 +847,51 @@ final class ArtifactStore: ObservableObject {
     var selectedArtifact: ArtifactRecord? {
         guard let selectedArtifactID else { return nil }
         return records.first { $0.id == selectedArtifactID }
+    }
+
+    func bindWorkspace(_ id: String) async throws {
+        guard id != workspaceID else { return }
+        guard !isLoading, activeOperations == 0 else { throw ArgusFailure("library_busy", "Wait for the artifact library to finish its current operation.") }
+        isLoading = true
+        defer { isLoading = false }
+        let root = initialRootURL, target = root.appendingPathComponent("workspaces").appendingPathComponent(id)
+        try await Task.detached(priority: .utility) {
+            let manager = FileManager.default
+            let owner = root.appendingPathComponent(".workspace-owner")
+            try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !manager.fileExists(atPath: target.path) {
+                let staged = target.deletingLastPathComponent().appendingPathComponent(".migration-" + UUID().uuidString)
+                defer { try? manager.removeItem(at: staged) }
+                try manager.createDirectory(at: staged, withIntermediateDirectories: true)
+                if !manager.fileExists(atPath: owner.path) {
+                    for name in ["records", "pdf", "images", "files", "sources"] {
+                        let source = root.appendingPathComponent(name)
+                        if manager.fileExists(atPath: source.path) { try manager.copyItem(at: source, to: staged.appendingPathComponent(name)) }
+                    }
+                }
+                try manager.moveItem(at: staged, to: target)
+            }
+            if !manager.fileExists(atPath: owner.path) { try Data(id.utf8).write(to: owner, options: .atomic) }
+        }.value
+        automaticTitleWorker?.cancel(); automaticTitleWorker = nil
+        automaticTitleRetryTask?.cancel(); automaticTitleRetryTask = nil
+        automaticTitleQueue = []; automaticTitleIDs = []
+        rootURL = target; disk = ArtifactDiskStore(rootURL: target); workspaceID = id
+        selectedArtifactID = nil; selectedPanelContext = nil
+        let report = try await disk.loadReport(); records = report.records; loadIssues = report.issues
+        enqueueAutomaticTitles(report.records)
+    }
+
+    func importShared(_ record: ArtifactRecord, content: Data, source: Data?) async throws -> ArtifactRecord {
+        try beginOperation(); defer { activeOperations -= 1 }
+        let imported = try await disk.importShared(record, content: content, source: source)
+        records.removeAll { $0.id == imported.id }; records.append(imported)
+        return imported
+    }
+
+    private func beginOperation() throws {
+        guard !isLoading else { throw ArgusFailure("library_busy", "Wait for the artifact library to finish loading.") }
+        activeOperations += 1
     }
 
     func fileURL(for record: ArtifactRecord) -> URL {
@@ -877,6 +944,7 @@ final class ArtifactStore: ObservableObject {
         presentation: String,
         source: RenderSourceArchive
     ) async throws -> ArtifactRecord {
+        try beginOperation(); defer { activeOperations -= 1 }
         let record = try await disk.savePDF(data, panel: panel, presentation: presentation, source: source)
         publish(record)
         return record
@@ -886,6 +954,7 @@ final class ArtifactStore: ObservableObject {
         _ data: Data,
         panel: ArtifactPanelContext
     ) async throws -> ArtifactRecord {
+        try beginOperation(); defer { activeOperations -= 1 }
         let record = try await disk.saveScreenshotPNG(data, panel: panel)
         publish(record)
         return record
@@ -899,6 +968,7 @@ final class ArtifactStore: ObservableObject {
         contentType: String?,
         presentation: String
     ) async throws -> ArtifactRecord {
+        try beginOperation(); defer { activeOperations -= 1 }
         let record = try await disk.saveFile(
             data,
             filename: filename,
@@ -919,6 +989,7 @@ final class ArtifactStore: ObservableObject {
         contentType: String?,
         presentation: String
     ) async throws -> ArtifactRecord {
+        try beginOperation(); defer { activeOperations -= 1 }
         let record = try await disk.saveFile(
             at: sourceURL,
             filename: filename,
@@ -932,15 +1003,18 @@ final class ArtifactStore: ObservableObject {
     }
 
     func rename(_ record: ArtifactRecord, to name: String) async throws -> ArtifactRecord {
+        try beginOperation(); defer { activeOperations -= 1 }
         let updated = try await disk.rename(record, to: name)
         if let index = records.firstIndex(where: { $0.id == record.id }) {
             records[index] = updated
         }
         errorMessage = nil
+        recordsChanged?()
         return updated
     }
 
     func delete(_ record: ArtifactRecord) async throws {
+        try beginOperation(); defer { activeOperations -= 1 }
         try await disk.delete(record)
         records.removeAll { $0.id == record.id }
         automaticTitleQueue.removeAll { $0 == record.id }
@@ -951,6 +1025,7 @@ final class ArtifactStore: ObservableObject {
         }
         if selectedArtifactID == record.id { selectedArtifactID = nil }
         errorMessage = nil
+        recordsChanged?()
         guard logEvents else { return }
         ActivityJournal.shared.log("artifactDeleted", [
             "artifactID": record.id.uuidString.lowercased(),
@@ -966,6 +1041,7 @@ final class ArtifactStore: ObservableObject {
         records.removeAll { $0.id == record.id }
         records.insert(record, at: 0)
         errorMessage = nil
+        recordsChanged?()
         enqueueAutomaticTitles([record])
         guard logEvents else { return }
         var fields: [String: Any] = [
@@ -1039,6 +1115,7 @@ final class ArtifactStore: ObservableObject {
     /// record should remain queued. Every local eligibility/disk outcome is
     /// terminal for this pass and returns `true`.
     private func generateAutomaticTitle(for id: UUID) async -> Bool {
+        let workspace = workspaceID
         guard let titleProvider,
               let record = records.first(where: { $0.id == id }),
               ArtifactAutomaticTitleEligibility.isEligible(record) else { return true }
@@ -1051,6 +1128,7 @@ final class ArtifactStore: ObservableObject {
                 .map { ($0.filename as NSString).deletingPathExtension }
         )
         guard let generated = await titleProvider.title(for: request) else { return false }
+        guard workspace == workspaceID, !Task.isCancelled else { return true }
         let unique = uniqueAutomaticTitle(generated, for: record)
         do {
             guard let updated = try await disk.applyAutomaticTitle(
@@ -1060,6 +1138,7 @@ final class ArtifactStore: ObservableObject {
             ), let index = records.firstIndex(where: { $0.id == id }),
                   records[index].titleSource != ArtifactTitleSource.manual else { return true }
             records[index] = updated
+            recordsChanged?()
             guard logEvents else { return true }
             ActivityJournal.shared.log("artifactTitleGenerated", [
                 "artifactID": updated.id.uuidString.lowercased(),

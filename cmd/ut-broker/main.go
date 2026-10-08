@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 
 	"universal-tmux/internal/broker"
@@ -40,6 +41,7 @@ import (
 	sess "universal-tmux/internal/session" // aliased: the `session` flag var below shadows the package name
 	"universal-tmux/internal/webartifact"
 	"universal-tmux/internal/weeklyprogressbridge"
+	"universal-tmux/internal/workspace"
 	webassets "universal-tmux/web"
 )
 
@@ -96,11 +98,32 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// Resolve the runtime's durable installation identity before selecting a
+	// workspace store. OS machine IDs can be absent or cloned in containers;
+	// display names and route addresses are not installation identities.
+	ln, where, ts, installationID, err := listener(ctx, *listen, *tsHost, *tsDir)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	if ts != nil {
+		defer ts.Close()
+	}
 	// Initial and periodic backups share one background worker. A slow store must
 	// never delay opening the broker's listeners or reconnecting live sessions.
 	go broker.RunDailyBackupLoop(ctx)
 
-	mgr := broker.NewManager(ctx, makeProvider(*tmuxSock, *shell)) // makeProvider: tmux (Unix) or ConPTY (Windows)
+	var workspaceStore *workspace.Store
+	if root, err := workspace.DefaultRootForInstallation(*tmuxSock, installationID); err != nil {
+		log.Printf("workspace service unavailable: %v", err)
+	} else if workspaceStore, err = workspace.Open(root); err != nil {
+		log.Printf("workspace service unavailable: %v", err)
+	}
+	if workspaceStore != nil {
+		defer workspaceStore.Close()
+		go workspaceStore.RunBackupLoop(ctx, func(err error) { log.Printf("workspace backup: %v", err) })
+	}
+	mgr := broker.NewManagerWithWorkspace(ctx, makeProvider(*tmuxSock, *shell), workspaceStore)
 	recoveryStore := recovery.NewStoreWithRuntime(*tmuxSock, newRecoveryRuntime(mgr))
 	// Mac restores after reboot; Babel restores the same logical workspace after
 	// a scheduler allocation moves it to a different node; Windows captures the
@@ -131,6 +154,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	if workspaceStore != nil {
+		workspaceStore.RegisterRoutes(mux)
+	}
 	browserbridge.New(displayName).RegisterRoutes(mux)
 	weeklyprogressbridge.New(displayName).RegisterRoutes(mux)
 	webartifact.NewRegistry("", displayName, hostName, mgr).RegisterRoutes(mux)
@@ -141,14 +167,23 @@ func main() {
 	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"service": "universal-tmux-broker",
-			"proto":   1,
-			"name":    displayName,
-			"host":    hostName, // os.Hostname(): equals /history's `node`, so a client can map a history row to this machine even when name (--name) differs
-			"socket":  *tmuxSock,
-			"os":      runtime.GOOS, // lets the phone pick the Mac broker as the sync host
-		})
+		identity := map[string]any{
+			"service":      "universal-tmux-broker",
+			"proto":        1,
+			"name":         displayName,
+			"host":         hostName, // os.Hostname(): equals /history's `node`, so a client can map a history row to this machine even when name (--name) differs
+			"socket":       *tmuxSock,
+			"os":           runtime.GOOS,
+			"capabilities": []string{"files-v1", "git-v1", "history-v1", "notebooks-v1", "web-artifacts-v1"},
+		}
+		if workspaceStore != nil {
+			if info, err := workspaceStore.Info(); err == nil {
+				identity["brokerID"] = info.BrokerID
+				identity["workspace"] = info
+				identity["capabilities"] = append(identity["capabilities"].([]string), "workspace-v1", "session-activity-v1")
+			}
+		}
+		_ = json.NewEncoder(w).Encode(identity)
 	})
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -765,16 +800,31 @@ func main() {
 		_, _ = w.Write(out)
 	})
 	mux.HandleFunc("/git/pr/review", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		e := gitsvc.ReviewPR(q.Get("dir"), q.Get("num"), q.Get("event"), q.Get("body"))
 		prActionResult(w, e)
 	})
 	mux.HandleFunc("/git/pr/merge", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		e := gitsvc.MergePR(q.Get("dir"), q.Get("num"), q.Get("method"))
 		prActionResult(w, e)
 	})
 	mux.HandleFunc("/git/pr/comment", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		e := gitsvc.CommentPR(q.Get("dir"), q.Get("num"), q.Get("body"))
 		prActionResult(w, e)
@@ -846,6 +896,7 @@ func main() {
 		data, _ := io.ReadAll(r.Body)
 		fsResult(w, fsvc.Write(r.URL.Query().Get("path"), data))
 	})
+	mux.HandleFunc("/fs/document", fsvc.ServeDocument)
 
 	// Argus Lab (LAB-DESIGN.md): read routes for the hub plus key decisions for
 	// the phone. The `ut lab` CLI operates on the store directly; these serve
@@ -1195,12 +1246,6 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"mirror": ms})
 	})
 
-	ln, where, ts, err := listener(ctx, *listen, *tsHost, *tsDir)
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
 	// Mesh: this broker can reach peer brokers over the tailnet (through its own
 	// tsnet node, or — local mode — the host's Tailscale), so an agent talks only
 	// to its LOCAL broker and we relay to any machine. /mesh/peers lists the
@@ -1321,10 +1366,10 @@ func fsResult(w http.ResponseWriter, err error) {
 // tsHost is set — the rootless, no-TUN inbound path for owned/cluster nodes.
 // The returned *tsnet.Server (nil in local mode) lets the mesh dial peer
 // brokers over the tailnet.
-func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, string, *tsnet.Server, error) {
+func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, string, *tsnet.Server, string, error) {
 	if tsHost == "" {
 		ln, err := net.Listen("tcp", listen)
-		return ln, "http://" + listen, nil, err
+		return ln, "http://" + listen, nil, "", err
 	}
 	port := "8722"
 	if _, p, err := net.SplitHostPort(listen); err == nil && p != "" {
@@ -1338,19 +1383,28 @@ func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, 
 		s.AuthKey = k
 	}
 	if err := s.Start(); err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	status, err := s.Up(ctx)
 	if err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
+	}
+	installationID, err := tailnetInstallationIdentity(status)
+	if err != nil {
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	lc, err := s.LocalClient()
 	if err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	ln, err := s.Listen("tcp", ":"+port)
 	if err != nil {
-		return nil, "", nil, err
+		_ = s.Close()
+		return nil, "", nil, "", err
 	}
 	// Real *.ts.net certificate (requires Tailscale HTTPS enabled on the tailnet).
 	// A valid chain is what macOS ATS demands for a remote host — no client hacks.
@@ -1359,5 +1413,12 @@ func listener(ctx context.Context, listen, tsHost, tsDir string) (net.Listener, 
 	if status != nil && status.Self != nil && status.Self.DNSName != "" {
 		name = strings.TrimSuffix(status.Self.DNSName, ".")
 	}
-	return ln, "https://" + name + ":" + port + "  (tailnet, TLS)", s, nil
+	return ln, "https://" + name + ":" + port + "  (tailnet, TLS)", s, installationID, nil
+}
+
+func tailnetInstallationIdentity(status *ipnstate.Status) (string, error) {
+	if status == nil || status.Self == nil || status.Self.ID == "" {
+		return "", fmt.Errorf("tailnet runtime did not supply a stable installation identity")
+	}
+	return "tailscale:" + string(status.Self.ID), nil
 }

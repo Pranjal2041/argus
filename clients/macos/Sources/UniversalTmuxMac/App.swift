@@ -61,6 +61,9 @@ struct UniversalTmuxApp: App {
                 .frame(minWidth: 980, minHeight: 600)
                 .preferredColorScheme(themeStore.palette.isLight ? .light : .dark)
                 .onAppear {
+                    state.sharedWorkspace.connectCatalogs(dashboards: dashboards, notebooks: notebooks)
+                    state.sharedWorkspace.connectArtifacts(artifacts)
+                    state.sharedWorkspace.connectJournal(ledger: ledgerHost.panel, wrapped: wrappedHost.panel)
                     browserControl.start(dashboards: dashboards, credentialVault: credentialVault)
                     if #available(macOS 14.0, *) {
                         UsageBrowser.open = { url in
@@ -68,8 +71,10 @@ struct UniversalTmuxApp: App {
                             state.openWindowRequest = "dashboards"
                             return true
                         }
-                        ArgusUsage.shared.start()
+                        state.sharedWorkspace.connectUsage()
                     }
+                    do { try WorkspaceServiceLauncher.ensureRunning() }
+                    catch { state.workspaceStorageError = error.localizedDescription }
                     credentialVault.unattendedModeActive = lab.unattendedMode
                     weeklyProgressRemote.start()
                     argusControl.start(state: state, commandCenter: commandCenter, weekly: weeklyProgress, lab: lab)
@@ -306,6 +311,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section { SharedWorkspaceSettingsView(app: state) }
             Section {
                 HStack {
                     Text("Text size")

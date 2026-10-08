@@ -42,11 +42,13 @@ private struct NBJupyterResp: Decodable { let port: Int; let token: String }
 final class NotebooksModel: ObservableObject {
     @Published var notebooks: [NotebookSession] = []
     @Published var activeID: UUID?
+    var catalogChanged: (() -> Void)?
 
     /// The local Mac broker is the forward hub (same as Dashboards/Ports).
     private let agent = "http://127.0.0.1:8722"
     private let storeKey = "ut.openNotebooks.v1"
     private let activeKey = "ut.openNotebooks.active.v1"
+    private let defaults: UserDefaults
     /// Notebooks currently being resolved, so a re-select / re-appear doesn't kick a
     /// second concurrent resolve for the same notebook.
     private var resolving: Set<UUID> = []
@@ -55,20 +57,33 @@ final class NotebooksModel: ObservableObject {
     /// persist on the host (the broker re-adopts the server), so we only restore the
     /// {machine, name, path} tabs here (url == nil) and resolve each lazily when it's
     /// shown — see `resolveIfNeeded`.
-    init() {
-        guard let d = UserDefaults.standard.data(forKey: storeKey),
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        guard let d = defaults.data(forKey: storeKey),
               let recs = try? JSONDecoder().decode([NotebookRecord].self, from: d) else { return }
         notebooks = recs.map { NotebookSession(id: $0.id, machineID: $0.machineID, name: $0.name, path: $0.path) }
-        if let a = UserDefaults.standard.string(forKey: activeKey) { activeID = UUID(uuidString: a) }
+        if let a = defaults.string(forKey: activeKey) { activeID = UUID(uuidString: a) }
     }
 
     /// Persist the current list + active id. Called on every mutation (mirrors how W&B
     /// runs persist on each change).
     private func save() {
         let recs = notebooks.map { NotebookRecord(id: $0.id, machineID: $0.machineID, name: $0.name, path: $0.path) }
-        if let d = try? JSONEncoder().encode(recs) { UserDefaults.standard.set(d, forKey: storeKey) }
-        if let a = activeID?.uuidString { UserDefaults.standard.set(a, forKey: activeKey) }
-        else { UserDefaults.standard.removeObject(forKey: activeKey) }
+        if let d = try? JSONEncoder().encode(recs) { defaults.set(d, forKey: storeKey) }
+        if let a = activeID?.uuidString { defaults.set(a, forKey: activeKey) }
+        else { defaults.removeObject(forKey: activeKey) }
+        catalogChanged?()
+    }
+
+    func installCatalog(_ entries: [(UUID, String, String, String)]) {
+        notebooks = entries.map { id, machineID, name, path in
+            if var existing = notebooks.first(where: { $0.id == id && $0.machineID == machineID && $0.path == path }) {
+                existing.name = name; return existing
+            }
+            return NotebookSession(id: id, machineID: machineID, name: name, path: path)
+        }
+        if let activeID, !notebooks.contains(where: { $0.id == activeID }) { self.activeID = notebooks.first?.id }
+        save()
     }
 
     var active: NotebookSession? { notebooks.first { $0.id == activeID } }

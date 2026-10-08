@@ -48,7 +48,11 @@ object BrokerDiscoveryPolicy {
             found[key(it.host)] = it
         }
         val next = current.map { saved ->
-            found[key(saved.host)]?.let { incoming -> incoming.copy(host = saved.host) } ?: saved
+            found[key(saved.host)]?.let { incoming ->
+                if (incoming.brokerID.isEmpty()) incoming.copy(host = saved.host, brokerID = saved.brokerID,
+                    workspaceID = saved.workspaceID, workspaceEnabled = saved.workspaceEnabled, capabilities = saved.capabilities)
+                else incoming.copy(host = saved.host)
+            } ?: saved
         }.toMutableList()
         val nextSources = sources.toMutableMap()
         val nextMisses = misses.toMutableMap()

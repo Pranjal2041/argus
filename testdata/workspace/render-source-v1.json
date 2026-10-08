@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "presentation": "rendered",
+  "fontSize": 14,
+  "document": {
+    "id": "572af459-ef41-4fcf-983d-daa356b1b848",
+    "source": "# Experiment report\n\n## Result 45\nThe shared workspace preserves this result across devices.",
+    "sourceOrigin": "fixture-transcript",
+    "terminal": {
+      "columns": 17,
+      "fontFamily": "monospace",
+      "foreground": "#1f2328",
+      "background": "#fbfbfa",
+      "styles": [{"foreground":"#1f2328","background":"#fbfbfa","bold":false,"italic":false,"strikethrough":false}],
+      "lines": [{"wrapped":false,"runs":[{"text":"Terminal fallback","style":0}]}]
+    }
+  }
+}

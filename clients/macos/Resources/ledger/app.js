@@ -24,8 +24,10 @@ let state = { day: null, events: [], days: [], offKinds: new Set(), q: "", machi
 // In-app: Swift injects data (no HTTP server). JS asks for a day via the `ut`
 // message handler; Swift replies with window.UTLedger.setDay(...).
 function post(type, extra) {
+  const message = Object.assign({ type: type }, extra || {});
+  if (window.ArgusNative) { window.ArgusNative.postMessage(JSON.stringify(message)); return; }
   const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ut;
-  if (h) h.postMessage(Object.assign({ type: type }, extra || {}));
+  if (h) h.postMessage(message);
 }
 
 function paintDays() {
@@ -227,7 +229,7 @@ function renderLedger() {
       post("openArtifact", { id: link.dataset.artifact });
     };
   });
-  $("foot").textContent = "append-only · local only · " + (state.day || "");
+  $("foot").textContent = "append-only · " + (state.scope ? "shared workspace" : "local only") + " · " + (state.day || "");
 }
 
 // The header "live" control is a manual Refresh in-app (user chose no polling).
@@ -244,8 +246,11 @@ window.UTLedger = {
     if (t.accent) { r.setProperty("--phos", t.accent); r.setProperty("--u", t.accent); }
   },
   setDays: function (payload) {
+    if (payload && payload.scope !== undefined && state.scope !== payload.scope) { state.scope = payload.scope; state.day = null; state.events = []; render(); }
     state.days = (payload && payload.days) || [];
     if (payload && payload.dir) $("dirline").textContent = payload.dir;
+    if (payload && payload.selectedDay && state.days.some(d => d.day === payload.selectedDay)) state.day = payload.selectedDay;
+    if (state.day && !state.days.some(d => d.day === state.day)) { state.day = null; state.events = []; render(); }
     // default to the most recent day on first load
     if (!state.day && state.days.length) {
       state.day = state.days[0].day;

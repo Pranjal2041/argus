@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import ArgusProtocol
 
 /// Argus Wrapped: a bundled no-build webview page (Resources/wrapped) that shows a
 /// Spotify-Wrapped-style deck + dashboard of your agent-command activity. Same
@@ -13,15 +14,16 @@ final class WrappedPanel: NSObject, WKScriptMessageHandler {
     private var ready = false
     /// Window in days; 0 = all time. Exposed so a future period picker can change it.
     var windowDays = 0
+    weak var workspace: SharedWorkspaceCoordinator?
 
-    override init() {
+    init(resourceDirectory: URL? = nil) {
         let cfg = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         cfg.userContentController = ucc
         webView = WKWebView(frame: .zero, configuration: cfg)
         super.init()
         ucc.add(self, name: "ut")
-        let dir = Bundle.main.resourceURL!.appendingPathComponent("wrapped")
+        let dir = resourceDirectory ?? Bundle.main.resourceURL!.appendingPathComponent("wrapped")
         webView.loadFileURL(dir.appendingPathComponent("index.html"), allowingReadAccessTo: dir)
         // Wrapped is a STANDALONE window (unlike the in-place Git/Ledger panes), so the
         // webview must paint its own solid background — a transparent webview here shows
@@ -43,7 +45,7 @@ final class WrappedPanel: NSObject, WKScriptMessageHandler {
         case "period":
             if let d = body["days"] as? Int { windowDays = d; compute() }
         case "openFolder":
-            NSWorkspace.shared.open(ActivityJournal.dirURL)
+            if workspace == nil { NSWorkspace.shared.open(ActivityJournal.dirURL) }
         default: break
         }
     }
@@ -55,6 +57,21 @@ final class WrappedPanel: NSObject, WKScriptMessageHandler {
 
     private func compute() {
         let days = windowDays
+        if let workspace {
+            guard let stats = workspace.replica.data("journal", "wrapped")?["periods"][String(days)], stats.object != nil,
+                  let data = try? ArgusWire.encoder().encode(stats), let json = String(data: data, encoding: .utf8) else {
+                webView.evaluateJavaScript("window.UTWrapped.setData({totals:{events:0}})", completionHandler: nil)
+                return
+            }
+            webView.evaluateJavaScript("window.UTWrapped.setData(\(json))", completionHandler: nil)
+            if let persona = workspace.replica.data("journal", "persona-\(days)")?["persona"], persona.object != nil,
+               let data = try? ArgusWire.encoder().encode(persona), let json = String(data: data, encoding: .utf8) {
+                webView.evaluateJavaScript("window.UTWrapped.setPersona(\(json))", completionHandler: nil)
+            } else if workspace.replica.data("commands", "wrapped-persona-\(days)") == nil {
+                workspace.change("commands", id: "wrapped-persona-\(days)", data: .object(["kind": .string("wrapped-persona"), "days": .number(Double(days))]))
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let stats = WrappedStats.compute(days: days)
             guard let data = try? JSONSerialization.data(withJSONObject: stats),

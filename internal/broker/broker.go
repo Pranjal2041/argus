@@ -22,6 +22,7 @@ import (
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
 	"universal-tmux/internal/terminalquery"
+	"universal-tmux/internal/workspace"
 )
 
 const (
@@ -379,10 +380,11 @@ func (h *sessionHub) close() {
 // Manager owns all session hubs for one host, via a pluggable backend Provider
 // (tmux on Unix, ConPTY on Windows).
 type Manager struct {
-	ctx  context.Context
-	prov session.Provider
-	mu   sync.Mutex
-	hubs map[string]*sessionHub
+	ctx       context.Context
+	prov      session.Provider
+	workspace *workspace.Store
+	mu        sync.Mutex
+	hubs      map[string]*sessionHub
 
 	// /sessions is served from this cache, refreshed in the background, so the HTTP
 	// handler NEVER blocks on prov.List() — which on the tmux backend forks tmux +
@@ -478,7 +480,11 @@ func (m *Manager) ClearCCOverride(session string, ts int64) {
 }
 
 func NewManager(ctx context.Context, prov session.Provider) *Manager {
-	m := &Manager{ctx: ctx, prov: prov, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}, ccOverrides: map[string]CCOverride{}, history: map[string]*SessionHistory{}}
+	return NewManagerWithWorkspace(ctx, prov, nil)
+}
+
+func NewManagerWithWorkspace(ctx context.Context, prov session.Provider, store *workspace.Store) *Manager {
+	m := &Manager{ctx: ctx, prov: prov, workspace: store, hubs: make(map[string]*sessionHub), hidden: map[string]bool{}, ccOverrides: map[string]CCOverride{}, history: map[string]*SessionHistory{}}
 	m.hiddenPath = hiddenStatePath()
 	m.loadHidden()
 	m.histPath = historyStatePath()
@@ -825,6 +831,16 @@ func (m *Manager) refreshSessions(includeBackground bool) {
 	if list == nil {
 		list = []session.Info{}
 	}
+	if m.workspace != nil {
+		for i := range list {
+			revision, err := m.workspace.ActivityRevision(list[i].LineageID, list[i].State, list[i].Activity)
+			if err != nil {
+				log.Printf("session activity persistence: %v", err)
+				continue
+			}
+			list[i].ActivityRevision = revision
+		}
+	}
 	m.sessMu.Lock()
 	m.sessCache = list
 	m.sessMu.Unlock()
@@ -832,6 +848,9 @@ func (m *Manager) refreshSessions(includeBackground bool) {
 }
 
 func sessionStateKey(info session.Info) string {
+	if info.LineageID != "" {
+		return info.LineageID
+	}
 	if info.ID != "" {
 		return info.ID
 	}

@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "architecture",
+    "shared-workspace",
     "installation",
     "terminals",
     "command-center",

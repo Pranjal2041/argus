@@ -55,16 +55,8 @@ final class ActivityJournal {
         }
         guard let line = journalLine(kind: kind, fields: f, date: date) else { return }
         q.async {
-            let dir = Self.dirURL
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent(journalDayFile(date))
-            if let h = try? FileHandle(forWritingTo: url) {
-                defer { try? h.close() }
-                _ = try? h.seekToEnd()
-                try? h.write(contentsOf: line)
-            } else {
-                try? line.write(to: url)
-            }
+            do { try JournalFileStore.append([line], to: Self.dirURL.appendingPathComponent(journalDayFile(date))) }
+            catch { NSLog("[journal] append failed: %@", error.localizedDescription) }
         }
     }
 

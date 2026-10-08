@@ -10,6 +10,7 @@ require (
 	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02
 	github.com/wlynxg/anet v0.0.5
 	github.com/yuin/goldmark v1.7.13
+	go.etcd.io/bbolt v1.5.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
 	tailscale.com v1.100.0

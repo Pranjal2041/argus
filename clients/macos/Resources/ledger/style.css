@@ -147,3 +147,36 @@ select:focus { border-color: var(--phos); box-shadow: 0 0 0 2.5px var(--phos-dim
 
 #empty { color: var(--ink-dim); padding: 60px 0; text-align: center; font: italic 17px var(--serif); }
 #foot { margin-top: 50px; color: var(--ink-faint); font-size: 10px; }
+
+/* The same archive, with a horizontal date rail on narrow native windows. */
+@media (max-width: 680px) {
+  #wrap { display: block; }
+  #drawer { padding: 18px 0 0; border-right: 0; border-bottom: 1px solid var(--rule); }
+  #brand { padding: 0 18px 14px; }
+  #brand h1 { font-size: 26px; }
+  #brand h1 br { display: none; }
+  #brand h1 em { margin-left: .22em; }
+  #brand .sub { margin-top: 4px; }
+  #days { display: flex; overflow-x: auto; gap: 5px; padding: 12px; }
+  .day { flex: 0 0 auto; min-height: 42px; }
+  #dirline { display: none; }
+  #main { padding: 22px 15px 60px; }
+  #head { gap: 10px; }
+  #daytitle { font-size: 27px; }
+  #live { min-height: 40px; align-items: center; }
+  #filters { gap: 7px; margin-bottom: 18px; }
+  .chip { padding: 8px 11px; }
+  #q { width: 100%; margin-left: 0; min-height: 42px; order: -1; }
+  select { min-height: 38px; max-width: 100%; }
+  #ledger { padding-left: 20px; }
+  #ledger::before { left: 4px; }
+  .ev::before { left: -19px; }
+  .evrow { display: grid; grid-template-columns: 58px 1fr; gap: 4px 10px; padding: 10px 7px; }
+  .kind { width: auto; }
+  .who, .gist { grid-column: 1 / -1; max-width: 100%; }
+  .gist { white-space: normal; overflow-wrap: anywhere; }
+  .detail { padding: 5px 7px 16px; }
+  .dl { grid-template-columns: 70px minmax(0, 1fr); gap: 5px 10px; }
+  .screen { padding: 10px; font-size: 10px; }
+}
+@media (prefers-reduced-motion: reduce) { .ev, #live.on .dot { animation: none; } }

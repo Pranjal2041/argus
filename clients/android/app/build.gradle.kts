@@ -37,7 +37,10 @@ android {
     kotlinOptions { jvmTarget = "17" }
 
     testOptions { unitTests.isIncludeAndroidResources = true }
-    testBuildType = "release"
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/sharedJournalAssets"))
+    sourceSets["test"].resources.srcDir(rootProject.file("../../testdata/workspace"))
+    sourceSets["androidTest"].assets.srcDir(rootProject.file("../../testdata/workspace"))
+    testBuildType = if (providers.gradleProperty("parityQA").orNull == "true") "qa" else "release"
 
     signingConfigs {
         if (hasKeystore) create("release") {
@@ -52,9 +55,22 @@ android {
             isMinifyEnabled = false // R8 off: the gomobile JNI classes need keep-rules; not worth the risk
             signingConfig = signingConfigs.getByName(if (hasKeystore) "release" else "debug")
         }
+        create("qa") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".qa"
+            isDebuggable = true
+            matchingFallbacks += "release"
+        }
     }
+    sourceSets["qa"].assets.srcDir(rootProject.file("../../testdata/workspace"))
     packaging { resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}") } }
 }
+
+val syncSharedJournalAssets by tasks.registering(Sync::class) {
+    from(rootProject.file("../macos/Resources")) { include("ledger/**", "wrapped/**") }
+    into(layout.buildDirectory.dir("generated/sharedJournalAssets"))
+}
+tasks.named("preBuild").configure { dependsOn(syncSharedJournalAssets) }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")

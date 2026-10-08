@@ -34,6 +34,20 @@ final class ArgusControlTests: XCTestCase {
         XCTAssertTrue(response.ok, response.error?.message ?? "", file: file, line: line)
         return try XCTUnwrap(response.result, file: file, line: line)
     }
+    func testStatusCorrectionCLIReportsNativeRelayFailureInsteadOfFalseSuccess() async throws {
+        app.sessionsByMachine["local"] = [SessionInfo(name: "analysis", state: "idle", lineageID: "first")]
+        cc.bind(app)
+        cc.statuses["local/analysis"] = AgentStatus(label: "idle", oneLiner: "A summary", updatedAt: .distantPast)
+        let revision = try ArgusJSON.encode(cc.statuses["local/analysis"]).revision
+        cc.sendBrokerCorrection = { _, _, _ in throw ArgusFailure("status_save_failed", "Broker refused") }
+        let rejected = await call("command-center.correct", ["id": "local#first", "label": "working", "if-revision": revision])
+        XCTAssertFalse(rejected.ok)
+        XCTAssertEqual(rejected.error?.code, "status_save_failed")
+        cc.sendBrokerCorrection = { _, _, _ in nil }
+        let accepted = await call("command-center.correct", ["id": "local#first", "label": "working", "if-revision": revision])
+        XCTAssertTrue(accepted.ok, accepted.error?.message ?? "")
+        XCTAssertEqual(cc.statuses["local/analysis"]?.label, "working")
+    }
     func testNotesAreSharedAndOptimisticallyEditedWithoutNavigation() async throws {
         let before = app.workspaceDestination
         let created = try result(await call("notes.create", ["text": "original"]))

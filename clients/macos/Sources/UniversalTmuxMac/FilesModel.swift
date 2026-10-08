@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
+import CryptoKit
+import ArgusProtocol
 
 /// A URLSession that never serves cached responses — so re-opening a file after a
 /// save (or an external change) always reflects what's on disk, not a stale, still
@@ -195,6 +197,12 @@ final class OpenDoc: ObservableObject, Identifiable {
     @Published var dirty = false
     @Published var draft = ""   // @Published so a live markdown preview re-renders as you type
     var originalText = ""
+    var revision = ""
+    @Published var saveIssue: String?
+    @Published var saving = false
+    @Published var conflictText: String?
+    var conflictRevision: String?
+    var onDraftChange: (() -> Void)?
     /// Original bytes for image/PDF/binary previews. Artifacts use these rather
     /// than re-reading the remote file, so the saved snapshot matches what the
     /// user was actually looking at.
@@ -233,10 +241,15 @@ final class OpenDoc: ObservableObject, Identifiable {
         draft = text
         let d = text != originalText
         if d != dirty { dirty = d }
+        onDraftChange?()
     }
     /// Adopt freshly-loaded text as the clean baseline.
     func loadedText(_ s: String) { draft = s; originalText = s; dirty = false; content = .text(s, name: name, path: path) }
-    func markSaved() { originalText = draft; loadedBytes = Data(draft.utf8); dirty = false }
+    func markSaved(text: String? = nil, revision: String? = nil) {
+        let saved = text ?? draft
+        originalText = saved; loadedBytes = Data(saved.utf8); dirty = draft != saved
+        if let revision { self.revision = revision }
+    }
 
     func zoomIn()    { zoom = min(4.0, zoom * 1.15) }
     func zoomOut()   { zoom = max(0.4, zoom / 1.15) }
@@ -645,16 +658,72 @@ final class FileTab: ObservableObject, Identifiable {
 
     /// Write the active doc's live draft (kept current by the editor's change events).
     func save() { if let doc = activeDoc { save(doc) } }
-    func save(_ doc: OpenDoc) {
-        guard case .text = doc.content else { return }
-        let text = doc.draft, path = doc.path
+    func save(_ doc: OpenDoc, onSaved: (() -> Void)? = nil) {
+        guard case .text = doc.content, !doc.saving else { return }
+        guard !doc.revision.isEmpty else { doc.saveIssue = "Reopen this file to establish a save revision. Your draft is retained."; return }
+        let text = doc.draft, path = doc.path, revision = doc.revision
+        doc.saving = true
         Task {
-            if await postWrite(path, Data(text.utf8)) {
-                doc.markSaved()
+            defer { doc.saving = false }
+            do {
+                guard var components = URLComponents(string: httpBase + "/fs/document") else { return }
+                components.queryItems = [.init(name: "path", value: path)]
+                guard let url = components.url else { return }
+                var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 30
+                request.setValue(revision, forHTTPHeaderField: "If-Match"); request.httpBody = Data(text.utf8)
+                let (body, response) = try await fsSession.data(for: request)
+                guard let response = response as? HTTPURLResponse else { throw ArgusFailure("invalid_response", "Invalid file-save response.") }
+                let value = (try? JSONDecoder().decode(ArgusJSON.self, from: body)) ?? .null
+                if response.statusCode == 409 {
+                    doc.conflictText = value["current"]["text"].string
+                    doc.conflictRevision = value["current"]["revision"].string
+                    throw ArgusFailure("file_conflict", "The remote file changed. Your draft has been retained.")
+                }
+                guard response.statusCode == 200, let savedRevision = value["revision"].string else {
+                    throw ArgusFailure("save_failed", "Save was not acknowledged (HTTP \(response.statusCode)). Your draft is retained.")
+                }
+                doc.markSaved(text: text, revision: savedRevision); doc.saveIssue = nil; doc.conflictText = nil; doc.conflictRevision = nil
+                persistDraft(doc)
                 // Activity journal: a hand-edited file is direct human work.
                 ActivityJournal.shared.log("fileSave", ["machineID": machineID, "path": path])
-            }
+                if !doc.dirty { onSaved?() }
+            } catch { doc.saveIssue = error.localizedDescription }
         }
+    }
+
+    private var draftStore: EditorDraftStore {
+        EditorDraftStore(directory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Argus/editor-drafts"))
+    }
+    private func persistDraft(_ doc: OpenDoc) {
+        guard !AppState.isRunningTests else { return }
+        do {
+            if doc.dirty {
+                try draftStore.save(EditorDraft(identity: machineID, path: doc.path, revision: doc.revision, base: doc.originalText, text: doc.draft))
+            } else { try draftStore.remove(identity: machineID, path: doc.path) }
+        } catch { doc.saveIssue = "Could not persist the latest draft. Keep this editor open." }
+    }
+    private func restoreDraft(_ doc: OpenDoc) {
+        guard !AppState.isRunningTests else { return }
+        do {
+            guard let saved = try draftStore.read(identity: machineID, path: doc.path) else { return }
+            if !doc.revision.isEmpty && doc.revision != saved.revision {
+                doc.conflictText = doc.originalText; doc.conflictRevision = doc.revision
+                doc.saveIssue = "The remote file changed. Your recovered draft is retained."
+            }
+            doc.revision = saved.revision; doc.loadedText(saved.base); doc.editorChanged(saved.text)
+            doc.content = .text(saved.text, name: doc.name, path: doc.path)
+        } catch { doc.saveIssue = "A saved draft could not be read. Its file has been retained." }
+    }
+    func rebaseDraft(_ doc: OpenDoc) {
+        guard let text = doc.conflictText, let revision = doc.conflictRevision else { return }
+        doc.originalText = text; doc.revision = revision; doc.dirty = doc.draft != text
+        doc.conflictText = nil; doc.conflictRevision = nil; doc.saveIssue = nil; persistDraft(doc)
+    }
+    func discardDraftAndClose(_ doc: OpenDoc) {
+        do {
+            if !AppState.isRunningTests { try draftStore.remove(identity: machineID, path: doc.path) }
+            closeDoc(doc.id)
+        } catch { doc.saveIssue = error.localizedDescription }
     }
 
     /// The exact already-visible value for a file, if Files has one. A dirty
@@ -1089,6 +1158,7 @@ final class FileTab: ObservableObject, Identifiable {
             ? (readURL(e.path).map { .media($0) } ?? .error("bad path"))
             : .loading(e.path)
         let doc = OpenDoc(path: e.path, name: e.name, content: initial)
+        doc.onDraftChange = { [weak self, weak doc] in if let doc { self?.persistDraft(doc) } }
         doc.pendingLine = line
         openDocs.append(doc)
         activeDocID = doc.id
@@ -1124,13 +1194,19 @@ final class FileTab: ObservableObject, Identifiable {
             case .pdf:
                 doc.content = .pdf(data)
             case .text:
-                if let s = String(data: data, encoding: .utf8) { doc.loadedText(s) }
+                if let s = String(data: data, encoding: .utf8) {
+                    doc.revision = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                    doc.loadedText(s); restoreDraft(doc)
+                }
                 else { doc.content = .binary(e) }
             default:
                 doc.content = .binary(e)
             }
         } catch {
-            if openDocs.contains(where: { $0.id == doc.id }) { doc.content = .error(error.localizedDescription) }
+            if openDocs.contains(where: { $0.id == doc.id }) {
+                doc.content = .error(error.localizedDescription)
+                if kind == .text { restoreDraft(doc) }
+            }
         }
     }
 

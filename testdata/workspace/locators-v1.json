@@ -1,0 +1,21 @@
+{
+  "websites": [
+    {"url":"https://example.org/projects?view=activity","valid":true},
+    {"url":"http://10.5.4.3:3000/report","valid":true},
+    {"url":"http://localhost:54321/report","valid":false},
+    {"url":"http://[::1]:8888/lab","valid":false},
+    {"url":"https://user:password@example.org/report","valid":false},
+    {"url":"https://example.org/login?access_token=private","valid":false},
+    {"url":"https://example.org/login?%63ode=private","valid":false},
+    {"url":"https://example.org/report#credentials","valid":false},
+    {"url":"javascript:alert(1)","valid":false}
+  ],
+  "services": [
+    {"brokerID":"stable-id","port":8888,"path":"/lab/tree/analysis.ipynb","valid":true},
+    {"brokerID":"stable-id","port":3000,"path":"/metrics?range=week","valid":true},
+    {"brokerID":"","port":8888,"path":"/lab","valid":false},
+    {"brokerID":"stable-id","port":65536,"path":"/","valid":false},
+    {"brokerID":"stable-id","port":8888,"path":"//another-host/","valid":false},
+    {"brokerID":"stable-id","port":8888,"path":"/lab?token=private","valid":false}
+  ]
+}

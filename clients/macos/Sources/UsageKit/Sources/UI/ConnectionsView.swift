@@ -4,6 +4,7 @@ import SwiftUI
 @available(macOS 14.0, *)
 struct ConnectionsView: View {
     @Bindable var store: UsageStore
+    @State private var removing: SourceConfiguration?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -35,7 +36,7 @@ struct ConnectionsView: View {
                         Text(instructions.url.absoluteString).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                     }
                   }
-                  if store.claudeLoginFlow != nil {
+                  if store.claudeLoginFlow != nil || (store.remoteLoginIntegration == "claude" && store.loginSourceID != nil) {
                     HStack(spacing: 12) {
                         SecureField("Complete authorization code (code#state)", text: $store.claudeAuthorizationCode)
                             .textFieldStyle(.roundedBorder).accessibilityIdentifier("claude-authorization-code")
@@ -45,7 +46,7 @@ struct ConnectionsView: View {
                             .accessibilityIdentifier("finish-claude-login")
                     }
                   }
-                  if store.devinLoginProcess != nil {
+                  if store.devinLoginProcess != nil || (store.remoteLoginIntegration == "devin" && store.loginSourceID != nil) {
                     HStack(spacing: 12) {
                         SecureField("Code from the Devin sign-in page", text: $store.devinAuthorizationCode)
                             .textFieldStyle(.roundedBorder).disabled(store.devinCodeSubmitted)
@@ -90,7 +91,7 @@ struct ConnectionsView: View {
                     }
                 }
             }
-            DisclosureGroup("Advanced configuration") {
+            if store.remoteAccountRequest == nil { DisclosureGroup("Advanced configuration") {
               HStack(spacing: 12) {
                 Image(systemName: "lock.shield").foregroundStyle(Palette.secondary)
                 VStack(alignment: .leading, spacing: 5) {
@@ -101,10 +102,23 @@ struct ConnectionsView: View {
                 Button("Show config") { NSWorkspace.shared.activateFileViewerSelecting([IntegrationConfiguration.file]) }.buttonStyle(SecondaryButtonStyle())
                 Button("Reload config") { Task { await store.reloadConnections() } }.buttonStyle(SecondaryButtonStyle()).disabled(store.refreshing)
               }.padding(.vertical, 10)
-            }.font(.system(size: 11)).foregroundStyle(Palette.secondary)
+            }.font(.system(size: 11)).foregroundStyle(Palette.secondary) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("connections-page")
+        .confirmationDialog("Remove this connection?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
+            Button("Remove connection", role: .destructive) {
+                if let source = removing { Task { _ = await store.remoteAccountAction(["action": "remove", "sourceID": source.id]) } }
+                removing = nil
+            }
+            Button("Cancel", role: .cancel) { removing = nil }
+        }
+        .task {
+            while store.remoteAccountRequest != nil && !Task.isCancelled {
+                _ = await store.remoteAccountAction(["action": "state"])
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
     }
 
     private func copy(_ value: String) {
@@ -136,6 +150,11 @@ struct ConnectionsView: View {
                 Button("Edit") { store.editConnection(configuration) }
                     .buttonStyle(SecondaryButtonStyle()).disabled(store.savingConnection || store.loginSourceID != nil)
                     .accessibilityIdentifier("edit-\(configuration.id)")
+                if store.remoteAccountRequest != nil {
+                    Button { removing = configuration } label: { Image(systemName: "trash") }
+                        .buttonStyle(.plain).disabled(store.savingConnection || store.loginSourceID != nil)
+                        .accessibilityLabel("Remove \(configuration.label)")
+                }
                 Button { Task { await store.refresh(sourceID: configuration.id) } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).foregroundStyle(Palette.secondary)
                     .disabled(store.refreshing || store.savingConnection || !configuration.enabled || store.loginSourceID != nil)

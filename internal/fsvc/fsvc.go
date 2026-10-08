@@ -348,6 +348,12 @@ func Rename(from, to string) error { return os.Rename(from, to) }
 // Write atomically writes data to path (temp file in the same dir + rename), so a
 // reader never sees a half-written file. Used for new files and editor saves.
 func Write(path string, data []byte) error {
+	fileWrites.Lock()
+	defer fileWrites.Unlock()
+	return writeFile(path, data)
+}
+
+func writeFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil { // create parent dirs (e.g. a new notebook folder)
 		return err
@@ -357,9 +363,20 @@ func Write(path string, data []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if info, err := os.Stat(path); err == nil {
+		if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+			tmp.Close()
+			return err
+		}
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

@@ -228,6 +228,7 @@ struct DashboardsView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("ut.uiScale") private var uiScale: Double = 1.0
     @State private var showAdd = false
+    @State private var showWorkspaceCatalog = false
     @State private var newURL = ""
     @State private var renaming: DashboardTab?
     @State private var renameText = ""
@@ -293,6 +294,12 @@ struct DashboardsView: View {
                 .padding(.horizontal, 8)
             }
             Spacer(minLength: 0)
+            Button { showWorkspaceCatalog.toggle() } label: { Image(systemName: "square.stack.3d.up") }
+                .buttonStyle(.plain).help("Shared workspace dashboards")
+                .popover(isPresented: $showWorkspaceCatalog) {
+                    if let catalog = state.sharedWorkspace.catalogs { SharedDashboardCatalogView(catalog: catalog) }
+                    else { Text("Connecting to workspace…").padding() }
+                }
             if !model.tabs.isEmpty {
                 Menu {
                     if let active = model.active {
