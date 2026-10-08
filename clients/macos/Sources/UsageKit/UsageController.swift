@@ -218,6 +218,7 @@ public final class UsageController: ObservableObject {
 
     public func clearSharedPresentation() {
         applyingSharedState = true; defer { applyingSharedState = false }
+        store.resetRemoteAccountPresentation()
         store.sources = []; store.failures = []; store.lastRefresh = nil
         store.remoteAccountConfiguration = nil; store.remoteAccountFields = [:]; store.loginSourceID = nil
         store.loginMessage = nil; store.loginInstructions = nil; store.remoteLoginIntegration = nil
@@ -231,10 +232,11 @@ public final class UsageController: ObservableObject {
             version: 1, observedAt: .now, lastRefresh: store.lastRefresh,
             sources: store.sources, glances: glances, warnings: warnings,
             failures: store.failures.map { .init(integration: $0.integration, sourceID: $0.descriptor?.sourceID,
-                                               message: $0.error ?? "Unavailable", needsAuthentication: $0.needsAuthentication) },
+                                               message: $0.error ?? "Unavailable", needsAuthentication: $0.needsAuthentication,
+                                               errorTitle: $0.errorTitle) },
             accounts: store.sources.map { source in
                 .init(id: source.id, title: source.name, account: source.account, observedAt: source.observedAt,
-                      stale: source.isStale, status: source.connectionStatusTitle,
+                      stale: source.isStale, status: store.connectionStatus(sourceID: source.id).title,
                       notes: source.notes, cards: Self.summary([source]))
             }))
     }
@@ -243,9 +245,14 @@ public final class UsageController: ObservableObject {
         let snapshot = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Snapshot.self, from: data)
         guard snapshot.version == 1 else { throw CocoaError(.coderReadCorrupt) }
         store.sources = snapshot.sources; store.lastRefresh = snapshot.lastRefresh
-        store.failures = snapshot.failures.map {
-            .init(integration: $0.integration, sources: [], error: $0.message,
-                  descriptor: nil, needsAuthentication: $0.needsAuthentication)
+        store.failures = snapshot.failures.map { failure in
+            let descriptor = failure.sourceID.map { id in
+                IntegrationDescriptor(sourceID: id, integration: failure.integration,
+                    label: snapshot.sources.first { $0.id == id }?.account ?? id)
+            }
+            return .init(integration: failure.integration, sources: [], error: failure.message,
+                  descriptor: descriptor, needsAuthentication: failure.needsAuthentication,
+                  errorTitle: failure.errorTitle ?? (failure.needsAuthentication ? "Connect account" : "Unavailable"))
         }
         store.now = .now; store.didLoad = true
         reconcile()

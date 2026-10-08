@@ -27,8 +27,8 @@ struct ConnectionsView: View {
                             Text(code).font(.system(size: 22, weight: .semibold, design: .monospaced)).textSelection(.enabled)
                             Button("Copy code") { copy(code) }.buttonStyle(SecondaryButtonStyle())
                         }
-                        Link(instructions.userCode == nil ? "Open sign-in page" : "Open authorization page", destination: instructions.url)
-                            .font(.system(size: 12))
+                        Button(instructions.userCode == nil ? "Open sign-in page" : "Open authorization page") { store.openAccountLoginPage() }
+                            .buttonStyle(.link).font(.system(size: 12))
                             .accessibilityIdentifier("open-account-sign-in")
                         Button("Copy link") { copy(instructions.url.absoluteString) }.buttonStyle(SecondaryButtonStyle())
                     }
@@ -36,6 +36,7 @@ struct ConnectionsView: View {
                         Text(instructions.url.absoluteString).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                     }
                   }
+                  if let message = store.loginBrowserError { InfoNote(text: message, warning: true) }
                   if store.claudeLoginFlow != nil || (store.remoteLoginIntegration == "claude" && store.loginSourceID != nil) {
                     HStack(spacing: 12) {
                         SecureField("Complete authorization code (code#state)", text: $store.claudeAuthorizationCode)
@@ -104,6 +105,7 @@ struct ConnectionsView: View {
               }.padding(.vertical, 10)
             }.font(.system(size: 11)).foregroundStyle(Palette.secondary) }
         }
+        .disabled(store.remoteAccountActionPending)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("connections-page")
         .confirmationDialog("Remove this connection?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
@@ -128,8 +130,7 @@ struct ConnectionsView: View {
 
     private func connectionRow(_ configuration: SourceConfiguration) -> some View {
         let source = store.sources.first { $0.id == configuration.id }
-        let failure = store.failures.first { $0.descriptor?.sourceID == configuration.id }
-        let needsWork = failure != nil || source?.unavailable != nil || source?.hasLimitedAccess == true
+        let status = store.connectionStatus(sourceID: configuration.id)
         return VStack(alignment: .leading, spacing: 9) {
             Hairline()
             HStack(alignment: .top, spacing: 12) {
@@ -140,8 +141,7 @@ struct ConnectionsView: View {
                     }
                 }
                 Spacer()
-                SoftBadge(text: !configuration.enabled ? "Disabled" : (source?.connectionStatusTitle ?? failure?.errorTitle ?? "Waiting"),
-                          symbol: needsWork ? "exclamationmark.circle" : "checkmark.circle", warning: needsWork)
+                SoftBadge(text: status.title, symbol: status.symbol, warning: status.needsAttention)
                 if configuration.integration.supportsAccountSignIn {
                     Button(configuration.hasSavedAccount ? "Change account" : "Sign in") { store.connectAccount(configuration.id) }
                         .buttonStyle(SecondaryButtonStyle()).disabled(store.loginSourceID != nil || store.refreshing || !configuration.enabled)
@@ -159,8 +159,9 @@ struct ConnectionsView: View {
                     .buttonStyle(.plain).foregroundStyle(Palette.secondary)
                     .disabled(store.refreshing || store.savingConnection || !configuration.enabled || store.loginSourceID != nil)
                     .accessibilityLabel("Check \(configuration.label) connection")
+                    .accessibilityIdentifier("check-\(configuration.id)")
             }
-            if let message = failure?.error ?? source?.unavailable?.message {
+            if let message = status.message {
                 Text(message).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let source, source.capabilities != nil { SourceAccessView(source: source) }

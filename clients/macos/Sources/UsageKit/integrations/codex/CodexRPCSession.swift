@@ -1,6 +1,17 @@
 import Foundation
 import Darwin
 
+/// Transport-level rejection is not evidence that credentials are invalid.
+/// Keep raw server messages private; they can contain credential-bearing URLs.
+@available(macOS 14.0, *)
+struct CodexRPCFailure: Error, Sendable {
+    var code: Int?
+    var mayRecoverAfterAccountRefresh: Bool {
+        guard let code else { return false }
+        return code == -32603 || (-32099 ... -32000).contains(code)
+    }
+}
+
 @available(macOS 14.0, *)
 protocol CodexServing: Sendable {
     func initialize() async throws
@@ -128,7 +139,7 @@ final class CodexRPCSession: CodexServing, @unchecked Sendable {
             if let id = value["id"].int {
                 if value["error"].object != nil {
                     // Deliberately do not expose raw server error bodies (which may contain auth URLs).
-                    finish(id, result: .failure(IntegrationError.authentication("Codex could not read this account. Reconnect if its login has expired.")))
+                    finish(id, result: .failure(CodexRPCFailure(code: value["error"]["code"].int)))
                 } else { finish(id, result: .success(value["result"])) }
             } else if let method = value["method"].string {
                 lock.lock()

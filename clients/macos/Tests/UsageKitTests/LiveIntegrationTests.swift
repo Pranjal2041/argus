@@ -207,6 +207,23 @@ final class LiveIntegrationTests: XCTestCase {
         XCTAssertTrue(calls.isEmpty)
     }
 
+    func testCollectorReturnsBrowserInstructionsWithoutLaunchingItsOwnBrowser() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = FixtureBrowser(), instructions = InstructionRecorder()
+        let authenticator = CodexAuthenticator(executable: "/fixture/codex", browser: browser,
+            makeSession: { _, _ in FixtureCodexSession(email: "new@example.test") })
+        let login = try await authenticator.signIn(profile: directory.path, existingEmails: [], opensBrowser: false) {
+            await instructions.record($0)
+        }
+        let calls = await browser.urls, result = await instructions.value
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(login.email, "new@example.test")
+        XCTAssertEqual(result?.url.absoluteString, "https://auth.openai.com/fixture")
+        XCTAssertEqual(result?.opensBrowserAutomatically, true)
+        XCTAssertEqual(result?.browserOpened, false)
+    }
+
     func testDeviceCodeReturnsInstructionsWithoutOpeningAnyBrowser() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -223,6 +240,7 @@ final class LiveIntegrationTests: XCTestCase {
         XCTAssertEqual(result?.userCode, "TEST-1234")
         XCTAssertEqual(result?.url.absoluteString, "https://auth.openai.com/fixture")
         XCTAssertEqual(result?.browserOpened, false)
+        XCTAssertEqual(result?.opensBrowserAutomatically, false)
     }
 
     func testFailedBrowserLaunchStillOffersManualSignInLink() async throws {

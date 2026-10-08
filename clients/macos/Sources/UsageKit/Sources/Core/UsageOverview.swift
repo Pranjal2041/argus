@@ -1,5 +1,21 @@
 import Foundation
 
+/// Reading freshness is independent of the result of the latest connection check.
+@available(macOS 14.0, *)
+struct UsageConnectionStatus {
+    let title: String
+    let message: String?
+    let needsAttention: Bool
+    let symbol: String
+
+    init(source: UsageSource?, failure: IntegrationResult?, enabled: Bool = true) {
+        message = enabled ? (failure?.error ?? source?.unavailable?.message) : nil
+        needsAttention = enabled && (failure != nil || source?.unavailable != nil || source?.hasLimitedAccess == true || source?.isStale == true)
+        title = !enabled ? "Disabled" : (failure?.errorTitle ?? source?.connectionStatusTitle ?? "Waiting")
+        symbol = needsAttention ? "exclamationmark.circle" : (enabled && source != nil ? "checkmark.circle" : "minus.circle")
+    }
+}
+
 /// Connection presence and measured usage are separate. Every source gets a
 /// reading or a status presentation; missing readings never become zero usage.
 @available(macOS 14.0, *)
@@ -37,11 +53,11 @@ extension UsageSource {
     }
 
     var connectionStatusTitle: String {
-        if isStale { return "Cached" }
         if hasLimitedAccess { return "Limited access" }
         if let unavailable {
             return unavailable.needsAuthentication ? "Sign in" : unavailable.title
         }
+        if isStale { return "Cached" }
         return hasOverviewReading ? "Connected" : "Unavailable"
     }
 }

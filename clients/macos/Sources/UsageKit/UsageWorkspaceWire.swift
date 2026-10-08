@@ -16,6 +16,7 @@ enum UsageWorkspaceWire {
         var sourceID: String?
         var message: String
         var needsAuthentication: Bool
+        var errorTitle: String? = nil
     }
     struct Account: Codable {
         var id: String

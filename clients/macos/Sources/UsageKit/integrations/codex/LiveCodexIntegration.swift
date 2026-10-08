@@ -5,6 +5,7 @@ struct LiveCodexIntegration: UsageIntegration {
     let id = IntegrationID.codex
     let configuration: SourceConfiguration
     let executable: String
+    var makeSession: @Sendable (String, String) throws -> any CodexServing = { try CodexRPCSession(executable: $0, profile: $1) }
     var descriptor: IntegrationDescriptor? { configuration.descriptor }
 
     func fetchSources() async throws -> [UsageSource] {
@@ -12,15 +13,52 @@ struct LiveCodexIntegration: UsageIntegration {
               FileManager.default.fileExists(atPath: profile) else {
             throw IntegrationError.authentication("Connect this Codex account to see its limits.")
         }
-        let session = try CodexRPCSession(executable: executable, profile: profile)
-        defer { session.close() }
+        let session = try makeSession(executable, profile)
+        defer { session.close(with: CancellationError()) }
         try await session.initialize()
-        let account = try await session.request("account/read", params: ["refreshToken": .bool(false)])["account"]
-        guard account["type"].string == "chatgpt" else {
-            throw IntegrationError.authentication("Sign in with a ChatGPT account. API-key logins do not expose ChatGPT quota windows.")
+        var refreshed = false
+        func readAccount(refresh: Bool) async throws -> JSONValue {
+            let response = try await session.request("account/read", params: ["refreshToken": .bool(refresh)], timeout: 25)
+            guard let account = response.object?["account"] else {
+                throw IntegrationError.invalidResponse("Codex did not return an account status. Check the CLI installation and try again.")
+            }
+            return account
         }
-        let rates = try await session.request("account/rateLimits/read")
+        var account = try await readAccount(refresh: false)
+        if account == .null {
+            account = try await readAccount(refresh: true)
+            refreshed = true
+        }
+        try Self.validateAccount(account, configuration: configuration)
+        var expectedAccount = configuration
+        if expectedAccount.accountIdentity == nil { expectedAccount.accountIdentity = account["email"].string }
+        let rates: JSONValue
+        do {
+            rates = try await session.request("account/rateLimits/read", params: [:], timeout: 25)
+        } catch {
+            // The CLI owns credential renewal. Retry once through its public
+            // account API; never replace profiles or reuse another account.
+            let canRefresh = (error as? IntegrationError)?.needsAuthentication == true
+                || (error as? CodexRPCFailure)?.mayRecoverAfterAccountRefresh == true
+            guard !refreshed, canRefresh else { throw error }
+            try Task.checkCancellation()
+            account = try await readAccount(refresh: true)
+            try Self.validateAccount(account, configuration: expectedAccount)
+            rates = try await session.request("account/rateLimits/read", params: [:], timeout: 25)
+        }
         return [try Self.normalize(account: account, rates: rates, configuration: configuration, now: .now)]
+    }
+
+    static func validateAccount(_ account: JSONValue, configuration: SourceConfiguration) throws {
+        switch account["type"].string {
+        case "chatgpt": try configuration.validateAccountIdentity(account["email"].string)
+        case "apiKey":
+            throw IntegrationError.authentication("This profile uses an API key. Sign in with a ChatGPT account to see its quota windows.")
+        case nil where account == .null:
+            throw IntegrationError.authentication("This profile has no active ChatGPT login after refreshing. Sign in again to restore live usage.")
+        default:
+            throw IntegrationError.invalidResponse("This profile did not report a supported ChatGPT account. Check its Codex login and try again.")
+        }
     }
 
     static func normalize(account: JSONValue, rates: JSONValue, configuration: SourceConfiguration, now: Date) throws -> UsageSource {
