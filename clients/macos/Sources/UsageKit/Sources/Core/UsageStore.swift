@@ -106,7 +106,8 @@ final class UsageStore {
     }
     private(set) var addedSources: [AddedSource]
     private let defaults: UserDefaults
-    private var registry: IntegrationRegistry
+    private var registry: IntegrationRegistry { didSet { registryGeneration &+= 1 } }
+    private var registryGeneration = 0
     @ObservationIgnored var makeRegistry: @Sendable (IntegrationConfiguration) -> IntegrationRegistry = { .live($0) }
     private let cache: SnapshotCache?
     private let connections: ConnectionRepository
@@ -181,13 +182,19 @@ final class UsageStore {
 
     func refresh(sourceID: String? = nil) async {
         guard !refreshing, authorizingCredentialID == nil else { return }
-        if let remoteRefresh { await remoteRefresh(sourceID); return }
         refreshing = true
-        defer { refreshing = false }
+        readingsChanged?()
+        defer { refreshing = false; readingsChanged?() }
+        if let remoteRefresh { await remoteRefresh(sourceID); return }
         let fetching = sourceID.map { id in
-            IntegrationRegistry(adapters: registry.adapters.filter { $0.descriptor?.sourceID == id }, origin: registry.origin, configuration: registry.configuration)
+            IntegrationRegistry(adapters: registry.adapters.filter { $0.descriptor?.sourceID == id }, origin: registry.origin,
+                                configuration: registry.configuration, fetchCoordinator: registry.fetchCoordinator)
         } ?? registry
-        let results = await fetching.fetchAll()
+        let generation = registryGeneration
+        let results = await fetching.fetchAll { [weak self] result in
+            await self?.acceptPartial(result, generation: generation)
+        }
+        guard generation == registryGeneration else { return }
         var fresh: [UsageSource] = sourceID == nil ? [] : sources.filter { $0.id != sourceID }
         for result in results {
             if result.error == nil { fresh.append(contentsOf: result.sources) }
@@ -226,6 +233,41 @@ final class UsageStore {
             catch { configurationError = "Live data loaded, but the local reading cache could not be saved." }
         }
         events = Array(events.prefix(100))
+        didLoad = true
+        readingsChanged?()
+    }
+
+    /// Present each account as soon as it completes. Preserve other accounts'
+    /// readings and timestamps while they are still in flight.
+    private func acceptPartial(_ result: IntegrationResult, generation: Int) {
+        guard generation == registryGeneration else { return }
+        func belongs(_ source: UsageSource) -> Bool {
+            if let id = result.descriptor?.sourceID { return source.id == id }
+            return source.integration == result.integration && !isAdded(source.id)
+        }
+        let previous = sources.filter(belongs)
+        let replacement: [UsageSource]
+        if result.error == nil { replacement = result.sources }
+        else if let existing = previous.first(where: { $0.unavailable == nil }) {
+            var stale = existing; stale.isStale = true
+            if var storage = stale.storage { storage.online = false; stale.payload = .storage(storage) }
+            replacement = [stale]
+        } else if let descriptor = result.descriptor {
+            replacement = [UsageSource(id: descriptor.sourceID, integration: descriptor.integration, account: descriptor.label,
+                observedAt: .now, payload: .unavailable(UnavailableUsage(title: result.errorTitle,
+                    message: result.error ?? "The source is unavailable.", needsAuthentication: result.needsAuthentication)),
+                origin: .live, accountIdentity: configuration?.sources.first { $0.id == descriptor.sourceID }?.accountIdentity)]
+        } else { replacement = previous }
+        sources.removeAll(where: belongs)
+        sources.append(contentsOf: replacement)
+        let order = Dictionary(uniqueKeysWithValues: (configuration?.sources ?? []).enumerated().map { ($0.element.id, $0.offset) })
+        if !isDemo { sources.sort { (order[$0.id] ?? 0) < (order[$1.id] ?? 0) } }
+        failures.removeAll {
+            if let id = result.descriptor?.sourceID { return $0.descriptor?.sourceID == id }
+            return $0.integration == result.integration
+        }
+        if result.error != nil { failures.append(result) }
+        now = .now
         didLoad = true
         readingsChanged?()
     }

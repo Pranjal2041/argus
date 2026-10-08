@@ -66,11 +66,28 @@ struct KeychainCredentialStore: CredentialStoring {
             }
         }
         let status = SecItemCopyMatching(request as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data,
+        guard status == errSecSuccess else { throw Self.failure(for: status) }
+        guard let data = result as? Data,
               let values = try? JSONDecoder().decode([String: String].self, from: data) else {
-            throw IntegrationError.authentication("macOS has not authorized this build to read the saved key. In Connections, choose Authorize saved key. Your provider key and its permissions are unchanged.")
+            throw IntegrationError.invalidResponse("The saved credential could not be decoded.")
         }
         return values
+    }
+
+    /// Keychain availability and provider authentication are separate facts.
+    /// Only a genuinely missing credential is a missing account credential;
+    /// lock, IPC, decoding, and worker failures must not demand a fresh login.
+    static func failure(for status: OSStatus) -> IntegrationError {
+        switch status {
+        case errSecItemNotFound:
+            return .authentication("This connection has no saved credential.")
+        case errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled:
+            return .permission("macOS could not unlock this connection's saved credential. Argus will retry automatically.")
+        case errSecDecode:
+            return .invalidResponse("The saved credential could not be decoded.")
+        default:
+            return .unavailable("The credential service is temporarily unavailable (status \(status)). Argus will retry automatically.")
+        }
     }
 
     func save(_ values: [String: String], reference: String) throws {
@@ -107,7 +124,7 @@ struct KeychainCredentialStore: CredentialStoring {
         let status = SecItemUpdate(request as CFDictionary,
             [kSecValueData as String: try JSONEncoder().encode(values)] as CFDictionary)
         guard status == errSecSuccess else {
-            throw IntegrationError.authentication("Could not save the renewed Claude login. Reconnect this account in Connections.")
+            throw Self.failure(for: status)
         }
     }
 }

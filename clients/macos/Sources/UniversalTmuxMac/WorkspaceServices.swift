@@ -69,7 +69,7 @@ enum WorkspaceServiceLauncher {
         guard let url = URL(string: base), url.scheme == "http",
               ["127.0.0.1", "localhost", "[::1]", "::1"].contains(url.host ?? "") else { exit(2) }
         Task { @MainActor in await WorkspaceCollector(base: base).run() }
-        dispatchMain()
+        HeadlessMainRunLoop.run()
     }
 }
 
@@ -91,17 +91,26 @@ private final class WorkspaceCollector {
     private var settingsApplied: ArgusJSON?
     private var dismissalsApplied: ArgusJSON?
     private var usagePresentationDirty = true
+    private var usagePresentationRevision = 0
+    private var completedUsageCommands: [SharedWorkspaceRecord] = []
     private let journalJob = WorkspaceRecurringJob(interval: 30)
     private let wrappedJob = WorkspaceRecurringJob(interval: 300)
     private var journalPublished: [String: String] = [:]
     private var personaTask: Task<Void, Never>?
     private var nextPersona = Date.distantPast
+    private var networkObserver: NSObjectProtocol?
 
     init(base: String) {
         self.base = base
         app.machines[0].httpBase = base
         app.machines[0].wsBase = base.replacingOccurrences(of: "http://", with: "ws://")
+        networkObserver = MainActorNotification.observe(BrokerNetworkRecovery.recovered) { [weak self] in
+            self?.networkCadence.reset()
+            self?.usageRefreshRequested = true
+        }
     }
+
+    deinit { if let networkObserver { NotificationCenter.default.removeObserver(networkObserver) } }
 
     private func owns(_ name: String) -> Bool {
         Double(leases[name]?["expiresAt"].uint64 ?? 0) / 1000 > Date().timeIntervalSince1970 + 10
@@ -218,7 +227,15 @@ private final class WorkspaceCollector {
             }
         }
         if #available(macOS 14.0, *), owns("usage"), usageController == nil {
-            usageController = UsageController()
+            let usage = UsageController()
+            if let snapshot = replica.data("usage", "current") {
+                try usage.restoreCollectorSnapshot(ArgusWire.encoder().encode(snapshot))
+            }
+            usage.readingsChanged = { [weak self] in
+                self?.usagePresentationDirty = true
+                self?.usagePresentationRevision += 1
+            }
+            usageController = usage
         }
         if #available(macOS 14.0, *), let usage = usageController as? UsageController {
             if owns("usage"), accountTask == nil, let lease = leases["usage"] {
@@ -242,24 +259,39 @@ private final class WorkspaceCollector {
             if let dismissals = replica.data("usage-dismissals", "default"), dismissals != dismissalsApplied {
                 try usage.applySharedDismissals(ArgusWire.encoder().encode(dismissals)); dismissalsApplied = dismissals; usagePresentationDirty = true
             }
-            if owns("usage"), usagePresentationDirty, usageTask == nil {
+            usage.setCollectionCadence(policy.usage(usage.collectionInterval))
+            var acknowledgedCommands = Set<String>()
+            if owns("usage"), usagePresentationDirty {
+                let revision = usagePresentationRevision
+                let completed = completedUsageCommands
                 try await publish("usage", id: "current", data: JSONDecoder().decode(ArgusJSON.self, from: usage.sharedSnapshot()))
-                usagePresentationDirty = false
+                for command in completed {
+                    try await remove(command)
+                    acknowledgedCommands.insert(command.id)
+                    completedUsageCommands.removeAll { $0.id == command.id && $0.revision == command.revision }
+                }
+                if usagePresentationRevision == revision { usagePresentationDirty = false }
             }
-            let commands = replica.collection("commands").filter { $0.data?["kind"].string == "usage-refresh" }
+            let commands = replica.collection("commands").filter {
+                $0.data?["kind"].string == "usage-refresh" && !acknowledgedCommands.contains($0.id)
+            }
+            let scheduled = usageRefreshRequested || Date().timeIntervalSince(lastUsage) >= policy.usage(usage.collectionInterval)
             if owns("usage"), usageTask == nil, accountTask == nil,
-               usageRefreshRequested || Date().timeIntervalSince(lastUsage) >= policy.usage(usage.collectionInterval) || !commands.isEmpty {
+               scheduled || !commands.isEmpty {
                 lastUsage = Date(); usageRefreshRequested = false
                 let fence = leases["usage"]?["fence"]
+                let targets = Set(commands.compactMap { $0.data?["sourceID"].string })
+                let allAccounts = scheduled || commands.contains { $0.data?["sourceID"].string == nil }
                 usageTask = Task {
                     defer { usageTask = nil }
-                    await usage.collectForWorkspace()
+                    if allAccounts { await usage.collectForWorkspace() }
+                    else {
+                        for id in targets.sorted() { await usage.collectForWorkspace(sourceID: id) }
+                    }
                     guard owns("usage"), leases["usage"]?["fence"] == fence else { return }
-                    do {
-                        let snapshot = try JSONDecoder().decode(ArgusJSON.self, from: usage.sharedSnapshot())
-                        try await publish("usage", id: "current", data: snapshot)
-                        for command in commands { try await remove(command) }
-                    } catch { NSLog("[workspace-service] Usage publication: %@", error.localizedDescription) }
+                    completedUsageCommands.append(contentsOf: commands)
+                    usagePresentationDirty = true
+                    usagePresentationRevision += 1
                 }
             }
         }

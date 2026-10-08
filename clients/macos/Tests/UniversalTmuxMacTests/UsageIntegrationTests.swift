@@ -15,7 +15,7 @@ final class UsageIntegrationTests: XCTestCase {
                 _ = try UsageCredentialProcess(executable: executable).perform(.init(operation: .read, reference: "argus-usage-nonexistent-test-\(UUID())"))
                 return false
             } catch let error as IntegrationError {
-                return error.needsAuthentication && error.errorDescription?.contains("macOS has not authorized") == true
+                return error.needsAuthentication && error.errorDescription?.contains("no saved credential") == true
             } catch { return false }
         }.value
         XCTAssertTrue(result, "The isolated worker must return an actionable missing-key response without a dialog or app lifecycle")
@@ -58,6 +58,21 @@ final class UsageIntegrationTests: XCTestCase {
         defer { window.close() }
         try await settle()
         try capture(host, name: "command-center")
+        do {
+            var finishRefresh: CheckedContinuation<Void, Never>?
+            defer { finishRefresh?.resume(); controller.remoteRefresh = nil }
+            controller.remoteRefresh = { _ in
+                await withCheckedContinuation { finishRefresh = $0 }
+            }
+            XCTAssertTrue(press(host, identifier: "usage-refresh"))
+            try await settle()
+            XCTAssertTrue(controller.refreshing)
+            try capture(host, name: "refreshing")
+            finishRefresh?.resume(); finishRefresh = nil
+            try await settle()
+            XCTAssertFalse(controller.refreshing)
+            try capture(host, name: "refresh-completed")
+        }
         let warning = try XCTUnwrap(controller.warnings.first)
         let dismissed = press(host, identifier: "usage-dismiss-\(warning.id)")
         XCTAssertTrue(dismissed, "The actual warning dismiss button must be reachable")

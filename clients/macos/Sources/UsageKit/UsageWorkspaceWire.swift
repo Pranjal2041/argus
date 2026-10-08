@@ -37,5 +37,7 @@ enum UsageWorkspaceWire {
         var warnings: [UsageWarning]
         var failures: [Failure]
         var accounts: [Account]
+        var refreshing: Bool? = nil
+        var refreshIntervalSeconds: Double? = nil
     }
 }

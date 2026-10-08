@@ -91,7 +91,8 @@ fun UsageScreen(vm: AppViewModel) {
             }
             Text("${accounts.size} accounts & devices · ${workspaceDate(snapshot?.optLong("lastRefresh") ?: 0)}", color = LocalTheme.current.dim, fontSize = 12.sp)
             TextButton(onClick = { connectionsOpen = true }) { Text("Manage connections") }
-            val freshFor = maxOf(300.0, (settings?.optDouble("refreshSeconds", 120.0) ?: 120.0) * 3) * 1000
+            val cadence = snapshot?.optDouble("refreshIntervalSeconds", settings?.optDouble("refreshSeconds", 120.0) ?: 120.0) ?: 120.0
+            val freshFor = maxOf(300.0, cadence * 3) * 1000
             if (snapshot != null && System.currentTimeMillis() - snapshot.optLong("lastRefresh") > freshFor) Text("Cached readings · waiting for the collector", color = LocalTheme.current.waiting, fontSize = 12.sp)
             (vm.workspaceSelectionIssue ?: vm.workspace.issue)?.let { Text(it, color = LocalTheme.current.waiting, fontSize = 12.sp) }
         }

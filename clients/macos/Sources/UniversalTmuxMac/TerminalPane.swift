@@ -1101,7 +1101,7 @@ final class TerminalController: ObservableObject {
         _ = BrokerNetworkRecovery.shared
         for name in [NetworkPreferences.changed, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
                      NSApplication.didHideNotification, NSApplication.didUnhideNotification, NSWindow.didChangeOcclusionStateNotification] {
-            networkObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            networkObservers.append(MainActorNotification.observe(name) { [weak self] in
                 guard let self else { return }
                 self.networkPolicy = NetworkPreferences.policy
                 self.applyNetworkPolicies()

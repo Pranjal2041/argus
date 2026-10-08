@@ -13,6 +13,33 @@ struct UsageCredentialRequest: Codable, Sendable {
 struct UsageCredentialResponse: Codable, Sendable {
     var values: [String: String]?
     var error: String?
+    var errorKind: String?
+
+    static func failure(_ error: Error) -> Self {
+        let known = error as? IntegrationError
+        let kind: String
+        switch known {
+        case .authentication: kind = "authentication"
+        case .permission: kind = "permission"
+        case .configuration: kind = "configuration"
+        case .invalidResponse: kind = "invalidResponse"
+        case .timeout: kind = "timeout"
+        default: kind = "unavailable"
+        }
+        return Self(error: known?.errorDescription ?? "The credential service is temporarily unavailable.", errorKind: kind)
+    }
+
+    func validate() throws {
+        guard let error else { return }
+        switch errorKind {
+        case "authentication": throw IntegrationError.authentication(error)
+        case "permission": throw IntegrationError.permission(error)
+        case "configuration": throw IntegrationError.configuration(error)
+        case "invalidResponse": throw IntegrationError.invalidResponse(error)
+        case "timeout": throw IntegrationError.timeout
+        default: throw IntegrationError.unavailable(error)
+        }
+    }
 }
 
 @available(macOS 14.0, *)
@@ -26,6 +53,8 @@ protocol UsageCredentialRunning: Sendable {
 @available(macOS 14.0, *)
 struct UsageCredentialProcess: UsageCredentialRunning {
     var executable: URL? = Bundle.main.executableURL
+    var timeout: TimeInterval = 15
+    var terminationGrace: TimeInterval = 1
 
     func perform(_ request: UsageCredentialRequest) throws -> UsageCredentialResponse {
         guard let executable else { throw IntegrationError.configuration("The Argus credential worker is unavailable.") }
@@ -43,23 +72,49 @@ struct UsageCredentialProcess: UsageCredentialRunning {
         process.terminationHandler = { _ in completed.signal() }
         try process.run()
         // Bound Keychain service stalls without touching any other process.
+        let deadlineState = CredentialDeadlineState()
         let timeout = DispatchWorkItem {
-            if process.isRunning { process.terminate() }
+            guard process.isRunning else { return }
+            deadlineState.expire()
+            process.terminate()
+            // A stuck worker can ignore SIGTERM. Its stdout must still reach
+            // EOF; otherwise readToEnd would defeat the advertised deadline.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + terminationGrace) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15, execute: timeout)
-        defer { timeout.cancel(); try? input.fileHandleForWriting.close(); try? output.fileHandleForReading.close() }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + self.timeout, execute: timeout)
+        defer {
+            timeout.cancel()
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            try? input.fileHandleForWriting.close(); try? output.fileHandleForReading.close()
+        }
         try input.fileHandleForWriting.write(contentsOf: data)
         try input.fileHandleForWriting.close()
-        let response = try output.fileHandleForReading.readToEnd() ?? Data()
+        var response = Data()
+        while let chunk = try output.fileHandleForReading.read(upToCount: 16 * 1024), !chunk.isEmpty {
+            response.append(chunk)
+            guard response.count <= UsageCredentialWorker.maximumMessageBytes else {
+                throw IntegrationError.invalidResponse("The credential worker returned an oversized response.")
+            }
+        }
         _ = completed.wait(timeout: .now() + 1)
+        if deadlineState.expired { throw IntegrationError.timeout }
         guard !process.isRunning, process.terminationStatus == 0,
               response.count <= UsageCredentialWorker.maximumMessageBytes,
               let decoded = try? JSONDecoder().decode(UsageCredentialResponse.self, from: response) else {
-            throw IntegrationError.authentication("The saved key could not be read. Check this account in Connections.")
+            throw IntegrationError.unavailable("The credential worker could not complete its request. Argus will retry automatically.")
         }
-        if let error = decoded.error { throw IntegrationError.authentication(error) }
+        try decoded.validate()
         return decoded
     }
+}
+
+private final class CredentialDeadlineState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var expired: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func expire() { lock.lock(); value = true; lock.unlock() }
 }
 
 /// Invoked before the app lifecycle: no windows, brokers, browser, polling, or
@@ -90,7 +145,7 @@ public enum UsageCredentialWorker {
                     response = UsageCredentialResponse()
                 }
             } catch {
-                response = UsageCredentialResponse(error: (error as? IntegrationError)?.errorDescription ?? "The saved credential is unavailable.")
+                response = UsageCredentialResponse.failure(error)
             }
             let output = try JSONEncoder().encode(response)
             guard output.count <= maximumMessageBytes else { exit(2) }

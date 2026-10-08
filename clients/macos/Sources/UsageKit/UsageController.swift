@@ -46,6 +46,7 @@ public final class UsageController: ObservableObject {
     private static let cardOrderKey = "commandCenterCardOrder.v1"
     public var sharedSettingsChanged: (() -> Void)?
     public var sharedDismissalsChanged: (() -> Void)?
+    public var readingsChanged: (() -> Void)?
     public var remoteRefresh: ((String?) async -> Void)? {
         didSet { store.remoteRefresh = remoteRefresh }
     }
@@ -66,6 +67,8 @@ public final class UsageController: ObservableObject {
     }
     private var applyingSharedState = false
     private var presentationWorkspaceID: String?
+    private var remoteCollectionUpdatedAt: Date?
+    private var effectiveRefreshSeconds: TimeInterval?
 
     /// Missing publication is not deletion. Retain local readings when this
     /// installation becomes the host, and otherwise restore only this workspace.
@@ -110,7 +113,10 @@ public final class UsageController: ObservableObject {
         } ?? [:])
         let savedInterval = defaults.double(forKey: "refreshSeconds")
         refreshSeconds = savedInterval > 0 ? min(3600, max(60, savedInterval)) : store.refreshInterval
-        store.readingsChanged = { [weak self] in self?.reconcile() }
+        store.readingsChanged = { [weak self] in
+            self?.reconcile()
+            self?.readingsChanged?()
+        }
         reconcile()
     }
 
@@ -130,10 +136,20 @@ public final class UsageController: ObservableObject {
 
     public func stop() { refreshTask?.cancel(); refreshTask = nil }
 
+    /// Workspace readers keep an independent presentation clock, without
+    /// starting another collector or sending redundant refresh commands.
+    public func startPresentation() {
+        stop()
+        refreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) } catch { break }
+                self?.reconcile()
+            }
+        }
+    }
+
     public func refresh() async {
         guard !refreshing else { return }
-        refreshing = true
-        defer { refreshing = false }
         await store.refresh()
         reconcile()
     }
@@ -187,7 +203,11 @@ public final class UsageController: ObservableObject {
     }
 
     func reconcile(now: Date = .now) {
-        let maxAge = max(300, refreshSeconds * 3)
+        store.now = now
+        if let updated = remoteCollectionUpdatedAt, now.timeIntervalSince(updated) >= 120 {
+            store.refreshing = false
+        }
+        let maxAge = max(300, (effectiveRefreshSeconds ?? refreshSeconds) * 3)
         let readings = UsageMeasurement.readings(store.sources, now: now, maxAge: maxAge, includeModelLimits: policy.includeModelLimits)
         warnings = engine.evaluate(readings, policy: policy, now: now)
         // An old reading remains inspectable, but must not masquerade as a live
@@ -200,6 +220,7 @@ public final class UsageController: ObservableObject {
         glances = cardOrder.arranged(Self.summary(sources))
         connectionIssueCount = store.failures.count
         lastRefresh = store.lastRefresh
+        refreshing = store.refreshing
         if let data = try? JSONEncoder().encode(engine.dismissals) { defaults.set(data, forKey: Self.dismissalKey) }
     }
 
@@ -216,10 +237,21 @@ public final class UsageController: ObservableObject {
 
     public var collectionInterval: Double { refreshSeconds }
 
+    /// Freshness follows the producer's effective budget, including device-local
+    /// throttling. Readers must not expire data before its next scheduled check.
+    public func setCollectionCadence(_ interval: TimeInterval) {
+        guard interval.isFinite, interval >= 60, interval <= 3600, effectiveRefreshSeconds != interval else { return }
+        effectiveRefreshSeconds = interval
+        reconcile()
+        readingsChanged?()
+    }
+
     public func clearSharedPresentation() {
         applyingSharedState = true; defer { applyingSharedState = false }
         store.resetRemoteAccountPresentation()
-        store.sources = []; store.failures = []; store.lastRefresh = nil
+        store.sources = []; store.failures = []; store.lastRefresh = nil; store.refreshing = false
+        remoteCollectionUpdatedAt = nil
+        effectiveRefreshSeconds = nil
         store.remoteAccountConfiguration = nil; store.remoteAccountFields = [:]; store.loginSourceID = nil
         store.loginMessage = nil; store.loginInstructions = nil; store.remoteLoginIntegration = nil
         store.connectionDraft = nil; store.claudeAuthorizationCode = ""; store.devinAuthorizationCode = ""
@@ -238,13 +270,16 @@ public final class UsageController: ObservableObject {
                 .init(id: source.id, title: source.name, account: source.account, observedAt: source.observedAt,
                       stale: source.isStale, status: store.connectionStatus(sourceID: source.id).title,
                       notes: source.notes, cards: Self.summary([source]))
-            }))
+            }, refreshing: store.refreshing, refreshIntervalSeconds: effectiveRefreshSeconds ?? refreshSeconds))
     }
 
     public func applySharedSnapshot(_ data: Data) throws {
         let snapshot = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Snapshot.self, from: data)
         guard snapshot.version == 1 else { throw CocoaError(.coderReadCorrupt) }
         store.sources = snapshot.sources; store.lastRefresh = snapshot.lastRefresh
+        remoteCollectionUpdatedAt = snapshot.observedAt
+        effectiveRefreshSeconds = snapshot.refreshIntervalSeconds.flatMap { $0.isFinite && (60...3600).contains($0) ? $0 : nil }
+        store.refreshing = snapshot.refreshing == true && Date().timeIntervalSince(snapshot.observedAt) < 120
         store.failures = snapshot.failures.map { failure in
             let descriptor = failure.sourceID.map { id in
                 IntegrationDescriptor(sourceID: id, integration: failure.integration,
@@ -257,6 +292,16 @@ public final class UsageController: ObservableObject {
         store.now = .now; store.didLoad = true
         reconcile()
         if let id = presentationWorkspaceID { defaults.set(data, forKey: "workspaceSnapshot.v1." + id) }
+    }
+
+    /// A new collector retains the previous publication while it rechecks each
+    /// account. An old owner's in-flight state is not work owned by this process.
+    public func restoreCollectorSnapshot(_ data: Data) throws {
+        try applySharedSnapshot(data)
+        remoteCollectionUpdatedAt = nil
+        effectiveRefreshSeconds = nil
+        store.refreshing = false
+        reconcile()
     }
 
     public func sharedSettings() throws -> Data {

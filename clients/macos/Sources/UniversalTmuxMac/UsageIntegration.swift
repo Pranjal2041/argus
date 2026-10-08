@@ -84,7 +84,8 @@ struct UsageCommandCenterSection: View {
                     .help("Drag cards to rearrange, or use the left and right buttons.")
                     .accessibilityIdentifier("usage-arrange-cards")
                 Button { Task { await usage.refresh() } } label: {
-                    Image(systemName: "arrow.clockwise")
+                    if usage.refreshing { ProgressView().controlSize(.mini).frame(width: 14, height: 14) }
+                    else { Image(systemName: "arrow.clockwise") }
                 }.disabled(usage.refreshing).help("Refresh usage").accessibilityIdentifier("usage-refresh")
                 Button { usage.showSettings = true } label: {
                     Image(systemName: "slider.horizontal.3")
