@@ -176,6 +176,7 @@ final class CodexStatusProvider: AgentStatusProvider {
         // shouldn't leave the card stale until the next 30s sweep. After the first
         // attempt the Codex session exists, so the retry resumes it.
         for attempt in 0..<2 {
+            guard !Task.isCancelled else { return nil }
             let resumingID = entry?.id
             let prompt = resumingID == nil ? Self.systemPrompt + "\n\n" + msg : msg
             if let run = await Self.runCodex(sessionID: resumingID, stdin: prompt) {
@@ -190,7 +191,7 @@ final class CodexStatusProvider: AgentStatusProvider {
             }
             if attempt == 0 {
                 NSLog("[cc] %@ status attempt failed — retrying in 3s", key)
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return nil }
             }
         }
         return nil
@@ -219,43 +220,18 @@ final class CodexStatusProvider: AgentStatusProvider {
     }
 
     private static func runCodex(sessionID: String?, stdin: String) async -> CodexRun? {
-        await withCheckedContinuation { (cont: CheckedContinuation<CodexRun?, Never>) in
-            DispatchQueue.global(qos: .utility).async {
-                let outputURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("argus-command-center-\(UUID().uuidString).txt")
-                defer { try? FileManager.default.removeItem(at: outputURL) }
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: codexPath)
-                p.arguments = sessionID.map {
-                    CodexStatusCommand.resumeArguments(sessionID: $0, finalMessageURL: outputURL)
-                } ?? CodexStatusCommand.initialArguments(finalMessageURL: outputURL)
-                p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
-                let inPipe = Pipe(), outPipe = Pipe()
-                p.standardInput = inPipe
-                p.standardOutput = outPipe
-                p.standardError = FileHandle.nullDevice
-                do { try p.run() } catch { cont.resume(returning: nil); return }
-                // Write stdin on a separate thread so a large prompt can't deadlock
-                // against us trying to read stdout from the same thread.
-                DispatchQueue.global(qos: .utility).async {
-                    inPipe.fileHandleForWriting.write(Data(stdin.utf8))
-                    try? inPipe.fileHandleForWriting.close()
-                }
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                let jsonl = String(decoding: data, as: UTF8.self)
-                guard p.terminationStatus == 0,
-                      let resolvedSessionID = CodexStatusCommand.sessionID(in: jsonl) ?? sessionID,
-                      let finalMessage = try? String(contentsOf: outputURL, encoding: .utf8) else {
-                    cont.resume(returning: nil)
-                    return
-                }
-                cont.resume(returning: CodexRun(
-                    sessionID: resolvedSessionID,
-                    finalMessage: finalMessage
-                ))
-            }
-        }
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("argus-command-center-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let arguments = sessionID.map {
+            CodexStatusCommand.resumeArguments(sessionID: $0, finalMessageURL: outputURL)
+        } ?? CodexStatusCommand.initialArguments(finalMessageURL: outputURL)
+        guard let result = try? await BoundedProcessRunner().run(executable: URL(fileURLWithPath: codexPath),
+                                                               arguments: arguments, input: Data(stdin.utf8)),
+              result.status == 0,
+              let resolvedSessionID = CodexStatusCommand.sessionID(in: String(decoding: result.stdout, as: UTF8.self)) ?? sessionID,
+              let finalMessage = try? String(contentsOf: outputURL, encoding: .utf8) else { return nil }
+        return CodexRun(sessionID: resolvedSessionID, finalMessage: finalMessage)
     }
 
     // MARK: parsing
@@ -406,10 +382,8 @@ enum ManualStatusLog {
     }
 }
 
-/// Drives the command center: every 30s (and for any session whose dot just changed),
-/// pulls recent output from each active session's broker and asks the provider for a
-/// status. Holds the latest status per session for the UI. Runs only while the window
-/// is open. Reads the session list + dot state from AppState.
+/// The headless collector queues terminal captures and summaries; GUI instances
+/// only read published statuses. Collection never depends on a window being open.
 @MainActor
 final class CommandCenterModel: ObservableObject {
     let isCollector: Bool
@@ -512,7 +486,10 @@ final class CommandCenterModel: ObservableObject {
         }
     }
 
-    private let provider: AgentStatusProvider = CodexStatusProvider()
+    private let provider: AgentStatusProvider
+    var networkPolicy: () -> NetworkPolicy = { NetworkPreferences.policy }
+    var monotonicNow: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var fetchOutput: (String, String) async -> String? = { await CommandCenterModel.fetchRecent(httpBase: $0, session: $1) }
     private weak var app: AppState?
     private var timer: Timer?
     private var networkCadence = NetworkCadence()
@@ -569,17 +546,41 @@ final class CommandCenterModel: ObservableObject {
     private var correctionIDs: [String: String] = [:]
     private var completedCorrections: [String: String] = [:]
     func correctionDelivered(ref: SessionRef, id: String) -> Bool { completedCorrections[ref.id] == id }
-    private var busy: Set<String> = []          // per-session op dedup (a fetch/summarize in flight)
+    private struct SummaryRequest {
+        let ref: SessionRef
+        let machine: Machine
+        let lifetime: String
+        let generation: UInt64
+        let ownership: UInt64?
+        var force: Bool
+    }
+    private var summaryQueue: SessionSummaryQueue<SummaryRequest>
+    private var summaryTasks: [String: Task<Void, Never>] = [:]
+    private var retryAfter: [String: TimeInterval] = [:]
+    var queuedSummaryKeys: Set<String> { summaryQueue.pendingKeys }
+    var activeSummaryKeys: Set<String> { summaryQueue.active }
 
-    func collectionOwnershipChanged() {
+    func collectionOwnershipChanged(workspaceID: String? = nil) {
         guard isCollector else { return }
         statuses = [:]; lastHash = [:]; lastDot = [:]; lastOKAt = [:]
+        sessionLifetimes = [:]
         correctionIDs = [:]; completedCorrections = [:]; correction = [:]
         consumedOverrideTS = [:]; appliedOverrideTS = [:]
+        retryAfter = [:]; summaryQueue.removeAllPending()
+        summaryTasks.values.forEach { $0.cancel() }
+        if let workspaceID {
+            presentationWorkspaceID = workspaceID
+            // The reader cache is a migration fallback, never a collector write
+            // target: it also owns pending UI corrections.
+            for key in ["ut.ccCollector.v1." + workspaceID, "ut.ccPresentation.v2." + workspaceID] {
+                guard let data = defaults.data(forKey: key),
+                      let saved = try? JSONDecoder().decode(Presentation.self, from: data) else { continue }
+                statuses = saved.statuses; sessionLifetimes = saved.lifetimes
+                lastOKAt = saved.statuses.mapValues { $0.updatedAt.timeIntervalSince1970 }
+                break
+            }
+        }
     }
-    private var modelInflight = 0               // concurrent model calls (the expensive part)
-    private var pulseN = 0
-    private let maxModelCalls = 5
     private let storeKey = "ut.ccStatuses.v1"
     private let defaults: UserDefaults
     private var presentationWorkspaceID: String?
@@ -603,12 +604,15 @@ final class CommandCenterModel: ObservableObject {
         return try? JSONDecoder().decode(Response.self, from: data).items
     }
 
-    init(collector: Bool = false, defaults: UserDefaults = .standard) {
+    init(collector: Bool = false, defaults: UserDefaults = .standard,
+         provider: AgentStatusProvider = CodexStatusProvider(), maximumConcurrentSummaries: Int = 5) {
         isCollector = collector
         self.defaults = defaults
+        self.provider = provider
+        summaryQueue = SessionSummaryQueue(capacity: maximumConcurrentSummaries)
         presentationWorkspaceID = defaults.string(forKey: "ut.workspace.id")
-        // Show last-known statuses instantly on launch (refreshed within ~30s), so the
-        // grid is never a wall of empty tiles after a relaunch.
+        // Readers retain last-known statuses on launch. The collector separately
+        // restores identity-checked presentation when it acquires its workspace.
         if !collector, let d = defaults.data(forKey: storeKey),
            let saved = try? JSONDecoder().decode([String: AgentStatus].self, from: d) {
             statuses = saved
@@ -643,7 +647,13 @@ final class CommandCenterModel: ObservableObject {
         // as recordCost (this runs in the same resumed-continuation context).
         guard let d = try? JSONEncoder().encode(statuses) else { return }
         let key = storeKey, defaults = defaults
-        CodexStatusProvider.writeDefaults { defaults.set(d, forKey: key) }
+        let workspace = presentationWorkspaceID
+        let presentation = try? JSONEncoder().encode(Presentation(statuses: statuses, lifetimes: sessionLifetimes,
+                                                                  corrections: pendingCorrections))
+        CodexStatusProvider.writeDefaults {
+            defaults.set(d, forKey: key)
+            if let workspace, let presentation { defaults.set(presentation, forKey: "ut.ccCollector.v1." + workspace) }
+        }
     }
 
     private func persistPresentation() {
@@ -680,8 +690,8 @@ final class CommandCenterModel: ObservableObject {
         ccLog("start() called (timer already? \(timer != nil))")
         guard timer == nil else { return }
         pulse()   // immediate first pass (every session is "new" → summarized)
-        // Fast pulse: cheaply watch for dot flips every 5s and force an immediate
-        // re-summary on a flip; do the full content-driven sweep every 6th pulse (~30s).
+        // The pulse discovers work. The independent queue continues draining even
+        // between pulses; network policy controls only periodic content checks.
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pulse() }
         }
@@ -706,26 +716,34 @@ final class CommandCenterModel: ObservableObject {
 
     private func pulse() {
         guard let app else { ccLog("pulse: app nil (not bound)"); return }
+        let policy = networkPolicy(), now = monotonicNow()
         if !isCollector {
             readSharedStatuses()
-            if networkCadence.due("legacy", every: NetworkPreferences.policy.commandCenter) {
+            if networkCadence.due("legacy", every: policy.commandCenter, now: now) {
                 Task { [weak self] in await self?.refreshLegacyStatuses() }
             }
             return
         }
-        guard collectionAllowed() else { return }
-        guard networkCadence.due("collector", every: NetworkPreferences.policy.commandCenter, force: explicitRefreshPending) else { return }
+        guard collectionAllowed() else {
+            summaryQueue.removeAllPending()
+            summaryTasks.values.forEach { $0.cancel() }
+            return
+        }
+        let metadataDue = networkCadence.due("collector", every: policy.commandCenter,
+                                            force: explicitRefreshPending, now: now)
         explicitRefreshPending = false
-        // Pick up manual statuses set on another device (the phone) and apply them here.
-        for m in app.machines { Task { [weak self] in await self?.consumeOverrides(machine: m) } }
-        pulseN += 1
-        let fullSweep = (pulseN % 6 == 0)   // content-driven refresh ~every 30s
+        if metadataDue {
+            for m in app.machines { Task { [weak self] in await self?.consumeOverrides(machine: m) } }
+        }
+        // Content cadence is explicit, not six throttled pulses. Queue draining,
+        // new sessions, corrections, and state changes never wait on this timer.
+        let fullSweep = networkCadence.due("content", every: policy.commandCenterContent, now: now)
         if fullSweep {
             let nonAgent = app.machines.reduce(0) { $0 + (app.sessionsByMachine[$1.id]?.filter { !$0.agent }.count ?? 0) }
-            ccLog("pulse n=\(pulseN) machines=\(app.machines.count) sessions=\(nonAgent)")
+            ccLog("sweep machines=\(app.machines.count) sessions=\(nonAgent)")
         }
         var liveKeys = Set<String>()
-        var candidates: [(ref: SessionRef, machine: Machine, name: String, state: String, force: Bool)] = []
+        var candidates: [SummaryRequest] = []
         for m in app.machines {
             // Skip hidden sessions entirely: no model call is spent on them (the
             // status agent is inactive for hidden panels) and they never reach the
@@ -739,25 +757,45 @@ final class CommandCenterModel: ObservableObject {
                     statuses[ref.id] = renamed.flatMap { statuses[$0] }
                     lastHash[ref.id] = nil; lastDot[ref.id] = nil; correction[ref.id] = nil
                     consumedOverrideTS[ref.id] = nil; appliedOverrideTS[ref.id] = nil
+                    retryAfter[ref.id] = nil; lastOKAt[ref.id] = nil
+                    summaryTasks[ref.id]?.cancel()
                     provider.forget(key: ref.id)
                     sessionLifetimes[ref.id] = lifetime
                 }
                 liveKeys.insert(ref.id)
                 let dotChanged = lastDot[ref.id] != s.state   // nil (new session) counts as changed
                 lastDot[ref.id] = s.state
-                // A dot flip forces an immediate refresh (bypassing content-detection AND the
-                // 30s window). Otherwise the 30s sweep re-checks content and refreshes only
-                // if the output actually changed.
-                if dotChanged || fullSweep {
-                    candidates.append((ref, m, s.name, s.state, dotChanged))
+                let missing = (statuses[ref.id]?.oneLiner.isEmpty ?? true) &&
+                    !summaryQueue.active.contains(ref.id) && !summaryQueue.pendingKeys.contains(ref.id)
+                let retryDue = retryAfter[ref.id].map { now >= $0 } ?? false
+                if dotChanged || ((fullSweep || missing || retryDue) && now >= (retryAfter[ref.id] ?? 0)) {
+                    if dotChanged { retryAfter[ref.id] = nil }
+                    candidates.append(SummaryRequest(ref: ref, machine: m, lifetime: lifetime,
+                        generation: correctionGeneration[ref.id, default: 0], ownership: collectionGeneration(), force: dotChanged))
                 }
             }
         }
-        // Fair scheduling: only `maxModelCalls` model calls run concurrently, so issue them
-        // LEAST-RECENTLY-SUMMARIZED first. Machine order put local sessions first, so they
-        // grabbed every slot and remote (babel) sessions were perpetually `gated`/starved.
-        candidates.sort { (lastOKAt[$0.ref.id] ?? 0) < (lastOKAt[$1.ref.id] ?? 0) }
-        for c in candidates { update(ref: c.ref, machine: c.machine, name: c.name, state: c.state, force: c.force) }
+        // Preserve fair admission through the complete fetch + model operation.
+        // Missing summaries precede refreshes; equal-age jobs have a stable order.
+        candidates.sort {
+            let leftMissing = statuses[$0.ref.id]?.oneLiner.isEmpty ?? true
+            let rightMissing = statuses[$1.ref.id]?.oneLiner.isEmpty ?? true
+            if leftMissing != rightMissing { return leftMissing }
+            let left = lastOKAt[$0.ref.id] ?? 0, right = lastOKAt[$1.ref.id] ?? 0
+            return left == right ? $0.ref.id < $1.ref.id : left < right
+        }
+        summaryQueue.retainPending { liveKeys.contains($0) && isCurrent($1) }
+        for request in candidates {
+            summaryQueue.enqueue(request.ref.id, work: request) { previous, latest in
+                var next = latest
+                if previous.lifetime == latest.lifetime && previous.generation == latest.generation {
+                    next.force = previous.force || latest.force
+                }
+                return next
+            }
+        }
+        for (key, task) in summaryTasks where !liveKeys.contains(key) { task.cancel() }
+        drainSummaries()
         refreshAttention()
         guard fullSweep else { return }
         // Drop status + continuity for sessions that vanished.
@@ -806,106 +844,125 @@ final class CommandCenterModel: ObservableObject {
         }
     }
 
-    private func update(ref: SessionRef, machine: Machine, name: String, state: String, force: Bool = false) {
-        guard collectionAllowed(), !busy.contains(ref.id) else { return }
-        busy.insert(ref.id)
-        let key = ref.id, httpBase = machine.httpBase
-        let lifetime = app?.collectionSessionKey(ref)
-        let generation = correctionGeneration[key, default: 0]
-        let ownership = collectionGeneration()
-        Task { [weak self] in
-            guard let self else { return }
-            defer { self.busy.remove(key) }
-            ccLog("sweep \(key) base=\(httpBase) force=\(force)")
-            guard var output = await Self.fetchRecent(httpBase: httpBase, session: name),
-                  !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                ccLog("FETCH-FAIL \(key) base=\(httpBase)")
-                NSLog("[cc] %@ recent empty/failed", key); return
-            }
-            if ccCaptureLooksTransient(output, state: state) {
-                // A repaint normally settles in milliseconds. Retry once instead of
-                // paying for a model call on a frame we already know is incomplete.
-                try? await Task.sleep(nanoseconds: 650_000_000)
-                if let retry = await Self.fetchRecent(httpBase: httpBase, session: name),
-                   !retry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    output = retry
+    private func isCurrent(_ request: SummaryRequest) -> Bool {
+        guard collectionAllowed(), collectionGeneration() == request.ownership,
+              app?.collectionSessionKey(request.ref) == request.lifetime,
+              correctionGeneration[request.ref.id, default: 0] == request.generation,
+              let session = app?.sessionsByMachine[request.ref.machineID]?.first(where: { $0.name == request.ref.session }) else { return false }
+        return !session.agent && !session.hidden
+    }
+
+    private func drainSummaries() {
+        guard collectionAllowed() else { return }
+        summaryQueue.retainPending { _, request in isCurrent(request) }
+        let now = monotonicNow(), retryAfter = retryAfter
+        while let entry = summaryQueue.next(where: { key, _ in now >= (retryAfter[key] ?? 0) }) {
+            let request = entry.work, key = entry.key
+            summaryTasks[key] = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.inflight.remove(key)
+                    self.summaryTasks[key] = nil
+                    self.summaryQueue.finish(key)
+                    self.drainSummaries()
                 }
+                await self.update(request)
             }
-            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.collectionSessionKey(ref) == lifetime,
-                  self.correctionGeneration[key, default: 0] == generation else { return }
-            if ccCaptureLooksTransient(output, state: state) {
-                ccLog("hold-transient \(key) len=\(output.count)")
-                // The blue deterministic dot is authoritative here. Correct a stale
-                // idle card immediately, but retain any useful prior description.
-                let previous = self.statuses[key]
-                if previous?.label != "working" {
-                    let oldSummary = previous?.oneLiner ?? ""
-                    let oldLower = oldSummary.lowercased()
-                    let contradictsWorking = oldSummary.isEmpty || oldLower.contains("at prompt") ||
-                        oldLower.contains("no work") || oldLower.contains("nothing running")
-                    self.statuses[key] = AgentStatus(
-                        label: "working",
-                        oneLiner: contradictsWorking
-                            ? "Work is in progress; waiting for the terminal view to settle."
-                            : oldSummary,
-                        lookAtThis: contradictsWorking ? nil : previous?.lookAtThis,
-                        updatedAt: Date()
-                    )
-                    self.persist()
-                    self.publish()
-                }
-                return // do not set lastHash: the next sweep retries this panel
-            }
-            ccLog("fetch-ok \(key) len=\(output.count)")
-            // Skip the (paid) model call when the output is unchanged since the last
-            // summary — ignoring the ticking working-footer. Saves cost + UI churn.
-            // `force` (a dot flip) bypasses this so the transition refreshes immediately.
-            let h = self.contentKey(output)
-            if !force && self.lastHash[key] == h { ccLog("skip-unchanged \(key)"); return }
-            // Output changed → needs a model call. Cap concurrent model calls only;
-            // if full, bail WITHOUT setting lastHash so this session retries next tick
-            // (no starvation — every session keeps getting fetched + a fair shot).
-            guard self.collectionAllowed(), self.modelInflight < self.maxModelCalls else { ccLog("gated \(key)"); return }
-            self.modelInflight += 1
-            self.inflight.insert(key)
-            let generated = await self.provider.status(forKey: key, output: output, note: self.correction[key])
-            self.modelInflight -= 1
-            self.inflight.remove(key)
-            guard self.collectionAllowed(), self.collectionGeneration() == ownership, self.app?.collectionSessionKey(ref) == lifetime,
-                  self.correctionGeneration[key, default: 0] == generation else { return }
-            guard let generated else { ccLog("model-nil \(key)"); NSLog("[cc] %@ model returned nil", key); return }
-            // A model call can take several seconds, so reconcile against the CURRENT
-            // broker state rather than the state captured when this sweep began.
-            let liveState = self.app?.sessionsByMachine[ref.machineID]?
-                .first(where: { $0.name == name })?.state ?? state
-            let status = ccReconcileLiveState(generated, state: liveState)
-            if status.label != generated.label {
-                ccLog("reconcile-live \(key) \(generated.label)->\(status.label)")
-            }
-            self.correction[key] = nil   // delivered once; it now lives in the resumed conversation as a turn, so the model keeps it in context going forward
-            self.completedCorrections[key] = self.correctionIDs[key]
-            ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
-            self.lastHash[key] = h
-            self.lastOKAt[key] = Date().timeIntervalSince1970
-            let prevLabel = self.statuses[key]?.label
-            self.statuses[key] = status
-            if prevLabel != status.label {
-                // Activity journal: the fleet's own account of itself, durable
-                // (the published /ccstatus blob and /tmp log both evaporate).
-                let parts = key.split(separator: "/", maxSplits: 1)
-                ActivityJournal.shared.log("status", [
-                    "machineID": String(parts.first ?? ""),
-                    "session": parts.count > 1 ? String(parts[1]) : key,
-                    "from": prevLabel ?? "none", "to": status.label,
-                    "summary": status.oneLiner,
-                ])
-            }
-            self.costUSD = self.provider.spendUSD
-            self.costCalls = self.provider.callCount
-            self.persist()
-            self.publish()
-            NSLog("[cc] %@ -> [%@] %@", key, status.label, status.oneLiner)
         }
+    }
+
+    private func update(_ request: SummaryRequest) async {
+        guard isCurrent(request), !Task.isCancelled else { return }
+        let ref = request.ref, key = ref.id, name = ref.session, force = request.force
+        let httpBase = app?.machines.first(where: { $0.id == ref.machineID })?.httpBase ?? request.machine.httpBase
+        let state = app?.sessionsByMachine[ref.machineID]?.first(where: { $0.name == name })?.state ?? "idle"
+        ccLog("sweep \(key) base=\(httpBase) force=\(force)")
+        guard var output = await fetchOutput(httpBase, name),
+              !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            ccLog("FETCH-FAIL \(key) base=\(httpBase)")
+            if isCurrent(request) { retryAfter[key] = monotonicNow() + networkPolicy().commandCenterContent }
+            NSLog("[cc] %@ recent empty/failed", key); return
+        }
+        if ccCaptureLooksTransient(output, state: state) {
+            // A repaint normally settles in milliseconds. Retry once instead of
+            // paying for a model call on a frame we already know is incomplete.
+            do { try await Task.sleep(nanoseconds: 650_000_000) } catch { return }
+            if let retry = await fetchOutput(httpBase, name),
+               !retry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                output = retry
+            }
+        }
+        guard isCurrent(request), !Task.isCancelled else { return }
+        if ccCaptureLooksTransient(output, state: state) {
+            ccLog("hold-transient \(key) len=\(output.count)")
+            // The blue deterministic dot is authoritative here. Correct a stale
+            // idle card immediately, but retain any useful prior description.
+            let previous = self.statuses[key]
+            if previous?.label != "working" {
+                let oldSummary = previous?.oneLiner ?? ""
+                let oldLower = oldSummary.lowercased()
+                let contradictsWorking = oldSummary.isEmpty || oldLower.contains("at prompt") ||
+                    oldLower.contains("no work") || oldLower.contains("nothing running")
+                self.statuses[key] = AgentStatus(
+                    label: "working",
+                    oneLiner: contradictsWorking
+                        ? "Work is in progress; waiting for the terminal view to settle."
+                        : oldSummary,
+                    lookAtThis: contradictsWorking ? nil : previous?.lookAtThis,
+                    updatedAt: Date()
+                )
+                self.persist()
+                self.publish()
+            }
+            retryAfter[key] = monotonicNow() + 5
+            return // retain useful text and retry the unsettled capture, not the model
+        }
+        ccLog("fetch-ok \(key) len=\(output.count)")
+        // Skip the (paid) model call when the output is unchanged since the last
+        // summary — ignoring the ticking working-footer. Saves cost + UI churn.
+        // `force` (a dot flip) bypasses this so the transition refreshes immediately.
+        let h = self.contentKey(output)
+        if !force && self.lastHash[key] == h { retryAfter[key] = nil; ccLog("skip-unchanged \(key)"); return }
+        self.inflight.insert(key)
+        let generated = await self.provider.status(forKey: key, output: output, note: self.correction[key])
+        self.inflight.remove(key)
+        guard isCurrent(request), !Task.isCancelled else { return }
+        guard let generated, !generated.oneLiner.isEmpty else {
+            retryAfter[key] = monotonicNow() + networkPolicy().commandCenterContent
+            ccLog("model-nil \(key)"); NSLog("[cc] %@ model returned no summary; retry scheduled", key); return
+        }
+        retryAfter[key] = nil
+        // A model call can take several seconds, so reconcile against the CURRENT
+        // broker state rather than the state captured when this sweep began.
+        let liveState = self.app?.sessionsByMachine[ref.machineID]?
+            .first(where: { $0.name == name })?.state ?? state
+        let status = ccReconcileLiveState(generated, state: liveState)
+        if status.label != generated.label {
+            ccLog("reconcile-live \(key) \(generated.label)->\(status.label)")
+        }
+        self.correction[key] = nil   // delivered once; it now lives in the resumed conversation as a turn, so the model keeps it in context going forward
+        self.completedCorrections[key] = self.correctionIDs[key]
+        ccLog("OK \(key) [\(status.label)] \(status.oneLiner.prefix(80))")
+        self.lastHash[key] = h
+        self.lastOKAt[key] = Date().timeIntervalSince1970
+        let prevLabel = self.statuses[key]?.label
+        self.statuses[key] = status
+        if prevLabel != status.label {
+            // Activity journal: the fleet's own account of itself, durable
+            // (the published /ccstatus blob and /tmp log both evaporate).
+            let parts = key.split(separator: "/", maxSplits: 1)
+            ActivityJournal.shared.log("status", [
+                "machineID": String(parts.first ?? ""),
+                "session": parts.count > 1 ? String(parts[1]) : key,
+                "from": prevLabel ?? "none", "to": status.label,
+                "summary": status.oneLiner,
+            ])
+        }
+        self.costUSD = self.provider.spendUSD
+        self.costCalls = self.provider.callCount
+        self.persist()
+        self.publish()
+        NSLog("[cc] %@ -> [%@] %@", key, status.label, status.oneLiner)
     }
 
     /// Publish the current status map to the LOCAL broker so other clients (the phone)

@@ -14,6 +14,8 @@ final class NetworkPolicyTests: XCTestCase {
         XCTAssertGreaterThan(low.history, normal.history)
         XCTAssertGreaterThan(low.userDataSync, normal.userDataSync)
         XCTAssertGreaterThan(low.commandCenter, normal.commandCenter)
+        XCTAssertEqual(normal.commandCenterContent, 30)
+        XCTAssertEqual(low.commandCenterContent, 60)
         XCTAssertGreaterThan(low.journal, normal.journal)
         XCTAssertGreaterThan(low.wrapped, normal.wrapped)
         XCTAssertEqual(low.usage(120), 600)

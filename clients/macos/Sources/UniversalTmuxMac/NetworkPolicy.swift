@@ -20,6 +20,7 @@ struct NetworkPolicy: Equatable {
     var userDataSync: TimeInterval { lowData ? 60 : 10 }
     var collectorSessions: TimeInterval { lowData ? 60 : 5 }
     var commandCenter: TimeInterval { lowData ? 60 : 5 }
+    var commandCenterContent: TimeInterval { lowData ? 60 : 30 }
     var journal: TimeInterval { lowData ? 300 : 30 }
     var wrapped: TimeInterval { lowData ? 1800 : 300 }
     func usage(_ configured: TimeInterval) -> TimeInterval { lowData ? max(600, configured) : configured }
