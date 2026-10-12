@@ -450,13 +450,15 @@ func classifySessions(socket string, sessions []SessionInfo) {
 
 // Client is a running `tmux -CC` control-mode session.
 type Client struct {
-	cmd     *exec.Cmd
-	ptmx    *os.File
-	socket  string
-	session string
-	primary string // pane id of the session's first pane
-	outCh   chan Output
-	writeMu sync.Mutex
+	cmd       *exec.Cmd
+	ptmx      *os.File
+	socket    string
+	session   string
+	primary   string // pane id of the session's first pane
+	outCh     chan Output
+	done      chan struct{}
+	closeOnce sync.Once
+	writeMu   sync.Mutex
 	// Agent-session use is persisted at most once/minute while a user types in a
 	// connected viewer. CLI run/send paths touch the same marker directly.
 	meshOwned     bool
@@ -493,7 +495,7 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 	}
 	c := &Client{
 		cmd: cmd, ptmx: ptmx, socket: socket, session: session,
-		primary: discoverPane(socket, id), outCh: make(chan Output, 1024), meshOwned: meshOwned,
+		primary: discoverPane(socket, id), outCh: make(chan Output, 1024), done: make(chan struct{}), meshOwned: meshOwned,
 	}
 	go c.readLoop(ptmx)
 	return c, nil
@@ -802,18 +804,33 @@ func (c *Client) Pane() string { return c.primary }
 func (c *Client) QueryOwnership() session.QueryOwnership { return session.BackendQueries }
 
 // Close detaches this control-mode client (closing the PTY makes tmux -CC exit).
-// Used when a session is killed or renamed out from under its hub.
+// Also used to recover an unresponsive attachment without ending its session.
 func (c *Client) Close() {
-	if c.ptmx != nil {
-		_ = c.ptmx.Close()
-	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-	}
+	c.closeOnce.Do(func() {
+		if c.done != nil {
+			close(c.done)
+		}
+		if c.cmd != nil && c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		if c.ptmx != nil {
+			_ = c.ptmx.Close()
+		}
+		if c.cmd != nil && c.cmd.Process != nil {
+			_ = c.cmd.Wait()
+		}
+	})
 }
 
 // Output returns the channel of pane output chunks.
 func (c *Client) Output() <-chan Output { return c.outCh }
+
+func (c *Client) emit(out Output) {
+	select {
+	case c.outCh <- out:
+	case <-c.done:
+	}
+}
 
 // send writes one control-mode command line to tmux.
 func (c *Client) send(line string) error {
@@ -1018,6 +1035,7 @@ func decodeScreenSnapshot(data []byte) session.ScreenSnapshot {
 
 func (c *Client) readLoop(r io.Reader) {
 	defer close(c.outCh)
+	defer c.Close()
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {
 		line, err := br.ReadString('\n')
@@ -1046,7 +1064,7 @@ func (c *Client) handleLine(line string) {
 		if len(f) >= 3 {
 			if w, h, ok := layoutSize(f[2]); ok && (w != c.lastW || h != c.lastH) {
 				c.lastW, c.lastH = w, h
-				c.outCh <- Output{Pane: c.primary, Cols: w, Rows: h}
+				c.emit(Output{Pane: c.primary, Cols: w, Rows: h})
 			}
 		}
 		return
@@ -1061,7 +1079,7 @@ func (c *Client) handleLine(line string) {
 	}
 	pane := rest[:sp]
 	data := stripWindowName(unescapeOutput(rest[sp+1:]))
-	c.outCh <- Output{Pane: pane, Data: data} // block for backpressure; broker always drains
+	c.emit(Output{Pane: pane, Data: data}) // backpressure until consumed or detached
 }
 
 // layoutSize extracts WxH from a tmux layout string ("ac1d,139x53,0,0,0").

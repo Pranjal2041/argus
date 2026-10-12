@@ -19,8 +19,17 @@ The display stream preserves:
 `Session.RequestSnapshot(id)` emits an ordered snapshot through `Output()`.
 Only the broker hub pump writes output frames; a snapshot is delivered only to
 its requesting subscriber. New subscribers receive no pre-snapshot deltas.
-Duplicate requests are coalesced; failed or timed-out captures disconnect the
-viewer so it can reconnect, rather than silently corrupting its display.
+Duplicate requests are coalesced. A failed submission or a capture missing its
+deadline retires the backend attachment and disconnects its viewers. Reconnect
+must attach afresh, never reuse the same unresponsive attachment. The session
+and its running program are not restarted. A viewer leaving does not cancel
+the attachment's pending health check; a completed capture cancels its watchdog.
+
+Retirement stops the old hub reader before a replacement starts, including
+backends whose output stream persists across detach. Snapshot IDs remain unique
+across attachments so a late reply cannot prime a new viewer. Backend `Close`
+must promptly release attachment resources and unblock pending submission,
+without ending the underlying terminal process.
 
 The tmux adapter captures metadata and the active grid in one command list on
 the same control connection as live output. Guarded capture responses are data,
