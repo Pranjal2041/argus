@@ -145,6 +145,23 @@ fi
 sanitize() { printf '%s' "$1" | tr ':.' '__'; }         # tmux forbids ':' and '.' in names
 tmux_target() { case "$1" in \$*) printf '\\%s' "$1" ;; *) printf '%s' "$1" ;; esac; }
 
+# Interactive terminals own their display policy. Fabric/noninteractive commands
+# above retain the caller's output preferences. Keep this list aligned with the
+# shared internal/terminalenv contract, exercised by the real-launcher tests.
+interactive_color_overrides=(NO_COLOR CLICOLOR CLICOLOR_FORCE FORCE_COLOR)
+unset "${interactive_color_overrides[@]}"
+new_session() {
+  local key
+  local -a args=()
+  # tmux retains its first launcher's environment. Remove stale defaults before
+  # the new pane starts, including when this server predates the fixed launcher.
+  # This changes no running process and is never used for attach-only requests.
+  for key in "${interactive_color_overrides[@]}"; do
+    args+=(set-environment -gu "$key" ';')
+  done
+  command tmux -L "$socket" "${args[@]}" new-session "$@"
+}
+
 command -v tmux >/dev/null 2>&1 || { echo "ut: tmux not found in PATH" >&2; exit 1; }
 mkdir -p "$LOCAL"
 PIDFILE="$LOCAL/broker-$socket.pid"
@@ -177,11 +194,11 @@ elif [ -n "$explicit" ]; then
         set-option -u -t "$target" @ut_agent_shell 2>/dev/null || true
     fi
   elif [ "$visible" -eq 1 ]; then
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_visible 1 \; \
       set-option -t "$target" @ut_origin cli-visible
   else
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_agent 1 \; \
       set-option -t "$target" @ut_agent_shell 1 \; \
       set-option -t "$target" @ut_origin cli-direct \; \
@@ -193,11 +210,11 @@ else
   while tmux -L "$socket" has-session -t "=$name" 2>/dev/null; do name="$base-$n"; n=$((n+1)); done
   target="$(tmux_target "$name")"
   if [ "$visible" -eq 1 ]; then
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_visible 1 \; \
       set-option -t "$target" @ut_origin cli-visible
   else
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_agent 1 \; \
       set-option -t "$target" @ut_agent_shell 1 \; \
       set-option -t "$target" @ut_origin cli-direct \; \
@@ -284,7 +301,7 @@ SUPEOF
   mv -f "$SUP_TMP" "$SUP"
   # tmux session creation is atomic. Never kill a supervisor that another
   # concurrent app/CLI startup just created.
-  if ! tmux -L "$socket" new-session -d -s "_ut-$socket" "$SUP" 2>/dev/null; then
+  if ! new_session -d -s "_ut-$socket" "$SUP" 2>/dev/null; then
     tmux -L "$socket" has-session -t "=_ut-$socket" 2>/dev/null || {
       echo "ut: could not start the broker supervisor for socket '$socket'" >&2
       exit 1

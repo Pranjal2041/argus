@@ -30,6 +30,7 @@ import (
 	"universal-tmux/internal/recovery"
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
+	"universal-tmux/internal/terminalenv"
 	"universal-tmux/internal/terminaltext"
 	"universal-tmux/internal/toolcommand"
 )
@@ -512,6 +513,12 @@ func literalSessionTarget(name string) string {
 	return name
 }
 
+func createSessionCommand(socket string, args ...string) *exec.Cmd {
+	cmd := toolcommand.Command("tmux", tmuxArgs(socket, args...)...)
+	cmd.Env = terminalenv.Interactive(os.Environ())
+	return cmd
+}
+
 // CreateSession creates a new detached session. startDir, if non-empty, sets
 // its working directory (so "new session in this folder" works).
 func CreateSession(socket, name, startDir string) error {
@@ -541,7 +548,7 @@ func CreateSession(socket, name, startDir string) error {
 		";", "set-option", "-t", target, optVisible, "1",
 		";", "set-option", "-t", target, optOrigin, "argus-ui",
 	)
-	out, err := toolcommand.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	out, err := createSessionCommand(socket, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
@@ -571,7 +578,7 @@ func CreateAgentShell(socket, name, startDir string) error {
 		";", "set-option", "-t", literalSessionTarget(name), optOrigin, "cli-sh",
 		";", "set-option", "-t", literalSessionTarget(name), optLastUsed, strconv.FormatInt(time.Now().Unix(), 10),
 	)
-	out, err := toolcommand.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	out, err := createSessionCommand(socket, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create agent shell %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}
@@ -627,7 +634,7 @@ func SpawnSession(socket, name, startDir, cmd string, idleSec int) error {
 		";", "set-option", "-t", literalSessionTarget(name), optOrigin, "cli-spawn",
 		";", "set-option", "-t", literalSessionTarget(name), optReapIdle, strconv.Itoa(idleSec),
 	)
-	out, err := toolcommand.Command("tmux", tmuxArgs(socket, args...)...).CombinedOutput()
+	out, err := createSessionCommand(socket, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("spawn %q: %v: %s", name, err, strings.TrimSpace(string(out)))
 	}

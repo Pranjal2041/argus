@@ -33,7 +33,9 @@ func TestBrokerOnlyLauncherColdStartConcurrentStartAndServerLoss(t *testing.T) {
 			broker := filepath.Join(root, "ut-broker")
 			// A long-running broker fixture makes ownership observable without
 			// opening a network endpoint or touching real credentials/state.
-			body := "#!/bin/sh\n[ \"${1:-}\" != --probe-local ] || exit 1\nprintf '%s\\n' \"$$\" >> " + shellJoin([]string{starts}) + "\nexec sleep 120\n"
+			body := "#!/bin/sh\n[ \"${1:-}\" != --probe-local ] || exit 1\n" +
+				"[ -z \"${NO_COLOR+x}${FORCE_COLOR+x}${CLICOLOR+x}${CLICOLOR_FORCE+x}\" ] || exit 9\n" +
+				"printf '%s\\n' \"$$\" >> " + shellJoin([]string{starts}) + "\nexec sleep 120\n"
 			if err := os.WriteFile(broker, []byte(body), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -51,6 +53,7 @@ func TestBrokerOnlyLauncherColdStartConcurrentStartAndServerLoss(t *testing.T) {
 			env := environmentWithOverrides(os.Environ(), map[string]string{
 				"UT_HOME": root, "UT_BROKER": broker, "UT_LOCAL_DIR": filepath.Join(root, "local"),
 				"UT_TAILSCALE_BIN": tailscale, "UT_STATE_DIR": filepath.Join(root, "state"),
+				"NO_COLOR": "1", "FORCE_COLOR": "0", "CLICOLOR": "0", "CLICOLOR_FORCE": "1",
 			})
 			run := func() error {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

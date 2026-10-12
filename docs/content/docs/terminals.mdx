@@ -86,6 +86,11 @@ Argus registers a login service for the local broker independently of user panel
 also ensures that service is registered; a 15-second check recreates a missing supervisor without
 replacing a running one. `ut --broker-only` provides the same panel-free startup path from the CLI.
 
+New and restored interactive terminals do not inherit the launcher's `NO_COLOR`, `FORCE_COLOR`,
+`CLICOLOR`, or `CLICOLOR_FORCE` output overrides. This also clears stale tmux defaults before a new
+pane starts, without restarting existing panes. Shell configuration and explicit commands can still
+set their own color preferences; noninteractive commands retain their caller's output policy.
+
 Recovery storage is scoped to a durable installation identity and session socket, not the hostname.
 Changing networks or renaming a machine therefore retains its recovery lineage. Older hostname-based
 snapshots remain visible in the source catalog. When ownership cannot be established, Argus asks you

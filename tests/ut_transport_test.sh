@@ -76,6 +76,10 @@ EOF
 cat > "$TMP/home/ut-broker" <<'EOF'
 #!/usr/bin/env bash
 [ "${1:-}" != --probe-local ] || exit 1
+if [ "${1:-}" = exec ]; then
+  printf '%s\n' "${NO_COLOR-unset}|${FORCE_COLOR-unset}|${CLICOLOR-unset}|${CLICOLOR_FORCE-unset}"
+  exit 0
+fi
 printf '%s %s\n' "${UT_PORT:-}" "${UT_LOCAL_PORT:-}"
 EOF
 # Keep the fixture independent of brokers listening on the developer's machine.
@@ -113,5 +117,8 @@ if grep -Eq '^export UT_(STATE_DIR|LAB_ROOT|BACKUP_ROOT|MACHINE_ID)=' "$TMP/loca
   exit 1
 fi
 assert_eq "$(env UT_HOME="$TMP/home" UT_PORT=8722 UT_LOCAL_PORT= "$ROOT/ut" ls)" '8722 8722'
+
+# Noninteractive fabric commands keep the caller's output policy.
+assert_eq "$(env UT_HOME="$TMP/home" NO_COLOR=1 FORCE_COLOR=0 CLICOLOR=0 CLICOLOR_FORCE=1 "$ROOT/ut" exec)" '1|0|0|1'
 
 printf 'ut transport selection tests passed\n'

@@ -349,17 +349,10 @@ func (p *Provider) create(name, dir string, agent, agentShell bool, reapIdle int
 		dir, _ = os.UserHomeDir()
 	}
 	lineageID := newSessionLineageID()
-	environment := make([]string, 0, len(os.Environ())+1)
-	for _, value := range os.Environ() {
-		if !strings.HasPrefix(strings.ToUpper(value), "UT_SESSION_LINEAGE_ID=") {
-			environment = append(environment, value)
-		}
-	}
-	environment = append(environment, "UT_SESSION_LINEAGE_ID="+lineageID)
 	cpty, err := conpty.Start(p.shell,
 		conpty.ConPtyDimensions(defCols, defRows),
 		conpty.ConPtyWorkDir(dir),
-		conpty.ConPtyEnv(environment))
+		conpty.ConPtyEnv(sessionEnvironment(os.Environ(), lineageID)))
 	if err != nil {
 		p.mu.Unlock()
 		return nil, false, fmt.Errorf("start ConPTY for %q: %w", name, err)

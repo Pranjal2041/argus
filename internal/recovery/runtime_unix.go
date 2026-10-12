@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"universal-tmux/internal/terminalenv"
 	"universal-tmux/internal/toolcommand"
 )
 
@@ -662,7 +663,7 @@ func (s *Store) Status(requestedSnapshot string) Status {
 }
 
 func createRestoredSession(socket string, panel PanelStatus) error {
-	args := []string{"new-session", "-d", "-s", panel.Name, "-c", panel.Directory}
+	args := terminalenv.TmuxNewSession("-d", "-s", panel.Name, "-c", panel.Directory)
 	if panel.Agent != AgentShell {
 		// tmux accepts command + arguments as separate argv. The wrapper leaves an
 		// interactive shell behind if the resumed TUI exits, matching normal panels.
@@ -674,7 +675,9 @@ func createRestoredSession(socket string, panel PanelStatus) error {
 		";", "set-option", "-t", panel.Name, "@ut_visible", "1",
 		";", "set-option", "-t", panel.Name, "@ut_origin", "workspace-restore",
 	)
-	out, err := tmuxCommand(socket, args...).CombinedOutput()
+	cmd := tmuxCommand(socket, args...)
+	cmd.Env = terminalenv.Interactive(cmd.Env)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create tmux session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
