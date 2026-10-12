@@ -52,6 +52,8 @@ Warning preferences and dismissals use the `dev.universaltmux.usage` defaults su
 
 For cutover, quit standalone Usage before starting the new Argus build so both applications do not refresh the same imported OAuth profiles concurrently. Terminal sessions and brokers do not need restarting.
 
+Collection progress belongs to the local collection task. A workspace reader stores remote progress separately with a two-minute presentation expiry. Applying, expiring, or clearing a snapshot never changes the local collection flag or sends a collection-change notification. Dashboard controls and Command Center derive the same effective refresh indicator from those two states. A cached snapshot therefore cannot re-enter collection notifications, stop active local work, or leave a reader's refresh controls disabled indefinitely.
+
 ## Command Center card arrangement
 
 Drag Usage cards to either side of another card to reorder them. **Arrange** exposes left/right buttons; the context menu also moves a card to either end. **Reset order** restores the default layout. The arrangement is saved separately from credentials and warning settings, survives refresh and relaunch, and retains positions for temporarily absent cards. New cards follow saved cards. Identity anchors keep accounts in place when their display changes between live and unavailable readings or between individual accounts and quota aggregates. Drag payloads are scoped to the current strip; unrelated or stale drops do not alter the layout.
@@ -80,6 +82,8 @@ On October 2, 2026, a signed-in enterprise account's CLI returned identity and p
 swift test --package-path clients/macos --filter 'UsageKitTests|UsageIntegrationTests'
 UT_USAGE_VISUAL_QA=1 swift test --package-path clients/macos --filter UsageIntegrationTests
 ```
+
+`UT_USAGE_SNAPSHOT_PROBE=1 swift test --package-path clients/macos --filter OriginalUsageRefreshTests` also reads saved startup snapshots into isolated test preferences and exercises restore/expiry without opening the GUI, polling providers, or modifying the saved snapshots.
 
 The opt-in visual test opens real native windows, mounts the actual SwiftUI views with fixture data, presses native accessibility controls, and captures `/tmp/argus-usage-*.png`. Run it only after arranging an approved desktop-testing window with the user. It covers Command Center dismissal/open, card-arrangement controls and reset, consumed-unit cards and details, full and compact account navigation, warning restoration, provider selection, Devin code entry, verified account replacement and cancellation. It does not use real credentials or contact providers. `UT_DEVIN_CLI_PROBE=1` additionally starts and cancels the installed CLI's sign-in prompt in an empty private profile, without opening a browser or entering a login code. `UT_DEVIN_USAGE_PROBE=1` enables a separate read-only test of the actual consumption adapter using a saved, enabled private account; it opens no windows and changes no connections.
 

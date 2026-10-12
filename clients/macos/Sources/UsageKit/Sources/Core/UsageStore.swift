@@ -77,7 +77,11 @@ enum DashboardLogic {
 final class UsageStore {
     var sources: [UsageSource] = []
     var failures: [IntegrationResult] = []
-    var refreshing = false { didSet { readingsChanged?() } }
+    // Only locally owned work changes collection state. Replicated progress is
+    // presentation data and must never call the collection-change observer.
+    var refreshing = false { didSet { if refreshing != oldValue { readingsChanged?() } } }
+    var remoteRefreshExpiresAt: Date?
+    var isRefreshing: Bool { refreshing || remoteRefreshExpiresAt.map { now < $0 } == true }
     var didLoad = false
     var now = Date.now
     var lastRefresh: Date?
@@ -182,7 +186,7 @@ final class UsageStore {
     // from standalone Usage without a replacement coordinator.
     func refresh(sourceID: String? = nil) async {
         if let remoteRefresh {
-            guard !refreshing, authorizingCredentialID == nil else { return }
+            guard !isRefreshing, authorizingCredentialID == nil else { return }
             refreshing = true
             defer { refreshing = false }
             await remoteRefresh(sourceID)

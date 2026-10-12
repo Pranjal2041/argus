@@ -76,7 +76,6 @@ public final class UsageController: ObservableObject {
     }
     private var applyingSharedState = false
     private var presentationWorkspaceID: String?
-    private var remoteCollectionUpdatedAt: Date?
     private var effectiveRefreshSeconds: TimeInterval?
 
     /// Missing publication is not deletion. Retain local readings when this
@@ -222,10 +221,9 @@ public final class UsageController: ObservableObject {
     }
 
     func reconcile(now: Date = .now) {
+        // Project collection/replica state without mutating the collector's
+        // progress flag or synchronously re-entering its change notification.
         store.now = now
-        if let updated = remoteCollectionUpdatedAt, now.timeIntervalSince(updated) >= 120 {
-            store.refreshing = false
-        }
         let maxAge = max(300, (effectiveRefreshSeconds ?? refreshSeconds) * 3)
         let readings = UsageMeasurement.readings(store.sources, now: now, maxAge: maxAge, includeModelLimits: policy.includeModelLimits)
         warnings = engine.evaluate(readings, policy: policy, now: now)
@@ -239,7 +237,7 @@ public final class UsageController: ObservableObject {
         glances = cardOrder.arranged(Self.summary(sources))
         connectionIssueCount = store.failures.count
         lastRefresh = store.lastRefresh
-        refreshing = store.refreshing
+        refreshing = store.isRefreshing
         if let data = try? JSONEncoder().encode(engine.dismissals) { defaults.set(data, forKey: Self.dismissalKey) }
     }
 
@@ -268,8 +266,8 @@ public final class UsageController: ObservableObject {
     public func clearSharedPresentation() {
         applyingSharedState = true; defer { applyingSharedState = false }
         store.resetRemoteAccountPresentation()
-        store.sources = []; store.failures = []; store.lastRefresh = nil; store.refreshing = false
-        remoteCollectionUpdatedAt = nil
+        store.sources = []; store.failures = []; store.lastRefresh = nil
+        store.remoteRefreshExpiresAt = nil
         effectiveRefreshSeconds = nil
         store.remoteAccountConfiguration = nil; store.remoteAccountFields = [:]; store.loginSourceID = nil
         store.loginMessage = nil; store.loginInstructions = nil; store.remoteLoginIntegration = nil
@@ -296,9 +294,8 @@ public final class UsageController: ObservableObject {
         let snapshot = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Snapshot.self, from: data)
         guard snapshot.version == 1 else { throw CocoaError(.coderReadCorrupt) }
         store.sources = snapshot.sources; store.lastRefresh = snapshot.lastRefresh
-        remoteCollectionUpdatedAt = snapshot.observedAt
         effectiveRefreshSeconds = snapshot.refreshIntervalSeconds.flatMap { $0.isFinite && (60...3600).contains($0) ? $0 : nil }
-        store.refreshing = snapshot.refreshing == true && Date().timeIntervalSince(snapshot.observedAt) < 120
+        store.remoteRefreshExpiresAt = snapshot.refreshing == true ? snapshot.observedAt.addingTimeInterval(120) : nil
         store.failures = snapshot.failures.map { failure in
             let descriptor = failure.sourceID.map { id in
                 IntegrationDescriptor(sourceID: id, integration: failure.integration,
@@ -317,9 +314,8 @@ public final class UsageController: ObservableObject {
     /// account. An old owner's in-flight state is not work owned by this process.
     public func restoreCollectorSnapshot(_ data: Data) throws {
         try applySharedSnapshot(data)
-        remoteCollectionUpdatedAt = nil
+        store.remoteRefreshExpiresAt = nil
         effectiveRefreshSeconds = nil
-        store.refreshing = false
         reconcile()
     }
 

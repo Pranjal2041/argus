@@ -3,6 +3,161 @@ import XCTest
 
 @available(macOS 14.0, *)
 final class OriginalUsageRefreshTests: XCTestCase {
+    @MainActor func testSnapshotApplicationAndCachedStartupNeverReenterOrPublishCollectionChanges() throws {
+        for age: TimeInterval in [0, 300, 3600] {
+            for active in [false, true] {
+                for cachedStartup in [false, true] {
+                    let suite = "usage.snapshot.lifecycle.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+                    defer { defaults.removePersistentDomain(forName: suite) }
+                    let observed = Date().addingTimeInterval(-age)
+                    let snapshot = UsageWorkspaceWire.Snapshot(version: 1, observedAt: observed,
+                        lastRefresh: observed, sources: [Self.reading("account", provider: .claude, date: observed)],
+                        glances: [], warnings: [], failures: [], accounts: [], refreshing: active)
+                    let data = try UsageWorkspaceWire.encoder.encode(snapshot)
+                    let store = UsageStore(defaults: defaults), reader = UsageController(store: store, defaults: defaults)
+                    var notifications = 0, publications = 0
+                    let changed = store.readingsChanged
+                    // Bound a regression so the assertion fails instead of crashing the test process.
+                    store.readingsChanged = {
+                        notifications += 1
+                        if notifications <= 8 { changed?() }
+                    }
+                    reader.readingsChanged = { publications += 1 }
+                    if cachedStartup {
+                        defaults.set(data, forKey: "workspaceSnapshot.v1.fixture")
+                        reader.bindSharedWorkspace("fixture", isLocal: true)
+                    } else {
+                        try reader.applySharedSnapshot(data)
+                    }
+                    XCTAssertEqual(store.sources.map(\.id), ["account"])
+                    XCTAssertEqual(reader.refreshing, active && age < 120)
+                    XCTAssertEqual(store.isRefreshing, reader.refreshing, "Dashboard and summary use the same projection")
+                    XCTAssertFalse(store.refreshing, "A reader never inherits ownership of remote work")
+                    reader.reconcile()
+                    reader.reconcile(now: Date().addingTimeInterval(180))
+                    XCTAssertFalse(store.isRefreshing)
+                    XCTAssertFalse(reader.refreshing)
+                    reader.clearSharedPresentation()
+                    XCTAssertEqual(notifications, 0, "Reading, expiring, or clearing a replica cannot notify collection changes")
+                    XCTAssertEqual(publications, 0, "Applying remote state must not echo it to the publisher")
+                }
+            }
+        }
+    }
+
+    @MainActor func testRemoteRequestKeepsOwnershipUntilCompletionAndExpiredProgressDoesNotBlockRetry() async throws {
+        let suite = "usage.remote.request.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults), reader = UsageController(store: store, defaults: defaults)
+        let gate = FetchGate(), started = expectation(description: "remote request started")
+        var requests = 0
+        reader.remoteRefresh = { _ in
+            requests += 1
+            started.fulfill()
+            await gate.wait()
+        }
+        let old = UsageWorkspaceWire.Snapshot(version: 1, observedAt: Date().addingTimeInterval(-300),
+            lastRefresh: nil, sources: [], glances: [], warnings: [], failures: [], accounts: [], refreshing: true)
+        let data = try UsageWorkspaceWire.encoder.encode(old)
+        try reader.applySharedSnapshot(data)
+        let task = Task { await reader.refresh() }
+        await fulfillment(of: [started], timeout: 2)
+        try reader.applySharedSnapshot(data)
+        XCTAssertTrue(store.refreshing)
+        XCTAssertTrue(store.isRefreshing)
+        XCTAssertTrue(reader.refreshing)
+        await reader.refresh()
+        await store.refresh()
+        XCTAssertEqual(requests, 1, "Snapshot application cannot allow overlapping remote requests")
+        await gate.release()
+        await task.value
+        XCTAssertFalse(store.refreshing)
+        XCTAssertFalse(store.isRefreshing)
+        XCTAssertFalse(reader.refreshing)
+    }
+
+    @MainActor func testProgressNotificationsOnlyDescribeLocalTransitions() {
+        let suite = "usage.progress.transitions.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UsageStore(defaults: defaults)
+        var transitions: [Bool] = []
+        store.readingsChanged = { transitions.append(store.refreshing) }
+        store.refreshing = false
+        store.refreshing = true
+        store.refreshing = true
+        store.remoteRefreshExpiresAt = Date().addingTimeInterval(120)
+        store.now = Date().addingTimeInterval(180)
+        store.remoteRefreshExpiresAt = nil
+        store.refreshing = false
+        store.refreshing = false
+        XCTAssertEqual(transitions, [true, false])
+        store.readingsChanged = nil
+    }
+
+    @MainActor func testSavedStartupSnapshotsLoadHeadlessly() throws {
+        guard ProcessInfo.processInfo.environment["UT_USAGE_SNAPSHOT_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in read-only check of saved startup snapshots; no GUI or provider requests")
+        }
+        let saved = UserDefaults.standard.persistentDomain(forName: "dev.universaltmux.usage") ?? [:]
+        let snapshots = saved.filter { $0.key.hasPrefix("workspaceSnapshot.v1.") && $0.value is Data }
+        XCTAssertFalse(snapshots.isEmpty, "The probe must exercise actual saved snapshots")
+        for (key, value) in snapshots {
+            let data = try XCTUnwrap(value as? Data)
+            let snapshot = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Snapshot.self, from: data)
+            let suite = "usage.startup.probe.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set(data, forKey: key)
+            let store = UsageStore(defaults: defaults), reader = UsageController(store: store, defaults: defaults)
+            var publications = 0
+            reader.readingsChanged = { publications += 1 }
+            reader.bindSharedWorkspace(String(key.dropFirst("workspaceSnapshot.v1.".count)), isLocal: true)
+            XCTAssertEqual(store.sources.map(\.id), snapshot.sources.map(\.id))
+            XCTAssertFalse(store.refreshing)
+            reader.reconcile(now: Date().addingTimeInterval(3600))
+            XCTAssertFalse(store.isRefreshing)
+            XCTAssertFalse(reader.refreshing)
+            XCTAssertEqual(publications, 0)
+            try reader.restoreCollectorSnapshot(data)
+            XCTAssertFalse(store.isRefreshing)
+            XCTAssertEqual(publications, 0)
+        }
+    }
+
+    @MainActor func testExpiredReplicaCannotEndAnOwnedCollection() async throws {
+        for provider in [IntegrationID.openaiAPI, .codex] {
+            let suite = "usage.collection.ownership.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let gate = FetchGate(), started = expectation(description: "collector started")
+            let adapter = FixtureUsageIntegration(id: provider, sourceID: "account") {
+                started.fulfill()
+                await gate.wait()
+                return [Self.reading("account", provider: provider)]
+            }
+            let store = UsageStore(registry: .init(adapters: [adapter]), defaults: defaults)
+            let controller = UsageController(store: store, defaults: defaults)
+            let task = Task { await controller.refresh() }
+            await fulfillment(of: [started], timeout: 2)
+            var notifications = 0
+            let changed = store.readingsChanged
+            store.readingsChanged = {
+                notifications += 1
+                if notifications <= 8 { changed?() }
+            }
+            let observed = Date().addingTimeInterval(-300)
+            let snapshot = UsageWorkspaceWire.Snapshot(version: 1, observedAt: observed,
+                lastRefresh: observed, sources: [], glances: [], warnings: [], failures: [], accounts: [], refreshing: true)
+            try controller.applySharedSnapshot(UsageWorkspaceWire.encoder.encode(snapshot))
+            XCTAssertTrue(store.refreshing, "Only the task owning a collection can end it")
+            XCTAssertTrue(controller.refreshing)
+            XCTAssertEqual(notifications, 0)
+            await gate.release()
+            await task.value
+            store.readingsChanged = changed
+            XCTAssertFalse(controller.refreshing)
+            XCTAssertEqual(store.sources.map(\.id), ["account"])
+        }
+    }
+
     @MainActor func testCancelledOwnerCannotStartAQueuedCollection() async throws {
         let suite = "usage.cancelled.owner.\(UUID())", defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
