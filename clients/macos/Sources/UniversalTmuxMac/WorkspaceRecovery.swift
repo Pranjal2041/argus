@@ -119,6 +119,7 @@ struct WorkspaceRecoveryEdit: Codable, Equatable, Identifiable {
 
 struct WorkspaceRecoveryStatus: Decodable {
     let available: Bool
+    var sourceSelectionRequired: Bool? = nil
     let snapshot: WorkspaceRecoverySnapshot?
     let currentServerId: String?
     let candidates: [WorkspaceRecoveryCandidate]?
@@ -126,6 +127,14 @@ struct WorkspaceRecoveryStatus: Decodable {
     let readyCount: Int
     let panels: [WorkspaceRecoveryPanel]
     let error: String?
+
+    var startupOfferKey: String? {
+        if available, let snapshot { return snapshot.id }
+        if sourceSelectionRequired == true, let candidates, !candidates.isEmpty {
+            return "choose:" + candidates.map(\.id).sorted().joined(separator: ",")
+        }
+        return nil
+    }
 }
 
 struct WorkspaceRestoreResult: Decodable, Identifiable {
@@ -182,7 +191,7 @@ final class WorkspaceRecoveryController: ObservableObject {
         status?.panels.filter(isRestorable) ?? []
     }
     var selectedCount: Int { selected.intersection(Set(restorablePanels.map(\.name))).count }
-    var hasOffer: Bool { status?.available == true && !readyPanels.isEmpty }
+    var hasOffer: Bool { status?.startupOfferKey != nil }
     var selectedTarget: WorkspaceRecoveryTarget {
         targets.first(where: { $0.id == selectedTargetID }) ?? Self.localTarget
     }
@@ -242,10 +251,10 @@ final class WorkspaceRecoveryController: ObservableObject {
             self.results = [:]
             self.phase = .idle
             self.errorMessage = decoded.error
-            guard offerAutomatically, decoded.available, let snapshot = decoded.snapshot else { return }
+            guard offerAutomatically, let offerKey = decoded.startupOfferKey else { return }
             let defaults = UserDefaults.standard
-            if defaults.string(forKey: Self.offeredSnapshotKey) != snapshot.id {
-                defaults.set(snapshot.id, forKey: Self.offeredSnapshotKey)
+            if defaults.string(forKey: Self.offeredSnapshotKey) != offerKey {
+                defaults.set(offerKey, forKey: Self.offeredSnapshotKey)
                 self.showSheet = true
             }
         }
@@ -815,6 +824,8 @@ struct WorkspaceRecoveryView: View {
                 summary(status)
                 panelList
                 footer
+            } else if recovery.status?.sourceSelectionRequired == true && !recovery.sourceCandidates.isEmpty {
+                sourceSelection
             } else {
                 emptyState
             }
@@ -836,6 +847,44 @@ struct WorkspaceRecoveryView: View {
                 saveAction: recovery.saveEdit
             )
         }
+    }
+
+    private var sourceSelection: some View {
+        VStack(alignment: .leading, spacing: 16 * uiScale) {
+            Text("Choose a saved workspace")
+                .font(.system(size: 18 * uiScale, weight: .semibold))
+                .foregroundStyle(Theme.textPrimary)
+            Text("Select a source to inspect its panels before restoring them to \(recovery.selectedTarget.name).")
+                .font(.system(size: 12 * uiScale))
+                .foregroundStyle(Theme.textSecondary)
+            ScrollView {
+                VStack(spacing: 8 * uiScale) {
+                    ForEach(recovery.sourceCandidates) { candidate in
+                        Button { recovery.selectSource(candidate.id) } label: {
+                            HStack(spacing: 12 * uiScale) {
+                                Image(systemName: "shippingbox").foregroundStyle(Theme.accent)
+                                VStack(alignment: .leading, spacing: 4 * uiScale) {
+                                    Text(candidate.host).font(.system(size: 13 * uiScale, weight: .semibold))
+                                    Text("\(candidate.panelCount) panels · \(capturedLabel(candidate.capturedAt))")
+                                        .font(.system(size: 11 * uiScale)).foregroundStyle(Theme.textSecondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right").foregroundStyle(Theme.textTertiary)
+                            }
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(14 * uiScale)
+                            .background(Theme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 8 * uiScale))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Close") { recovery.showSheet = false }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22 * uiScale)
     }
 
     private var header: some View {
@@ -1125,7 +1174,7 @@ struct WorkspaceRecoveryView: View {
     private func capturedLabel(_ value: String) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: value) else { return "previous workspace" }
+        guard let date = formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value) else { return "previous workspace" }
         let relative = RelativeDateTimeFormatter()
         relative.unitsStyle = .full
         return "captured " + relative.localizedString(for: date, relativeTo: Date())

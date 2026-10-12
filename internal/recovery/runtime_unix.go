@@ -935,13 +935,6 @@ func (s *Store) restore(snapshotID string, names []string, concurrency int, useC
 }
 
 func (s *Store) Bootstrap(sessionName string) error {
-	if sessionName == "" {
-		panes, err := listPanes(s.Socket)
-		if err != nil || len(panes) == 0 {
-			return fmt.Errorf("no restored session is available to bootstrap the broker")
-		}
-		sessionName = panes[0].Name
-	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{}
 	if value := os.Getenv("UT_CLI"); value != "" {
@@ -964,7 +957,9 @@ func (s *Store) Bootstrap(sessionName string) error {
 	if cli == "" {
 		return fmt.Errorf("ut launcher was not found")
 	}
-	args := []string{"-L", s.Socket, sessionName}
+	// Broker lifecycle does not depend on successful restoration or a user
+	// panel. Retain the argument for compatibility with older callers only.
+	args := []string{"-L", s.Socket, "--broker-only"}
 	cmd := toolcommand.Command(cli, args...)
 	path := os.Getenv("PATH")
 	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {

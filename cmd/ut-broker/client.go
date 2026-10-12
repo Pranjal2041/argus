@@ -746,6 +746,7 @@ Files, shells, and commands work the same everywhere.
 USAGE
   ut [name]                            attach or create a hidden CLI session
   ut --visible [name]                  deliberately create/promote a visible panel
+  ut --broker-only                     ensure the local broker without creating a panel
   ut ls                                 list every machine and its sessions
   ut exec  @<machine> <command...>      run a one-shot command, print its output
   ut sh    @<machine> <name>            create a persistent agent shell (keeps cwd/env/venv)

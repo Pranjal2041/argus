@@ -143,7 +143,7 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "bootstrap":
 		flags, socket := cliFlags("recovery bootstrap", stderr)
-		session := flags.String("session", "", "existing restored session used to start the broker")
+		session := flags.String("session", "", "deprecated compatibility option; broker startup does not require a session")
 		if flags.Parse(args[1:]) != nil {
 			return 2
 		}

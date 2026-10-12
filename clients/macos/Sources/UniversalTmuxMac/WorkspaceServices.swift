@@ -31,32 +31,11 @@ enum WorkspaceServiceLauncher {
     @MainActor static func ensureRunning() throws {
         guard Bundle.main.bundleURL.pathExtension == "app", let executable = Bundle.main.executableURL,
               !CommandLine.arguments.contains("--workspace-worker") else { return }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let directory = home.appendingPathComponent("Library/LaunchAgents")
-        let file = directory.appendingPathComponent(label + ".plist")
-        let logs = home.appendingPathComponent("Library/Logs/Argus")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try LocalBrokerServiceLauncher.ensureRunning()
         let build = (try? executable.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?.timeIntervalSince1970) ?? 0
-        let plist: [String: Any] = ["Label": label, "ProgramArguments": [executable.path, "--workspace-worker", "--build=\(build)"],
-            "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 15, "ProcessType": "Background",
-            "StandardOutPath": logs.appendingPathComponent("workspace.log").path,
-            "StandardErrorPath": logs.appendingPathComponent("workspace.log").path]
-        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-        let changed = (try? Data(contentsOf: file)) != data
-        if changed { try data.write(to: file, options: .atomic) }
-        let domain = "gui/\(getuid())"
-        func run(_ args: [String]) throws -> Int32 {
-            let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/launchctl"); process.arguments = args
-            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            try process.run(); process.waitUntilExit(); return process.terminationStatus
-        }
-        if changed { _ = try run(["bootout", domain + "/" + label]) }
-        if try run(["print", domain + "/" + label]) != 0 {
-            guard try run(["bootstrap", domain, file.path]) == 0 else {
-                throw ArgusFailure("service_start_failed", "Workspace background service could not start.")
-            }
-        }
+        try LaunchAgentService(label: label,
+            arguments: [executable.path, "--workspace-worker", "--build=\(build)"],
+            keepAlive: true, logName: "workspace.log").ensureRunning()
     }
 
     static func runIfRequested() {
@@ -68,7 +47,15 @@ enum WorkspaceServiceLauncher {
         // explicit loopback endpoint also permits isolated process-level checks.
         guard let url = URL(string: base), url.scheme == "http",
               ["127.0.0.1", "localhost", "[::1]", "::1"].contains(url.host ?? "") else { exit(2) }
-        Task { @MainActor in await WorkspaceCollector(base: base).run() }
+        Task { @MainActor in
+            // A login can start this worker before the app has ever opened.
+            // Explicit test endpoints are externally owned and never bootstrapped.
+            if !CommandLine.arguments.contains(where: { $0.hasPrefix(prefix) }) {
+                do { try LocalBrokerServiceLauncher.ensureRunning() }
+                catch { NSLog("[local-broker-service] %@", error.localizedDescription) }
+            }
+            await WorkspaceCollector(base: base).run()
+        }
         HeadlessMainRunLoop.run()
     }
 }

@@ -70,16 +70,17 @@ type RecoveryCandidate struct {
 // lifetime. A new backend receives a new ID, even within the same OS boot, so a
 // freshly-created empty backend can never overwrite the workspace it replaced.
 type Snapshot struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	ID            string    `json:"id"`
-	Host          string    `json:"host"`
-	Socket        string    `json:"socket"`
-	BootID        string    `json:"bootId"`
-	ServerID      string    `json:"serverId"`
-	ServerPID     int       `json:"serverPid"`
-	ServerStarted int64     `json:"serverStarted"`
-	CapturedAt    time.Time `json:"capturedAt"`
-	Entries       []Entry   `json:"entries"`
+	SchemaVersion  int       `json:"schemaVersion"`
+	ID             string    `json:"id"`
+	Host           string    `json:"host"`
+	Socket         string    `json:"socket"`
+	InstallationID string    `json:"installationId,omitempty"`
+	BootID         string    `json:"bootId"`
+	ServerID       string    `json:"serverId"`
+	ServerPID      int       `json:"serverPid"`
+	ServerStarted  int64     `json:"serverStarted"`
+	CapturedAt     time.Time `json:"capturedAt"`
+	Entries        []Entry   `json:"entries"`
 	// RecoverySourceID binds a new tmux server lifetime to exactly one prior
 	// workspace. Once every source entry has been observed intact,
 	// RecoveryComplete stays true so a later intentional panel close is not
@@ -129,14 +130,15 @@ type EntryEdit struct {
 // Status is the startup offer. Available means at least one panel can be
 // restored without overwriting or guessing.
 type Status struct {
-	Available       bool                `json:"available"`
-	Snapshot        *Snapshot           `json:"snapshot,omitempty"`
-	Candidates      []RecoveryCandidate `json:"candidates,omitempty"`
-	TargetHost      string              `json:"targetHost,omitempty"`
-	CurrentServerID string              `json:"currentServerId,omitempty"`
-	ReadyCount      int                 `json:"readyCount"`
-	Panels          []PanelStatus       `json:"panels"`
-	Error           string              `json:"error,omitempty"`
+	Available               bool                `json:"available"`
+	SourceSelectionRequired bool                `json:"sourceSelectionRequired,omitempty"`
+	Snapshot                *Snapshot           `json:"snapshot,omitempty"`
+	Candidates              []RecoveryCandidate `json:"candidates,omitempty"`
+	TargetHost              string              `json:"targetHost,omitempty"`
+	CurrentServerID         string              `json:"currentServerId,omitempty"`
+	ReadyCount              int                 `json:"readyCount"`
+	Panels                  []PanelStatus       `json:"panels"`
+	Error                   string              `json:"error,omitempty"`
 }
 
 const (

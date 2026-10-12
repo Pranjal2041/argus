@@ -16,7 +16,7 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 	if err != nil {
 		return Status{Error: err.Error()}
 	}
-	allItems, err := s.loadCluster()
+	allItems, err := s.loadSources()
 	if err != nil {
 		return Status{Error: err.Error()}
 	}
@@ -88,7 +88,7 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 		if len(candidate.Entries) == 0 {
 			continue
 		}
-		if candidate.ServerID == currentServerID && sameRecoveryHost(candidate.Host, s.Host) {
+		if candidate.ServerID == currentServerID && s.ownsSnapshot(candidate) {
 			live := make([]Entry, 0, len(current))
 			for _, entry := range current {
 				live = append(live, entry)
@@ -98,6 +98,9 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 			}
 		}
 		key := strings.ToLower(strings.TrimSpace(candidate.Host))
+		if candidate.InstallationID != "" {
+			key = "installation:" + candidate.InstallationID
+		}
 		if _, exists := latestByHost[key]; !exists {
 			latestByHost[key] = candidate
 		}
@@ -118,14 +121,14 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].CapturedAt.After(candidates[j].CapturedAt) })
 	if requestedSnapshot == "" && selected == nil && s.Cluster != "" {
 		for index := range candidates {
-			if !sameRecoveryHost(candidates[index].Host, s.Host) {
+			if recoveryCluster(candidates[index].Host) == s.Cluster && !sameRecoveryHost(candidates[index].Host, s.Host) {
 				selected = &candidates[index]
 				break
 			}
 		}
 	}
 
-	status := Status{Snapshot: selected, CurrentServerID: currentServerID, TargetHost: s.Host}
+	status := Status{Snapshot: selected, CurrentServerID: currentServerID, TargetHost: s.Host, Panels: []PanelStatus{}}
 	for _, candidate := range candidates {
 		ready := 0
 		remaining := s.remainingEntries(candidate)
@@ -140,6 +143,7 @@ func (s *Store) statusWithCurrent(requestedSnapshot string, current map[string]E
 		})
 	}
 	if selected == nil {
+		status.SourceSelectionRequired = requestedSnapshot == "" && len(current) == 0 && len(candidates) > 0
 		if requestedSnapshot != "" {
 			status.Error = requestedUnavailable
 			if status.Error == "" {

@@ -82,6 +82,16 @@ later from **View → Restore Previous Workspace…**. Choose any subset of pane
   than guessed from terminal text; and
 - recognized startup options, including `--yolo` and Claude's dangerous-permissions mode.
 
+Argus registers a login service for the local broker independently of user panels. Opening the app
+also ensures that service is registered; a 15-second check recreates a missing supervisor without
+replacing a running one. `ut --broker-only` provides the same panel-free startup path from the CLI.
+
+Recovery storage is scoped to a durable installation identity and session socket, not the hostname.
+Changing networks or renaming a machine therefore retains its recovery lineage. Older hostname-based
+snapshots remain visible in the source catalog. When ownership cannot be established, Argus asks you
+to choose a source before inspecting and restoring it; it does not adopt another installation's
+workspace merely because its hostname matches.
+
 Babel brokers write the same snapshots into the shared home. Open **Restore Workspace**, choose a
 departed source node and any currently online Babel destination, then restore the panels you want.
 A node must miss three 30-second snapshots before it is treated as departed; this prevents cloning

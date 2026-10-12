@@ -75,6 +75,7 @@ exit 0
 EOF
 cat > "$TMP/home/ut-broker" <<'EOF'
 #!/usr/bin/env bash
+[ "${1:-}" != --probe-local ] || exit 1
 printf '%s %s\n' "${UT_PORT:-}" "${UT_LOCAL_PORT:-}"
 EOF
 # Keep the fixture independent of brokers listening on the developer's machine.
@@ -107,7 +108,7 @@ assert_eq "$(env UT_HOME="$TMP/home" UT_PORT=8722 UT_LOCAL_PORT=8732 "$ROOT/ut" 
   eval "$(grep "^export UT_" "$TMP/local/supervise-third.sh")"
   assert_eq "$UT_STATE_DIR|$UT_LAB_ROOT|${UT_BACKUP_ROOT:-}" "$TMP/state dir|$TMP/lab|"
 )
-if grep -q '^export UT_' "$TMP/local/supervise-base.sh"; then
+if grep -Eq '^export UT_(STATE_DIR|LAB_ROOT|BACKUP_ROOT|MACHINE_ID)=' "$TMP/local/supervise-base.sh"; then
   echo "default instance must not pin state roots" >&2
   exit 1
 fi

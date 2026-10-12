@@ -16,17 +16,20 @@ import (
 	"time"
 
 	"universal-tmux/internal/statedir"
+	"universal-tmux/internal/workspace"
 )
 
 type Store struct {
-	Socket  string
-	Dir     string
-	Root    string
-	Host    string
-	Cluster string
-	Now     func() time.Time
-	runtime WorkspaceRuntime
-	mu      sync.Mutex
+	Socket         string
+	Dir            string
+	Root           string
+	Host           string
+	Cluster        string
+	Now            func() time.Time
+	InstallationID string
+	identityError  error
+	runtime        WorkspaceRuntime
+	mu             sync.Mutex
 }
 
 // RuntimeIdentity identifies one lifetime of a session-owning backend. tmux
@@ -50,6 +53,10 @@ type WorkspaceRuntime interface {
 }
 
 func NewStore(socket string) *Store {
+	return newInstallationStore(socket, "", true)
+}
+
+func newInstallationStore(socket, installationID string, useBinding bool) *Store {
 	if socket == "" {
 		socket = "ut"
 	}
@@ -58,21 +65,33 @@ func NewStore(socket string) *Store {
 		host = "local"
 	}
 	root := filepath.Join(statedir.Dir(), "recovery")
+	key, err := workspace.InstallationKey(socket, installationID)
+	if useBinding {
+		if bound := localRecoveryIdentity(root, socket); bound != "" {
+			key, err = bound, nil
+		}
+	}
 	return &Store{
-		Socket:  socket,
-		Dir:     filepath.Join(root, safeComponent(host), safeComponent(socket)),
-		Root:    root,
-		Host:    host,
-		Cluster: recoveryCluster(host),
-		Now:     time.Now,
+		Socket:         socket,
+		Dir:            filepath.Join(root, "_installations", key),
+		Root:           root,
+		Host:           host,
+		Cluster:        recoveryCluster(host),
+		Now:            time.Now,
+		InstallationID: key,
+		identityError:  err,
 	}
 }
 
 // NewStoreWithRuntime binds recovery to the backend instance that actually owns
 // the live sessions. Server processes use this constructor; the standalone Unix
 // CLI continues to inspect tmux directly through NewStore.
-func NewStoreWithRuntime(socket string, runtime WorkspaceRuntime) *Store {
-	store := NewStore(socket)
+func NewStoreWithRuntime(socket string, runtime WorkspaceRuntime, installationID ...string) *Store {
+	id := ""
+	if len(installationID) > 0 {
+		id = installationID[0]
+	}
+	store := newInstallationStore(socket, id, false)
 	store.runtime = runtime
 	return store
 }
@@ -159,6 +178,9 @@ func writeAtomic(path string, body []byte, mode fs.FileMode) error {
 }
 
 func (s *Store) saveLocked(snapshot Snapshot) error {
+	if s.identityError != nil {
+		return s.identityError
+	}
 	body, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
@@ -175,6 +197,7 @@ func (s *Store) saveLocked(snapshot Snapshot) error {
 func (s *Store) saveCaptured(snapshot *Snapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	snapshot.InstallationID = s.InstallationID
 	items, err := s.loadAllLocked()
 	if err != nil {
 		return err
@@ -317,6 +340,9 @@ func (s *Store) loadAll() ([]Snapshot, error) {
 }
 
 func (s *Store) loadAllLocked() ([]Snapshot, error) {
+	if s.identityError != nil {
+		return nil, s.identityError
+	}
 	return loadSnapshotsFromDir(s.Dir)
 }
 
@@ -347,8 +373,13 @@ func loadSnapshotsFromDir(directory string) ([]Snapshot, error) {
 	return items, nil
 }
 
-func (s *Store) loadCluster() ([]Snapshot, error) {
-	if s.Cluster == "" || s.Root == "" {
+func (s *Store) loadSources() ([]Snapshot, error) {
+	if s.Root == "" {
+		return s.loadAll()
+	}
+	// Tests and embedders can supply a standalone store directory. Do not scan
+	// a different installation's default root when that directory is overridden.
+	if s.InstallationID != "" && s.Dir != filepath.Join(s.Root, "_installations", s.InstallationID) {
 		return s.loadAll()
 	}
 	s.mu.Lock()
@@ -361,19 +392,39 @@ func (s *Store) loadCluster() ([]Snapshot, error) {
 		return nil, err
 	}
 	var items []Snapshot
-	for _, host := range hosts {
-		if !host.IsDir() || recoveryCluster(host.Name()) != s.Cluster {
-			continue
-		}
-		loaded, err := loadSnapshotsFromDir(filepath.Join(s.Root, host.Name(), safeComponent(s.Socket)))
-		if err != nil {
-			continue
-		}
-		for _, snapshot := range loaded {
-			if snapshot.Socket == s.Socket && recoveryCluster(snapshot.Host) == s.Cluster {
-				items = append(items, snapshot)
+	load := func(directory string) {
+		for _, dir := range []string{directory, filepath.Join(directory, "imports")} {
+			loaded, err := loadSnapshotsFromDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, snapshot := range loaded {
+				if snapshot.Socket == s.Socket {
+					items = append(items, snapshot)
+				}
 			}
 		}
+	}
+	for _, host := range hosts {
+		if !host.IsDir() {
+			continue
+		}
+		if host.Name() == "_installations" {
+			installations, _ := os.ReadDir(filepath.Join(s.Root, host.Name()))
+			for _, installation := range installations {
+				if installation.IsDir() {
+					load(filepath.Join(s.Root, host.Name(), installation.Name()))
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(host.Name(), "_") {
+			continue
+		}
+		// Hostname-era manifests are discoverable sources, not implicit local
+		// lineage. A rename must not hide them, and a shared home must not make
+		// them the current installation's predecessor without explicit selection.
+		load(filepath.Join(s.Root, host.Name(), safeComponent(s.Socket)))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CapturedAt.After(items[j].CapturedAt) })
 	return items, nil
@@ -447,7 +498,7 @@ func (s *Store) remainingEntries(snapshot Snapshot) []Entry {
 }
 
 func (s *Store) load(id string) (Snapshot, error) {
-	items, err := s.loadAll()
+	items, err := s.loadSources()
 	if err != nil {
 		return Snapshot{}, err
 	}
