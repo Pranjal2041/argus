@@ -64,7 +64,14 @@ public final class UsageController: ObservableObject {
     public func handleAccountService(_ data: Data) async -> Data {
         do {
             guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.coderReadCorrupt) }
-            return try JSONSerialization.data(withJSONObject: await store.handleAccountService(request))
+            let result = try await store.handleAccountService(request)
+            // Account operations already own their targeted refresh. Publish
+            // metadata changes without scheduling a second, all-account poll.
+            if (request["action"] as? String ?? "state") != "state" {
+                reconcile()
+                readingsChanged?()
+            }
+            return try JSONSerialization.data(withJSONObject: result)
         } catch { return (try? JSONSerialization.data(withJSONObject: ["error": error.localizedDescription])) ?? Data("{}".utf8) }
     }
     private var applyingSharedState = false
@@ -161,7 +168,7 @@ public final class UsageController: ObservableObject {
     }
 
     public func refresh() async {
-        guard !refreshing else { return }
+        guard !Task.isCancelled, !refreshing else { return }
         await store.refresh()
         reconcile()
     }

@@ -19,7 +19,10 @@ final class OriginalCodexCollectionTests: XCTestCase {
             let fixture = try Fixture(account: account)
             defer { fixture.remove() }
             do { _ = try await fixture.integration.fetchSources(); XCTFail("Expected unsupported login") }
-            catch { XCTAssertTrue((error as? IntegrationError)?.needsAuthentication == true) }
+            catch {
+                XCTAssertTrue((error as? IntegrationError)?.needsAuthentication == true)
+                XCTAssertFalse(error.localizedDescription.contains("API-key"), "A null account must not be mislabeled as an API-key login")
+            }
             let calls = try fixture.calls()
             XCTAssertEqual(calls.filter { $0["method"].string == "account/read" }.count, 1)
             XCTAssertFalse(calls.contains { $0["params"]["refreshToken"].bool == true })

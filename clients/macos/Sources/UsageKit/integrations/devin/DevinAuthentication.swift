@@ -7,9 +7,15 @@ struct DevinAccount: Sendable {
 
     static func parse(_ output: String) throws -> Self {
         let text = DevinOutput.plain(output)
-        guard text.localizedCaseInsensitiveContains("Logged in"), !text.localizedCaseInsensitiveContains("Not logged in"),
+        if text.localizedCaseInsensitiveContains("Not logged in") {
+            throw IntegrationError.authentication("Sign in to this Devin account in Connections.")
+        }
+        guard text.localizedCaseInsensitiveContains("Logged in"),
               let email = DevinOutput.captures("(?im)^\\s*Email:\\s*(\\S+@\\S+)\\s*$", text).first else {
-            throw IntegrationError.authentication("Devin did not confirm this account's identity. Sign in again in Connections.")
+            if text.localizedCaseInsensitiveContains("permission denied") || text.localizedCaseInsensitiveContains("not authorized") {
+                throw IntegrationError.permission("This login does not have access to Devin CLI account details.")
+            }
+            throw IntegrationError.unavailable("Devin CLI did not return this account's identity.")
         }
         return Self(email: email, plan: DevinOutput.captures("(?im)^\\s*Plan:\\s*(.+)$", text).first)
     }

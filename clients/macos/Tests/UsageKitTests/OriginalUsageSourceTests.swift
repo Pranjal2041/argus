@@ -25,6 +25,13 @@ final class OriginalUsageSourceTests: XCTestCase {
                     "        // Added private-profile integrations must not inherit the host's login.\n" +
                     "        if environment[\"HOME\"] != nil { inherited = UsageProcessEnvironment.make(overrides: environment) }\n", with: "")
             }
+            if relative == "codex/LiveCodexIntegration.swift" {
+                // The same original guard handles both a missing login and an
+                // API-key login. Its text must not claim all failures are API keys.
+                embedded = embedded.replacingOccurrences(of:
+                    "This profile has no active ChatGPT login for usage. Reconnect this account.",
+                    with: "Sign in with a ChatGPT account. API-key logins do not expose ChatGPT quota windows.")
+            }
             XCTAssertEqual(embedded, original, relative)
             checked += 1
         }
@@ -61,6 +68,14 @@ final class OriginalUsageSourceTests: XCTestCase {
         XCTAssertTrue(originalView.contains(loop))
         XCTAssertTrue(controller.contains(loop.replacingOccurrences(of: "store.refreshInterval", with: "refreshSeconds")
             .replacingOccurrences(of: "await store.refresh()", with: "await refresh()")))
+    }
+
+    func testWorkspaceEventsCannotAddAnotherAutomaticCollectionDriver() throws {
+        let service = try String(contentsOf: package.appendingPathComponent("Sources/UniversalTmuxMac/WorkspaceServices.swift"))
+        let recovery = try between(service, "        networkObserver =", "\n    }\n")
+        XCTAssertFalse(recovery.contains("usage"), "Route recovery must not trigger provider requests")
+        XCTAssertFalse(service.contains("usageRefreshRequested"))
+        XCTAssertTrue(service.contains("!commands.isEmpty {"), "The second task is only for explicit refresh commands")
     }
 
     func testCodexSignInDiffIsLimitedToBrowserHandoff() throws {

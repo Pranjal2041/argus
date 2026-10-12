@@ -69,7 +69,6 @@ private final class WorkspaceCollector {
     private let base: String
     private var leases: [String: ArgusJSON] = [:]
     private var networkCadence = NetworkCadence()
-    private var usageRefreshRequested = false
     private var usageTask: Task<Void, Never>?
     private var accountTask: Task<Void, Never>?
     private var usageController: AnyObject?
@@ -92,7 +91,8 @@ private final class WorkspaceCollector {
         app.machines[0].wsBase = base.replacingOccurrences(of: "http://", with: "ws://")
         networkObserver = MainActorNotification.observe(BrokerNetworkRecovery.recovered) { [weak self] in
             self?.networkCadence.reset()
-            self?.usageRefreshRequested = true
+            // Usage owns its original polling loop. Route notifications are
+            // broker recovery signals, not requests to poll every provider.
         }
     }
 
@@ -237,7 +237,6 @@ private final class WorkspaceCollector {
                             guard owns("usage"), leases["usage"]?["fence"] == lease["fence"] else { return }
                             _ = try await sharedWorkspaceRequest(base, "/workspace/service/usage/reply", .object([
                                 "id": .string(id), "lease": lease, "body": try JSONDecoder().decode(ArgusJSON.self, from: result)]))
-                            if call["body"]["action"].string != "state" { usageRefreshRequested = true }
                         } catch { NSLog("[workspace-service] Account request was not acknowledged.") }
                     }
                 }
@@ -264,13 +263,11 @@ private final class WorkspaceCollector {
             let commands = replica.collection("commands").filter {
                 $0.data?["kind"].string == "usage-refresh" && !acknowledgedCommands.contains($0.id)
             }
-            let scheduled = usageRefreshRequested
             if owns("usage"), usageTask == nil, accountTask == nil, !usage.refreshing,
-               scheduled || !commands.isEmpty {
-                usageRefreshRequested = false
+               !commands.isEmpty {
                 let fence = leases["usage"]?["fence"]
                 let targets = Set(commands.compactMap { $0.data?["sourceID"].string })
-                let allAccounts = scheduled || commands.contains { $0.data?["sourceID"].string == nil }
+                let allAccounts = commands.contains { $0.data?["sourceID"].string == nil }
                 usageTask = Task {
                     defer { usageTask = nil }
                     if allAccounts { await usage.collectForWorkspace() }

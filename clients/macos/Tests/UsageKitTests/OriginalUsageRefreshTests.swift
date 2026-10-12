@@ -3,6 +3,75 @@ import XCTest
 
 @available(macOS 14.0, *)
 final class OriginalUsageRefreshTests: XCTestCase {
+    @MainActor func testCancelledOwnerCannotStartAQueuedCollection() async throws {
+        let suite = "usage.cancelled.owner.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let attempts = OriginalFetchAttempts()
+        let adapter = FixtureUsageIntegration(id: .codex, sourceID: "account") {
+            _ = await attempts.next()
+            return [Self.reading("account", provider: .codex)]
+        }
+        let controller = UsageController(store: UsageStore(registry: .init(adapters: [adapter]), defaults: defaults), defaults: defaults)
+        let queued = Task {
+            try? await Task.sleep(for: .seconds(60))
+            await controller.refresh()
+        }
+        queued.cancel()
+        await queued.value
+        let count = await attempts.count
+        XCTAssertEqual(count, 0)
+    }
+
+    @MainActor func testAccountRPCReadsAndFailuresDoNotPollAndEditsRefreshOnlyTheirOwnSource() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("usage-rpc-cadence-\(UUID())")
+        let suite = "usage.rpc.cadence.\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let localAttempts = OriginalFetchAttempts(), cliAttempts = OriginalFetchAttempts()
+        let local = FixtureUsageIntegration(id: .macStorage, sourceID: "local") {
+            _ = await localAttempts.next()
+            return [Self.reading("local", provider: .macStorage)]
+        }
+        let cli = FixtureUsageIntegration(id: .codex, sourceID: "cli") {
+            _ = await cliAttempts.next()
+            return [Self.reading("cli", provider: .codex)]
+        }
+        var cliSource = SourceConfiguration(id: "cli", integration: .codex, label: "CLI")
+        cliSource.codexHome = directory.path
+        let source = SourceConfiguration(id: "local", integration: .macStorage, label: "Disk")
+        let config = IntegrationConfiguration(sources: [source, cliSource])
+        let url = directory.appendingPathComponent("config.json")
+        try config.save(to: url)
+        let store = UsageStore(registry: .init(adapters: [local, cli], origin: .live, configuration: config),
+            defaults: defaults, cache: .init(url: directory.appendingPathComponent("cache.json")),
+            connections: .init(url: url))
+        store.makeRegistry = { .init(adapters: [local, cli], origin: .live, configuration: $0) }
+        let controller = UsageController(store: store, defaults: defaults)
+        await controller.refresh()
+        var changes = 0
+        controller.readingsChanged = { changes += 1 }
+        for index in 0..<20 {
+            let request: [String: Any] = index.isMultiple(of: 2) ? [:] : ["action": "state"]
+            let result = await controller.handleAccountService(try JSONSerialization.data(withJSONObject: request))
+            XCTAssertNil((try JSONSerialization.jsonObject(with: result) as? [String: Any])?["error"])
+        }
+        XCTAssertEqual(changes, 0, "Read-only state queries must not dirty usage or poll providers")
+        let failed = await controller.handleAccountService(Data(#"{"action":"connect","sourceID":"missing"}"#.utf8))
+        XCTAssertNotNil((try JSONSerialization.jsonObject(with: failed) as? [String: Any])?["error"])
+        let beforeLocal = await localAttempts.count, beforeCLI = await cliAttempts.count
+        XCTAssertEqual(beforeLocal, 1); XCTAssertEqual(beforeCLI, 1)
+        var draft = ConnectionDraft(source: source); draft.label = "Renamed disk"
+        let edited = await controller.handleAccountService(try JSONSerialization.data(withJSONObject: ["action": "save", "draft": draft.serviceFields]))
+        XCTAssertNil((try JSONSerialization.jsonObject(with: edited) as? [String: Any])?["error"])
+        let afterLocal = await localAttempts.count, afterCLI = await cliAttempts.count
+        XCTAssertEqual(afterLocal, 2)
+        XCTAssertEqual(afterCLI, 1, "Editing one connection cannot repoll every other account")
+        XCTAssertGreaterThan(changes, 0)
+    }
+
     @MainActor func testRecurringCollectionSurvivesFailureAndStopRestartWithoutAPublisher() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("usage-copy-loop-\(UUID())")
         let suite = "usage.copy.loop.\(UUID())", defaults = UserDefaults(suiteName: suite)!

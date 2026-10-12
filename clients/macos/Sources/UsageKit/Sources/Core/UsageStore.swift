@@ -94,7 +94,6 @@ final class UsageStore {
     @ObservationIgnored private var loginHandoff = AccountLoginHandoff()
     @ObservationIgnored private var remoteAccountGeneration = 0
     @ObservationIgnored private var remoteStateRequestID: UUID?
-    var deferConnectionRefresh = false
     var selectedCategory: SourceCategory?
     var selection: DetailSelection?
     var page = "Overview"
@@ -364,7 +363,7 @@ final class UsageStore {
             if draft.startsCodexLogin { connectCodex(saved.id, method: draft.codexLoginMethod, context: loginContext) }
             else if draft.startsClaudeLogin { connectClaude(saved.id, context: loginContext) }
             else if draft.startsDevinLogin { connectDevin(saved.id, context: loginContext) }
-            else if saved.enabled && !deferConnectionRefresh { await refresh(sourceID: saved.id) }
+            else if saved.enabled { await refresh(sourceID: saved.id) }
             return true
         } catch {
             connectionSaveError = (error as? IntegrationError)?.errorDescription ?? "Couldn't save the connection. Check the fields and try again."
@@ -633,8 +632,6 @@ final class UsageStore {
             var draft = existing.map(ConnectionDraft.init(source:)) ?? ConnectionDraft(integration: integration)
             guard draft.integration == integration else { throw IntegrationError.configuration("The connection type changed.") }
             draft.applyServiceFields(fields)
-            deferConnectionRefresh = true
-            defer { deferConnectionRefresh = false }
             guard await saveConnection(draft, loginContext: context) else { throw IntegrationError.configuration(connectionSaveError ?? "Connection was not saved.") }
         case "connect":
             guard let source, source.enabled else { throw IntegrationError.configuration("Enable this connection before signing in.") }

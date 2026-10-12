@@ -17,7 +17,7 @@ struct LiveCodexIntegration: UsageIntegration {
         try await session.initialize()
         let account = try await session.request("account/read", params: ["refreshToken": .bool(false)])["account"]
         guard account["type"].string == "chatgpt" else {
-            throw IntegrationError.authentication("Sign in with a ChatGPT account. API-key logins do not expose ChatGPT quota windows.")
+            throw IntegrationError.authentication("This profile has no active ChatGPT login for usage. Reconnect this account.")
         }
         let rates = try await session.request("account/rateLimits/read")
         return [try Self.normalize(account: account, rates: rates, configuration: configuration, now: .now)]
