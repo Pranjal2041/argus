@@ -40,6 +40,8 @@ public final class UsageController: ObservableObject {
     }
     var engine: UsageAlertEngine
     private var refreshTask: Task<Void, Never>?
+    private var initialRefreshTask: Task<Void, Never>?
+    private var clockTask: Task<Void, Never>?
     private var cardOrder: UsageCardOrder
     private static let policyKey = "warningPolicy.v1"
     private static let dismissalKey = "warningDismissals.v1"
@@ -83,7 +85,8 @@ public final class UsageController: ObservableObject {
     }
 
     public convenience init(demo: Bool = false) {
-        let defaults = UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
+        let defaults = AppPreferences.isUITesting ? AppPreferences.defaults
+            : UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
         defaults.register(defaults: ["appearance": "system"])
         var importError: String?
         if !demo && !CommandLine.arguments.contains("--usage-config") {
@@ -122,27 +125,36 @@ public final class UsageController: ObservableObject {
 
     public func start() {
         guard refreshTask == nil else { return }
+        initialRefreshTask = Task { [weak self] in await self?.refresh() }
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            await refresh()
+            guard !store.isDemo else { return }
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) } catch { break }
-                store.now = .now
-                if Date().timeIntervalSince(store.lastRefresh ?? .distantPast) >= refreshSeconds { await refresh() }
-                else { reconcile() }
+                do { try await Task.sleep(for: .seconds(refreshSeconds)) } catch { break }
+                await refresh()
             }
         }
+        startClock()
     }
 
-    public func stop() { refreshTask?.cancel(); refreshTask = nil }
+    public func stop() {
+        initialRefreshTask?.cancel(); initialRefreshTask = nil
+        refreshTask?.cancel(); refreshTask = nil
+        clockTask?.cancel(); clockTask = nil
+    }
 
     /// Workspace readers keep an independent presentation clock, without
     /// starting another collector or sending redundant refresh commands.
     public func startPresentation() {
         stop()
-        refreshTask = Task { [weak self] in
+        startClock()
+    }
+
+    private func startClock() {
+        guard clockTask == nil else { return }
+        clockTask = Task { [weak self] in
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) } catch { break }
+                do { try await Task.sleep(for: .seconds(30)) } catch { break }
                 self?.reconcile()
             }
         }

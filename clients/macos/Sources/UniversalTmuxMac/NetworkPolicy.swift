@@ -23,7 +23,6 @@ struct NetworkPolicy: Equatable {
     var commandCenterContent: TimeInterval { lowData ? 60 : 30 }
     var journal: TimeInterval { lowData ? 300 : 30 }
     var wrapped: TimeInterval { lowData ? 1800 : 300 }
-    func usage(_ configured: TimeInterval) -> TimeInterval { lowData ? max(600, configured) : configured }
     func lab(visible: Bool) -> TimeInterval { lowData ? (visible ? 15 : 120) : (visible ? 5 : 20) }
 }
 
@@ -101,7 +100,7 @@ struct NetworkSettingsSection: View {
         } header: {
             Text("Network")
         } footer: {
-            Text("Recent terminals stay ready for quick switching, with time and data limits on hidden panes. Background lists, summaries, and usage refresh less often. Remote jobs keep running.")
+            Text("Recent terminals stay ready for quick switching, with time and data limits on hidden panes. Background lists and summaries refresh less often. Usage keeps its configured refresh interval. Remote jobs keep running.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

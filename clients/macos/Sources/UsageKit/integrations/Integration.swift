@@ -27,7 +27,6 @@ struct IntegrationRegistry: Sendable {
     let adapters: [any UsageIntegration]
     var origin: SourceOrigin = .demo
     var configuration: IntegrationConfiguration?
-    var fetchCoordinator = IntegrationFetchCoordinator()
 
     static func configured() -> IntegrationRegistry {
         do { return live(try IntegrationConfiguration.load()) }
@@ -56,18 +55,23 @@ struct IntegrationRegistry: Sendable {
         CodexIntegration(), ClaudeIntegration(), DevinIntegration(), MacStorageIntegration(), WindowsStorageIntegration(),
     ])
 
-    func fetchAll(onResult: @escaping @Sendable (IntegrationResult) async -> Void = { _ in }) async -> [IntegrationResult] {
+    func fetchAll() async -> [IntegrationResult] {
         await withTaskGroup(of: IntegrationResult.self) { group in
             for adapter in adapters {
                 group.addTask {
-                    await fetchCoordinator.fetch(adapter)
+                    do {
+                        return IntegrationResult(integration: adapter.id, sources: try await adapter.fetchSources(), descriptor: adapter.descriptor)
+                    } catch {
+                        let known = error as? IntegrationError
+                        return IntegrationResult(integration: adapter.id, sources: [],
+                                                 error: known?.errorDescription ?? "Couldn't refresh \(adapter.id.name). Check the connection and retry.",
+                                                 descriptor: adapter.descriptor, needsAuthentication: known?.needsAuthentication ?? false,
+                                                 errorTitle: known?.title ?? "Unavailable")
+                    }
                 }
             }
             var results: [IntegrationResult] = []
-            for await result in group {
-                results.append(result)
-                await onResult(result)
-            }
+            for await result in group { results.append(result) }
             return results.sorted { a, b in
                 let left = IntegrationID.allCases.firstIndex(of: a.integration)!
                 let right = IntegrationID.allCases.firstIndex(of: b.integration)!

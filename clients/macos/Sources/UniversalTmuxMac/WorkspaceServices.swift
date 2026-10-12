@@ -69,7 +69,6 @@ private final class WorkspaceCollector {
     private let base: String
     private var leases: [String: ArgusJSON] = [:]
     private var networkCadence = NetworkCadence()
-    private var lastUsage = Date.distantPast
     private var usageRefreshRequested = false
     private var usageTask: Task<Void, Never>?
     private var accountTask: Task<Void, Never>?
@@ -104,6 +103,20 @@ private final class WorkspaceCollector {
     }
 
     func run() async {
+        // Usage owns its refresh loop and local cache. Broker availability,
+        // workspace leases, and Argus network policy only affect publication.
+        if #available(macOS 14.0, *) {
+            let usage = UsageController()
+            usage.readingsChanged = { [weak self] in
+                self?.usagePresentationDirty = true
+                self?.usagePresentationRevision += 1
+            }
+            usageController = usage
+            usage.start()
+        }
+        defer {
+            if #available(macOS 14.0, *) { (usageController as? UsageController)?.stop() }
+        }
         _ = BrokerNetworkRecovery.shared
         cc.bind(app)
         ActivityJournal.shared.nameResolver = { [weak app] id in app?.machines.first { $0.id == id }?.name }
@@ -213,17 +226,6 @@ private final class WorkspaceCollector {
                 }
             }
         }
-        if #available(macOS 14.0, *), owns("usage"), usageController == nil {
-            let usage = UsageController()
-            if let snapshot = replica.data("usage", "current") {
-                try usage.restoreCollectorSnapshot(ArgusWire.encoder().encode(snapshot))
-            }
-            usage.readingsChanged = { [weak self] in
-                self?.usagePresentationDirty = true
-                self?.usagePresentationRevision += 1
-            }
-            usageController = usage
-        }
         if #available(macOS 14.0, *), let usage = usageController as? UsageController {
             if owns("usage"), accountTask == nil, let lease = leases["usage"] {
                 let call = try await sharedWorkspaceRequest(base, "/workspace/service/usage/take", lease)
@@ -246,7 +248,7 @@ private final class WorkspaceCollector {
             if let dismissals = replica.data("usage-dismissals", "default"), dismissals != dismissalsApplied {
                 try usage.applySharedDismissals(ArgusWire.encoder().encode(dismissals)); dismissalsApplied = dismissals; usagePresentationDirty = true
             }
-            usage.setCollectionCadence(policy.usage(usage.collectionInterval))
+            usage.setCollectionCadence(usage.collectionInterval)
             var acknowledgedCommands = Set<String>()
             if owns("usage"), usagePresentationDirty {
                 let revision = usagePresentationRevision
@@ -262,10 +264,10 @@ private final class WorkspaceCollector {
             let commands = replica.collection("commands").filter {
                 $0.data?["kind"].string == "usage-refresh" && !acknowledgedCommands.contains($0.id)
             }
-            let scheduled = usageRefreshRequested || Date().timeIntervalSince(lastUsage) >= policy.usage(usage.collectionInterval)
-            if owns("usage"), usageTask == nil, accountTask == nil,
+            let scheduled = usageRefreshRequested
+            if owns("usage"), usageTask == nil, accountTask == nil, !usage.refreshing,
                scheduled || !commands.isEmpty {
-                lastUsage = Date(); usageRefreshRequested = false
+                usageRefreshRequested = false
                 let fence = leases["usage"]?["fence"]
                 let targets = Set(commands.compactMap { $0.data?["sourceID"].string })
                 let allAccounts = scheduled || commands.contains { $0.data?["sourceID"].string == nil }

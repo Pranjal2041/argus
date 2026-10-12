@@ -45,8 +45,7 @@ struct CodexAuthenticator: Sendable {
         let start: JSONValue
         do {
             start = try await session.request("account/login/start", params: ["type": .string(method == .browser ? "chatgpt" : "chatgptDeviceCode")], timeout: 25)
-        } catch {
-            guard error is CodexRPCFailure || (error as? IntegrationError)?.needsAuthentication == true else { throw error }
+        } catch IntegrationError.authentication {
             throw IntegrationError.authentication(method == .deviceCode
                 ? "Could not start device-code sign-in. Enable device-code login in ChatGPT security settings or workspace permissions, and use a current Codex CLI. You can also choose Default browser."
                 : "Could not start browser sign-in. Try Device code or check the Codex CLI installation.")

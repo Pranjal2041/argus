@@ -18,8 +18,6 @@ final class NetworkPolicyTests: XCTestCase {
         XCTAssertEqual(low.commandCenterContent, 60)
         XCTAssertGreaterThan(low.journal, normal.journal)
         XCTAssertGreaterThan(low.wrapped, normal.wrapped)
-        XCTAssertEqual(low.usage(120), 600)
-        XCTAssertEqual(low.usage(1800), 1800)
         XCTAssertGreaterThan(low.lab(visible: false), low.lab(visible: true))
         XCTAssertEqual(low.warmTerminalLimit, 3)
         XCTAssertEqual(low.terminalRetention.grace, 60)
