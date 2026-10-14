@@ -19,6 +19,9 @@ fi
 cmp -s ".build/release/UniversalTmuxMac" "$APP/Contents/MacOS/Argus"
 cmp -s ".build/release/argus" "$APP/Contents/MacOS/argus-cli"
 cp Info.plist "$APP/Contents/Info.plist"
+# Keep broker-only startup semantics in step with the app; the broker binary
+# and private credentials remain in the existing per-user installation.
+cp ../../ut "$APP/Contents/Resources/ut"
 cp Resources/Argus.icns "$APP/Contents/Resources/" 2>/dev/null || true
 cp Resources/fonts/*.ttf "$APP/Contents/Resources/" 2>/dev/null || true
 cp -R Resources/codemirror "$APP/Contents/Resources/" 2>/dev/null || true  # CM6 bundle (legacy)

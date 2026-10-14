@@ -5,6 +5,155 @@ import XCTest
 
 final class WorkspaceRecoveryTests: XCTestCase {
     @MainActor
+    func testDevinRecoveryEditorAcceptsItsConversationFormatAndSavesDetails() throws {
+        _ = NSApplication.shared
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        let panel = try JSONDecoder().decode(WorkspaceRecoveryPanel.self, from: Data(#"""
+        {"name":"research","directory":"/work/project","agent":"devin","sessionId":"gentle-birch",
+         "executable":"/home/user/.local/bin/devin","argv":["devin","--permission-mode","bypass"],
+         "xdgDataHome":"/profiles/data","xdgConfigHome":"/profiles/config","state":"ready","selected":true}
+        """#.utf8))
+        var edit = WorkspaceRecoveryEdit(panel: panel)
+        XCTAssertNil(edit.validationError)
+        XCTAssertEqual(edit.xdgDataHome, "/profiles/data")
+        XCTAssertEqual(edit.xdgConfigHome, "/profiles/config")
+        edit.sessionId = "../unrelated"
+        XCTAssertNotNil(edit.validationError)
+        edit.sessionId = "gentle-birch"
+        var saved: WorkspaceRecoveryEdit?
+        let host = NSHostingView(rootView: WorkspaceRecoveryEditView(panel: panel, edit: edit, scale: 1, saveAction: { saved = $0 }))
+        host.frame = NSRect(x: 0, y: 0, width: 620, height: 640)
+        let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        if let path = ProcessInfo.processInfo.environment["UT_DEVIN_RECOVERY_SCREENSHOT"],
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
+        // Invoke only this unshown fixture's control, without global input.
+        func press(_ value: Any, depth: Int = 0) -> Bool {
+            guard depth < 40, let node = value as? NSObject else { return false }
+            let idSelector = NSSelectorFromString("accessibilityIdentifier")
+            let childrenSelector = NSSelectorFromString("accessibilityChildren")
+            let id = node.responds(to: idSelector) ? node.perform(idSelector)?.takeUnretainedValue() as? String : nil
+            if id == "recovery-save-details" {
+                let selector = NSSelectorFromString("accessibilityPerformPress")
+                guard node.responds(to: selector) else { return false }
+                typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+                _ = unsafeBitCast(node.method(for: selector), to: Press.self)(node, selector)
+                return true
+            }
+            let children = node.responds(to: childrenSelector) ? node.perform(childrenSelector)?.takeUnretainedValue() as? [Any] : nil
+            return (children ?? []).contains { press($0, depth: depth + 1) }
+        }
+        XCTAssertTrue(press(host))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(saved?.sessionId, "gentle-birch")
+        XCTAssertEqual(saved?.agent, "devin")
+        XCTAssertEqual(saved?.xdgDataHome, "/profiles/data")
+    }
+
+    override class func setUp() {
+        super.setUp()
+        _ = NSApplication.shared
+    }
+
+    func testUnownedLegacySourcesOfferAChoiceInsteadOfClaimingLocalRecovery() throws {
+        let status = try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: Data(#"""
+        {"available":false,"sourceSelectionRequired":true,"targetHost":"renamed-host","readyCount":0,"panels":[],
+         "candidates":[{"id":"old-source","host":"old-host","capturedAt":"2026-10-10T14:05:00Z","panelCount":40,"readyCount":37}]}
+        """#.utf8))
+        XCTAssertNil(status.snapshot)
+        XCTAssertEqual(status.startupOfferKey, "choose:old-source")
+        let ordinary = try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: Data(#"{"available":false,"readyCount":0,"panels":[]}"#.utf8))
+        XCTAssertNil(ordinary.startupOfferKey)
+    }
+
+    @MainActor
+    func testLegacySourceChoiceRendersAtSupportedSize() throws {
+        let controller = WorkspaceRecoveryController()
+        controller.status = try JSONDecoder().decode(WorkspaceRecoveryStatus.self, from: Data(#"""
+        {"available":false,"sourceSelectionRequired":true,"targetHost":"renamed-host","readyCount":0,"panels":[],
+         "candidates":[
+          {"id":"old-source","host":"previous-workstation.local","capturedAt":"2026-10-10T14:05:00Z","panelCount":40,"readyCount":37},
+          {"id":"other-source","host":"independent-runtime","capturedAt":"2026-10-09T10:00:00Z","panelCount":6,"readyCount":6}]}
+        """#.utf8))
+        XCTAssertTrue(controller.hasOffer)
+        XCTAssertTrue(controller.selectedSourceID.isEmpty)
+        XCTAssertTrue(controller.selected.isEmpty)
+        let host = NSHostingView(rootView: WorkspaceRecoveryView(recovery: controller))
+        host.frame = NSRect(x: 0, y: 0, width: 720, height: 620)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+        if let path = ProcessInfo.processInfo.environment["UT_RECOVERY_SOURCE_SCREENSHOT"],
+           let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    @MainActor
+    func testChoosingLegacySourceLoadsItsPanelPreviewWithoutRestoringAnything() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("recovery-fixture")
+        let catalog = #"{"available":false,"sourceSelectionRequired":true,"readyCount":0,"panels":[],"candidates":[{"id":"old-source","host":"previous-workstation.local","capturedAt":"2026-10-10T14:05:00Z","panelCount":1,"readyCount":1}]}"#
+        let preview = #"{"available":true,"snapshot":{"id":"old-source","host":"previous-workstation.local","socket":"ut","capturedAt":"2026-10-10T14:05:00Z"},"readyCount":1,"panels":[{"name":"research","directory":"/tmp","agent":"shell","state":"ready","selected":true}]}"#
+        let script = """
+        #!/bin/sh
+        [ "$1" = recovery ] && [ "$2" = status ] || exit 9
+        case " $* " in
+          *" --snapshot old-source "*) printf '%s\\n' '\(preview)' ;;
+          *) printf '%s\\n' '\(catalog)' ;;
+        esac
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let previous = ProcessInfo.processInfo.environment["UT_BROKER"]
+        setenv("UT_BROKER", executable.path, 1)
+        defer {
+            if let previous { setenv("UT_BROKER", previous, 1) } else { unsetenv("UT_BROKER") }
+        }
+        let controller = WorkspaceRecoveryController()
+        controller.checkForRecovery()
+        for _ in 0..<100 where controller.phase == .checking { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(controller.status?.sourceSelectionRequired, true)
+        XCTAssertTrue(controller.selectedSourceID.isEmpty)
+
+        let host = NSHostingView(rootView: WorkspaceRecoveryView(recovery: controller))
+        host.frame = NSRect(x: 0, y: 0, width: 720, height: 620)
+        let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.orderOut(nil); window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+        // The center of the first source card in the supported 720x620 layout.
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 300, y: 425),
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+            window.sendEvent(event)
+        }
+        for _ in 0..<100 where controller.status?.snapshot?.id != "old-source" { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(controller.selectedSourceID, "old-source")
+        XCTAssertEqual(controller.status?.snapshot?.id, "old-source")
+        XCTAssertEqual(controller.selected, ["research"])
+        XCTAssertTrue(controller.results.isEmpty)
+        XCTAssertEqual(controller.phase, .idle)
+    }
+
+    @MainActor
     func testRecoverySourcesAggregateEveryStoreAndPreferTheOwningOrigin() throws {
         let relay = WorkspaceRecoveryTarget(id: "relay", name: "relay", host: "relay", route: "relay")
         let owner = WorkspaceRecoveryTarget(id: "owner", name: "source-a", host: "source-a", route: "owner")
@@ -369,6 +518,7 @@ final class WorkspaceRecoveryTests: XCTestCase {
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 590),
             styleMask: .borderless, backing: .buffered, defer: false
         )
+        window.isReleasedWhenClosed = false
         window.contentView = host
         window.orderBack(nil)
         let launchPoint = NSPoint(x: 430, y: 72)

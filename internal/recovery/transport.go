@@ -82,7 +82,7 @@ func (s *Store) ExportSnapshot(id string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	shared, err := s.loadCluster()
+	shared, err := s.loadSources()
 	if err != nil {
 		return nil, err
 	}

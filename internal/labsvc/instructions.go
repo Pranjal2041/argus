@@ -19,9 +19,10 @@ type InstructionInstall struct {
 	Changed bool   `json:"changed"`
 }
 
-// InstallInstructions adds the Lab instruction to CLAUDE.md and AGENTS.md when
-// present, or creates AGENTS.md when neither exists. The operation is
-// idempotent and deliberately matches `ut lab init`.
+// InstallInstructions always installs the shared AGENTS.md contract, and also
+// updates an existing provider-specific compatibility file. A project adopting
+// another agent must not lose its Lab workflow because only CLAUDE.md existed.
+// The operation is idempotent and shared with `ut lab init`.
 func InstallInstructions(cwd string) ([]InstructionInstall, error) {
 	info, err := os.Stat(cwd)
 	if err != nil {
@@ -30,16 +31,13 @@ func InstallInstructions(cwd string) ([]InstructionInstall, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("project folder is not a directory: %s", cwd)
 	}
-	targets := []string{}
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
+	targets := []string{"AGENTS.md"}
+	for _, name := range []string{"CLAUDE.md"} {
 		if _, err := os.Stat(filepath.Join(cwd, name)); err == nil {
 			targets = append(targets, name)
 		} else if !os.IsNotExist(err) {
 			return nil, err
 		}
-	}
-	if len(targets) == 0 {
-		targets = []string{"AGENTS.md"}
 	}
 
 	results := make([]InstructionInstall, 0, len(targets))

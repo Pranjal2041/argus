@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"universal-tmux/internal/terminalenv"
 	"universal-tmux/internal/toolcommand"
 )
 
@@ -214,6 +215,9 @@ func processAgent(process processInfo) string {
 	}
 	if name == "claude" || name == "claude.exe" || strings.HasPrefix(name, "claude-") {
 		return AgentClaude
+	}
+	if name == "devin" || name == "devin.exe" {
+		return AgentDevin
 	}
 	return ""
 }
@@ -467,6 +471,8 @@ func InspectAgentSession(socket, name string) (AgentSession, error) {
 		}
 		var id, path string
 		switch agent {
+		case AgentDevin:
+			return inspectDevin(process, processes, state)
 		case AgentCodex:
 			files, fileErr := platformOpenFiles(process.PID)
 			if fileErr != nil {
@@ -521,6 +527,12 @@ func captureEntry(pane paneInfo, processes map[int]processInfo) Entry {
 	entry.Executable = state.Executable
 	entry.Argv = state.Argv
 	switch agent {
+	case AgentDevin:
+		var session AgentSession
+		session, err = inspectDevin(process, processes, state)
+		entry.SessionID, entry.SessionPath = session.ID, session.Path
+		entry.XDGDataHome = strings.TrimSpace(state.Environment["XDG_DATA_HOME"])
+		entry.XDGConfigHome = strings.TrimSpace(state.Environment["XDG_CONFIG_HOME"])
 	case AgentClaude:
 		entry.SessionID, entry.SessionPath, _, err = inspectClaude(process.PID, state)
 		entry.ClaudeConfig = strings.TrimSpace(state.Environment["CLAUDE_CONFIG_DIR"])
@@ -662,7 +674,7 @@ func (s *Store) Status(requestedSnapshot string) Status {
 }
 
 func createRestoredSession(socket string, panel PanelStatus) error {
-	args := []string{"new-session", "-d", "-s", panel.Name, "-c", panel.Directory}
+	args := terminalenv.TmuxNewSession("-d", "-s", panel.Name, "-c", panel.Directory)
 	if panel.Agent != AgentShell {
 		// tmux accepts command + arguments as separate argv. The wrapper leaves an
 		// interactive shell behind if the resumed TUI exits, matching normal panels.
@@ -674,7 +686,9 @@ func createRestoredSession(socket string, panel PanelStatus) error {
 		";", "set-option", "-t", panel.Name, "@ut_visible", "1",
 		";", "set-option", "-t", panel.Name, "@ut_origin", "workspace-restore",
 	)
-	out, err := tmuxCommand(socket, args...).CombinedOutput()
+	cmd := tmuxCommand(socket, args...)
+	cmd.Env = terminalenv.Interactive(cmd.Env)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create tmux session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -935,13 +949,6 @@ func (s *Store) restore(snapshotID string, names []string, concurrency int, useC
 }
 
 func (s *Store) Bootstrap(sessionName string) error {
-	if sessionName == "" {
-		panes, err := listPanes(s.Socket)
-		if err != nil || len(panes) == 0 {
-			return fmt.Errorf("no restored session is available to bootstrap the broker")
-		}
-		sessionName = panes[0].Name
-	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{}
 	if value := os.Getenv("UT_CLI"); value != "" {
@@ -964,7 +971,9 @@ func (s *Store) Bootstrap(sessionName string) error {
 	if cli == "" {
 		return fmt.Errorf("ut launcher was not found")
 	}
-	args := []string{"-L", s.Socket, sessionName}
+	// Broker lifecycle does not depend on successful restoration or a user
+	// panel. Retain the argument for compatibility with older callers only.
+	args := []string{"-L", s.Socket, "--broker-only"}
 	cmd := toolcommand.Command(cli, args...)
 	path := os.Getenv("PATH")
 	for _, directory := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {

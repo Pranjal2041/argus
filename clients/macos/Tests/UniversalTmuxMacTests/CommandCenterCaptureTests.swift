@@ -2,6 +2,42 @@ import XCTest
 @testable import UniversalTmuxMac
 
 final class CommandCenterCaptureTests: XCTestCase {
+    func testInterruptGrammarAndWrappedTimerNormalization() {
+        for hint in ["esc to interrupt", "esc twice to interrupt", "Escape 2 times to interrupt", "/stop to interrupt"] {
+            let first = "Useful result\n\nThinking · 3s (\(hint)) · (42c)\n❭ \n"
+            let second = "Useful result\n\nThinking · 1m 12s (\(hint)) · (2985c)\n❭ \n"
+            XCTAssertEqual(AgentTerminalChrome.contentKey(first), AgentTerminalChrome.contentKey(second))
+            XCTAssertNotEqual(AgentTerminalChrome.contentKey(first), AgentTerminalChrome.contentKey(second.replacingOccurrences(of: "Useful result", with: "New result")))
+            let chars = Array(hint)
+            for split in 1..<chars.count {
+                let wrapped = String(chars[..<split]) + "\n" + String(chars[split...])
+                let lines = "Thinking (\(wrapped))\n❭ ".components(separatedBy: "\n")
+                XCTAssertEqual(AgentTerminalChrome.interruptRows(lines), [0, 1], "\(hint), split \(split)")
+            }
+        }
+        let history = "esc twice to interrupt\n" + String(repeating: "new output\n", count: 9)
+        XCTAssertTrue(AgentTerminalChrome.interruptRows(history.components(separatedBy: "\n")).isEmpty)
+    }
+
+    func testRepeatedInterruptAndLiveComposerAreNotSubstantiveOutput() {
+        let chrome = "⠦ Thinking · 1m 14s (esc twice to interrupt) · (2957c)\n────\n(bypass permissions on)\n❭ Guide Devin while it works\n────\nClaude Opus · ctrl+o details · opt+t thinking"
+        XCTAssertTrue(ccCaptureLooksTransient(chrome, state: "working"))
+        XCTAssertFalse(ccCaptureLooksTransient("API Error\n" + chrome, state: "working"))
+        XCTAssertFalse(ccCaptureLooksTransient("Built the dashboard and verified all six routes.\n" + chrome, state: "working"))
+        XCTAssertFalse(ccCaptureLooksTransient(chrome, state: "idle"))
+        let tokenBar = chrome.components(separatedBy: "\n").dropLast().joined(separator: "\n") + "\nConfigured Model 5.5 · Context: 796k / 1.0M tokens (79%)"
+        XCTAssertTrue(ccCaptureLooksTransient(tokenBar, state: "working"))
+        XCTAssertEqual(AgentTerminalChrome.contentKey(tokenBar), AgentTerminalChrome.contentKey(tokenBar.replacingOccurrences(of: "796k", with: "797k")))
+    }
+
+    func testKeyboardInstructionsAndQuotedAnswerRemainSubstantive() {
+        for answer in ["Press ctrl+x to cut the selected text, then paste it into the destination.",
+                       "> This is a complete quoted answer with important instructions and results."] {
+            XCTAssertFalse(ccCaptureLooksTransient(answer, state: "working"))
+            XCTAssertNotEqual(AgentTerminalChrome.contentKey(answer), AgentTerminalChrome.contentKey(answer + " Changed."))
+        }
+    }
+
     func testStatusCommandPinsGPT6LunaHighAndKeepsConversationDurable() {
         let output = URL(fileURLWithPath: "/tmp/status.txt")
         let initial = CodexStatusCommand.initialArguments(finalMessageURL: output)
@@ -11,7 +47,7 @@ final class CommandCenterCaptureTests: XCTestCase {
         )
 
         XCTAssertEqual(CodexStatusCommand.model, "gpt-6-luna")
-        XCTAssertEqual(CodexStatusCommand.model, CodexArtifactTitleProvider.model)
+        XCTAssertEqual(CodexStatusCommand.model, AgentArtifactTitleProvider.model)
         XCTAssertEqual(initial.filter { $0.hasPrefix("gpt-") }, ["gpt-6-luna"])
         XCTAssertTrue(initial.contains("model_reasoning_effort=\"high\""))
         XCTAssertTrue(initial.contains("read-only"))

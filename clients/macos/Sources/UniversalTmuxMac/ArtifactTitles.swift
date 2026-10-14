@@ -12,6 +12,7 @@ enum ArtifactTitleSource {
 
 enum ArtifactAutomaticTitleEligibility {
     static func isEligible(_ record: ArtifactRecord) -> Bool {
+        if AgentProvider(rawValue: record.titleSource ?? "") != nil { return false }
         switch record.titleSource {
         case ArtifactTitleSource.codex, ArtifactTitleSource.manual:
             return false
@@ -44,20 +45,38 @@ struct ArtifactTitleRequest {
 
 protocol ArtifactTitleProviding {
     func title(for request: ArtifactTitleRequest) async -> String?
+    func generatedTitle(for request: ArtifactTitleRequest) async -> GeneratedArtifactTitle?
+}
+
+struct GeneratedArtifactTitle {
+    let text: String
+    let provider: AgentProvider
+}
+
+extension ArtifactTitleProviding {
+    func generatedTitle(for request: ArtifactTitleRequest) async -> GeneratedArtifactTitle? {
+        guard let text = await title(for: request) else { return nil }
+        return GeneratedArtifactTitle(text: text, provider: .codex)
+    }
 }
 
 /// Produces short content-aware artifact titles without granting the naming
-/// run write access. Calls are serialized by the ArtifactStore, ephemeral, and
-/// deliberately ignore repository/user instructions: artifact content is data,
-/// never a source of instructions for the naming agent.
-actor CodexArtifactTitleProvider: ArtifactTitleProviding {
+/// run write access. Calls are serialized by the ArtifactStore and run in an
+/// isolated working directory: artifact content is data, never a source of
+/// instructions for the naming agent.
+actor AgentArtifactTitleProvider: ArtifactTitleProviding {
     static let model = CodexModels.luna
     static let reasoningEffort = "medium"
 
-    private var unavailableUntil: Date?
+    private var unavailableUntil: [AgentProvider: Date] = [:]
 
     func title(for request: ArtifactTitleRequest) async -> String? {
-        if let unavailableUntil, unavailableUntil > Date() { return nil }
+        await generatedTitle(for: request)?.text
+    }
+
+    func generatedTitle(for request: ArtifactTitleRequest) async -> GeneratedArtifactTitle? {
+        let provider = AgentTaskPurpose.artifactTitle.selectedProvider()
+        if let until = unavailableUntil[provider], until > Date() { return nil }
 
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("argus-artifact-title-" + UUID().uuidString, isDirectory: true)
@@ -72,25 +91,24 @@ actor CodexArtifactTitleProvider: ArtifactTitleProviding {
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
 
         let material = await Self.material(for: request, temporaryDirectory: temporaryDirectory)
-        let outputURL = temporaryDirectory.appendingPathComponent("title.txt")
-        let result = await Self.runCodex(
+        let result = try? await AgentCLIRunner().run(AgentGenerationRequest(
+            provider: provider, purpose: .artifactTitle,
             prompt: Self.prompt(
                 for: request,
                 text: material.text,
                 imageAttached: material.imageURL != nil
             ),
-            imageURL: material.imageURL,
-            outputURL: outputURL,
-            workingDirectory: temporaryDirectory
-        )
-        guard let result, let title = Self.sanitized(result) else {
+            directory: temporaryDirectory,
+            imageURL: material.imageURL
+        ))
+        guard let result, let title = Self.sanitized(result.text) else {
             // One unavailable login/binary/network condition should not fan out
             // into one failed process for every legacy artifact in the library.
-            unavailableUntil = Date().addingTimeInterval(15 * 60)
+            unavailableUntil[provider] = Date().addingTimeInterval(15 * 60)
             return nil
         }
-        unavailableUntil = nil
-        return title
+        unavailableUntil[provider] = nil
+        return GeneratedArtifactTitle(text: title, provider: result.provider)
     }
 
     static func commandArguments(
@@ -98,24 +116,9 @@ actor CodexArtifactTitleProvider: ArtifactTitleProviding {
         workingDirectory: URL,
         imageURL: URL?
     ) -> [String] {
-        var arguments = [
-            "exec",
-            "--ephemeral",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "--sandbox", "read-only",
-            "--color", "never",
-            "-C", workingDirectory.path,
-            "-m", model,
-            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
-            "-o", outputURL.path,
-        ]
-        if let imageURL {
-            arguments += ["-i", imageURL.path]
-        }
-        arguments.append("-")
-        return arguments
+        AgentCLIRunner.arguments(AgentGenerationRequest(provider: .codex, purpose: .artifactTitle, prompt: "", imageURL: imageURL),
+            directory: workingDirectory, finalURL: outputURL, exportURL: outputURL,
+            promptURL: outputURL, configURL: outputURL)
     }
 
     static func sanitized(_ raw: String) -> String? {
@@ -324,72 +327,4 @@ actor CodexArtifactTitleProvider: ArtifactTitleProviding {
         """
     }
 
-    private static func runCodex(
-        prompt: String,
-        imageURL: URL?,
-        outputURL: URL,
-        workingDirectory: URL
-    ) async -> String? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: codexPath)
-                process.arguments = commandArguments(
-                    outputURL: outputURL,
-                    workingDirectory: workingDirectory,
-                    imageURL: imageURL
-                )
-                process.currentDirectoryURL = workingDirectory
-                let input = Pipe()
-                process.standardInput = input
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 90, execute: killer)
-                DispatchQueue.global(qos: .utility).async {
-                    input.fileHandleForWriting.write(Data(prompt.utf8))
-                    try? input.fileHandleForWriting.close()
-                }
-                process.waitUntilExit()
-                killer.cancel()
-                guard process.terminationStatus == 0,
-                      let value = try? String(contentsOf: outputURL, encoding: .utf8) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                continuation.resume(returning: value)
-            }
-        }
-    }
-
-    /// GUI apps do not inherit a login shell's PATH.
-    private static let codexPath: String = {
-        let candidates = [
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex",
-            NSHomeDirectory() + "/.local/bin/codex",
-        ]
-        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "command -v codex"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
-        let value = String(
-            decoding: pipe.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? "/opt/homebrew/bin/codex" : value
-    }()
 }

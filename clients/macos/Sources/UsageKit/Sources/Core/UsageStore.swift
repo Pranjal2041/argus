@@ -77,7 +77,11 @@ enum DashboardLogic {
 final class UsageStore {
     var sources: [UsageSource] = []
     var failures: [IntegrationResult] = []
-    var refreshing = false
+    // Only locally owned work changes collection state. Replicated progress is
+    // presentation data and must never call the collection-change observer.
+    var refreshing = false { didSet { if refreshing != oldValue { readingsChanged?() } } }
+    var remoteRefreshExpiresAt: Date?
+    var isRefreshing: Bool { refreshing || remoteRefreshExpiresAt.map { now < $0 } == true }
     var didLoad = false
     var now = Date.now
     var lastRefresh: Date?
@@ -94,7 +98,6 @@ final class UsageStore {
     @ObservationIgnored private var loginHandoff = AccountLoginHandoff()
     @ObservationIgnored private var remoteAccountGeneration = 0
     @ObservationIgnored private var remoteStateRequestID: UUID?
-    var deferConnectionRefresh = false
     var selectedCategory: SourceCategory?
     var selection: DetailSelection?
     var page = "Overview"
@@ -106,8 +109,7 @@ final class UsageStore {
     }
     private(set) var addedSources: [AddedSource]
     private let defaults: UserDefaults
-    private var registry: IntegrationRegistry { didSet { registryGeneration &+= 1 } }
-    private var registryGeneration = 0
+    private var registry: IntegrationRegistry
     @ObservationIgnored var makeRegistry: @Sendable (IntegrationConfiguration) -> IntegrationRegistry = { .live($0) }
     private let cache: SnapshotCache?
     private let connections: ConnectionRepository
@@ -180,21 +182,33 @@ final class UsageStore {
         filteredSources.filter { $0.integration == integration }
     }
 
+    // Argus routes remote requests; local fetching and caching below are copied
+    // from standalone Usage without a replacement coordinator.
     func refresh(sourceID: String? = nil) async {
+        if let remoteRefresh {
+            guard !isRefreshing, authorizingCredentialID == nil else { return }
+            refreshing = true
+            defer { refreshing = false }
+            await remoteRefresh(sourceID)
+        } else {
+            await refreshFromUsage(sourceID: sourceID)
+            // Saved account labels belong to Argus presentation, not to the
+            // copied fetching/cache implementation or a fabricated measurement.
+            for index in sources.indices where sources[index].unavailable != nil && sources[index].accountIdentity == nil {
+                sources[index].accountIdentity = configuration?.sources.first { $0.id == sources[index].id }?.accountIdentity
+            }
+            readingsChanged?()
+        }
+    }
+
+    func refreshFromUsage(sourceID: String? = nil) async {
         guard !refreshing, authorizingCredentialID == nil else { return }
         refreshing = true
-        readingsChanged?()
-        defer { refreshing = false; readingsChanged?() }
-        if let remoteRefresh { await remoteRefresh(sourceID); return }
+        defer { refreshing = false }
         let fetching = sourceID.map { id in
-            IntegrationRegistry(adapters: registry.adapters.filter { $0.descriptor?.sourceID == id }, origin: registry.origin,
-                                configuration: registry.configuration, fetchCoordinator: registry.fetchCoordinator)
+            IntegrationRegistry(adapters: registry.adapters.filter { $0.descriptor?.sourceID == id }, origin: registry.origin, configuration: registry.configuration)
         } ?? registry
-        let generation = registryGeneration
-        let results = await fetching.fetchAll { [weak self] result in
-            await self?.acceptPartial(result, generation: generation)
-        }
-        guard generation == registryGeneration else { return }
+        let results = await fetching.fetchAll()
         var fresh: [UsageSource] = sourceID == nil ? [] : sources.filter { $0.id != sourceID }
         for result in results {
             if result.error == nil { fresh.append(contentsOf: result.sources) }
@@ -207,8 +221,7 @@ final class UsageStore {
                     fresh.append(UsageSource(id: descriptor.sourceID, integration: descriptor.integration, account: descriptor.label,
                                              observedAt: .now, payload: .unavailable(UnavailableUsage(
                                                 title: result.errorTitle,
-                                                message: result.error ?? "The source is unavailable.", needsAuthentication: result.needsAuthentication)), origin: .live,
-                                             accountIdentity: configuration?.sources.first { $0.id == descriptor.sourceID }?.accountIdentity))
+                                                message: result.error ?? "The source is unavailable.", needsAuthentication: result.needsAuthentication)), origin: .live))
                 }
             } else { fresh.append(contentsOf: sources.filter { $0.integration == result.integration && !isAdded($0.id) }) }
         }
@@ -234,46 +247,10 @@ final class UsageStore {
         }
         events = Array(events.prefix(100))
         didLoad = true
-        readingsChanged?()
-    }
-
-    /// Present each account as soon as it completes. Preserve other accounts'
-    /// readings and timestamps while they are still in flight.
-    private func acceptPartial(_ result: IntegrationResult, generation: Int) {
-        guard generation == registryGeneration else { return }
-        func belongs(_ source: UsageSource) -> Bool {
-            if let id = result.descriptor?.sourceID { return source.id == id }
-            return source.integration == result.integration && !isAdded(source.id)
-        }
-        let previous = sources.filter(belongs)
-        let replacement: [UsageSource]
-        if result.error == nil { replacement = result.sources }
-        else if let existing = previous.first(where: { $0.unavailable == nil }) {
-            var stale = existing; stale.isStale = true
-            if var storage = stale.storage { storage.online = false; stale.payload = .storage(storage) }
-            replacement = [stale]
-        } else if let descriptor = result.descriptor {
-            replacement = [UsageSource(id: descriptor.sourceID, integration: descriptor.integration, account: descriptor.label,
-                observedAt: .now, payload: .unavailable(UnavailableUsage(title: result.errorTitle,
-                    message: result.error ?? "The source is unavailable.", needsAuthentication: result.needsAuthentication)),
-                origin: .live, accountIdentity: configuration?.sources.first { $0.id == descriptor.sourceID }?.accountIdentity)]
-        } else { replacement = previous }
-        sources.removeAll(where: belongs)
-        sources.append(contentsOf: replacement)
-        let order = Dictionary(uniqueKeysWithValues: (configuration?.sources ?? []).enumerated().map { ($0.element.id, $0.offset) })
-        if !isDemo { sources.sort { (order[$0.id] ?? 0) < (order[$1.id] ?? 0) } }
-        failures.removeAll {
-            if let id = result.descriptor?.sourceID { return $0.descriptor?.sourceID == id }
-            return $0.integration == result.integration
-        }
-        if result.error != nil { failures.append(result) }
-        now = .now
-        didLoad = true
-        readingsChanged?()
     }
 
     func reloadCollectorConfiguration() {
-        guard !isDemo else { return }
+        guard !isDemo, !refreshing else { return }
         do {
             let config = try connections.load()
             let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
@@ -390,7 +367,7 @@ final class UsageStore {
             if draft.startsCodexLogin { connectCodex(saved.id, method: draft.codexLoginMethod, context: loginContext) }
             else if draft.startsClaudeLogin { connectClaude(saved.id, context: loginContext) }
             else if draft.startsDevinLogin { connectDevin(saved.id, context: loginContext) }
-            else if saved.enabled && !deferConnectionRefresh { await refresh(sourceID: saved.id) }
+            else if saved.enabled { await refresh(sourceID: saved.id) }
             return true
         } catch {
             connectionSaveError = (error as? IntegrationError)?.errorDescription ?? "Couldn't save the connection. Check the fields and try again."
@@ -659,8 +636,6 @@ final class UsageStore {
             var draft = existing.map(ConnectionDraft.init(source:)) ?? ConnectionDraft(integration: integration)
             guard draft.integration == integration else { throw IntegrationError.configuration("The connection type changed.") }
             draft.applyServiceFields(fields)
-            deferConnectionRefresh = true
-            defer { deferConnectionRefresh = false }
             guard await saveConnection(draft, loginContext: context) else { throw IntegrationError.configuration(connectionSaveError ?? "Connection was not saved.") }
         case "connect":
             guard let source, source.enabled else { throw IntegrationError.configuration("Enable this connection before signing in.") }

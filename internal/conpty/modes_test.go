@@ -68,3 +68,26 @@ func TestModeIgnoresQuery(t *testing.T) {
 		t.Fatalf("query must not set a mode, got %q", string(r))
 	}
 }
+
+func TestProgrammaticPasteSeparatesContentFromSubmit(t *testing.T) {
+	var m modeTracker
+	text := "first line\nsecond line λ"
+	if got := string(m.paste(text, true)); got != text+"\r" {
+		t.Fatalf("legacy terminal: %q", got)
+	}
+	m.feed([]byte("\x1b[?20"))
+	m.feed([]byte("04h"))
+	if got := string(m.paste(text, true)); got != "\x1b[200~"+text+"\x1b[201~\r" {
+		t.Fatalf("bracketed terminal: %q", got)
+	}
+	if got := string(m.paste(text, false)); got != "\x1b[200~"+text+"\x1b[201~" {
+		t.Fatalf("no-submit paste: %q", got)
+	}
+	if got := string(m.paste("", true)); got != "\r" {
+		t.Fatalf("submit-only: %q", got)
+	}
+	m.feed([]byte("\x1b[?2004l"))
+	if got := string(m.paste(text, true)); got != text+"\r" {
+		t.Fatalf("reset mode: %q", got)
+	}
+}

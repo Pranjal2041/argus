@@ -7,7 +7,28 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"universal-tmux/internal/agentstate"
 )
+
+func TestCloseUnblocksUndrainedControlOutput(t *testing.T) {
+	c := &Client{outCh: make(chan Output), done: make(chan struct{})}
+	finished := make(chan struct{})
+	go func() {
+		c.readLoop(strings.NewReader("%output %0 queued-output\n"))
+		close(finished)
+	}()
+	c.Close()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("detaching left the control reader blocked on its retired hub")
+	}
+	if _, ok := <-c.Output(); ok {
+		t.Fatal("detached control output remains open")
+	}
+	c.Close() // idempotent even when readLoop also closes the client
+}
 
 func TestSendKeysChunksLargeInputWithoutChangingBytes(t *testing.T) {
 	r, w, err := os.Pipe()
@@ -81,8 +102,8 @@ func TestScreenHasInterrupt(t *testing.T) {
 		{"blank breaks join", "esc to inte\n\nrrupt\n", false},
 	}
 	for _, c := range cases {
-		if got := screenHasInterrupt([]byte(c.screen)); got != c.want {
-			t.Errorf("%s: screenHasInterrupt = %v, want %v", c.name, got, c.want)
+		if got := agentstate.HasInterrupt([]byte(c.screen)); got != c.want {
+			t.Errorf("%s: agentstate.HasInterrupt = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -119,8 +140,8 @@ func TestScreenHasWaitingPrompt(t *testing.T) {
 		{"plain numbered list, no nav footer", " 1. one\n 2. two\n 3. three\n\noutput continues\n", false},
 	}
 	for _, c := range cases {
-		if got := screenHasWaitingPrompt([]byte(c.screen)); got != c.want {
-			t.Errorf("%s: screenHasWaitingPrompt = %v, want %v", c.name, got, c.want)
+		if got := agentstate.HasWaitingPrompt([]byte(c.screen)); got != c.want {
+			t.Errorf("%s: agentstate.HasWaitingPrompt = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

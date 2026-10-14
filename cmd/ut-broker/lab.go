@@ -1071,8 +1071,8 @@ func labMarkStopped(st *labsvc.Store, args []string) int {
 }
 
 // labInit writes the one line agents need into the project instruction files.
-// It appends to CLAUDE.md and AGENTS.md when they exist, creates AGENTS.md
-// when neither does, and never duplicates the line.
+// It always installs AGENTS.md, also updates an existing CLAUDE.md, and never
+// duplicates the line.
 func labInit(_ *labsvc.Store) int {
 	cwd, _ := os.Getwd()
 	results, err := labsvc.InstallInstructions(cwd)

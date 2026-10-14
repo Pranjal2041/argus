@@ -64,7 +64,7 @@ func (c *Client) collectSnapshotLine(line string) bool {
 		if !s.invalid {
 			data = capture.ANSI()
 		}
-		c.outCh <- Output{Pane: c.primary, Data: data, Cols: capture.Cols, Rows: capture.Rows, SnapshotID: s.id}
+		c.emit(Output{Pane: c.primary, Data: data, Cols: capture.Cols, Rows: capture.Rows, SnapshotID: s.id})
 		*s = snapshotReply{}
 		return true
 	}

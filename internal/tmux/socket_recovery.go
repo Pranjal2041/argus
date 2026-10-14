@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"universal-tmux/internal/terminalenv"
 )
 
 // Use tmux's resolved endpoint, including TMUX_TMPDIR or an inherited $TMUX,
@@ -55,7 +57,7 @@ func sessionCreationArgs(socket, name, dir string) ([]string, bool, error) {
 	if running {
 		args = append(args, "-N")
 	}
-	args = append(args, "new-session", "-d", "-s", name)
+	args = append(args, terminalenv.TmuxNewSession("-d", "-s", name)...)
 	if dir != "" {
 		args = append(args, "-c", dir)
 	}

@@ -458,7 +458,7 @@ final class PaneConn: NSObject, TerminalViewDelegate {
     // MARK: image paste (bridge the Mac clipboard to the remote agent)
 
     /// Upload a pasted clipboard image to the session's HOST and type its path into
-    /// the agent. A remote agent (claude/codex on Babel/Windows) can't read the
+    /// the agent. An agent on another host can't read the
     /// Mac's clipboard, so this is the file-path-bridge approach the community uses.
     func handleImagePaste(_ png: Data) {
         guard !httpBase.isEmpty else { return }
@@ -1151,7 +1151,7 @@ final class TerminalController: ObservableObject {
         // Shift+Enter → newline (LF), as long as no cmd/ctrl/opt is involved.
         if (event.keyCode == 36 || event.keyCode == 76),
            shiftDown, mods.isDisjoint(with: [.command, .control, .option]) {
-            conn.sendInput("\n")   // LF == Ctrl+J == claude/codex "insert newline"
+            conn.sendInput("\n")   // LF / Ctrl+J inserts a composer newline across supported agent CLIs.
             return nil
         }
         if event.keyCode == 9, mods.contains(.control), mods.isDisjoint(with: [.command, .option]),

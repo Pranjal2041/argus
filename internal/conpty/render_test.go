@@ -8,6 +8,41 @@ import (
 	"universal-tmux/internal/rendersource"
 )
 
+// The incremental screen, not OSC title conventions or a bounded output ring,
+// owns activity. Exercise both single-press and repeated-press TUI controls.
+func TestCaptureActivityUsesCurrentScreen(t *testing.T) {
+	for _, hint := range []string{"esc to interrupt", "esc twice to interrupt", "/stop to interrupt"} {
+		s := newCaptureScreen(100, 24)
+		s.write([]byte("\x1b]0;static title\x07\x1b[20;1HThinking (" + hint + ")"))
+		if got := s.activity(); got != "working" {
+			t.Fatalf("%s: %q", hint, got)
+		}
+		s.write([]byte("\x1b[20;1H\x1b[2mThinking (" + hint + ")\x1b[22m"))
+		if got := s.activity(); got != "working" {
+			t.Fatalf("faint footer: %q", got)
+		}
+		// More than the old title scan/ring bound, without repainting the footer.
+		for i := 0; i < 2000; i++ {
+			s.write([]byte("\x1b[1;1Hprogress"))
+		}
+		if got := s.activity(); got != "working" {
+			t.Fatalf("lost persistent footer: %q", got)
+		}
+		s.write([]byte("\x1b[2J\x1b[1;1HChoose\r\n❯ 1. Allow\r\n 2. Deny"))
+		if got := s.activity(); got != "waiting" {
+			t.Fatalf("dialog: %q", got)
+		}
+		s.write([]byte("\x1b[2J\x1b[1;1HDone\r\n❯ "))
+		if got := s.activity(); got != "idle" {
+			t.Fatalf("completed: %q", got)
+		}
+	}
+	var unavailable *captureScreen
+	if unavailable.activity() != "" {
+		t.Fatal("missing screen must not mean completion")
+	}
+}
+
 func TestRenderSnapshotPreservesCursorBlankRowsAndEditorBoundary(t *testing.T) {
 	s := newCaptureScreen(80, 12)
 	border := strings.Repeat("─", 80)

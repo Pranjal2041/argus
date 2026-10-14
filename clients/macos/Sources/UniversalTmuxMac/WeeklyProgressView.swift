@@ -110,14 +110,7 @@ struct WeeklyProgressView: View {
                     .foregroundStyle(Theme.textTertiary)
             }
             Spacer()
-            Text(WeeklyProgressModelPresentation.currentLabel)
-                .font(cf(9.5, .semibold))
-                .tracking(0.5)
-                .foregroundStyle(Theme.textTertiary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(Theme.surface.opacity(0.75)))
-                .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+            WeeklyProgressProviderBadge(scale: uiScale)
             Button { state.showWeeklyProgress = false } label: {
                 Image(systemName: "xmark")
                     .font(cf(13, .medium))

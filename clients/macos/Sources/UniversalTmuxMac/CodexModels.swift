@@ -2,4 +2,5 @@
 /// own reasoning effort, prompt, and conversation lifecycle.
 enum CodexModels {
     static let luna = "gpt-6-luna"
+    static let weeklyProgress = "gpt-6-astra"
 }

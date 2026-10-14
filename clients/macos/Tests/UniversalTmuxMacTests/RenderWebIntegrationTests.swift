@@ -5,6 +5,54 @@ import XCTest
 
 @MainActor
 final class RenderWebIntegrationTests: XCTestCase {
+    func testEveryTranscriptProviderUsesTheSameRichRenderer() async throws {
+        let source = "# Agent report\n\n| Component | Purpose |\n|---|---|\n| Worker | Execute tasks |\n| Coordinator | Collect measurements |\n\n```swift\nlet value = 42\n```\n\n\\[x^2 + y^2 = z^2\\]"
+        for provider in AgentProvider.allCases {
+            let webView = try await loadRenderer()
+            try await setDocument(webView, source: source, origin: provider.rawValue + "-transcript", presentation: "rendered")
+            let report = try await inspect(webView)
+            XCTAssertEqual(report.string("sourceOrigin"), provider.rawValue + "-transcript")
+            XCTAssertEqual(report["tables"] as? Int, 1)
+            XCTAssertEqual(report["displayMath"] as? Int, 1)
+            XCTAssertEqual(report["codeBlocks"] as? Int, 1)
+            XCTAssertTrue(report.string("text").contains("Collect measurements"))
+            // Exercise the actual rendered/terminal control's common entry point.
+            try await setDocument(webView, source: source, origin: provider.rawValue + "-transcript", presentation: "terminal")
+            let terminal = try await inspect(webView)
+            XCTAssertGreaterThan(terminal["terminalRows"] as? Int ?? 0, 0)
+            try await setDocument(webView, source: source, origin: provider.rawValue + "-transcript", presentation: "rendered")
+            let rendered = try await inspect(webView)
+            XCTAssertEqual(rendered["tables"] as? Int, 1)
+        }
+    }
+
+    func testInspectLiveAgentRenderWhenRequested() async throws {
+        guard let input = ProcessInfo.processInfo.environment["UT_TEST_AGENT_SOURCE_INPUT"],
+              let output = ProcessInfo.processInfo.environment["UT_TEST_AGENT_RENDER_SCREENSHOT"] else { return }
+        struct Source: Decodable { let source: String; let origin: String }
+        let document = try JSONDecoder().decode(Source.self, from: Data(contentsOf: URL(fileURLWithPath: input)))
+        let webView = try await loadRenderer()
+        try await setDocument(webView, source: document.source, origin: document.origin, presentation: "rendered")
+        let report = try await inspect(webView)
+        XCTAssertEqual(report.string("sourceOrigin"), document.origin)
+        XCTAssertGreaterThan(report["headings"] as? Int ?? 0, 0)
+        XCTAssertTrue(report["error"] is NSNull || report["error"] == nil)
+        let scrollable = try await webView.evaluateJavaScript(#"""
+            Array.from(document.querySelectorAll('.table-scroll')).every(box => {
+              box.scrollLeft = box.scrollWidth;
+              const last = box.querySelector('tr:last-child td:last-child');
+              const reachable = !last || last.getBoundingClientRect().right <= box.getBoundingClientRect().right + 2;
+              box.scrollLeft = 0;
+              return reachable;
+            })
+            """#) as? Bool
+        XCTAssertEqual(scrollable, true, "Every wide table's rightmost content is reachable")
+        let height = try await webView.evaluateJavaScript("document.documentElement.scrollHeight") as? Double ?? 900
+        webView.frame.size.height = min(8000, height + 20)
+        try await capture(webView, to: output)
+        print("Live renderer checked: \(report["tables"] ?? 0) tables, \(report["headings"] ?? 0) headings")
+    }
+
     func testPDFPreservesBundledMathStylesAndNestedOverflow() async throws {
         let webView = try await loadRenderer()
         try await setDocument(webView, source: "# Math and nested content\n\n\\[\\frac{123}{456} + \\sqrt{789}\\]\n\nNESTED_START", origin: "test", presentation: "rendered")

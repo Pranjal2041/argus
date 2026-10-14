@@ -28,13 +28,18 @@ enum WeeklyProgressWeekNavigation {
 }
 
 enum WeeklyProgressModelPresentation {
-    /// The dashboard describes the configuration used for new and resumed runs,
-    /// not the model recorded by an older generation in the selected week.
+    /// New generations follow the selected provider. Resumed generations retain
+    /// their persisted provider and conversation identity.
     static var currentLabel: String {
-        label(
-            model: CodexWeeklyProgressCommand.model,
-            reasoningEffort: CodexWeeklyProgressCommand.reasoningEffort
-        )
+        label(provider: AgentTaskPurpose.weeklyProgress.selectedProvider())
+    }
+
+    static func label(provider: AgentProvider) -> String {
+        let purpose = AgentTaskPurpose.weeklyProgress
+        guard let model = purpose.model(for: provider) else {
+            return provider.displayName.uppercased() + " · CONFIGURED MODEL"
+        }
+        return label(model: model, reasoningEffort: purpose.reasoningEffort)
     }
 
     static func label(model: String, reasoningEffort: String) -> String {

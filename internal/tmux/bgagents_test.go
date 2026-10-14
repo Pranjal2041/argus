@@ -3,6 +3,7 @@ package tmux
 import (
 	"strings"
 	"testing"
+	"universal-tmux/internal/agentstate"
 )
 
 // The background-sub-agents view from a real session (paste-E0722445): the agent
@@ -25,16 +26,16 @@ const realDialogScreen = `Do you want to proceed?
   ↑/↓ to navigate · Enter to select · Esc to cancel`
 
 func TestBackgroundAgentsNotWaiting(t *testing.T) {
-	if !bgAgentsWaitingRe.Match([]byte(bgAgentsScreen)) {
+	if agentstate.Detect([]byte(bgAgentsScreen)) != "working" {
 		t.Fatal("bgAgentsWaitingRe should match 'Waiting for 2 background agents'")
 	}
-	if screenHasWaitingPrompt([]byte(bgAgentsScreen)) {
+	if agentstate.HasWaitingPrompt([]byte(bgAgentsScreen)) {
 		t.Fatal("background-agents manager must NOT count as waiting (it's delegated work, not a user choice)")
 	}
 }
 
 func TestRealDialogStillWaiting(t *testing.T) {
-	if !screenHasWaitingPrompt([]byte(realDialogScreen)) {
+	if !agentstate.HasWaitingPrompt([]byte(realDialogScreen)) {
 		t.Fatal("a real permission dialog must still be detected as waiting")
 	}
 }

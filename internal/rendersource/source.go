@@ -53,15 +53,19 @@ type Result struct {
 // agent process in one terminal pane. Provider selects only the format adapter;
 // provenance, turn selection, matching, and fallback remain shared here.
 type TranscriptRef struct {
-	Provider           string
-	Path               string
+	Provider string
+	Path     string
+	// Stores may contain multiple conversations. A selector is part of exact
+	// provenance, never an invitation to choose the newest row in that store.
+	SessionID          string
 	RequireScreenMatch bool
 }
 
 type candidateFile struct {
-	path     string
-	provider string
-	mtime    time.Time
+	path      string
+	provider  string
+	sessionID string
+	mtime     time.Time
 }
 
 type message struct {
@@ -73,7 +77,7 @@ type message struct {
 	decorations []string
 }
 
-// Resolve searches the standard Codex and Claude transcript stores on this
+// Resolve searches the registered providers' standard transcript stores on this
 // host. It never trusts recency alone: a candidate must strongly overlap the
 // captured screen, preventing two agents in the same folder from crossing.
 func Resolve(home, cwd, screen string) (Result, error) {
@@ -98,37 +102,24 @@ func ResolveWithTranscript(home, cwd, screen string, transcript TranscriptRef) (
 			// it is not visible enough yet, preserve the lossless terminal frame;
 			// never walk backward to a fully visible previous response.
 			best = bestFromExactTranscript(candidateFile{
-				path: transcript.Path, provider: transcript.Provider, mtime: info.ModTime(),
+				path: transcript.Path, provider: transcript.Provider, sessionID: transcript.SessionID, mtime: info.ModTime(),
 			}, screenTokens)
 			if best.Confidence >= minimumConfidence {
 				return best, nil
 			}
 			return Result{}, ErrNoMatch
 		}
+		// Missing or unreadable exact storage cannot authorize another session.
+		return Result{}, ErrNoMatch
 	}
-	// Try Codex first. A strong screen match already identifies the authored
-	// response; walking a second provider's potentially very large history adds
-	// latency without increasing confidence. A miss then searches Claude.
-	if best.Confidence < minimumConfidence {
-		best = bestFromFiles(
-			discover(filepath.Join(home, ".codex", "sessions"), "codex", cwd),
-			cwd, screenTokens, best,
-		)
-	}
-	if best.Confidence < minimumConfidence {
-		root := filepath.Join(home, ".claude", "projects")
-		best = bestFromFiles(
-			discover(root, "claude", cwd),
-			cwd, screenTokens, best,
-		)
-		if cwd != "" && best.Confidence < minimumConfidence {
-			// Encoded project names reflect the launch path, which can be a
-			// symlink rather than the pane's physical cwd. A scoped miss must
-			// not hide an equivalent path's transcript. Keep cwd and visible
-			// overlap checks; broaden only the directory-name optimization.
-			if _, scoped := claudeProjectRoot(root, cwd); scoped {
-				best = bestFromFiles(discoverCandidates(root, "claude", cwd, false), cwd, screenTokens, best)
-			}
+	// A proven near-prompt screen match ends discovery for every adapter.
+	for _, adapter := range transcriptAdapters {
+		best = bestFromFiles(adapter.discover(home, cwd), cwd, screenTokens, best)
+		if best.Confidence < minimumConfidence && adapter.fallbackDiscover != nil {
+			best = bestFromFiles(adapter.fallbackDiscover(home, cwd), cwd, screenTokens, best)
+		}
+		if best.Confidence >= minimumConfidence {
+			break
 		}
 	}
 
@@ -161,14 +152,10 @@ func bestFromExactTranscript(file candidateFile, screenTokens []string) Result {
 }
 
 func transcriptMessages(file candidateFile) []message {
-	switch file.provider {
-	case "codex":
-		return codexMessages(file.path)
-	case "claude":
-		return claudeMessages(file.path)
-	default:
-		return nil
+	if adapter := adapterFor(file.provider); adapter != nil {
+		return adapter.messages(file)
 	}
+	return nil
 }
 
 func bestFromFiles(files []candidateFile, cwd string, screenTokens []string, best Result) Result {

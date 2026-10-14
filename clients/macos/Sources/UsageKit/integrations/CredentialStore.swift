@@ -22,8 +22,6 @@ extension CredentialStoring {
 struct KeychainCredentialStore: CredentialStoring {
     static let service = "com.pranjal.usage.credentials"
     private static let legacyReadLock = NSLock()
-    var worker: any UsageCredentialRunning = UsageCredentialProcess()
-    var isWorker = false
 
     private func query(_ reference: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
@@ -32,8 +30,7 @@ struct KeychainCredentialStore: CredentialStoring {
     }
 
     func read(reference: String) throws -> [String: String] {
-        if !isWorker { return try worker.perform(.init(operation: .read, reference: reference)).values ?? [:] }
-        return try read(reference: reference, allowInteraction: false)
+        try read(reference: reference, allowInteraction: false)
     }
 
     /// Explicit user action only; background refresh always calls the non-interactive overload.
@@ -50,44 +47,20 @@ struct KeychainCredentialStore: CredentialStoring {
         context.interactionNotAllowed = !allowInteraction
         request[kSecUseAuthenticationContext as String] = context
         var result: CFTypeRef?
-        // LAContext alone does not suppress legacy ACL prompts. Only the isolated
-        // worker changes the process-wide switch; explicit authorization in the
-        // host must leave the browser/vault's Keychain behavior untouched.
+        // LAContext alone does not suppress legacy login-keychain ACL prompts on macOS.
+        // Serialize the process-wide legacy setting and restore it after this exact read.
+        Self.legacyReadLock.lock()
+        defer { Self.legacyReadLock.unlock() }
         var interactionAllowed: DarwinBoolean = true
-        if !allowInteraction {
-            Self.legacyReadLock.lock()
-            SecKeychainGetUserInteractionAllowed(&interactionAllowed)
-            SecKeychainSetUserInteractionAllowed(false)
-        }
-        defer {
-            if !allowInteraction {
-                SecKeychainSetUserInteractionAllowed(interactionAllowed.boolValue)
-                Self.legacyReadLock.unlock()
-            }
-        }
+        SecKeychainGetUserInteractionAllowed(&interactionAllowed)
+        SecKeychainSetUserInteractionAllowed(allowInteraction)
+        defer { SecKeychainSetUserInteractionAllowed(interactionAllowed.boolValue) }
         let status = SecItemCopyMatching(request as CFDictionary, &result)
-        guard status == errSecSuccess else { throw Self.failure(for: status) }
-        guard let data = result as? Data,
+        guard status == errSecSuccess, let data = result as? Data,
               let values = try? JSONDecoder().decode([String: String].self, from: data) else {
-            throw IntegrationError.invalidResponse("The saved credential could not be decoded.")
+            throw IntegrationError.authentication("macOS has not authorized this build to read the saved key. In Connections, choose Authorize saved key. Your provider key and its permissions are unchanged.")
         }
         return values
-    }
-
-    /// Keychain availability and provider authentication are separate facts.
-    /// Only a genuinely missing credential is a missing account credential;
-    /// lock, IPC, decoding, and worker failures must not demand a fresh login.
-    static func failure(for status: OSStatus) -> IntegrationError {
-        switch status {
-        case errSecItemNotFound:
-            return .authentication("This connection has no saved credential.")
-        case errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled:
-            return .permission("macOS could not unlock this connection's saved credential. Argus will retry automatically.")
-        case errSecDecode:
-            return .invalidResponse("The saved credential could not be decoded.")
-        default:
-            return .unavailable("The credential service is temporarily unavailable (status \(status)). Argus will retry automatically.")
-        }
     }
 
     func save(_ values: [String: String], reference: String) throws {
@@ -108,10 +81,6 @@ struct KeychainCredentialStore: CredentialStoring {
     }
 
     func update(_ values: [String: String], reference: String) throws {
-        if !isWorker {
-            _ = try worker.perform(.init(operation: .update, reference: reference, values: values))
-            return
-        }
         var request = query(reference)
         let context = LAContext(); context.interactionNotAllowed = true
         request[kSecUseAuthenticationContext as String] = context
@@ -124,7 +93,7 @@ struct KeychainCredentialStore: CredentialStoring {
         let status = SecItemUpdate(request as CFDictionary,
             [kSecValueData as String: try JSONEncoder().encode(values)] as CFDictionary)
         guard status == errSecSuccess else {
-            throw Self.failure(for: status)
+            throw IntegrationError.authentication("Could not save the renewed Claude login. Reconnect this account in Connections.")
         }
     }
 }

@@ -99,6 +99,29 @@ func (p *tieredRefreshProvider) DetectState(name string) string {
 	return p.states[name]
 }
 
+func TestUnavailableActivityDoesNotInventCompletionOrCrossLifetimes(t *testing.T) {
+	p := &tieredRefreshProvider{inventory: []session.Info{{Name: "renamed", ID: "$1", LineageID: "same-process"}}}
+	m := &Manager{prov: p, hidden: map[string]bool{}, history: map[string]*SessionHistory{},
+		sessCache: []session.Info{{Name: "original", ID: "$1", LineageID: "same-process", State: "working"}}}
+	m.refreshSessions(false)
+	if got := m.Sessions()[0].State; got != "working" {
+		t.Fatalf("capture failure invented completion: %q", got)
+	}
+	p.states = map[string]string{"renamed": "idle"}
+	m.refreshSessions(false)
+	if got := m.Sessions()[0].State; got != "idle" {
+		t.Fatalf("real completion not published: %q", got)
+	}
+	p.states["renamed"] = "working"
+	m.refreshSessions(false)
+	p.states = nil
+	p.inventory[0].LineageID = "replacement-process"
+	m.refreshSessions(false)
+	if got := m.Sessions()[0].State; got != "idle" {
+		t.Fatalf("old process state leaked into replacement: %q", got)
+	}
+}
+
 func (p *tieredRefreshProvider) takeDetected() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

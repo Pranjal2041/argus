@@ -158,7 +158,7 @@ final class ArtifactStoreTests: XCTestCase {
     func testCodexTitleCommandPinsGPT6LunaAndMediumReasoningForTextAndImages() {
         let screenshot = URL(fileURLWithPath: "/tmp/screenshot.png")
         for imageURL in [nil, screenshot] as [URL?] {
-            let arguments = CodexArtifactTitleProvider.commandArguments(
+            let arguments = AgentArtifactTitleProvider.commandArguments(
                 outputURL: URL(fileURLWithPath: "/tmp/title.txt"),
                 workingDirectory: URL(fileURLWithPath: "/tmp/title-work"),
                 imageURL: imageURL
@@ -175,7 +175,7 @@ final class ArtifactStoreTests: XCTestCase {
 
     func testAutomaticTitleSanitizingAndVersionNumbersRemainReadable() {
         XCTAssertEqual(
-            CodexArtifactTitleProvider.sanitized("**Title: Router Accuracy Comparison.pdf.**"),
+            AgentArtifactTitleProvider.sanitized("**Title: Router Accuracy Comparison.pdf.**"),
             "Router Accuracy Comparison"
         )
         XCTAssertEqual(

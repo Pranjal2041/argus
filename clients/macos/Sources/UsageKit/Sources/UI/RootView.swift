@@ -84,9 +84,9 @@ struct RootView: View {
                     .buttonStyle(.plain).font(.system(size: 11)).accessibilityIdentifier("nav-overview")
             }
             Button { Task { await store.refresh() } } label: {
-                if store.refreshing { ProgressView().controlSize(.mini).frame(width: 28, height: 28) }
+                if store.isRefreshing { ProgressView().controlSize(.mini).frame(width: 28, height: 28) }
                 else { Image(systemName: "arrow.clockwise").font(.system(size: 12)).frame(width: 28, height: 28) }
-            }.buttonStyle(.plain).disabled(store.refreshing).help("Refresh sources")
+            }.buttonStyle(.plain).disabled(store.isRefreshing).help("Refresh sources")
                 .accessibilityLabel("Refresh sources").accessibilityIdentifier("refresh-sources")
             Menu {
                 Button("Overview") { store.page = "Overview"; store.selection = nil }
@@ -190,12 +190,12 @@ struct RootView: View {
             Spacer()
             Button { Task { await store.refresh() } } label: {
                 HStack(spacing: 6) {
-                    if store.refreshing { ProgressView().controlSize(.mini).frame(width: 12, height: 12) }
+                    if store.isRefreshing { ProgressView().controlSize(.mini).frame(width: 12, height: 12) }
                     else { Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .medium)) }
-                    Text(store.refreshing ? "Refreshing…" : "\(store.isDemo ? "Updated" : "Checked") \(UsageFormat.freshness(store.lastRefresh ?? .now, now: store.now))")
+                    Text(store.isRefreshing ? "Refreshing…" : "\(store.isDemo ? "Updated" : "Checked") \(UsageFormat.freshness(store.lastRefresh ?? .now, now: store.now))")
                         .font(.system(size: 11))
                 }.foregroundStyle(Palette.secondary)
-            }.buttonStyle(.plain).disabled(store.refreshing).accessibilityLabel("Refresh sources").accessibilityIdentifier("refresh-sources")
+            }.buttonStyle(.plain).disabled(store.isRefreshing).accessibilityLabel("Refresh sources").accessibilityIdentifier("refresh-sources")
         }
     }
 

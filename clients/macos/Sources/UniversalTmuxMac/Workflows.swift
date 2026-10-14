@@ -170,6 +170,8 @@ private struct WorkflowFormView: View {
         "claude --dangerously-skip-permissions",
         "claude --dangerously-skip-permissions --resume ",
         "codex",
+        "devin",
+        "devin --resume ",
     ]
     /// Commands you can drop in: the distinct ones from your other workflows (so a command
     /// you use a lot is one click away), then a few common presets not already there.

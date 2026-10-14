@@ -28,35 +28,23 @@ final class WorkspaceRecurringJob {
 /// cannot start a second collector or stop the workspace's collection work.
 enum WorkspaceServiceLauncher {
     static let label = "dev.universaltmux.workspace"
+
+    static func specification(executable: URL, build: TimeInterval) -> LaunchAgentService {
+        // This service supplies the live app and runs bounded provider commands.
+        // Darwin-background throttling is inherited by those commands and can
+        // turn a healthy fetch into a timeout. Match the app's resource policy;
+        // Adaptive cannot promote our HTTP IPC as it would an XPC connection.
+        LaunchAgentService(label: label,
+            arguments: [executable.path, "--workspace-worker", "--build=\(build)"],
+            processType: .interactive, keepAlive: true, logName: "workspace.log")
+    }
+
     @MainActor static func ensureRunning() throws {
         guard Bundle.main.bundleURL.pathExtension == "app", let executable = Bundle.main.executableURL,
               !CommandLine.arguments.contains("--workspace-worker") else { return }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let directory = home.appendingPathComponent("Library/LaunchAgents")
-        let file = directory.appendingPathComponent(label + ".plist")
-        let logs = home.appendingPathComponent("Library/Logs/Argus")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try LocalBrokerServiceLauncher.ensureRunning()
         let build = (try? executable.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?.timeIntervalSince1970) ?? 0
-        let plist: [String: Any] = ["Label": label, "ProgramArguments": [executable.path, "--workspace-worker", "--build=\(build)"],
-            "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 15, "ProcessType": "Background",
-            "StandardOutPath": logs.appendingPathComponent("workspace.log").path,
-            "StandardErrorPath": logs.appendingPathComponent("workspace.log").path]
-        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-        let changed = (try? Data(contentsOf: file)) != data
-        if changed { try data.write(to: file, options: .atomic) }
-        let domain = "gui/\(getuid())"
-        func run(_ args: [String]) throws -> Int32 {
-            let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/launchctl"); process.arguments = args
-            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            try process.run(); process.waitUntilExit(); return process.terminationStatus
-        }
-        if changed { _ = try run(["bootout", domain + "/" + label]) }
-        if try run(["print", domain + "/" + label]) != 0 {
-            guard try run(["bootstrap", domain, file.path]) == 0 else {
-                throw ArgusFailure("service_start_failed", "Workspace background service could not start.")
-            }
-        }
+        try specification(executable: executable, build: build).ensureRunning()
     }
 
     static func runIfRequested() {
@@ -68,7 +56,15 @@ enum WorkspaceServiceLauncher {
         // explicit loopback endpoint also permits isolated process-level checks.
         guard let url = URL(string: base), url.scheme == "http",
               ["127.0.0.1", "localhost", "[::1]", "::1"].contains(url.host ?? "") else { exit(2) }
-        Task { @MainActor in await WorkspaceCollector(base: base).run() }
+        Task { @MainActor in
+            // A login can start this worker before the app has ever opened.
+            // Explicit test endpoints are externally owned and never bootstrapped.
+            if !CommandLine.arguments.contains(where: { $0.hasPrefix(prefix) }) {
+                do { try LocalBrokerServiceLauncher.ensureRunning() }
+                catch { NSLog("[local-broker-service] %@", error.localizedDescription) }
+            }
+            await WorkspaceCollector(base: base).run()
+        }
         HeadlessMainRunLoop.run()
     }
 }
@@ -82,8 +78,6 @@ private final class WorkspaceCollector {
     private let base: String
     private var leases: [String: ArgusJSON] = [:]
     private var networkCadence = NetworkCadence()
-    private var lastUsage = Date.distantPast
-    private var usageRefreshRequested = false
     private var usageTask: Task<Void, Never>?
     private var accountTask: Task<Void, Never>?
     private var usageController: AnyObject?
@@ -106,7 +100,8 @@ private final class WorkspaceCollector {
         app.machines[0].wsBase = base.replacingOccurrences(of: "http://", with: "ws://")
         networkObserver = MainActorNotification.observe(BrokerNetworkRecovery.recovered) { [weak self] in
             self?.networkCadence.reset()
-            self?.usageRefreshRequested = true
+            // Usage owns its original polling loop. Route notifications are
+            // broker recovery signals, not requests to poll every provider.
         }
     }
 
@@ -117,6 +112,20 @@ private final class WorkspaceCollector {
     }
 
     func run() async {
+        // Usage owns its refresh loop and local cache. Broker availability,
+        // workspace leases, and Argus network policy only affect publication.
+        if #available(macOS 14.0, *) {
+            let usage = UsageController()
+            usage.readingsChanged = { [weak self] in
+                self?.usagePresentationDirty = true
+                self?.usagePresentationRevision += 1
+            }
+            usageController = usage
+            usage.start()
+        }
+        defer {
+            if #available(macOS 14.0, *) { (usageController as? UsageController)?.stop() }
+        }
         _ = BrokerNetworkRecovery.shared
         cc.bind(app)
         ActivityJournal.shared.nameResolver = { [weak app] id in app?.machines.first { $0.id == id }?.name }
@@ -226,17 +235,6 @@ private final class WorkspaceCollector {
                 }
             }
         }
-        if #available(macOS 14.0, *), owns("usage"), usageController == nil {
-            let usage = UsageController()
-            if let snapshot = replica.data("usage", "current") {
-                try usage.restoreCollectorSnapshot(ArgusWire.encoder().encode(snapshot))
-            }
-            usage.readingsChanged = { [weak self] in
-                self?.usagePresentationDirty = true
-                self?.usagePresentationRevision += 1
-            }
-            usageController = usage
-        }
         if #available(macOS 14.0, *), let usage = usageController as? UsageController {
             if owns("usage"), accountTask == nil, let lease = leases["usage"] {
                 let call = try await sharedWorkspaceRequest(base, "/workspace/service/usage/take", lease)
@@ -248,7 +246,6 @@ private final class WorkspaceCollector {
                             guard owns("usage"), leases["usage"]?["fence"] == lease["fence"] else { return }
                             _ = try await sharedWorkspaceRequest(base, "/workspace/service/usage/reply", .object([
                                 "id": .string(id), "lease": lease, "body": try JSONDecoder().decode(ArgusJSON.self, from: result)]))
-                            if call["body"]["action"].string != "state" { usageRefreshRequested = true }
                         } catch { NSLog("[workspace-service] Account request was not acknowledged.") }
                     }
                 }
@@ -259,7 +256,7 @@ private final class WorkspaceCollector {
             if let dismissals = replica.data("usage-dismissals", "default"), dismissals != dismissalsApplied {
                 try usage.applySharedDismissals(ArgusWire.encoder().encode(dismissals)); dismissalsApplied = dismissals; usagePresentationDirty = true
             }
-            usage.setCollectionCadence(policy.usage(usage.collectionInterval))
+            usage.setCollectionCadence(usage.collectionInterval)
             var acknowledgedCommands = Set<String>()
             if owns("usage"), usagePresentationDirty {
                 let revision = usagePresentationRevision
@@ -275,13 +272,11 @@ private final class WorkspaceCollector {
             let commands = replica.collection("commands").filter {
                 $0.data?["kind"].string == "usage-refresh" && !acknowledgedCommands.contains($0.id)
             }
-            let scheduled = usageRefreshRequested || Date().timeIntervalSince(lastUsage) >= policy.usage(usage.collectionInterval)
-            if owns("usage"), usageTask == nil, accountTask == nil,
-               scheduled || !commands.isEmpty {
-                lastUsage = Date(); usageRefreshRequested = false
+            if owns("usage"), usageTask == nil, accountTask == nil, !usage.refreshing,
+               !commands.isEmpty {
                 let fence = leases["usage"]?["fence"]
                 let targets = Set(commands.compactMap { $0.data?["sourceID"].string })
-                let allAccounts = scheduled || commands.contains { $0.data?["sourceID"].string == nil }
+                let allAccounts = commands.contains { $0.data?["sourceID"].string == nil }
                 usageTask = Task {
                     defer { usageTask = nil }
                     if allAccounts { await usage.collectForWorkspace() }

@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
+	"universal-tmux/internal/agentstate"
 	"universal-tmux/internal/session"
 )
 
@@ -48,14 +49,25 @@ func renderRing(b []byte, cols, rows int) string {
 //
 // Resize is applied at the same moment as the real ConPTY resize, so bytes produced
 // at different terminal widths are never replayed as though they all had the latest
-// width. The bounded raw ring remains useful for reconnect/state detection, but it is
+// width. The bounded raw ring remains useful for reconnect, but it is
 // no longer treated as a terminal checkpoint.
 type captureScreen struct {
-	vt       vt10x.Terminal
-	cols     int
-	rows     int
-	faint    faintFilter
-	utf8Tail []byte
+	vt              vt10x.Terminal
+	visible         vt10x.Terminal // unfiltered: faint controls still convey activity
+	cols            int
+	rows            int
+	faint           faintFilter
+	utf8Tail        []byte
+	visibleUTF8Tail []byte
+}
+
+// activity reads the same visible-screen contract as tmux, including agents
+// with static titles and dialogs. Missing screen evidence is not completion.
+func (s *captureScreen) activity() string {
+	if s == nil {
+		return ""
+	}
+	return agentstate.Detect([]byte(trimScreen(s.visible.String())))
 }
 
 func newCaptureScreen(cols, rows int) *captureScreen {
@@ -66,9 +78,10 @@ func newCaptureScreen(cols, rows int) *captureScreen {
 		rows = defRows
 	}
 	return &captureScreen{
-		vt:   vt10x.New(vt10x.WithSize(cols, rows)),
-		cols: cols,
-		rows: rows,
+		vt:      vt10x.New(vt10x.WithSize(cols, rows)),
+		visible: vt10x.New(vt10x.WithSize(cols, rows)),
+		cols:    cols,
+		rows:    rows,
 	}
 }
 
@@ -77,28 +90,34 @@ func (s *captureScreen) resize(cols, rows int) {
 		return
 	}
 	s.vt.Resize(cols, rows)
+	s.visible.Resize(cols, rows)
 	s.cols, s.rows = cols, rows
 }
 
 func (s *captureScreen) write(b []byte) {
-	filtered := s.faint.filter(b)
-	if len(s.utf8Tail) > 0 {
-		joined := make([]byte, 0, len(s.utf8Tail)+len(filtered))
-		joined = append(joined, s.utf8Tail...)
+	s.visibleUTF8Tail = writeScreenUTF8(s.visible, b, s.visibleUTF8Tail)
+	s.utf8Tail = writeScreenUTF8(s.vt, s.faint.filter(b), s.utf8Tail)
+}
+
+func writeScreenUTF8(vt vt10x.Terminal, filtered, tail []byte) []byte {
+	if len(tail) > 0 {
+		joined := make([]byte, 0, len(tail)+len(filtered))
+		joined = append(joined, tail...)
 		joined = append(joined, filtered...)
 		filtered = joined
-		s.utf8Tail = s.utf8Tail[:0]
 	}
+	tail = tail[:0]
 
 	// vt10x keeps escape-parser state across Write calls, but an incomplete UTF-8
 	// rune at the end of a pipe read must be carried into the next call explicitly.
 	end := completeUTF8Prefix(filtered)
 	if end > 0 {
-		_, _ = s.vt.Write(filtered[:end])
+		_, _ = vt.Write(filtered[:end])
 	}
 	if end < len(filtered) {
-		s.utf8Tail = append(s.utf8Tail, filtered[end:]...)
+		tail = append(tail, filtered[end:]...)
 	}
+	return tail
 }
 
 func completeUTF8Prefix(b []byte) int {

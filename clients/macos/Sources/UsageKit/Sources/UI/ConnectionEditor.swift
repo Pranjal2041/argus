@@ -5,7 +5,7 @@ struct ConnectionEditor: View {
     @State var draft: ConnectionDraft
     @Bindable var store: UsageStore
 
-    private var busy: Bool { store.savingConnection || store.refreshing || store.loginSourceID != nil }
+    private var busy: Bool { store.savingConnection || store.isRefreshing || store.loginSourceID != nil }
     private var actionTitle: String {
         if draft.startsAccountLogin { return draft.integration.signInTitle }
         return draft.sourceID == nil ? (draft.integration.category == .devices ? "Connect device" : "Connect account") : "Save changes"

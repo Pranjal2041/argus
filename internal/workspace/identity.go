@@ -22,6 +22,16 @@ func DefaultRoot(socket string) (string, error) {
 	return DefaultRootForInstallation(socket, "")
 }
 
+// InstallationKey is the opaque, socket-scoped identity shared by durable
+// broker services. Resolving it does not open or migrate the workspace database.
+func InstallationKey(socket, installationID string) (string, error) {
+	root, err := resolveRoot(statedir.Dir(), socket, os.Getenv("UT_MACHINE_ID"), installationID, osMachineIdentity)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(root), nil
+}
+
 // DefaultRootForInstallation isolates installations even when they share a home
 // and a cloned OS machine ID. installationID must be an opaque, durable runtime
 // identity, never a display name, address, hostname, or process/boot identifier.

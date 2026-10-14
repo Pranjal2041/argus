@@ -65,6 +65,7 @@ func main() {
 	}
 
 	listen := flag.String("listen", "127.0.0.1:8722", "local host:port (the port is reused on the tailnet when --tsnet-host is set)")
+	probeLocal := flag.Bool("probe-local", false, "check that the listen address serves this tmux socket, without starting a broker")
 	session := flag.String("session", "ut-demo", "fallback session when none is requested; warmed only when it already exists")
 	tmuxSock := flag.String("tmux-socket", "ut", "dedicated tmux server socket (-L); isolates our sessions from any other tmux")
 	webDir := flag.String("web", "", "serve web assets from this dir instead of the embedded copy (dev)")
@@ -75,6 +76,12 @@ func main() {
 	extraListen := flag.String("extra-listen", "", "additional best-effort host:port to ALSO serve the same mux on (e.g. this host's tailnet IP, so remote tailnet clients can reach a loopback-bound broker). A bind failure here is logged and ignored — it never stops the primary --listen.")
 	localListenFlag := flag.String("local-listen", "", "loopback host:port for CLIs and agents on THIS host (default 127.0.0.1:$UT_LOCAL_PORT, else the --listen port). Lets several brokers share a host while each publishes the standard tailnet port.")
 	flag.Parse()
+	if *probeLocal {
+		if localBrokerMatches("http://"+*listen, *tmuxSock) {
+			return
+		}
+		os.Exit(1)
+	}
 	localListen, err := resolveLocalListen(*localListenFlag, *listen, os.Getenv("UT_LOCAL_PORT"))
 	if err != nil {
 		log.Fatal(err)
@@ -124,7 +131,10 @@ func main() {
 		go workspaceStore.RunBackupLoop(ctx, func(err error) { log.Printf("workspace backup: %v", err) })
 	}
 	mgr := broker.NewManagerWithWorkspace(ctx, makeProvider(*tmuxSock, *shell), workspaceStore)
-	recoveryStore := recovery.NewStoreWithRuntime(*tmuxSock, newRecoveryRuntime(mgr))
+	recoveryStore := recovery.NewStoreWithRuntime(*tmuxSock, newRecoveryRuntime(mgr), installationID)
+	if err := recoveryStore.BindLocalIdentity(servingLocalPort); err != nil {
+		log.Printf("warn: offline recovery identity: %v", err)
+	}
 	// Mac restores after reboot; Babel restores the same logical workspace after
 	// a scheduler allocation moves it to a different node; Windows captures the
 	// ConPTY workspace owned by this broker before that process can disappear.

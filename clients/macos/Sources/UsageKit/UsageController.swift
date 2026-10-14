@@ -40,6 +40,8 @@ public final class UsageController: ObservableObject {
     }
     var engine: UsageAlertEngine
     private var refreshTask: Task<Void, Never>?
+    private var initialRefreshTask: Task<Void, Never>?
+    private var clockTask: Task<Void, Never>?
     private var cardOrder: UsageCardOrder
     private static let policyKey = "warningPolicy.v1"
     private static let dismissalKey = "warningDismissals.v1"
@@ -62,12 +64,18 @@ public final class UsageController: ObservableObject {
     public func handleAccountService(_ data: Data) async -> Data {
         do {
             guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.coderReadCorrupt) }
-            return try JSONSerialization.data(withJSONObject: await store.handleAccountService(request))
+            let result = try await store.handleAccountService(request)
+            // Account operations already own their targeted refresh. Publish
+            // metadata changes without scheduling a second, all-account poll.
+            if (request["action"] as? String ?? "state") != "state" {
+                reconcile()
+                readingsChanged?()
+            }
+            return try JSONSerialization.data(withJSONObject: result)
         } catch { return (try? JSONSerialization.data(withJSONObject: ["error": error.localizedDescription])) ?? Data("{}".utf8) }
     }
     private var applyingSharedState = false
     private var presentationWorkspaceID: String?
-    private var remoteCollectionUpdatedAt: Date?
     private var effectiveRefreshSeconds: TimeInterval?
 
     /// Missing publication is not deletion. Retain local readings when this
@@ -83,7 +91,8 @@ public final class UsageController: ObservableObject {
     }
 
     public convenience init(demo: Bool = false) {
-        let defaults = UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
+        let defaults = AppPreferences.isUITesting ? AppPreferences.defaults
+            : UserDefaults(suiteName: demo ? "argus.usage.preview" : "dev.universaltmux.usage")!
         defaults.register(defaults: ["appearance": "system"])
         var importError: String?
         if !demo && !CommandLine.arguments.contains("--usage-config") {
@@ -122,34 +131,43 @@ public final class UsageController: ObservableObject {
 
     public func start() {
         guard refreshTask == nil else { return }
+        initialRefreshTask = Task { [weak self] in await self?.refresh() }
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            await refresh()
+            guard !store.isDemo else { return }
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) } catch { break }
-                store.now = .now
-                if Date().timeIntervalSince(store.lastRefresh ?? .distantPast) >= refreshSeconds { await refresh() }
-                else { reconcile() }
+                do { try await Task.sleep(for: .seconds(refreshSeconds)) } catch { break }
+                await refresh()
             }
         }
+        startClock()
     }
 
-    public func stop() { refreshTask?.cancel(); refreshTask = nil }
+    public func stop() {
+        initialRefreshTask?.cancel(); initialRefreshTask = nil
+        refreshTask?.cancel(); refreshTask = nil
+        clockTask?.cancel(); clockTask = nil
+    }
 
     /// Workspace readers keep an independent presentation clock, without
     /// starting another collector or sending redundant refresh commands.
     public func startPresentation() {
         stop()
-        refreshTask = Task { [weak self] in
+        startClock()
+    }
+
+    private func startClock() {
+        guard clockTask == nil else { return }
+        clockTask = Task { [weak self] in
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) } catch { break }
+                do { try await Task.sleep(for: .seconds(30)) } catch { break }
                 self?.reconcile()
             }
         }
     }
 
     public func refresh() async {
-        guard !refreshing else { return }
+        guard !Task.isCancelled, !refreshing else { return }
         await store.refresh()
         reconcile()
     }
@@ -203,10 +221,9 @@ public final class UsageController: ObservableObject {
     }
 
     func reconcile(now: Date = .now) {
+        // Project collection/replica state without mutating the collector's
+        // progress flag or synchronously re-entering its change notification.
         store.now = now
-        if let updated = remoteCollectionUpdatedAt, now.timeIntervalSince(updated) >= 120 {
-            store.refreshing = false
-        }
         let maxAge = max(300, (effectiveRefreshSeconds ?? refreshSeconds) * 3)
         let readings = UsageMeasurement.readings(store.sources, now: now, maxAge: maxAge, includeModelLimits: policy.includeModelLimits)
         warnings = engine.evaluate(readings, policy: policy, now: now)
@@ -220,7 +237,7 @@ public final class UsageController: ObservableObject {
         glances = cardOrder.arranged(Self.summary(sources))
         connectionIssueCount = store.failures.count
         lastRefresh = store.lastRefresh
-        refreshing = store.refreshing
+        refreshing = store.isRefreshing
         if let data = try? JSONEncoder().encode(engine.dismissals) { defaults.set(data, forKey: Self.dismissalKey) }
     }
 
@@ -249,8 +266,8 @@ public final class UsageController: ObservableObject {
     public func clearSharedPresentation() {
         applyingSharedState = true; defer { applyingSharedState = false }
         store.resetRemoteAccountPresentation()
-        store.sources = []; store.failures = []; store.lastRefresh = nil; store.refreshing = false
-        remoteCollectionUpdatedAt = nil
+        store.sources = []; store.failures = []; store.lastRefresh = nil
+        store.remoteRefreshExpiresAt = nil
         effectiveRefreshSeconds = nil
         store.remoteAccountConfiguration = nil; store.remoteAccountFields = [:]; store.loginSourceID = nil
         store.loginMessage = nil; store.loginInstructions = nil; store.remoteLoginIntegration = nil
@@ -277,9 +294,8 @@ public final class UsageController: ObservableObject {
         let snapshot = try UsageWorkspaceWire.decoder.decode(UsageWorkspaceWire.Snapshot.self, from: data)
         guard snapshot.version == 1 else { throw CocoaError(.coderReadCorrupt) }
         store.sources = snapshot.sources; store.lastRefresh = snapshot.lastRefresh
-        remoteCollectionUpdatedAt = snapshot.observedAt
         effectiveRefreshSeconds = snapshot.refreshIntervalSeconds.flatMap { $0.isFinite && (60...3600).contains($0) ? $0 : nil }
-        store.refreshing = snapshot.refreshing == true && Date().timeIntervalSince(snapshot.observedAt) < 120
+        store.remoteRefreshExpiresAt = snapshot.refreshing == true ? snapshot.observedAt.addingTimeInterval(120) : nil
         store.failures = snapshot.failures.map { failure in
             let descriptor = failure.sourceID.map { id in
                 IntegrationDescriptor(sourceID: id, integration: failure.integration,
@@ -298,9 +314,8 @@ public final class UsageController: ObservableObject {
     /// account. An old owner's in-flight state is not work owned by this process.
     public func restoreCollectorSnapshot(_ data: Data) throws {
         try applySharedSnapshot(data)
-        remoteCollectionUpdatedAt = nil
+        store.remoteRefreshExpiresAt = nil
         effectiveRefreshSeconds = nil
-        store.refreshing = false
         reconcile()
     }
 

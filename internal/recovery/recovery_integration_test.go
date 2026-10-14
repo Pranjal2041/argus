@@ -440,7 +440,7 @@ func TestCaptureEnabledOnEveryShippingBackendByDefault(t *testing.T) {
 	}
 }
 
-func TestBootstrapCanUseAFailedRestoreShell(t *testing.T) {
+func TestBootstrapDoesNotRequireARestoredSession(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
@@ -448,7 +448,6 @@ func TestBootstrapCanUseAFailedRestoreShell(t *testing.T) {
 	cleanup := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
 	cleanup()
 	t.Cleanup(cleanup)
-	createVisibleTestSession(t, socket, "diagnostic-shell", "")
 
 	directory := t.TempDir()
 	output := filepath.Join(directory, "launcher argv")
@@ -465,7 +464,7 @@ func TestBootstrapCanUseAFailedRestoreShell(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-L", socket, "diagnostic-shell"}
+	want := []string{"-L", socket, "--broker-only"}
 	if got := splitNonemptyLines(string(body)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("bootstrap argv = %#v, want %#v", got, want)
 	}

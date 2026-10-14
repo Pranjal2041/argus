@@ -13,21 +13,37 @@ struct LiveDevinIntegration: UsageIntegration {
     var descriptor: IntegrationDescriptor? { configuration.descriptor }
 
     func fetchSources() async throws -> [UsageSource] {
-        guard FileManager.default.isExecutableFile(atPath: executable) else {
-            throw IntegrationError.configuration("Install Devin CLI, then sign in to this account in Connections.")
-        }
         guard let path = configuration.accountProfile else {
             throw IntegrationError.authentication("Sign in to this Devin account in Connections. Each connection has its own private login.")
         }
         let profile = try AccountProfile(path: path)
-        let result = try await runner.run(executable: executable, arguments: ["auth", "status"],
-            environment: profile.environment, timeout: 30)
-        guard result.status == 0 else {
-            throw IntegrationError.authentication("Devin CLI could not check this account. Sign in again in Connections.")
+        var output = ""
+        var account: DevinAccount?
+        var statusError: Error?
+        do {
+            guard FileManager.default.isExecutableFile(atPath: executable) else {
+                throw IntegrationError.configuration("Install Devin CLI to verify a new account's identity.")
+            }
+            let result = try await runner.run(executable: executable, arguments: ["auth", "status"],
+                environment: profile.environment, timeout: 30)
+            output = String(decoding: result.stdout + result.stderr, as: UTF8.self)
+            account = try DevinAccount.parse(output)
+        } catch {
+            if error is CancellationError { throw error }
+            statusError = error
         }
-        let output = String(decoding: result.stdout + result.stderr, as: UTF8.self)
-        let account = try DevinAccount.parse(output)
-        try configuration.validateAccountIdentity(account.email)
+        if let account { try configuration.validateAccountIdentity(account.email) }
+        // CLI access and analytics access are independent capabilities. A
+        // failed metadata check cannot invalidate a previously verified login
+        // in this connection's explicit private profile. A positively reported
+        // different identity still fails above, before any analytics request.
+        if account == nil, let identity = configuration.accountIdentity,
+           !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            account = DevinAccount(email: identity, plan: nil)
+        }
+        guard let account else {
+            throw statusError ?? IntegrationError.unavailable("Devin did not report this account's identity.")
+        }
         do {
             let credentials = try readCredentials(profile)
             let root = try await client.get(credentials.baseURL.appendingPathComponent("personal-analytics/consumption"),

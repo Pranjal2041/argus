@@ -3,9 +3,8 @@ import SwiftUI
 // MARK: - Agent state
 
 /// The agent-state classification a broker reports per session in `/sessions`.
-/// The current detector emits only `working` (the agent's "esc to interrupt" footer is
-/// on screen) and `idle`. `waiting` is reserved/vestigial — still decoded so an older
-/// broker that sends it doesn't break, but never emitted now. Unknown → `.idle`.
+/// The shared detector emits `working` for a running turn, `waiting` for an
+/// interactive decision, and `idle` otherwise. Unknown → `.idle`.
 enum AgentState: String {
     case working
     case waiting
@@ -14,9 +13,8 @@ enum AgentState: String {
     init(raw: String) { self = AgentState(rawValue: raw.lowercased()) ?? .idle }
 }
 
-/// How a session's indicator should render. Two states only: the broker reports
-/// `working` (its agent shows "esc to interrupt") → a pulsing BLUE dot; anything else
-/// → a solid GREEN dot. (`attached` is no longer used here.)
+/// Running → pulsing BLUE; completed/unseen → ORANGE; viewed → GREEN.
+/// Provider identity and attachment do not change these semantics.
 struct AgentIndicatorStyle {
     let color: SwiftUI.Color
     let filled: Bool   // false = hollow ring (idle)
@@ -26,7 +24,7 @@ struct AgentIndicatorStyle {
     static func resolve(state: AgentState, attached: Bool, unseen: Bool = false) -> AgentIndicatorStyle {
         switch state {
         case .working:
-            // Agent is actively running (its "esc to interrupt" footer is on screen).
+            // The broker reports an actively running turn.
             return AgentIndicatorStyle(
                 color: Theme.running, filled: true, pulses: true,
                 help: "Running")

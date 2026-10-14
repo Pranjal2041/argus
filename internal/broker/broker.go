@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -59,13 +60,20 @@ type sessionHub struct {
 	mu           sync.Mutex
 	subs         map[*subscriber]struct{}
 	lastPane     string
-	dead         chan struct{} // closed when the backend session ended (pump exited)
-	nextSnapshot uint64
+	stop         chan struct{} // closed as soon as this attachment is retired
+	dead         chan struct{} // closed after the pump exits and the backend detaches
+	closeOnce    sync.Once
+	snapshots    map[uint64]*time.Timer // includes requests whose viewer disconnected
+	snapshotWait time.Duration
 	replyViewer  *subscriber // stable while connected and primed; protected by mu
 }
 
 func newSessionHub(tm session.Session) *sessionHub {
-	h := &sessionHub{tm: tm, subs: make(map[*subscriber]struct{}), lastPane: tm.Pane(), dead: make(chan struct{})}
+	h := &sessionHub{
+		tm: tm, subs: make(map[*subscriber]struct{}), lastPane: tm.Pane(),
+		stop: make(chan struct{}), dead: make(chan struct{}),
+		snapshots: make(map[uint64]*time.Timer), snapshotWait: 10 * time.Second,
+	}
 	go h.pump()
 	return h
 }
@@ -104,9 +112,20 @@ func outputFrames(pane string, data []byte) [][]byte {
 }
 
 func (h *sessionHub) pump() {
-	defer close(h.dead)
+	defer func() { h.close(); close(h.dead) }()
 	filters := make(map[string]*terminalquery.Filter)
-	for out := range h.tm.Output() {
+	output := h.tm.Output()
+	for {
+		var out session.Output
+		select {
+		case <-h.stop:
+			return
+		case next, ok := <-output:
+			if !ok {
+				return
+			}
+			out = next
+		}
 		var sizeFrames [][]byte
 		if out.Cols > 0 && out.Rows > 0 {
 			// In-band size event: broadcast the authoritative pane size in stream
@@ -145,6 +164,15 @@ func (h *sessionHub) pump() {
 			activeFrames = framesFor(active)
 		}
 		h.mu.Lock()
+		if timer := h.snapshots[out.SnapshotID]; timer != nil {
+			timer.Stop()
+			delete(h.snapshots, out.SnapshotID)
+			if len(out.Data) == 0 {
+				h.mu.Unlock()
+				log.Printf("terminal attachment: snapshot %d failed; detaching for reconnect", out.SnapshotID)
+				return
+			}
+		}
 		h.lastPane = out.Pane
 		subs := make([]*subscriber, 0, len(h.subs))
 		for s := range h.subs {
@@ -205,33 +233,45 @@ func (h *sessionHub) pump() {
 	}
 }
 
+// IDs remain unique across attachments: a persistent backend may still have a
+// late snapshot queued when its replacement hub starts reading the same stream.
+var snapshotSequence atomic.Uint64
+
 // At most one outstanding request per viewer. Only pump writes snapshot and
 // live frames, preserving the backend's stream cut even for multi-frame captures.
 func (h *sessionHub) requestSnapshot(sub *subscriber) error {
 	h.mu.Lock()
+	select {
+	case <-h.stop:
+		h.mu.Unlock()
+		return fmt.Errorf("terminal attachment has closed")
+	default:
+	}
 	if sub.snapshotID != 0 {
 		h.mu.Unlock()
 		return nil
 	}
-	h.nextSnapshot++
-	id := h.nextSnapshot
+	id := snapshotSequence.Add(1)
 	sub.snapshotID = id
+	// Arm before submission: even a blocked backend write must be interrupted
+	// by detaching. The deadline belongs to the attachment, not the viewer.
+	h.snapshots[id] = time.AfterFunc(h.snapshotWait, func() { h.snapshotExpired(id) })
 	h.mu.Unlock()
 	if err := h.tm.RequestSnapshot(id); err != nil {
-		h.mu.Lock()
-		sub.snapshotID = 0
-		h.mu.Unlock()
+		h.close()
 		return err
 	}
-	time.AfterFunc(10*time.Second, func() {
-		h.mu.Lock()
-		pending := sub.snapshotID == id
-		h.mu.Unlock()
-		if pending {
-			sub.cancel()
-		}
-	})
 	return nil
+}
+
+func (h *sessionHub) snapshotExpired(id uint64) {
+	h.mu.Lock()
+	_, pending := h.snapshots[id]
+	h.mu.Unlock()
+	if pending {
+		log.Printf("terminal attachment: snapshot %d timed out; detaching for reconnect", id)
+		h.close()
+	}
 }
 
 func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
@@ -241,6 +281,12 @@ func (h *sessionHub) serve(ctx context.Context, c *websocket.Conn) error {
 
 	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel, interactive: true}
 	h.mu.Lock()
+	select {
+	case <-h.stop:
+		h.mu.Unlock()
+		return fmt.Errorf("terminal attachment has closed")
+	default:
+	}
 	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
 	// The initial snapshot carries its exact size. Until its ordered stream
@@ -325,6 +371,12 @@ func (h *sessionHub) stream(parent context.Context, w io.Writer, flush func()) {
 	defer cancel()
 	sub := &subscriber{ch: make(chan []byte, 1024), done: make(chan struct{}), cancel: cancel}
 	h.mu.Lock()
+	select {
+	case <-h.stop:
+		h.mu.Unlock()
+		return
+	default:
+	}
 	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
 	defer func() {
@@ -360,21 +412,29 @@ func (h *sessionHub) stream(parent context.Context, w io.Writer, flush func()) {
 	}
 }
 
-// close evicts every connected client (cancelling each serve ctx closes its
-// WebSocket) and detaches the control-mode client. Used on kill/rename.
+// close retires this attachment, not the underlying session or its program.
+// Stop the pump explicitly: persistent backends need not close Output() when
+// detached. Manager waits for dead before letting a new hub read that stream.
 func (h *sessionHub) close() {
-	h.mu.Lock()
-	subs := make([]*subscriber, 0, len(h.subs))
-	for s := range h.subs {
-		subs = append(subs, s)
-	}
-	h.mu.Unlock()
-	for _, s := range subs {
-		if s.cancel != nil {
-			s.cancel()
+	h.closeOnce.Do(func() {
+		h.mu.Lock()
+		close(h.stop)
+		for id, timer := range h.snapshots {
+			timer.Stop()
+			delete(h.snapshots, id)
 		}
-	}
-	h.tm.Close()
+		subs := make([]*subscriber, 0, len(h.subs))
+		for s := range h.subs {
+			subs = append(subs, s)
+		}
+		h.mu.Unlock()
+		for _, s := range subs {
+			if s.cancel != nil {
+				s.cancel()
+			}
+		}
+		h.tm.Close()
+	})
 }
 
 // Manager owns all session hubs for one host, via a pluggable backend Provider
@@ -820,10 +880,9 @@ func (m *Manager) refreshSessions(includeBackground bool) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				state := provider.DetectState(list[i].Name)
-				if state == "" {
-					state = "idle"
+				if state != "" {
+					list[i].State = state
 				}
-				list[i].State = state
 			}(i)
 		}
 		wg.Wait()
@@ -901,7 +960,8 @@ func (m *Manager) hub(name string) (*sessionHub, error) {
 	defer m.mu.Unlock()
 	if h, ok := m.hubs[name]; ok {
 		select {
-		case <-h.dead: // backend session ended — drop the stale hub and re-dial
+		case <-h.stop: // failed/ended attachment — finish detaching before re-dial
+			<-h.dead
 			delete(m.hubs, name)
 		default:
 			return h, nil

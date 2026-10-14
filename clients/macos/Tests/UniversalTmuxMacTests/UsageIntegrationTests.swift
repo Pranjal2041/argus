@@ -7,18 +7,52 @@ import XCTest
 @available(macOS 14.0, *)
 @MainActor
 final class UsageIntegrationTests: XCTestCase {
-    func testCredentialWorkerExitsWithoutStartingTheAppForMissingKey() async throws {
+    func testWorkerFetchesUsageEvenWhenItsBrokerIsUnreachable() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("usage-worker-copy-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../testdata/usage/codex-app-server.rb").standardizedFileURL
+        let cli = directory.appendingPathComponent("codex")
+        try FileManager.default.copyItem(at: fixture, to: cli)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+        try Data(#"{"type":"chatgpt","email":"fixture@example.test"}"#.utf8)
+            .write(to: directory.appendingPathComponent("account.json"))
+        try Data(#"{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":10080}}}"#.utf8)
+            .write(to: directory.appendingPathComponent("rates.json"))
+        var source = SourceConfiguration(id: "fixture", integration: .codex, label: "Fixture")
+        source.codexHome = directory.path
+        var config = IntegrationConfiguration(sources: [source])
+        config.executables.codex = cli.path
+        let configURL = directory.appendingPathComponent("integrations.json")
+        try config.save(to: configURL)
         let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/UniversalTmuxMac")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
-        let result = await Task.detached {
-            do {
-                _ = try UsageCredentialProcess(executable: executable).perform(.init(operation: .read, reference: "argus-usage-nonexistent-test-\(UUID())"))
-                return false
-            } catch let error as IntegrationError {
-                return error.needsAuthentication && error.errorDescription?.contains("no saved credential") == true
-            } catch { return false }
-        }.value
-        XCTAssertTrue(result, "The isolated worker must return an actionable missing-key response without a dialog or app lifecycle")
+        let process = Process()
+        process.executableURL = executable
+        // An explicit endpoint disables service bootstrapping. UI-testing mode
+        // isolates defaults/cache; only this fixture's private CLI is configured.
+        process.arguments = ["--workspace-worker", "--workspace-endpoint=http://127.0.0.1:1", "--ui-testing", "--usage-config", configURL.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        defer {
+            if process.isRunning { process.terminate() }
+            // No provider child remains after its completed read; terminate the
+            // owned fixture worker before deleting its profile.
+            process.waitUntilExit()
+        }
+        let requests = directory.appendingPathComponent("requests.jsonl")
+        let deadline = Date().addingTimeInterval(8)
+        var completed = false
+        while Date() < deadline, process.isRunning {
+            if let text = try? String(contentsOf: requests), text.contains("account/rateLimits/read") {
+                completed = true; break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(process.isRunning)
+        XCTAssertTrue(completed, "Local Usage must fetch without a broker response, workspace snapshot, or lease")
     }
 
     func testUsageParticipatesInCommonWorkspaceNavigation() throws {

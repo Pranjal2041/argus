@@ -106,6 +106,7 @@ esac
 # --- args: optional flags, then at most one session name -------------------
 socket="ut"
 visible=0
+broker_only=0
 explicit=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -116,6 +117,9 @@ while [ $# -gt 0 ]; do
     --visible)
       [ "$visible" -eq 0 ] || { echo "ut: --visible may be specified only once" >&2; exit 2; }
       visible=1; shift
+      ;;
+    --broker-only)
+      broker_only=1; shift
       ;;
     --)
       shift
@@ -134,36 +138,52 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+if [ "$broker_only" -eq 1 ] && { [ "$visible" -eq 1 ] || [ -n "$explicit" ]; }; then
+  echo "ut: --broker-only cannot be combined with a session name or --visible" >&2
+  exit 2
+fi
 sanitize() { printf '%s' "$1" | tr ':.' '__'; }         # tmux forbids ':' and '.' in names
 tmux_target() { case "$1" in \$*) printf '\\%s' "$1" ;; *) printf '%s' "$1" ;; esac; }
+
+# Interactive terminals own their display policy. Fabric/noninteractive commands
+# above retain the caller's output preferences. Keep this list aligned with the
+# shared internal/terminalenv contract, exercised by the real-launcher tests.
+interactive_color_overrides=(NO_COLOR CLICOLOR CLICOLOR_FORCE FORCE_COLOR)
+unset "${interactive_color_overrides[@]}"
+new_session() {
+  local key
+  local -a args=()
+  # tmux retains its first launcher's environment. Remove stale defaults before
+  # the new pane starts, including when this server predates the fixed launcher.
+  # This changes no running process and is never used for attach-only requests.
+  for key in "${interactive_color_overrides[@]}"; do
+    args+=(set-environment -gu "$key" ';')
+  done
+  command tmux -L "$socket" "${args[@]}" new-session "$@"
+}
 
 command -v tmux >/dev/null 2>&1 || { echo "ut: tmux not found in PATH" >&2; exit 1; }
 mkdir -p "$LOCAL"
 PIDFILE="$LOCAL/broker-$socket.pid"
 LOGFILE="$LOCAL/broker-$socket.log"
 
-# A broker for this socket is already up if its tmux-hosted supervisor session is
-# alive (it respawns the broker, so this also covers the broker's restart gap), or
-# its pidfile points at a live ut-broker (tsnet brokers do NOT listen on loopback),
-# or — local mode — something answers on loopback.
+# A supervisor owns its socket through tmux. An independently launched broker
+# must prove the same ownership through /whoami; a live PID/HTTP port alone is
+# insufficient and can belong to a different installation.
 broker_running() {
-  local pid
   if tmux -L "$socket" has-session -t "_ut-$socket" 2>/dev/null; then
     return 0
   fi
-  if [ -f "$PIDFILE" ]; then
-    pid="$(cat "$PIDFILE" 2>/dev/null || true)"
-    if [ -n "$pid" ] && ps -p "$pid" -o command= 2>/dev/null | grep -q "ut-broker"; then
-      return 0
-    fi
-  fi
-  curl -fsS --max-time 2 "http://127.0.0.1:${LOCAL_PORT}/sessions" >/dev/null 2>&1
+  "$BROKER" --probe-local --listen "127.0.0.1:${LOCAL_PORT}" --tmux-socket "$socket" >/dev/null 2>&1
 }
 
 # --- session: CLI-created sessions are background unless --visible ----------
 # Visibility is explicit provenance. Existing sessions retain their creation
 # classification when merely attached; --visible deliberately promotes one.
-if [ -n "$explicit" ]; then
+if [ "$broker_only" -eq 1 ]; then
+  # Discovery/recovery must be available even before the first user panel.
+  name=""
+elif [ -n "$explicit" ]; then
   name="$(sanitize "$explicit")"; [ -n "$name" ] || name="main"
   target="$(tmux_target "$name")"
   if tmux -L "$socket" has-session -t "=$name" 2>/dev/null; then
@@ -174,11 +194,11 @@ if [ -n "$explicit" ]; then
         set-option -u -t "$target" @ut_agent_shell 2>/dev/null || true
     fi
   elif [ "$visible" -eq 1 ]; then
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_visible 1 \; \
       set-option -t "$target" @ut_origin cli-visible
   else
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_agent 1 \; \
       set-option -t "$target" @ut_agent_shell 1 \; \
       set-option -t "$target" @ut_origin cli-direct \; \
@@ -190,11 +210,11 @@ else
   while tmux -L "$socket" has-session -t "=$name" 2>/dev/null; do name="$base-$n"; n=$((n+1)); done
   target="$(tmux_target "$name")"
   if [ "$visible" -eq 1 ]; then
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_visible 1 \; \
       set-option -t "$target" @ut_origin cli-visible
   else
-    tmux -L "$socket" new-session -d -s "$name" -c "$PWD" \; \
+    new_session -d -s "$name" -c "$PWD" \; \
       set-option -t "$target" @ut_agent 1 \; \
       set-option -t "$target" @ut_agent_shell 1 \; \
       set-option -t "$target" @ut_origin cli-direct \; \
@@ -219,13 +239,15 @@ if ! broker_running; then
   # Self-restarting supervisor (node-local, never NFS). It reads the authkey at
   # runtime rather than embedding it, so the key never lands in this script file.
   SUP="$LOCAL/supervise-$socket.sh"
+  SUP_TMP="$(mktemp "$LOCAL/.supervise-$socket.XXXXXX")"
   # Instance state roots are fixed at launch, since a reused tmux server's
   # environment may predate them (see UT_STATE_DIR in docs/cli).
   INSTANCE_ENV=""
-  for var in UT_STATE_DIR UT_LAB_ROOT UT_BACKUP_ROOT; do
+  for var in UT_STATE_DIR UT_LAB_ROOT UT_BACKUP_ROOT UT_MACHINE_ID; do
     [ -z "${!var:-}" ] || INSTANCE_ENV+="export $var=$(printf '%q' "${!var}")"$'\n'
   done
-  cat > "$SUP" <<SUPEOF
+  INSTANCE_ENV+="export UT_LOCAL_DIR=$(printf '%q' "$LOCAL")"$'\n'
+  cat > "$SUP_TMP" <<SUPEOF
 #!/usr/bin/env bash
 # ut broker supervisor — hosted by tmux so it inherits tmux's daemonization and
 # outlives SSH/login teardown. Restarts the broker if it ever exits.
@@ -275,11 +297,19 @@ while true; do
   sleep 2
 done
 SUPEOF
-  chmod 700 "$SUP"
-  tmux -L "$socket" kill-session -t "_ut-$socket" 2>/dev/null || true
-  tmux -L "$socket" new-session -d -s "_ut-$socket" "$SUP" 2>/dev/null || true
+  chmod 700 "$SUP_TMP"
+  mv -f "$SUP_TMP" "$SUP"
+  # tmux session creation is atomic. Never kill a supervisor that another
+  # concurrent app/CLI startup just created.
+  if ! new_session -d -s "_ut-$socket" "$SUP" 2>/dev/null; then
+    tmux -L "$socket" has-session -t "=_ut-$socket" 2>/dev/null || {
+      echo "ut: could not start the broker supervisor for socket '$socket'" >&2
+      exit 1
+    }
+  fi
 fi
 
 # --- behave exactly like tmux: attach to the session ----------------------
+[ "$broker_only" -eq 1 ] && exit 0
 [ -n "${UT_NO_ATTACH:-}" ] && exit 0      # test hook: skip the interactive attach
 exec tmux -L "$socket" attach -t "$name"

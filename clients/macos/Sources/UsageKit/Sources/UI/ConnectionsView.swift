@@ -101,7 +101,7 @@ struct ConnectionsView: View {
                 }.font(.system(size: 11)).foregroundStyle(Palette.secondary)
                 Spacer()
                 Button("Show config") { NSWorkspace.shared.activateFileViewerSelecting([IntegrationConfiguration.file]) }.buttonStyle(SecondaryButtonStyle())
-                Button("Reload config") { Task { await store.reloadConnections() } }.buttonStyle(SecondaryButtonStyle()).disabled(store.refreshing)
+                Button("Reload config") { Task { await store.reloadConnections() } }.buttonStyle(SecondaryButtonStyle()).disabled(store.isRefreshing)
               }.padding(.vertical, 10)
             }.font(.system(size: 11)).foregroundStyle(Palette.secondary) }
         }
@@ -144,7 +144,7 @@ struct ConnectionsView: View {
                 SoftBadge(text: status.title, symbol: status.symbol, warning: status.needsAttention)
                 if configuration.integration.supportsAccountSignIn {
                     Button(configuration.hasSavedAccount ? "Change account" : "Sign in") { store.connectAccount(configuration.id) }
-                        .buttonStyle(SecondaryButtonStyle()).disabled(store.loginSourceID != nil || store.refreshing || !configuration.enabled)
+                        .buttonStyle(SecondaryButtonStyle()).disabled(store.loginSourceID != nil || store.isRefreshing || !configuration.enabled)
                         .accessibilityIdentifier("connect-\(configuration.id)")
                 }
                 Button("Edit") { store.editConnection(configuration) }
@@ -157,7 +157,7 @@ struct ConnectionsView: View {
                 }
                 Button { Task { await store.refresh(sourceID: configuration.id) } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).foregroundStyle(Palette.secondary)
-                    .disabled(store.refreshing || store.savingConnection || !configuration.enabled || store.loginSourceID != nil)
+                    .disabled(store.isRefreshing || store.savingConnection || !configuration.enabled || store.loginSourceID != nil)
                     .accessibilityLabel("Check \(configuration.label) connection")
                     .accessibilityIdentifier("check-\(configuration.id)")
             }
@@ -171,7 +171,7 @@ struct ConnectionsView: View {
                     Spacer()
                     Button("Authorize saved key") { Task { await store.authorizeSavedCredential(configuration.id) } }
                         .buttonStyle(SecondaryButtonStyle())
-                        .disabled(store.refreshing || store.authorizingCredentialID != nil || store.savingConnection)
+                        .disabled(store.isRefreshing || store.authorizingCredentialID != nil || store.savingConnection)
                         .accessibilityIdentifier("authorize-key-\(configuration.id)")
                 }
             } else if let file = configuration.credentialFile {

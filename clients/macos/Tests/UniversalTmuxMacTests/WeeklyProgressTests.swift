@@ -553,6 +553,7 @@ final class WeeklyProgressTests: XCTestCase {
     }
 
     func testModelBadgePreservesModelIdentityAcrossProvidersAndEfforts() {
+        XCTAssertEqual(WeeklyProgressModelPresentation.label(provider: .devin), "DEVIN · CONFIGURED MODEL")
         for (model, effort, expected) in [
             ("gpt-6-astra", "high", "GPT-6-ASTRA · HIGH"),
             ("provider/research-v2", "low", "PROVIDER/RESEARCH-V2 · LOW"),
@@ -586,6 +587,21 @@ final class WeeklyProgressTests: XCTestCase {
                 "\(arguments[modelIndex + 1].uppercased()) · \(generation.manifest.reasoningEffort.uppercased())"
             )
         }
+    }
+
+    func testManifestKeepsProviderIdentityAndDecodesLegacyConversations() throws {
+        var generation = try WeeklyProgressDiskStore(rootURL: root).createGeneration(
+            project: WeeklyProgressProject(name: "Provider identity", panels: []),
+            week: WeeklyProgressWeek(start: date(day: 3), calendar: calendar)
+        )
+        let id = "019f630d-5663-7722-bc65-5fd298a497ec"
+        generation.manifest.codexSessionID = id
+        XCTAssertEqual(generation.manifest.conversation, AgentConversation(provider: .codex, id: id))
+        generation.manifest.recordConversation("gentle-birch", provider: .devin)
+        let decoded = try JSONDecoder().decode(WeeklyProgressGenerationManifest.self, from: JSONEncoder().encode(generation.manifest))
+        XCTAssertEqual(decoded.conversation, AgentConversation(provider: .devin, id: "gentle-birch"))
+        XCTAssertNil(decoded.codexSessionID)
+        XCTAssertEqual(decoded.agentProvider, .devin)
     }
 
     func testCodexCommandPinsAstraHighAndKeepsConversationDurable() {
@@ -938,6 +954,14 @@ final class WeeklyProgressTests: XCTestCase {
     }
 
     func testInterruptedGenerationResumesFromDurableStageAndCodexSession() async throws {
+        try await verifyInterruptedGenerationResumes(provider: .codex)
+    }
+
+    func testInterruptedGenerationResumesFromDurableStageAndDevinSession() async throws {
+        try await verifyInterruptedGenerationResumes(provider: .devin)
+    }
+
+    private func verifyInterruptedGenerationResumes(provider: AgentProvider) async throws {
         let journal = root.appendingPathComponent("resume-journal", isDirectory: true)
         try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
         try #"{"kind":"utterance","session":"lsd","ts":"2026-08-03T10:00:00Z"}"#.appending("\n").write(
@@ -948,7 +972,7 @@ final class WeeklyProgressTests: XCTestCase {
         for day in 4...9 {
             try Data().write(to: journal.appendingPathComponent(String(format: "2026-08-%02d.jsonl", day)))
         }
-        let fake = FakeWeeklyProgressAgent(safeAfterResumeCount: 6)
+        let fake = FakeWeeklyProgressAgent(safeAfterResumeCount: 6, provider: provider)
         let store = WeeklyProgressDiskStore(rootURL: root.appendingPathComponent("resume-store"))
         let pipeline = WeeklyProgressPipeline(
             store: store,
@@ -974,12 +998,26 @@ final class WeeklyProgressTests: XCTestCase {
         let failed = try XCTUnwrap(store.generations(projectID: project.id).first)
         XCTAssertEqual(failed.manifest.stage, .failed)
         XCTAssertEqual(failed.manifest.auditPasses, 4)
-        XCTAssertEqual(failed.manifest.codexSessionID, FakeWeeklyProgressAgent.sessionID)
+        let expectedID = provider == .devin ? "gentle-birch" : FakeWeeklyProgressAgent.sessionID
+        XCTAssertEqual(failed.manifest.conversation, AgentConversation(provider: provider, id: expectedID))
+        XCTAssertEqual(failed.manifest.codexSessionID, provider == .codex ? expectedID : nil)
+
+        // A saved run cannot be continued through a different provider, even
+        // when the caller's current choice has changed since generation began.
+        let otherProvider: AgentProvider = provider == .codex ? .devin : .codex
+        let mismatched = WeeklyProgressPipeline(store: store, journalDirectory: journal,
+            artifactRootURL: root.appendingPathComponent("resume-artifacts"),
+            agent: FakeWeeklyProgressAgent(provider: otherProvider))
+        do {
+            _ = try await mismatched.resume(generationDirectory: failed.directory)
+            XCTFail("A saved conversation changed providers")
+        } catch AgentCLIError.providerMismatch {} catch { XCTFail("Unexpected error: \(error)") }
 
         let resumed = try await pipeline.resume(generationDirectory: failed.directory)
 
         XCTAssertEqual(resumed.manifest.stage, .complete)
         XCTAssertEqual(resumed.manifest.auditPasses, 5)
+        XCTAssertEqual(resumed.manifest.conversation, AgentConversation(provider: provider, id: expectedID))
         let startCount = await fake.startCount()
         let resumeCount = await fake.resumeCount()
         XCTAssertEqual(startCount, 1)
@@ -1099,13 +1137,15 @@ final class WeeklyProgressTests: XCTestCase {
 
 private actor FakeWeeklyProgressAgent: WeeklyProgressAgentRunning {
     static let sessionID = "019f630d-5663-7722-bc65-5fd298a497ec"
+    nonisolated let provider: AgentProvider
     private let safeAfterResumeCount: Int
     private var starts = 0
     private var resumes = 0
     private var prompts: [String] = []
 
-    init(safeAfterResumeCount: Int = 4) {
+    init(safeAfterResumeCount: Int = 4, provider: AgentProvider = .codex) {
         self.safeAfterResumeCount = safeAfterResumeCount
+        self.provider = provider
     }
 
     func start(prompt: String, in directory: URL, stageName: String) async throws
@@ -1121,7 +1161,7 @@ private actor FakeWeeklyProgressAgent: WeeklyProgressAgentRunning {
             atomically: true,
             encoding: .utf8
         )
-        return WeeklyProgressAgentResult(sessionID: Self.sessionID, finalMessage: "research complete")
+        return WeeklyProgressAgentResult(sessionID: provider == .devin ? "gentle-birch" : Self.sessionID, finalMessage: "research complete")
     }
 
     func resume(sessionID: String, prompt: String, in directory: URL, stageName: String) async throws

@@ -25,6 +25,23 @@ type modeTracker struct {
 	on     map[int]bool
 }
 
+// paste frames text using the mode negotiated by the foreground application.
+// Submission is outside the paste, even when text and Enter share one write.
+func (m *modeTracker) paste(text string, enter bool) []byte {
+	var data []byte
+	if text != "" && m.on[2004] {
+		data = append(data, "\x1b[200~"...)
+	}
+	data = append(data, text...)
+	if text != "" && m.on[2004] {
+		data = append(data, "\x1b[201~"...)
+	}
+	if enter {
+		data = append(data, '\r')
+	}
+	return data
+}
+
 func (m *modeTracker) feed(b []byte) {
 	for _, c := range b {
 		switch m.state {

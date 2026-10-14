@@ -4,7 +4,9 @@ Argus embeds the native Usage dashboard on macOS 14 or later. Open **View → Us
 
 ## Preserved dashboard
 
-`clients/macos/Sources/UsageKit` imports the core, SwiftUI views, provider adapters, and tests from `/Users/pranjal/Developer/usage`. The standalone app's window and application lifecycle are not imported. The original project is unchanged.
+`clients/macos/Sources/UsageKit` imports the core, SwiftUI views, provider adapters, and tests from `/Users/pranjal/Developer/usage`. The original provider-fetch, HTTP, Keychain, CLI, normalization, and cache implementations are preserved. The original refresh body is `UsageStore.refreshFromUsage`; remote routing and presentation metadata remain outside it. Pristine reference files live in `clients/macos/vendor/usage`, and source-parity tests check against them. The original project is unchanged.
+
+One Codex diagnostic string is corrected without changing collection: a missing active account is not necessarily an API-key login. The source-parity test permits that exact text change and still compares the complete fetch implementation.
 
 - Codex and Claude Code: independent accounts, quota windows, resets, model-specific limits, account details, sign-in and reconnect.
 - Devin: independent accounts and consumed ACUs for the provider's reporting period, without requiring a quota or reset date.
@@ -18,9 +20,13 @@ Command Center uses Argus's existing theme. The complete dashboard retains Usage
 
 ## Shared refresh and warnings
 
-One app-owned `UsageController` refreshes all enabled connections even when the dashboard is closed. Opening multiple views does not create additional polling loops. The default interval is two minutes; **Warnings & refresh** offers one, two, five, or fifteen minutes. Refreshes query provider status/billing APIs or read-only CLI commands; no agent prompt or model run is started.
+One `UsageController` in the launchd-owned workspace process runs standalone Usage's initial refresh, sleep-then-refresh loop, and thirty-second presentation clock, even when the dashboard is closed. Opening multiple views does not create additional polling loops. Collection starts before broker synchronization: broker outages, publication failures, workspace leases, and Argus Low Data mode do not change Usage's fetch cadence. Leases still fence shared publication. The default interval is two minutes; **Warnings & refresh** offers one, two, five, or fifteen minutes. Refreshes query provider status/billing APIs or read-only CLI commands; no agent prompt or model run is started.
 
-All live HTTP clients share an in-process polling coordinator. Identical overlapping reads share one in-flight request; completed responses are not reused as fresh readings. A 429 pauses the affected origin/header scope, honors `Retry-After` (seconds or HTTP date), and backs off from two to thirty minutes on repeated failures. A longer server deadline is never shortened. Automatic and manual refreshes cannot bypass that pause, and unrelated accounts/providers continue refreshing. Explicit 5xx cooldowns are also honored. Connections reports rate limiting and the next eligible request time without asking for reauthentication; the last successful reading keeps its original timestamp until a new fetch succeeds. The coordinator does not control an independently running standalone app: the cutover step below is still required.
+Route/wake notifications and account-state RPCs never start another automatic usage refresh. Account edits and completed sign-ins own their targeted refresh in the store; the workspace wrapper only publishes their results. Failed account requests cannot trigger an all-account poll. Explicit refresh commands remain separate from the original recurring loop.
+
+The app-serving workspace process uses launchd's `Interactive` resource policy, matching a normal app. A headless process is not necessarily background-priority work: marking this service `Background` throttles its provider subprocesses too, consuming their deadlines under CPU/I/O contention. The independent broker reconciler keeps its background policy. This distinction applies to every provider and workspace job, not a particular command or account.
+
+HTTP reads use standalone Usage's implementation: a 429 or 5xx receives one short retry within that refresh, and there is no additional persistent Argus cooldown. Every later collection calls the adapters again. The original store prevents overlapping refreshes, retains each failed account's previous reading and timestamp, and replaces it after a successful fetch. There is no separate fetch-result coordinator or timeout slot that can poison subsequent collections. Standalone Usage is an independent process; the cutover step below avoids duplicate polling.
 
 Command Center shows per-provider quota averages with account coverage, per-account consumed units and cloud/API spending, separate drives, and connection issues. Providers, billing accounts, and storage capacities are not pooled together.
 
@@ -44,9 +50,11 @@ On first launch, Argus imports `~/Library/Application Support/Usage/integrations
 
 Imported connections retain their credential references and Codex profile paths. The original configuration, credential files, and Keychain items are not deleted. New credentials use an `argus-usage-` reference prefix; replacing an imported credential cannot delete a standalone Usage key. New profiles live in Argus's own Usage directory. Configuration files are owner-readable/writable and contain references rather than secrets.
 
-Warning preferences and dismissals use the `dev.universaltmux.usage` defaults suite. Existing Keychain access may require **Authorize saved key** in Connections; background checks do not display authorization dialogs. Background reads/token renewal run through the same signed executable in `--usage-keychain-worker` mode, before its app lifecycle. Private pipes carry requests/results; this isolates legacy process-wide Keychain prompt settings from Argus's browser and credential vault.
+Warning preferences and dismissals use the `dev.universaltmux.usage` defaults suite. Existing Keychain access may require **Authorize saved key** in Connections; background checks do not display authorization dialogs. Reads and token renewal use standalone Usage's direct Keychain implementation inside the workspace process; no per-read credential subprocess or credential IPC protocol is added. The interactive Argus browser runs in its separate app process.
 
 For cutover, quit standalone Usage before starting the new Argus build so both applications do not refresh the same imported OAuth profiles concurrently. Terminal sessions and brokers do not need restarting.
+
+Collection progress belongs to the local collection task. A workspace reader stores remote progress separately with a two-minute presentation expiry. Applying, expiring, or clearing a snapshot never changes the local collection flag or sends a collection-change notification. Dashboard controls and Command Center derive the same effective refresh indicator from those two states. A cached snapshot therefore cannot re-enter collection notifications, stop active local work, or leave a reader's refresh controls disabled indefinitely.
 
 ## Command Center card arrangement
 
@@ -54,11 +62,11 @@ Drag Usage cards to either side of another card to reorder them. **Arrange** exp
 
 ## Devin CLI
 
-Background reading first executes `devin auth status` with a timeout and `NO_COLOR=1` to verify the saved identity. Each connection supplies its own `HOME` and XDG data/config/cache directories. Ambient provider tokens are not inherited. A missing private profile requires sign-in and never falls back to the account in the user's terminal.
+Background reading checks `devin auth status` with a timeout and `NO_COLOR=1` when the CLI is installed. Each connection supplies its own `HOME` and XDG data/config/cache directories. Ambient provider tokens are not inherited. A missing private profile requires sign-in and never falls back to the account in the user's terminal. A positively reported different identity is rejected before reading analytics. CLI permission, availability, and analytics permission are independent: an existing verified private login can still read its consumption when CLI metadata is denied, offline, or unavailable. A never-verified identity cannot be invented from a failed CLI response.
 
 The default executable is `~/.local/bin/devin`, configurable through `executables.devin`. Connections supports **Sign in with Devin CLI**, **Change account**, and separate account identities. Sign-in opens a link in UT Browser; the user pastes its code into Argus's secure code field. The CLI handles PKCE, token exchange, and enterprise routing through `devin auth login --force-manual-token-flow` in a private, owned prompt terminal. That terminal is not a tmux/broker session, never receives global keyboard input, and has no model run.
 
-After verifying identity, the adapter reads only that private profile's `credentials.toml` and sends a read-only `GET personal-analytics/consumption` to its declared HTTPS Devin API deployment with the saved bearer credential. This is the endpoint used by Devin's own My analytics page. Credential values remain in memory and are never included in configuration, snapshots, logs, or command arguments. Browser login is not needed for ongoing refreshes. The adapter selects the current `[start, end)` reporting interval and its `acus_consumed` value, preserving the provider's date offset and full numeric precision. Its card rounds for display (for example, `2,332 ACUs used · Sep 15 – Oct 14`), without displaying a limit or reset countdown.
+Using the identity verified during sign-in or reported by the CLI, the adapter reads only that private profile's `credentials.toml` and sends a read-only `GET personal-analytics/consumption` to its declared HTTPS Devin API deployment with the saved bearer credential. This is the endpoint used by Devin's own My analytics page. Credential values remain in memory and are never included in configuration, snapshots, logs, or command arguments. Browser login is not needed for ongoing refreshes. The adapter selects the current `[start, end)` reporting interval and its `acus_consumed` value, preserving the provider's date offset and full numeric precision. Its card rounds for display (for example, `2,332 ACUs used · Sep 15 – Oct 14`), without displaying a limit or reset countdown.
 
 Every attempt uses a new owner-only profile directory. Only verified identities are committed. The shared profile-commit contract, also used by Codex, rejects duplicate identities, shared roots, stale configuration, and disabled/removed connections. A failed or cancelled attempt stops its owned process and deletes only its temporary profile; the previous account and other connections remain unchanged. New private profiles and identity metadata survive Argus restarts. Changing the terminal's default Devin login no longer changes these connections.
 
@@ -72,11 +80,15 @@ On October 2, 2026, a signed-in enterprise account's CLI returned identity and p
 
 ## Automated verification
 
+The signed app executable accepts `--usage-diagnostic CONNECTION_ID` for an explicit headless collection of one enabled connection. It uses the real adapter, credentials, HTTP implementation and command runner without writing readings or publishing a workspace snapshot. JSON output contains elapsed times, HTTP status/retry delay and command exit status; request paths, headers, bodies, command arguments, environment values and raw errors are omitted. This makes a provider request; it is not a passive cache inspection and does not run automatically.
+
 ```sh
 swift test --package-path clients/macos --filter 'UsageKitTests|UsageIntegrationTests'
 UT_USAGE_VISUAL_QA=1 swift test --package-path clients/macos --filter UsageIntegrationTests
 ```
 
+`UT_USAGE_SNAPSHOT_PROBE=1 swift test --package-path clients/macos --filter OriginalUsageRefreshTests` also reads saved startup snapshots into isolated test preferences and exercises restore/expiry without opening the GUI, polling providers, or modifying the saved snapshots.
+
 The opt-in visual test opens real native windows, mounts the actual SwiftUI views with fixture data, presses native accessibility controls, and captures `/tmp/argus-usage-*.png`. Run it only after arranging an approved desktop-testing window with the user. It covers Command Center dismissal/open, card-arrangement controls and reset, consumed-unit cards and details, full and compact account navigation, warning restoration, provider selection, Devin code entry, verified account replacement and cancellation. It does not use real credentials or contact providers. `UT_DEVIN_CLI_PROBE=1` additionally starts and cancels the installed CLI's sign-in prompt in an empty private profile, without opening a browser or entering a login code. `UT_DEVIN_USAGE_PROBE=1` enables a separate read-only test of the actual consumption adapter using a saved, enabled private account; it opens no windows and changes no connections.
 
-The shared tests cover independent accounts, partial failures, credentials and rollback, quota/billing normalization, migration, alert reset/recovery/freshness, persistent settings, and single-loop ownership. The source app's tests are preserved alongside the new integration tests.
+The shared tests cover independent accounts, partial failures, credentials and rollback, quota/billing normalization, migration, alert reset/recovery/freshness, persistent settings, and single-loop ownership. The source app's tests are preserved alongside the integration tests. Restoration checks additionally compare compiled source with the pristine baseline, exercise transient HTTP failures and subsequent recovery, run the original Codex implementation against a private CLI protocol fixture, verify repeated polling and stop/restart, and start the actual headless worker against an unreachable broker to prove local collection is independent of synchronization. These checks use fixture accounts, not the user's credentials.

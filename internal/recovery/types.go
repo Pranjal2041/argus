@@ -15,6 +15,7 @@ const (
 	AgentShell  = "shell"
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
+	AgentDevin  = "devin"
 	// Explicit user edits are authoritative restore input. They are never
 	// written back into the immutable captured snapshot.
 	SessionEvidenceUserEdit = "user-edit"
@@ -49,6 +50,8 @@ type Entry struct {
 	SessionEvidence string `json:"sessionEvidence,omitempty"`
 	CodexHome       string `json:"codexHome,omitempty"`
 	ClaudeConfig    string `json:"claudeConfig,omitempty"`
+	XDGDataHome     string `json:"xdgDataHome,omitempty"`
+	XDGConfigHome   string `json:"xdgConfigHome,omitempty"`
 	Windows         int    `json:"windows"`
 	Panes           int    `json:"panes"`
 	CaptureError    string `json:"captureError,omitempty"`
@@ -70,16 +73,17 @@ type RecoveryCandidate struct {
 // lifetime. A new backend receives a new ID, even within the same OS boot, so a
 // freshly-created empty backend can never overwrite the workspace it replaced.
 type Snapshot struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	ID            string    `json:"id"`
-	Host          string    `json:"host"`
-	Socket        string    `json:"socket"`
-	BootID        string    `json:"bootId"`
-	ServerID      string    `json:"serverId"`
-	ServerPID     int       `json:"serverPid"`
-	ServerStarted int64     `json:"serverStarted"`
-	CapturedAt    time.Time `json:"capturedAt"`
-	Entries       []Entry   `json:"entries"`
+	SchemaVersion  int       `json:"schemaVersion"`
+	ID             string    `json:"id"`
+	Host           string    `json:"host"`
+	Socket         string    `json:"socket"`
+	InstallationID string    `json:"installationId,omitempty"`
+	BootID         string    `json:"bootId"`
+	ServerID       string    `json:"serverId"`
+	ServerPID      int       `json:"serverPid"`
+	ServerStarted  int64     `json:"serverStarted"`
+	CapturedAt     time.Time `json:"capturedAt"`
+	Entries        []Entry   `json:"entries"`
 	// RecoverySourceID binds a new tmux server lifetime to exactly one prior
 	// workspace. Once every source entry has been observed intact,
 	// RecoveryComplete stays true so a later intentional panel close is not
@@ -116,27 +120,30 @@ type PanelStatus struct {
 // client can change one fact without reconstructing hidden capture metadata.
 // Arguments excludes argv[0], which is represented by Executable.
 type EntryEdit struct {
-	Panel        string    `json:"panel"`
-	Directory    *string   `json:"directory,omitempty"`
-	Agent        *string   `json:"agent,omitempty"`
-	SessionID    *string   `json:"sessionId,omitempty"`
-	Executable   *string   `json:"executable,omitempty"`
-	Arguments    *[]string `json:"arguments,omitempty"`
-	CodexHome    *string   `json:"codexHome,omitempty"`
-	ClaudeConfig *string   `json:"claudeConfig,omitempty"`
+	Panel         string    `json:"panel"`
+	Directory     *string   `json:"directory,omitempty"`
+	Agent         *string   `json:"agent,omitempty"`
+	SessionID     *string   `json:"sessionId,omitempty"`
+	Executable    *string   `json:"executable,omitempty"`
+	Arguments     *[]string `json:"arguments,omitempty"`
+	CodexHome     *string   `json:"codexHome,omitempty"`
+	ClaudeConfig  *string   `json:"claudeConfig,omitempty"`
+	XDGDataHome   *string   `json:"xdgDataHome,omitempty"`
+	XDGConfigHome *string   `json:"xdgConfigHome,omitempty"`
 }
 
 // Status is the startup offer. Available means at least one panel can be
 // restored without overwriting or guessing.
 type Status struct {
-	Available       bool                `json:"available"`
-	Snapshot        *Snapshot           `json:"snapshot,omitempty"`
-	Candidates      []RecoveryCandidate `json:"candidates,omitempty"`
-	TargetHost      string              `json:"targetHost,omitempty"`
-	CurrentServerID string              `json:"currentServerId,omitempty"`
-	ReadyCount      int                 `json:"readyCount"`
-	Panels          []PanelStatus       `json:"panels"`
-	Error           string              `json:"error,omitempty"`
+	Available               bool                `json:"available"`
+	SourceSelectionRequired bool                `json:"sourceSelectionRequired,omitempty"`
+	Snapshot                *Snapshot           `json:"snapshot,omitempty"`
+	Candidates              []RecoveryCandidate `json:"candidates,omitempty"`
+	TargetHost              string              `json:"targetHost,omitempty"`
+	CurrentServerID         string              `json:"currentServerId,omitempty"`
+	ReadyCount              int                 `json:"readyCount"`
+	Panels                  []PanelStatus       `json:"panels"`
+	Error                   string              `json:"error,omitempty"`
 }
 
 const (

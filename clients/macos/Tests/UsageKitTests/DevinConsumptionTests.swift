@@ -132,6 +132,55 @@ final class DevinConsumptionTests: XCTestCase {
         XCTAssertNil(result.first?.consumption)
     }
 
+    func testAnalyticsRemainsAvailableWhenIndependentCLIStatusIsDeniedOfflineOrMissing() async throws {
+        var source = configuration; source.loginProfile = "/fixture/account"
+        let cases: [(String, ConsumptionStatusFixture)] = [
+            ("/usr/bin/true", .init(output: "Logged in (via Devin).\nFailed to fetch from server: Permission denied: User is not authorized to use the CLI")),
+            ("/usr/bin/true", .init(output: "Logged in\nFailed to fetch from server: network unavailable")),
+            ("/usr/bin/true", .init(failure: .timeout)),
+            ("/fixture/missing-cli", .init())
+        ]
+        for (executable, runner) in cases {
+            let client = ConsumptionHTTPFixture(status: 200)
+            let result = try await LiveDevinIntegration(configuration: source, executable: executable,
+                runner: runner, client: client, readCredentials: { profile in
+                    XCTAssertEqual(profile.root.path, "/fixture/account")
+                    return DevinAPICredentials(apiKey: "fixture-owned-account", baseURL: URL(string: "https://example.test")!)
+                }).fetchSources()
+            XCTAssertEqual(result.first?.consumption?.used, 12.5)
+            XCTAssertEqual(result.first?.accountIdentity, source.accountIdentity)
+            XCTAssertFalse(try XCTUnwrap(result.first).isStale)
+            let requests = await client.requests
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+
+    func testFailedMetadataNeverInventsAnUnverifiedAccountAndAnalyticsErrorsKeepTheirMeaning() async throws {
+        var source = configuration; source.loginProfile = "/fixture/account"
+        let runner = ConsumptionStatusFixture(output: "Logged in\nPermission denied: not authorized to use the CLI")
+        for status in [401, 403, 500] {
+            let client = ConsumptionHTTPFixture(status: status)
+            let adapter = LiveDevinIntegration(configuration: source, executable: "/usr/bin/true", runner: runner,
+                client: client, readCredentials: { _ in
+                    .init(apiKey: "fixture", baseURL: URL(string: "https://example.test")!)
+                })
+            do { _ = try await adapter.fetchSources(); XCTFail("Denied or unavailable analytics cannot become a live reading") }
+            catch let error as IntegrationError {
+                XCTAssertEqual(error.needsAuthentication, status == 401)
+                XCTAssertEqual(error.title, status == 401 ? "Connect account" : status == 403 ? "Access required" : "Unavailable")
+            }
+        }
+        source.accountIdentity = nil
+        let client = ConsumptionHTTPFixture(status: 200)
+        do {
+            _ = try await LiveDevinIntegration(configuration: source, executable: "/usr/bin/true", runner: runner,
+                client: client, readCredentials: { _ in .init(apiKey: "fixture", baseURL: URL(string: "https://example.test")!) }).fetchSources()
+            XCTFail("A never-verified account cannot borrow a label or identity")
+        } catch let error as IntegrationError { XCTAssertFalse(error.needsAuthentication) }
+        let requests = await client.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
     func testConfiguredAccountConsumptionReadOnlyProbe() async throws {
         guard ProcessInfo.processInfo.environment["UT_DEVIN_USAGE_PROBE"] == "1" else { throw XCTSkip("Opt-in read-only request using an explicitly saved Devin account") }
         let config = try IntegrationConfiguration.load()
@@ -151,9 +200,12 @@ final class DevinConsumptionTests: XCTestCase {
 private struct ConsumptionStatusFixture: CommandRunning {
     var email = "reader@example.test"
     var extra = ""
+    var output: String?
+    var failure: IntegrationError?
     func run(executable: String, arguments: [String], environment: [String : String], timeout: Double) async throws -> CommandOutput {
         XCTAssertEqual(arguments, ["auth", "status"])
-        return CommandOutput(status: 0, stdout: Data("Logged in\nEmail: \(email)\nPlan: Enterprise\n\(extra)".utf8), stderr: Data())
+        if let failure { throw failure }
+        return CommandOutput(status: 0, stdout: Data((output ?? "Logged in\nEmail: \(email)\nPlan: Enterprise\n\(extra)").utf8), stderr: Data())
     }
 }
 

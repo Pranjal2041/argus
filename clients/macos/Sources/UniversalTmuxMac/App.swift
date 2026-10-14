@@ -374,6 +374,7 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Show agent sessions", isOn: $state.showAgentSessions)
+                SidebarBacklogToggle(isOn: $state.hideBackloggedPanels, label: "Hide backlogged panels in sidebar")
             } header: {
                 Text("Sessions")
             } footer: {
@@ -382,6 +383,8 @@ struct SettingsView: View {
             }
 
             MachineLaunchersSettingsSection(store: machineLaunchers)
+
+            AgentProviderSettingsSection()
 
             Section {
                 Toggle(
@@ -1138,7 +1141,7 @@ struct RootView: View {
                 // A stable VStack is both cheaper at this scale and cannot enter that
                 // lazy scroll-anchor reconciliation path.
                 VStack(alignment: .leading, spacing: 1) {
-                    NeedsAttentionSection(waiting: state.waitingSessions, selection: $state.selection)
+                    NeedsAttentionSection(waiting: state.sidebarWaitingSessions, selection: $state.selection)
                     ForEach(state.machines) { machine in
                         let groups = filteredGroups(machine)
                         VStack(alignment: .leading, spacing: 1) {
@@ -1166,16 +1169,16 @@ struct RootView: View {
             Text("Argus")
                 .font(cf(13, .semibold))
                 .foregroundStyle(Theme.textPrimary)
-            if state.waitingCount > 0 {
+            if !state.sidebarWaitingSessions.isEmpty {
                 HStack(spacing: 3) {
                     Image(systemName: "bell.fill").font(cf(8.5))
-                    Text("\(state.waitingCount)").font(cf(10.5, .semibold)).monospacedDigit()
+                    Text("\(state.sidebarWaitingSessions.count)").font(cf(10.5, .semibold)).monospacedDigit()
                 }
                 .foregroundStyle(SwiftUI.Color(hex: "#24252F"))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Theme.waiting))
-                .help("\(state.waitingCount) session\(state.waitingCount == 1 ? "" : "s") waiting on you")
+                .help("\(state.sidebarWaitingSessions.count) sidebar session\(state.sidebarWaitingSessions.count == 1 ? "" : "s") waiting on you")
                 .transition(.scale.combined(with: .opacity))
             }
             Spacer()
@@ -1400,6 +1403,7 @@ struct RootView: View {
         if state.statusByMachine[m.id] == .delayed { return "session refresh delayed — retrying" }
         if state.statusByMachine[m.id] == nil || state.statusByMachine[m.id] == .checking { return "checking sessions…" }
         if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "no matches" }
+        if state.hideBackloggedPanels { return "no non-backlog panels" }
         return "no sessions"
     }
 
@@ -1926,7 +1930,7 @@ struct StatusDot: View {
     }
 }
 
-// MARK: - Command palette (⌘K)
+// MARK: - Command palette (⌘P)
 
 /// Fuzzy cross-node session switcher + action launcher. Type to filter, ↑/↓ to
 /// move, ↩ to run the highlighted item, Esc to dismiss.
@@ -1940,6 +1944,18 @@ struct CommandPalette: View {
     @State private var query = ""
     @State private var sel = 0
     @FocusState private var focused: Bool
+
+    init(machineName: @escaping (String) -> String, state: AppState, terminals: TerminalController,
+         lab: LabModel, artifacts: ArtifactStore, recovery: WorkspaceRecoveryController,
+         query: String = "") {
+        self.machineName = machineName
+        self.state = state
+        self.terminals = terminals
+        self.lab = lab
+        self.artifacts = artifacts
+        self.recovery = recovery
+        _query = State(initialValue: query)
+    }
 
     struct Item: Identifiable {
         let id: String
@@ -1996,6 +2012,9 @@ struct CommandPalette: View {
             ("textformat.size", "Reset Font Size", "⌘0", { terminals.resetFontSize() }),
             ("arrow.clockwise", "Refresh Sessions", "⌘R", { state.refreshAll() }),
             ("line.3.horizontal.decrease.circle", "Filter Sessions", "⌘L", { state.focusSearch() }),
+            (state.hideBackloggedPanels ? "eye" : "eye.slash",
+             state.hideBackloggedPanels ? "Show Backlogged Panels in Sidebar" : "Hide Backlogged Panels in Sidebar",
+             "Sidebar only", { state.hideBackloggedPanels.toggle() }),
             ("sidebar.leading", "Toggle Sidebar", "⌃⌘S", { state.toggleSidebar() }),
             (state.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer",
              state.keepAwake ? "Stop Keeping This Mac Awake" : "Keep This Mac Awake & Reachable While Locked",
@@ -2053,6 +2072,10 @@ struct CommandPalette: View {
                             // rows by position and kept STALE content when the filtered
                             // list changed — filtering (incl. commands) looked broken.
                             .onTapGesture { sel = i; run() }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityIdentifier("palette-item:" + it.id)
+                            .accessibilityAction { sel = i; run() }
                         }
                     }
                     .padding(8)

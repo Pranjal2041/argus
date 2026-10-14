@@ -45,9 +45,9 @@ type Session interface {
 	Resize(cols, rows int) error
 	Size() (cols, rows int)          // the pane's CURRENT size (0,0 if unknown)
 	Snapshot() []byte                // repaint including viewport rows and editing cursor; subsequent deltas must land at the same cells
-	RequestSnapshot(id uint64) error // emit the repaint through Output(), never a parallel writer
+	RequestSnapshot(id uint64) error // emit the repaint through Output(), never a parallel writer; Close must unblock pending submission
 	Pane() string                    // default pane id for input routing
-	Close()                          // detach this control client (session itself persists)
+	Close()                          // promptly detach this attachment, never terminate the session; Output may stay open
 }
 
 // QueryOwnership describes the terminal endpoint, not the application running
@@ -107,6 +107,8 @@ type Provider interface {
 // state until the background cadence. Providers that do not implement this
 // optional capability return their state directly in ListInventory.
 type TieredStateProvider interface {
+	// Empty means unavailable evidence; retain the last successful state.
+	// Only a successful read may report working, waiting, or idle.
 	DetectState(name string) string
 }
 
