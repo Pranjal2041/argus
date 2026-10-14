@@ -19,7 +19,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"universal-tmux/internal/agentstate"
 	"universal-tmux/internal/recovery"
 	"universal-tmux/internal/rendersource"
 	"universal-tmux/internal/session"
@@ -164,160 +164,16 @@ func (p *Provider) Dial(ctx context.Context, name string) (session.Session, erro
 	return c, nil
 }
 
-// interruptHints are the footer strings agents show while a turn is actively
-// running — Claude: "… · esc to interrupt"; Codex: "Working (… • esc to
-// interrupt)"; some agent modes instead print "/stop to interrupt". Any of them
-// on the visible screen is the agent-agnostic "working" signal; their absence
-// means idle. This survives a noisy pane: a server logging in the same window
-// never prints these, so output-activity false positives disappear.
-var interruptHints = []string{"esc to interrupt", "/stop to interrupt"}
-
-// interruptScanLines bounds the scan to the last few non-blank lines — the hint lives
-// in the footer, so checking only the bottom avoids matching the phrase in chat text.
-// 8 (was 6) absorbs footers that grow suffixes ("· 1 background terminal running ·
-// /ps to view · /stop to close") and wrap to an extra line.
-const interruptScanLines = 8
-
-// DetectState classifies a session's visible screen:
-//   - "working": the agent's "esc to interrupt" footer is showing;
-//   - "waiting": the agent is BLOCKED on the user — a numbered option dialog
-//     ("Do you want to proceed?  ❯ 1. Yes / 2. No…") is on screen;
-//   - "idle": neither.
-//
-// A passive, point-in-time capture-pane read: no history, no background
-// sampler — computed on demand when /sessions is requested.
+// DetectState classifies the current visible screen using the shared terminal
+// activity contract. An unavailable capture is not evidence of completion.
 func DetectState(socket, name string) string {
-	// Bound the capture so one wedged pane on a loaded node can't stall the whole
-	// (now-parallel) refresh; a timed-out or failed read falls back to "idle".
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := toolcommand.CommandContext(ctx, "tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", name)...).Output()
 	if err != nil {
-		return "idle"
+		return ""
 	}
-	if screenHasInterrupt(out) {
-		return "working"
-	}
-	// The agent delegated to background sub-agents and is waiting on THEM, not on
-	// the user ("Waiting for 2 background agents to finish"). That's working, not a
-	// decision — never flag it for attention.
-	if bgAgentsWaitingRe.Match(out) {
-		return "working"
-	}
-	if screenHasWaitingPrompt(out) {
-		return "waiting"
-	}
-	return "idle"
-}
-
-// bgAgentsWaitingRe matches the footer an agent shows while blocked on its own
-// spawned sub-agents — "Waiting for N background agents to finish". This is
-// delegated WORK in progress, never a prompt for the user.
-var bgAgentsWaitingRe = regexp.MustCompile(`(?i)waiting for \d+ background agents?`)
-
-// agentsManagerRe matches the background-agents MANAGER list chrome — "↑/↓ to
-// select · Enter to view", "← for agents · ↓ to manage". It reuses the same
-// up/down navigation cue as a real option dialog but is NOT a user choice, so it
-// must NOT count as "waiting".
-var agentsManagerRe = regexp.MustCompile(`(?i)(enter to view|← for agents|↓ to manage|to manage tasks)`)
-
-// waitingScanLines bounds the dialog scan: a selection menu renders near the
-// bottom — but some agent TUIs draw a status block BELOW it, so the window is
-// generous enough to still reach the menu's footer.
-const waitingScanLines = 22
-
-var (
-	// The SELECTED row of a numbered option dialog: "❯ 1. Yes". The bare "❯" is
-	// just the composer prompt (always on screen), so the digit is required.
-	waitingSelectorRe = regexp.MustCompile(`^\s*│?\s*❯\s*\d+\.\s`)
-	// Any other (unselected) option row: "  2. No, and tell Claude…".
-	waitingOptionRe = regexp.MustCompile(`^\s*│?\s*\d+\.\s`)
-	// The footer an interactive selection menu prints WHILE blocked on a choice
-	// — e.g. "Enter to select · ↑/↓ to navigate · Esc to cancel". The most
-	// robust "waiting for you to pick" signal: an explicit string the TUI emits,
-	// independent of any selector GLYPH (custom agents mark the selected row with
-	// COLOR, not a "❯", so the glyph heuristic alone misses them). Anchored on
-	// the up/down navigation cue so ordinary prose can't trip it.
-	waitingFooterRe = regexp.MustCompile(`(?i)(↑/↓|↑ ↓|↑↓|up/?down|arrow keys|use arrows).{0,40}(navigate|select|choose|move)`)
-)
-
-// screenHasWaitingPrompt reports whether the screen tail shows an interactive
-// selection menu blocked on the user. True if EITHER:
-//   - a menu footer hint is present ("↑/↓ to navigate" etc.) — robust across
-//     custom TUIs that don't draw a "❯" selector; or
-//   - a "❯ N." selected row PLUS another numbered option row (Claude-style
-//     permission dialogs) — a single typed draft like "❯ 1. fix it" can't
-//     satisfy both.
-func screenHasWaitingPrompt(screen []byte) bool {
-	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
-	start := len(lines) - waitingScanLines
-	if start < 0 {
-		start = 0
-	}
-	tail := lines[start:]
-	for _, l := range tail {
-		// Skip the background-agents manager list: it shows "↑/↓ to select · Enter
-		// to view", which matches the dialog-footer cue but is the agent browsing its
-		// own sub-agents, not a choice put to the user.
-		if waitingFooterRe.MatchString(l) && !agentsManagerRe.MatchString(l) {
-			return true
-		}
-	}
-	selector, options := false, 0
-	for _, l := range tail {
-		if waitingSelectorRe.MatchString(l) {
-			selector = true
-			options++
-		} else if waitingOptionRe.MatchString(l) {
-			options++
-		}
-	}
-	return selector && options >= 2
-}
-
-// screenHasInterrupt reports whether any interrupt hint appears in the last few
-// non-blank lines of a captured screen.
-//
-// ADJACENT lines are checked JOINED (no separator): the footer grows suffixes
-// and wraps at the pane width, and the wrap point — which shifts as the
-// elapsed-time text ticks ("8s" → "1m 42s") — can land INSIDE the phrase
-// ("…esc to inte" / "rrupt) · 1 background…"), so no single captured line
-// contains it. A wrapped line is always immediately followed by its
-// continuation, so joining adjacent lines reconstructs the phrase; a blank
-// line is never a wrap and breaks the join.
-func screenHasInterrupt(screen []byte) bool {
-	lines := strings.Split(strings.TrimRight(string(screen), "\n"), "\n")
-	checked := 0
-	var run []string // current run of ADJACENT non-blank lines, gathered bottom-up
-	runHasHint := func() bool {
-		if len(run) == 0 {
-			return false
-		}
-		var b strings.Builder
-		for i := len(run) - 1; i >= 0; i-- { // back to screen order
-			b.WriteString(run[i])
-		}
-		joined := strings.ToLower(b.String())
-		for _, hint := range interruptHints {
-			if strings.Contains(joined, hint) {
-				return true
-			}
-		}
-		return false
-	}
-	for i := len(lines) - 1; i >= 0 && checked < interruptScanLines; i-- {
-		l := strings.TrimRight(lines[i], " \t")
-		if strings.TrimSpace(l) == "" {
-			if runHasHint() {
-				return true
-			}
-			run = run[:0]
-			continue
-		}
-		checked++
-		run = append(run, l)
-	}
-	return runHasHint()
+	return agentstate.Detect(out)
 }
 
 // internalSessionPrefix marks tmux sessions that are ut's own infrastructure

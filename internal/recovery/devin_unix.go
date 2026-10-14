@@ -120,7 +120,7 @@ func inspectDevin(root processInfo, processes map[int]processInfo, state process
 		if pid != root.PID {
 			var err error
 			childState, err = platformProcessState(pid)
-			if err != nil || len(childState.Argv) < 2 || childState.Argv[1] != "acp" {
+			if err != nil || leadingSubcommand(childState.Argv, devinRestoreOptions) != "acp" {
 				continue
 			}
 		}

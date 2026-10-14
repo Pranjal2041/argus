@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"universal-tmux/internal/session"
@@ -116,16 +117,27 @@ func execInSession(socket, name, cmd string, timeout time.Duration) session.Exec
 	return session.ExecResult{Stdout: string(so), Stderr: string(se), Exit: rc}
 }
 
-// SendText types text into a session's shell (and optionally Enter), returning
-// immediately without capturing output — for firing a long job or interactive
-// input. -l sends the bytes literally.
+var sendBufferSequence atomic.Uint64
+
+// SendText pastes one logical input, followed by an optional submit key. Honor
+// the application's negotiated bracketed-paste mode so embedded newlines stay
+// inside the paste and the submit byte is outside its framing. Application-level
+// acceptance of that submit key is not acknowledged by the terminal protocol.
 func (p *Provider) SendText(name, text string, enter bool) error {
 	sessionID, ok := sessionIDForName(p.socket, name)
 	if !ok {
 		return fmt.Errorf("no such session %q", name)
 	}
 	if text != "" {
-		if err := toolcommand.Command("tmux", tmuxArgs(p.socket, "send-keys", "-t", sessionID, "-l", text)...).Run(); err != nil {
+		buffer := fmt.Sprintf("ut-send-%d-%d", os.Getpid(), sendBufferSequence.Add(1))
+		load := toolcommand.Command("tmux", tmuxArgs(p.socket, "load-buffer", "-b", buffer, "-")...)
+		load.Stdin = strings.NewReader(text)
+		if err := load.Run(); err != nil {
+			return err
+		}
+		defer func() { _ = toolcommand.Command("tmux", tmuxArgs(p.socket, "delete-buffer", "-b", buffer)...).Run() }()
+		// -p brackets only when requested; -r preserves LF bytes exactly.
+		if err := toolcommand.Command("tmux", tmuxArgs(p.socket, "paste-buffer", "-p", "-r", "-b", buffer, "-t", sessionID)...).Run(); err != nil {
 			return err
 		}
 	}

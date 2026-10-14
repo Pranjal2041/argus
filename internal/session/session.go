@@ -107,6 +107,8 @@ type Provider interface {
 // state until the background cadence. Providers that do not implement this
 // optional capability return their state directly in ListInventory.
 type TieredStateProvider interface {
+	// Empty means unavailable evidence; retain the last successful state.
+	// Only a successful read may report working, waiting, or idle.
 	DetectState(name string) string
 }
 

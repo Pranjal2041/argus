@@ -880,10 +880,9 @@ func (m *Manager) refreshSessions(includeBackground bool) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				state := provider.DetectState(list[i].Name)
-				if state == "" {
-					state = "idle"
+				if state != "" {
+					list[i].State = state
 				}
-				list[i].State = state
 			}(i)
 		}
 		wg.Wait()

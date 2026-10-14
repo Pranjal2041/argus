@@ -69,6 +69,34 @@ func splitOption(arg string) (string, bool) {
 	return arg, false
 }
 
+// leadingSubcommand follows declared option arity, not fixed argv positions or
+// a search for a word that could instead be an option value or prompt. Unknown
+// and variadic prefixes cannot prove a helper's role and fail closed.
+func leadingSubcommand(argv []string, specs map[string]optionSpec) string {
+	for index := 1; index < len(argv); {
+		arg := argv[index]
+		if arg == "--" {
+			return ""
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
+		name, inline := splitOption(arg)
+		spec, ok := specs[name]
+		if !ok || spec.Values < 0 || (inline && spec.Values == 0) {
+			return ""
+		}
+		index++
+		if !inline {
+			index += spec.Values
+		}
+		if index > len(argv) {
+			return ""
+		}
+	}
+	return ""
+}
+
 // preserveOptions parses only options whose resume behavior is explicit. It
 // never carries an initial prompt into a restored conversation, and an unknown
 // option blocks automatic restoration instead of being silently dropped.

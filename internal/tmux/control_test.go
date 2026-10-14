@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"universal-tmux/internal/agentstate"
 )
 
 func TestCloseUnblocksUndrainedControlOutput(t *testing.T) {
@@ -101,8 +102,8 @@ func TestScreenHasInterrupt(t *testing.T) {
 		{"blank breaks join", "esc to inte\n\nrrupt\n", false},
 	}
 	for _, c := range cases {
-		if got := screenHasInterrupt([]byte(c.screen)); got != c.want {
-			t.Errorf("%s: screenHasInterrupt = %v, want %v", c.name, got, c.want)
+		if got := agentstate.HasInterrupt([]byte(c.screen)); got != c.want {
+			t.Errorf("%s: agentstate.HasInterrupt = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -139,8 +140,8 @@ func TestScreenHasWaitingPrompt(t *testing.T) {
 		{"plain numbered list, no nav footer", " 1. one\n 2. two\n 3. three\n\noutput continues\n", false},
 	}
 	for _, c := range cases {
-		if got := screenHasWaitingPrompt([]byte(c.screen)); got != c.want {
-			t.Errorf("%s: screenHasWaitingPrompt = %v, want %v", c.name, got, c.want)
+		if got := agentstate.HasWaitingPrompt([]byte(c.screen)); got != c.want {
+			t.Errorf("%s: agentstate.HasWaitingPrompt = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

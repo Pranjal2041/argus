@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -247,10 +246,10 @@ func (p *Provider) DetectState(name string) string {
 	s := p.sessions[name]
 	p.mu.Unlock()
 	if s == nil {
-		return "idle"
+		return ""
 	}
 	s.mu.Lock()
-	state := detectState(s.ring)
+	state := s.capture.activity()
 	s.mu.Unlock()
 	return state
 }
@@ -514,7 +513,8 @@ func (p *Provider) ReapAgents() []string {
 				expired = session.AgentSessionExpired(now, s.lastOut, s.doneAt, s.reapIdle)
 			}
 		}
-		idle := expired && detectState(s.ring) != "working"
+		state := s.capture.activity()
+		idle := expired && (state == "idle" || state == "waiting")
 		s.mu.Unlock()
 		if idle {
 			stale = append(stale, name)
@@ -536,11 +536,10 @@ func (p *Provider) SendText(name, text string, enter bool) error {
 	if !ok {
 		return fmt.Errorf("no such session %q", name)
 	}
-	data := text
-	if enter {
-		data += "\r"
-	}
-	return s.SendKeys("%0", []byte(data))
+	s.mu.Lock()
+	data := s.modes.paste(text, enter)
+	s.mu.Unlock()
+	return s.SendKeys("%0", data)
 }
 
 // Exec runs a command on this Windows host. One-shot only for now (fresh
@@ -585,38 +584,4 @@ func (p *Provider) Exec(req session.ExecRequest) session.ExecResult {
 		}
 	}
 	return res
-}
-
-// --- attention-state detection: the agent's OSC window-title spinner ---------
-//
-// A running turn animates a braille spinner in the WINDOW TITLE via OSC 0/2 — e.g.
-// `ESC]0;⠴ research BEL`, re-emitted ~10x/s — and the agent emits one final
-// non-spinner title (`ESC]0;research BEL`) the instant the turn ends. Unlike the
-// "esc to interrupt" footer (which the TUI cell-diffs and almost never re-emits, so
-// it's effectively absent from the byte stream), the title is an explicit escape
-// sequence the agent SENDS every frame, so it's reliably in the raw ConPTY output —
-// a DETERMINISTIC signal we can read without a rendered screen (ConPTY has no
-// capture-pane). Verified on both Codex and Claude on Windows: working titles carry
-// a braille glyph; the idle title does not. No recency gate, no screen-scraping.
-var titleRe = regexp.MustCompile(`\x1b\][012];([^\x07\x1b]*)(?:\x07|\x1b\\)`)
-
-const titleTailScan = 8192 // bytes of recent output to find the latest window title in
-
-// detectState classifies a ConPTY session from its MOST RECENT OSC window title:
-// a braille glyph (U+2800–U+28FF, the animated spinner) means a turn is running.
-func detectState(ring []byte) string {
-	tail := ring
-	if len(tail) > titleTailScan {
-		tail = tail[len(tail)-titleTailScan:]
-	}
-	m := titleRe.FindAllSubmatch(tail, -1)
-	if len(m) == 0 {
-		return "idle" // no recent window title → no working signal
-	}
-	for _, r := range string(m[len(m)-1][1]) { // the latest title's text
-		if r >= 0x2800 && r <= 0x28FF {
-			return "working"
-		}
-	}
-	return "idle"
 }

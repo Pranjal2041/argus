@@ -203,10 +203,10 @@ final class CLIAgentStatusProvider: AgentStatusProvider {
     If the input starts with a "[USER STATUS CORRECTION]" line: the user just manually changed this agent's status because they judged your auto-status wrong. Take it seriously — work out from the scrollback WHY they'd pick the status they chose, and lean toward a status consistent with their judgment. Don't simply revert to what you had. (You're not forced to output their exact label if the screen now clearly shows something different — but their correction is a strong signal about what matters here.)
 
     READING THE SCREEN CORRECTLY (this is where mistakes happen):
-    - The bottom-most line that looks like "❯ <some text>" sitting just above the "⏵⏵ bypass permissions…" status bar is the LIVE INPUT BOX. The text in it is very often an AUTO-GENERATED suggestion (ghost text the agent proposes, like "yes go ahead", "continue", "yes please"). It is NOT something the user typed and NOT an approval. NEVER treat that composer line as a user message, an answer, or a go-ahead.
-    - The user's REAL messages are earlier in the transcript, each one followed by the agent actually acting on it. If the agent asked a question and the next thing is just the input box (no agent work after it, no "esc to interrupt"), then the user has NOT answered yet — the agent is WAITING ON THE USER.
-    - "esc to interrupt" / "/stop to interrupt" on screen = the agent is generating right now (working). Its ABSENCE means the agent is not currently generating.
-    - AGENT HALTED ON AN ERROR: if the agent's LAST output is an error it did not get past — "API Error" / "Rate limited" / a crash / an exception / a command that failed and it stopped — with no successful agent work after it and no "esc to interrupt", the agent is STUCK and needs you. Do NOT assume it "recovered": treat an error as recovered ONLY if you can see real agent work AFTER it. The agent's own earlier "recovered / running to completion" narration does not count if a LATER error left it halted at the bottom. (Being out of room — "100% context used" / "context low" — is NOT itself stuck; the agent compacts and continues.)
+    - The bottom-most composer (often marked ❯, ❭, ›, or > and bounded by separator lines or a status bar) is the LIVE INPUT BOX. A placeholder such as "Guide the agent while it works" is chrome, not a submitted message. The text in it is very often an AUTO-GENERATED suggestion (ghost text the agent proposes, like "yes go ahead", "continue", "yes please"). It is NOT something the user typed and NOT an approval. NEVER treat that composer line as a user message, an answer, or a go-ahead.
+    - The user's REAL messages are earlier in the transcript, each one followed by the agent actually acting on it. If the agent asked a question and the next thing is just the input box (no agent work after it, no current running indicator), then the user has NOT answered yet — the agent is WAITING ON THE USER.
+    - A live footer offering an interrupt control ("esc to interrupt", "esc twice to interrupt", "Escape 2 times to interrupt", or "/stop to interrupt") means a turn is running. Do not infer idle from the absence of one exact phrase: agents use different controls, and a sampled frame may omit the footer. Consider the current activity evidence and work in flight.
+    - AGENT HALTED ON AN ERROR: if the agent's LAST output is an error it did not get past — "API Error" / "Rate limited" / a crash / an exception / a command that failed and it stopped — with no successful agent work after it and no current running indicator, the agent is STUCK and needs you. Do NOT assume it "recovered": treat an error as recovered ONLY if you can see real agent work AFTER it. The agent's own earlier "recovered / running to completion" narration does not count if a LATER error left it halted at the bottom. (Being out of room — "100% context used" / "context low" — is NOT itself stuck; the agent compacts and continues.)
 
     The summary is INSIGHT, not a recap:
     - Lead with the meaningful state: the key result/finding it produced, the decision it's waiting on, whether it finished, or where it's stuck — relative to the user's task.
@@ -214,7 +214,7 @@ final class CLIAgentStatusProvider: AgentStatusProvider {
     - Surface any loose end that needs the user — a pending approval, an unanswered question it asked, a known blocker. That is often the single most useful thing to say.
     - NO FILLER. Never write "ready for next task", "awaiting command", "ready for you to try", "sitting at the prompt", or restate routine steps.
 
-    BACKGROUND JOBS / WORK IN FLIGHT: the agent counts as WORKING — even when it is sitting at the ❯ input box with no "esc to interrupt" and no live motion on THIS frame — whenever it has work still in progress. Signs of in-flight work: a job/training run/sweep/server it launched is still running (a climbing step count or rising %, fresh log lines, "N shells still running", "N monitor(s) still running", "waiting for / waited for background terminal", a SLURM job in squeue, a watcher/cron it armed); the agent is minding a job on a schedule (a monitoring loop, "I'll check every 30 min", "next fire ~HH:MM", "I'll report when it completes", "the loop continues"); OR its latest narration is active in-progress work it said it will continue ("I'm rerunning the solver", "I'll wait for the anchor branch, then decide", "once the first chunks land I'll refresh", "letting wave 1 run and will watch"). Report the job's state/progress. Do NOT call this idle just because the screen is momentarily static — the work is running under the agent's watch. EXCEPTIONS that still override working: a pending question the agent asked the user, OR the agent halted on an error (see "stuck"), takes priority — report that the agent needs you, not the job. STILL IDLE only when there is genuinely NO work in flight: the agent explicitly finished or tore it down ("all jobs cancelled", "0 remaining", "done — let me know if you want…"), a fresh CLI with no task started, or the task quietly completed with nothing running and no continuation stated.
+    BACKGROUND JOBS / WORK IN FLIGHT: the agent counts as WORKING — even when it is sitting at the ❯ input box with no current running indicator and no live motion on THIS frame — whenever it has work still in progress. Signs of in-flight work: a job/training run/sweep/server it launched is still running (a climbing step count or rising %, fresh log lines, "N shells still running", "N monitor(s) still running", "waiting for / waited for background terminal", a SLURM job in squeue, a watcher/cron it armed); the agent is minding a job on a schedule (a monitoring loop, "I'll check every 30 min", "next fire ~HH:MM", "I'll report when it completes", "the loop continues"); OR its latest narration is active in-progress work it said it will continue ("I'm rerunning the solver", "I'll wait for the anchor branch, then decide", "once the first chunks land I'll refresh", "letting wave 1 run and will watch"). Report the job's state/progress. Do NOT call this idle just because the screen is momentarily static — the work is running under the agent's watch. EXCEPTIONS that still override working: a pending question the agent asked the user, OR the agent halted on an error (see "stuck"), takes priority — report that the agent needs you, not the job. STILL IDLE only when there is genuinely NO work in flight: the agent explicitly finished or tore it down ("all jobs cancelled", "0 remaining", "done — let me know if you want…"), a fresh CLI with no task started, or the task quietly completed with nothing running and no continuation stated.
 
     SUB-AGENTS: an agent that spawned its own background sub-agents and is "Waiting for N background agents to finish" (you'll see a list of running sub-tasks / "↓ to manage" / "← for agents") is WORKING — it delegated the work and is waiting on ITS OWN agents, NOT on you. This is NEVER needs-decision. Summarize what the sub-agents are doing.
 
@@ -225,10 +225,10 @@ final class CLIAgentStatusProvider: AgentStatusProvider {
     - Is the only thing "asking" the user an optional session-quality/feedback/rating prompt? It is never needs-decision (see OPTIONAL FEEDBACK PROMPTS) — fall through to the real state below.
 
     LABEL — work down this list IN ORDER and pick the FIRST that applies. Do not skip ahead.
-    1. needs-decision: the AGENT itself asked the user a SPECIFIC question and is blocked on the answer — you can point to the actual question the agent wrote on screen (no agent work after it, no "esc to interrupt"). It is NOT needs-decision if YOU are the one inferring "awaiting requirements / awaiting confirmation / needs the user to clarify" — that is you second-guessing; when the USER is the one giving instructions, the agent should act (working), it is not waiting on anyone. Ghost text in the composer is not an answer; an optional session-quality/feedback prompt is not a question (see OPTIONAL FEEDBACK PROMPTS).
+    1. needs-decision: the AGENT itself asked the user a SPECIFIC question and is blocked on the answer — you can point to the actual question the agent wrote on screen (no agent work after it, no current running indicator). It is NOT needs-decision if YOU are the one inferring "awaiting requirements / awaiting confirmation / needs the user to clarify" — that is you second-guessing; when the USER is the one giving instructions, the agent should act (working), it is not waiting on anyone. Ghost text in the composer is not an answer; an optional session-quality/feedback prompt is not a question (see OPTIONAL FEEDBACK PROMPTS).
     2. stuck: the agent is genuinely halted — its last output is an unrecovered error ("API Error" / "Rate limited", a crash, an exception, a permission loop), the same failure is repeating with no progress, or it explicitly gave up. This holds EVEN IF a background job still shows some progress: a halted agent that needs you outranks the job's %. NOT a hard or still-unsolved problem it is actively working on, NOT user frustration, NOT the mere existence of an open bug, NOT a fresh user message. A difficult task in progress is "working", not "stuck".
     3. drifting: clearly off-track or churning without making progress (only if obvious).
-    4. working: the agent is generating now ("esc to interrupt" present), OR a background job's output is visibly advancing (see BACKGROUND JOBS).
+    4. working: the agent is generating now (a live running indicator is present), OR a background job's output is visibly advancing (see BACKGROUND JOBS).
     5. look: nothing is running, but a notable or surprising result is on screen the user should see (no decision needed).
     6. milestone: nothing is running, but a substantial deliverable just landed — an experiment finished with findings, a PR merged, a feature built and tested. NOT a routine one-line commit or minor edit.
     7. idle: none of the above — at the prompt, nothing running or advancing, last action minor or the task quietly done. Do not invent importance.
@@ -266,15 +266,17 @@ func ccCaptureLooksTransient(_ output: String, state: String) -> Bool {
                   "permission denied", "needs you", "waiting for approval"]
     if urgent.contains(where: lower.contains) { return false }
 
+    let lines = output.components(separatedBy: "\n")
+    let controls = AgentTerminalChrome.interruptRows(lines)
+    let chrome = AgentTerminalChrome.chromeRows(lines)
     var signal = 0
-    for raw in output.split(separator: "\n", omittingEmptySubsequences: false) {
-        let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    for row in lines.indices {
+        let line = lines[row].trimmingCharacters(in: .whitespacesAndNewlines)
         let low = line.lowercased()
-        if line == "›" || line == ">" { continue }
+        if controls.contains(row) || chrome.contains(row) { continue }
         // Agent footer/status bar: useful for the deterministic dot, not as a
         // description of the work. It is often the only thing left in a bad frame.
-        if low.contains("goal achieved") || low.contains("goal paused") ||
-            low.contains("esc to interrupt") || low.contains("stop to interrupt") {
+        if low.contains("goal achieved") || low.contains("goal paused") {
             continue
         }
         signal += line.unicodeScalars.reduce(0) {
@@ -284,8 +286,8 @@ func ccCaptureLooksTransient(_ output: String, state: String) -> Bool {
     return signal < 32
 }
 
-/// The broker's working state is a direct terminal signal (on Windows, the latest
-/// OSC-title spinner), while idle/look/milestone are model interpretations of a
+/// The broker's working state is a direct visible-terminal signal, while
+/// idle/look/milestone are model interpretations of a
 /// sampled screen. They must never contradict that live signal. Attention labels
 /// remain untouched: a running turn can still be stuck, drifting, or need a decision.
 func ccReconcileLiveState(_ status: AgentStatus, state: String) -> AgentStatus {
@@ -568,19 +570,10 @@ final class CommandCenterModel: ObservableObject {
     }
 
     /// Fingerprint of the output IGNORING volatile agent chrome (the ticking
-    /// "esc to interrupt" footer / spinner), so a session that's only animating its
+    /// interrupt-control footer / spinner), so a session that's only animating its
     /// timer isn't re-summarized. Real new output changes the content lines → new key.
     private func contentKey(_ s: String) -> Int {
-        var lines: [String] = []
-        for raw in s.split(separator: "\n", omittingEmptySubsequences: false) {
-            let low = raw.lowercased()
-            if low.contains("esc to interrupt") || low.contains("stop to interrupt") {
-                lines.append("·working·")   // collapse the line whose only change is the timer
-            } else {
-                lines.append(String(raw).trimmingCharacters(in: .whitespaces))
-            }
-        }
-        return lines.joined(separator: "\n").hashValue
+        AgentTerminalChrome.contentKey(s)
     }
 
     private func persist() {
