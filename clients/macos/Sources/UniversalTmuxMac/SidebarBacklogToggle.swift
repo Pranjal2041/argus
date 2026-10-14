@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The same preference is available beside the panel list and in Settings.
+/// Settings control for the preference also available through the command palette.
 struct SidebarBacklogToggle: View {
     @Binding var isOn: Bool
     var label = "Hide backlog"

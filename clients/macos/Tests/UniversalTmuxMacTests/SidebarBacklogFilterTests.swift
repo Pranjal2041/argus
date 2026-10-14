@@ -142,8 +142,8 @@ final class SidebarBacklogFilterTests: XCTestCase {
         NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
         NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
         let state = fixture()
-        let host = NSHostingView(rootView: SidebarFixture(state: state))
-        host.frame = NSRect(x: 0, y: 0, width: WorkspaceSidebarSizing.defaultWidth, height: 600)
+        let host = NSHostingView(rootView: SidebarFilterSettingsFixture(state: state))
+        host.frame = NSRect(x: 0, y: 0, width: 360 + WorkspaceSidebarSizing.defaultWidth, height: 600)
         let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
@@ -166,7 +166,7 @@ final class SidebarBacklogFilterTests: XCTestCase {
             XCTAssertEqual(find(host, identifier: "panel-remote/review") == nil, enabled)
             if let prefix = ProcessInfo.processInfo.environment["UT_SIDEBAR_FILTER_SCREENSHOT"] {
                 for width in [WorkspaceSidebarSizing.minimumWidth, WorkspaceSidebarSizing.defaultWidth] {
-                    host.setFrameSize(NSSize(width: width, height: 600))
+                    host.setFrameSize(NSSize(width: 360 + width, height: 600))
                     settle()
                     let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
                     host.cacheDisplay(in: host.bounds, to: bitmap)
@@ -188,14 +188,25 @@ final class SidebarBacklogFilterTests: XCTestCase {
 }
 
 /// Uses the shipping control, visibility model, attention section, and session rows.
-private struct SidebarFixture: View {
+private struct SidebarFilterSettingsFixture: View {
     @ObservedObject var state: AppState
 
     var body: some View {
+        HStack(spacing: 0) {
+            Form {
+                Section("Sessions") {
+                    SidebarBacklogToggle(isOn: $state.hideBackloggedPanels, label: "Hide backlogged panels in sidebar")
+                }
+            }
+            .formStyle(.grouped)
+            .frame(width: 360)
+            sidebar
+        }
+    }
+
+    private var sidebar: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Argus").font(.system(size: 13, weight: .semibold)).padding(.horizontal, 4)
-            SidebarBacklogToggle(isOn: $state.hideBackloggedPanels)
-                .font(.system(size: 11)).foregroundStyle(Theme.textSecondary).padding(.horizontal, 4)
             NeedsAttentionSection(waiting: state.sidebarWaitingSessions, selection: $state.selection)
             ForEach(state.machines) { machine in
                 Text(machine.name.uppercased()).font(.system(size: 11, weight: .semibold))

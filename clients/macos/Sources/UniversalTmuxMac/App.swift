@@ -1134,12 +1134,6 @@ struct RootView: View {
         VStack(spacing: 0) {
             sidebarHeader
             searchField
-            SidebarBacklogToggle(isOn: $state.hideBackloggedPanels)
-                .font(cf(11))
-                .foregroundStyle(Theme.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
             ScrollView {
                 // The sidebar is deliberately non-lazy. A real fleet is tens of rows,
                 // while SwiftUI's pinned LazyVStack repeatedly entered multi-second
@@ -1936,7 +1930,7 @@ struct StatusDot: View {
     }
 }
 
-// MARK: - Command palette (⌘K)
+// MARK: - Command palette (⌘P)
 
 /// Fuzzy cross-node session switcher + action launcher. Type to filter, ↑/↓ to
 /// move, ↩ to run the highlighted item, Esc to dismiss.
@@ -1950,6 +1944,18 @@ struct CommandPalette: View {
     @State private var query = ""
     @State private var sel = 0
     @FocusState private var focused: Bool
+
+    init(machineName: @escaping (String) -> String, state: AppState, terminals: TerminalController,
+         lab: LabModel, artifacts: ArtifactStore, recovery: WorkspaceRecoveryController,
+         query: String = "") {
+        self.machineName = machineName
+        self.state = state
+        self.terminals = terminals
+        self.lab = lab
+        self.artifacts = artifacts
+        self.recovery = recovery
+        _query = State(initialValue: query)
+    }
 
     struct Item: Identifiable {
         let id: String
@@ -2006,6 +2012,9 @@ struct CommandPalette: View {
             ("textformat.size", "Reset Font Size", "⌘0", { terminals.resetFontSize() }),
             ("arrow.clockwise", "Refresh Sessions", "⌘R", { state.refreshAll() }),
             ("line.3.horizontal.decrease.circle", "Filter Sessions", "⌘L", { state.focusSearch() }),
+            (state.hideBackloggedPanels ? "eye" : "eye.slash",
+             state.hideBackloggedPanels ? "Show Backlogged Panels in Sidebar" : "Hide Backlogged Panels in Sidebar",
+             "Sidebar only", { state.hideBackloggedPanels.toggle() }),
             ("sidebar.leading", "Toggle Sidebar", "⌃⌘S", { state.toggleSidebar() }),
             (state.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer",
              state.keepAwake ? "Stop Keeping This Mac Awake" : "Keep This Mac Awake & Reachable While Locked",
@@ -2063,6 +2072,10 @@ struct CommandPalette: View {
                             // rows by position and kept STALE content when the filtered
                             // list changed — filtering (incl. commands) looked broken.
                             .onTapGesture { sel = i; run() }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityIdentifier("palette-item:" + it.id)
+                            .accessibilityAction { sel = i; run() }
                         }
                     }
                     .padding(8)
