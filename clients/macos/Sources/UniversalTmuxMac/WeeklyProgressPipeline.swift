@@ -6,246 +6,91 @@ struct WeeklyProgressAgentResult: Equatable {
 }
 
 protocol WeeklyProgressAgentRunning {
+    var provider: AgentProvider { get }
     func start(prompt: String, in directory: URL, stageName: String) async throws
         -> WeeklyProgressAgentResult
     func resume(sessionID: String, prompt: String, in directory: URL, stageName: String) async throws
         -> WeeklyProgressAgentResult
 }
 
+extension WeeklyProgressAgentRunning {
+    var provider: AgentProvider { .codex }
+}
+
 enum CodexWeeklyProgressCommand {
-    static let model = "gpt-6-astra"
+    static let model = CodexModels.weeklyProgress
     static let reasoningEffort = "high"
 
     static func initialArguments(directory: URL, finalMessageURL: URL) -> [String] {
-        [
-            "exec",
-            "--skip-git-repo-check",
-            "--sandbox", "workspace-write",
-            "--color", "never",
-            "-C", directory.path,
-            "-m", model,
-            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
-            "--json",
-            "-o", finalMessageURL.path,
-            "-",
-        ]
+        arguments(conversation: nil, directory: directory, finalMessageURL: finalMessageURL)
     }
 
     static func resumeArguments(sessionID: String, finalMessageURL: URL) -> [String] {
-        [
-            "exec", "resume",
-            "--skip-git-repo-check",
-            "-m", model,
-            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
-            "--json",
-            "-o", finalMessageURL.path,
-            sessionID,
-            "-",
-        ]
+        arguments(conversation: AgentConversation(provider: .codex, id: sessionID),
+            directory: FileManager.default.temporaryDirectory, finalMessageURL: finalMessageURL)
+    }
+
+    private static func arguments(conversation: AgentConversation?, directory: URL, finalMessageURL: URL) -> [String] {
+        AgentCLIRunner.arguments(AgentGenerationRequest(provider: .codex, purpose: .weeklyProgress, prompt: "", conversation: conversation),
+            directory: directory, finalURL: finalMessageURL, exportURL: finalMessageURL,
+            promptURL: finalMessageURL, configURL: finalMessageURL)
     }
 
     static func sessionID(in jsonl: String) -> String? {
-        for line in jsonl.split(separator: "\n") {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["type"] as? String == "thread.started",
-                  let sessionID = object["thread_id"] as? String,
-                  !sessionID.isEmpty else { continue }
-            return sessionID
-        }
-        return nil
+        AgentCLIRunner.codexSessionID(in: jsonl)
     }
 }
 
-enum WeeklyProgressAgentError: LocalizedError {
-    case executableMissing(String)
-    case failed(stage: String, status: Int32, detail: String)
-    case missingSessionID(String)
-    case timedOut(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .executableMissing(let path): return "Codex CLI was not found at \(path)."
-        case .failed(let stage, let status, let detail):
-            return "Codex stage \(stage) exited with status \(status). \(detail)"
-        case .missingSessionID(let stage): return "Codex stage \(stage) did not report a session ID."
-        case .timedOut(let stage): return "Codex stage \(stage) exceeded its time limit."
-        }
-    }
-}
-
-/// Runs one durable multi-turn Codex conversation. The JSON event stream and
-/// stderr for every turn are kept beside the generated report and deck.
-struct CodexWeeklyProgressAgent: WeeklyProgressAgentRunning {
-    let executableURL: URL
+/// A report keeps its original provider for its entire durable conversation.
+/// Every turn uses the same bounded, cancellable CLI contract as other features.
+struct CLIAgentWeeklyProgressAgent: WeeklyProgressAgentRunning {
+    let provider: AgentProvider
+    let executableURL: URL?
     let timeout: TimeInterval
 
-    init(executableURL: URL = Self.defaultExecutableURL, timeout: TimeInterval = 3 * 60 * 60) {
+    init(provider: AgentProvider, executableURL: URL? = nil, timeout: TimeInterval = 3 * 60 * 60) {
+        self.provider = provider
         self.executableURL = executableURL
         self.timeout = timeout
     }
 
     func start(prompt: String, in directory: URL, stageName: String) async throws
         -> WeeklyProgressAgentResult {
-        let finalURL = agentDirectory(directory).appendingPathComponent(stageName + "-final.txt")
-        let output = try await run(
-            arguments: CodexWeeklyProgressCommand.initialArguments(
-                directory: directory,
-                finalMessageURL: finalURL
-            ),
-            prompt: prompt,
-            directory: directory,
-            stageName: stageName
-        )
-        guard let sessionID = CodexWeeklyProgressCommand.sessionID(in: output) else {
-            throw WeeklyProgressAgentError.missingSessionID(stageName)
-        }
-        return WeeklyProgressAgentResult(
-            sessionID: sessionID,
-            finalMessage: (try? String(contentsOf: finalURL, encoding: .utf8)) ?? ""
-        )
+        try await run(sessionID: nil, prompt: prompt, directory: directory, stageName: stageName)
     }
 
     func resume(sessionID: String, prompt: String, in directory: URL, stageName: String) async throws
         -> WeeklyProgressAgentResult {
-        let finalURL = agentDirectory(directory).appendingPathComponent(stageName + "-final.txt")
-        _ = try await run(
-            arguments: CodexWeeklyProgressCommand.resumeArguments(
-                sessionID: sessionID,
-                finalMessageURL: finalURL
-            ),
-            prompt: prompt,
-            directory: directory,
-            stageName: stageName
-        )
-        return WeeklyProgressAgentResult(
-            sessionID: sessionID,
-            finalMessage: (try? String(contentsOf: finalURL, encoding: .utf8)) ?? ""
-        )
+        try await run(sessionID: sessionID, prompt: prompt, directory: directory, stageName: stageName)
     }
 
     private func run(
-        arguments: [String],
+        sessionID: String?,
         prompt: String,
         directory: URL,
         stageName: String
-    ) async throws -> String {
-        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
-            throw WeeklyProgressAgentError.executableMissing(executableURL.path)
-        }
-        let agentDir = agentDirectory(directory)
+    ) async throws -> WeeklyProgressAgentResult {
+        let agentDir = directory.appendingPathComponent("agent", isDirectory: true)
         try FileManager.default.createDirectory(at: agentDir, withIntermediateDirectories: true)
         try Data(prompt.utf8).write(
             to: agentDir.appendingPathComponent(stageName + "-prompt.md"),
             options: .atomic
         )
-        let outputURL = agentDir.appendingPathComponent(stageName + ".jsonl")
-        let errorURL = agentDir.appendingPathComponent(stageName + ".stderr.log")
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-        FileManager.default.createFile(atPath: errorURL.path, contents: nil)
-
-        let status = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Int32, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = executableURL
-                process.arguments = arguments
-                process.currentDirectoryURL = directory
-                var environment = ProcessInfo.processInfo.environment
-                let additions = [
-                    "/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/bin",
-                    "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-                ]
-                let currentPath = environment["PATH"] ?? ""
-                environment["PATH"] = (additions + [currentPath]).filter { !$0.isEmpty }
-                    .joined(separator: ":")
-                process.environment = environment
-                let input = Pipe()
-                process.standardInput = input
-                guard let output = try? FileHandle(forWritingTo: outputURL),
-                      let errors = try? FileHandle(forWritingTo: errorURL) else {
-                    continuation.resume(throwing: CocoaError(.fileWriteUnknown))
-                    return
-                }
-                process.standardOutput = output
-                process.standardError = errors
-                do {
-                    try process.run()
-                } catch {
-                    try? output.close(); try? errors.close()
-                    continuation.resume(throwing: error)
-                    return
-                }
-                DispatchQueue.global(qos: .utility).async {
-                    input.fileHandleForWriting.write(Data(prompt.utf8))
-                    try? input.fileHandleForWriting.close()
-                }
-                let timeoutLock = NSLock()
-                var didTimeOut = false
-                let killer = DispatchWorkItem {
-                    guard process.isRunning else { return }
-                    timeoutLock.lock()
-                    didTimeOut = true
-                    timeoutLock.unlock()
-                    process.terminate()
-                }
-                DispatchQueue.global(qos: .utility).asyncAfter(
-                    deadline: .now() + timeout,
-                    execute: killer
-                )
-                process.waitUntilExit()
-                killer.cancel()
-                timeoutLock.lock()
-                let wasTimedOut = didTimeOut
-                timeoutLock.unlock()
-                try? output.close(); try? errors.close()
-                if wasTimedOut {
-                    continuation.resume(throwing: WeeklyProgressAgentError.timedOut(stageName))
-                } else {
-                    continuation.resume(returning: process.terminationStatus)
-                }
-            }
+        do {
+            let result = try await AgentCLIRunner(executableOverride: executableURL).run(AgentGenerationRequest(
+                provider: provider, purpose: .weeklyProgress, prompt: prompt,
+                conversation: sessionID.map { AgentConversation(provider: provider, id: $0) },
+                directory: directory, timeout: timeout, diagnosticsPrefix: agentDir.appendingPathComponent(stageName)
+            ))
+            guard let conversation = result.conversation else { throw AgentCLIError.invalidConversation }
+            try Data(result.text.utf8).write(to: agentDir.appendingPathComponent(stageName + "-final.txt"), options: .atomic)
+            try JSONEncoder().encode(conversation).write(to: agentDir.appendingPathComponent(stageName + "-conversation.json"), options: .atomic)
+            return WeeklyProgressAgentResult(sessionID: conversation.id, finalMessage: result.text)
+        } catch {
+            try? Data(error.localizedDescription.utf8).write(to: agentDir.appendingPathComponent(stageName + ".stderr.log"), options: .atomic)
+            throw error
         }
-        let output = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? ""
-        guard status == 0 else {
-            let detail = ((try? String(contentsOf: errorURL, encoding: .utf8)) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw WeeklyProgressAgentError.failed(
-                stage: stageName,
-                status: status,
-                detail: String(detail.suffix(2_000))
-            )
-        }
-        return output
     }
-
-    private func agentDirectory(_ generationDirectory: URL) -> URL {
-        generationDirectory.appendingPathComponent("agent", isDirectory: true)
-    }
-
-    static let defaultExecutableURL: URL = {
-        let candidates = [
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex",
-            NSHomeDirectory() + "/.local/bin/codex",
-        ]
-        if let path = candidates.first(where: FileManager.default.isExecutableFile(atPath:)) {
-            return URL(fileURLWithPath: path)
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "command -v codex"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
-        let path = String(
-            decoding: pipe.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
-        return URL(fileURLWithPath: path.isEmpty ? candidates[0] : path)
-    }()
 }
 
 enum WeeklyProgressPipelineError: LocalizedError {
@@ -599,7 +444,7 @@ actor WeeklyProgressPipeline {
     let store: WeeklyProgressDiskStore
     let collector: WeeklyProgressEvidenceCollector
     let artifactRootURL: URL
-    let agent: any WeeklyProgressAgentRunning
+    let agent: (any WeeklyProgressAgentRunning)?
     /// Additional machine-guided repairs allowed after replaying every original
     /// correction turn from the reference session.
     let maximumAuditPasses: Int
@@ -608,7 +453,7 @@ actor WeeklyProgressPipeline {
         store: WeeklyProgressDiskStore = WeeklyProgressDiskStore(),
         journalDirectory: URL = ActivityJournal.dirURL,
         artifactRootURL: URL = ArtifactStore.defaultRootURL,
-        agent: any WeeklyProgressAgentRunning = CodexWeeklyProgressAgent(),
+        agent: (any WeeklyProgressAgentRunning)? = nil,
         maximumAuditPasses: Int = 3
     ) {
         self.store = store
@@ -632,7 +477,7 @@ actor WeeklyProgressPipeline {
         return try await resume(generationDirectory: generation.directory)
     }
 
-    /// Creates the durable identity before the long-running Codex work starts.
+    /// Creates the durable identity before the long-running agent work starts.
     /// Remote callers can therefore receive a generation id immediately and
     /// safely reconnect while the pipeline continues on this Mac.
     func prepare(
@@ -640,11 +485,18 @@ actor WeeklyProgressPipeline {
         week: WeeklyProgressWeek,
         remoteRequestID: String? = nil
     ) throws -> WeeklyProgressGeneration {
-        try store.createGeneration(
+        var generation = try store.createGeneration(
             project: project,
             week: week,
             remoteRequestID: remoteRequestID
         )
+        let provider = agent?.provider ?? AgentTaskPurpose.weeklyProgress.selectedProvider()
+        generation.manifest.agentProvider = provider
+        generation.manifest.model = AgentTaskPurpose.weeklyProgress.model(for: provider) ?? "configured"
+        generation.manifest.reasoningEffort = provider == .codex ? AgentTaskPurpose.weeklyProgress.reasoningEffort : "configured"
+        try store.write(generation.manifest, in: generation.directory)
+        try WeeklyProgressJSON.write(generation.manifest, to: generation.directory.appendingPathComponent("request.json"))
+        return generation
     }
 
     /// Continue an interrupted or explicitly retried generation from its durable
@@ -682,7 +534,10 @@ actor WeeklyProgressPipeline {
     private func continueGeneration(_ source: WeeklyProgressGeneration)
         async throws -> WeeklyProgressGeneration {
         var generation = source
-        var sessionID = generation.manifest.codexSessionID
+        let provider = generation.manifest.agentProvider ?? .codex
+        let agent = self.agent ?? CLIAgentWeeklyProgressAgent(provider: provider)
+        guard agent.provider == provider else { throw AgentCLIError.providerMismatch }
+        var sessionID = generation.manifest.conversation?.id
         let priorReview = store.latestCompletedGeneration(
             projectID: generation.manifest.project.id,
             before: generation.manifest.week
@@ -724,7 +579,7 @@ actor WeeklyProgressPipeline {
                     )
                 }
                 sessionID = result.sessionID
-                generation.manifest.codexSessionID = result.sessionID
+                generation.manifest.recordConversation(result.sessionID, provider: provider)
                 try persist(&generation, stage: .reconstructingResearch)
                 try require("research-report.md", in: generation.directory)
                 try require("evidence-ledger.json", in: generation.directory)
@@ -735,6 +590,7 @@ actor WeeklyProgressPipeline {
             if !exists("draft.pptx", in: generation.directory) {
                 try persist(&generation, stage: .draftingSlides)
                 let result = try await runTurn(
+                    agent: agent,
                     sessionID: sessionID,
                     prompt: WeeklyProgressPrompts.draftSlides(
                         project: generation.manifest.project,
@@ -745,7 +601,7 @@ actor WeeklyProgressPipeline {
                     stageName: uniqueStageName("02-draft", in: generation.directory)
                 )
                 sessionID = result.sessionID
-                generation.manifest.codexSessionID = result.sessionID
+                generation.manifest.recordConversation(result.sessionID, provider: provider)
                 try persist(&generation, stage: .draftingSlides)
                 try require("draft.pptx", in: generation.directory)
             }
@@ -761,13 +617,14 @@ actor WeeklyProgressPipeline {
                 let pass = generation.manifest.auditPasses + 1
                 try persist(&generation, stage: .auditingSlides)
                 let result = try await runTurn(
+                    agent: agent,
                     sessionID: sessionID,
                     prompt: WeeklyProgressPrompts.referenceCorrection(pass: pass),
                     directory: generation.directory,
                     stageName: String(format: "03-reference-correction-%02d", pass)
                 )
                 sessionID = result.sessionID
-                generation.manifest.codexSessionID = result.sessionID
+                generation.manifest.recordConversation(result.sessionID, provider: provider)
                 generation.manifest.auditPasses = pass
                 try persist(&generation, stage: .auditingSlides)
                 _ = auditPassed(in: generation.directory)
@@ -781,13 +638,14 @@ actor WeeklyProgressPipeline {
                 let pass = generation.manifest.auditPasses + 1
                 try persist(&generation, stage: .auditingSlides)
                 let result = try await runTurn(
+                    agent: agent,
                     sessionID: sessionID,
                     prompt: WeeklyProgressPrompts.repairSlides(pass: pass),
                     directory: generation.directory,
                     stageName: String(format: "04-validation-repair-%02d", pass)
                 )
                 sessionID = result.sessionID
-                generation.manifest.codexSessionID = result.sessionID
+                generation.manifest.recordConversation(result.sessionID, provider: provider)
                 generation.manifest.auditPasses = pass
                 try persist(&generation, stage: .auditingSlides)
                 if auditPassed(in: generation.directory) {
@@ -803,6 +661,7 @@ actor WeeklyProgressPipeline {
     }
 
     private func runTurn(
+        agent: any WeeklyProgressAgentRunning,
         sessionID: String?,
         prompt: String,
         directory: URL,

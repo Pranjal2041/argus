@@ -15,6 +15,7 @@ const (
 	AgentShell  = "shell"
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
+	AgentDevin  = "devin"
 	// Explicit user edits are authoritative restore input. They are never
 	// written back into the immutable captured snapshot.
 	SessionEvidenceUserEdit = "user-edit"
@@ -49,6 +50,8 @@ type Entry struct {
 	SessionEvidence string `json:"sessionEvidence,omitempty"`
 	CodexHome       string `json:"codexHome,omitempty"`
 	ClaudeConfig    string `json:"claudeConfig,omitempty"`
+	XDGDataHome     string `json:"xdgDataHome,omitempty"`
+	XDGConfigHome   string `json:"xdgConfigHome,omitempty"`
 	Windows         int    `json:"windows"`
 	Panes           int    `json:"panes"`
 	CaptureError    string `json:"captureError,omitempty"`
@@ -117,14 +120,16 @@ type PanelStatus struct {
 // client can change one fact without reconstructing hidden capture metadata.
 // Arguments excludes argv[0], which is represented by Executable.
 type EntryEdit struct {
-	Panel        string    `json:"panel"`
-	Directory    *string   `json:"directory,omitempty"`
-	Agent        *string   `json:"agent,omitempty"`
-	SessionID    *string   `json:"sessionId,omitempty"`
-	Executable   *string   `json:"executable,omitempty"`
-	Arguments    *[]string `json:"arguments,omitempty"`
-	CodexHome    *string   `json:"codexHome,omitempty"`
-	ClaudeConfig *string   `json:"claudeConfig,omitempty"`
+	Panel         string    `json:"panel"`
+	Directory     *string   `json:"directory,omitempty"`
+	Agent         *string   `json:"agent,omitempty"`
+	SessionID     *string   `json:"sessionId,omitempty"`
+	Executable    *string   `json:"executable,omitempty"`
+	Arguments     *[]string `json:"arguments,omitempty"`
+	CodexHome     *string   `json:"codexHome,omitempty"`
+	ClaudeConfig  *string   `json:"claudeConfig,omitempty"`
+	XDGDataHome   *string   `json:"xdgDataHome,omitempty"`
+	XDGConfigHome *string   `json:"xdgConfigHome,omitempty"`
 }
 
 // Status is the startup offer. Available means at least one panel can be

@@ -216,6 +216,9 @@ func processAgent(process processInfo) string {
 	if name == "claude" || name == "claude.exe" || strings.HasPrefix(name, "claude-") {
 		return AgentClaude
 	}
+	if name == "devin" || name == "devin.exe" {
+		return AgentDevin
+	}
 	return ""
 }
 
@@ -468,6 +471,8 @@ func InspectAgentSession(socket, name string) (AgentSession, error) {
 		}
 		var id, path string
 		switch agent {
+		case AgentDevin:
+			return inspectDevin(process, processes, state)
 		case AgentCodex:
 			files, fileErr := platformOpenFiles(process.PID)
 			if fileErr != nil {
@@ -522,6 +527,12 @@ func captureEntry(pane paneInfo, processes map[int]processInfo) Entry {
 	entry.Executable = state.Executable
 	entry.Argv = state.Argv
 	switch agent {
+	case AgentDevin:
+		var session AgentSession
+		session, err = inspectDevin(process, processes, state)
+		entry.SessionID, entry.SessionPath = session.ID, session.Path
+		entry.XDGDataHome = strings.TrimSpace(state.Environment["XDG_DATA_HOME"])
+		entry.XDGConfigHome = strings.TrimSpace(state.Environment["XDG_CONFIG_HOME"])
 	case AgentClaude:
 		entry.SessionID, entry.SessionPath, _, err = inspectClaude(process.PID, state)
 		entry.ClaudeConfig = strings.TrimSpace(state.Environment["CLAUDE_CONFIG_DIR"])

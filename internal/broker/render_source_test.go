@@ -88,7 +88,7 @@ func TestRenderMatchingScreenUsesCoherentGridWithoutChangingRecent(t *testing.T)
 }
 
 func TestRenderSourceConsumesProviderNeutralExactTranscript(t *testing.T) {
-	for _, provider := range []string{"claude", "codex"} {
+	for _, provider := range []string{"claude", "codex", "devin"} {
 		t.Run(provider, func(t *testing.T) { testRenderSourceConsumesExactTranscript(t, provider) })
 	}
 }
@@ -124,6 +124,15 @@ func testRenderSourceConsumesExactTranscript(t *testing.T, providerName string) 
 		}
 		encoded = append(encoded, body...)
 		encoded = append(encoded, '\n')
+	}
+	if providerName == "devin" {
+		path = filepath.Join(filepath.Dir(path), "session.json")
+		var err error
+		encoded, err = json.Marshal(map[string]any{"schema_version": "ATIF-v1.7", "session_id": "broker-thread",
+			"steps": []map[string]any{{"source": "user", "message": "Render this turn."}, {"source": "agent", "message": source}}})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)

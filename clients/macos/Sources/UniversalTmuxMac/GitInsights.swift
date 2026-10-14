@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 // On-demand "what actually changed" insights for the git panel: one local
-// `claude -p --model sonnet` run over a commit range's combined diff.
+// selected CLI run over a commit range's combined diff.
 //
 // Cost discipline, per design: a level is generated ONLY when the user clicks
 // it, and results are cached forever on disk keyed by (commit hashes, level) —
@@ -19,8 +19,10 @@ final class GitInsights {
     // "v3": prompt revision — bumping regenerates insights written by older,
     // weaker prompts instead of serving them from cache forever. Free-form
     // questions cache too (commits are immutable): the question joins the key.
-    static func key(hashes: [String], level: String, question: String? = nil) -> String {
-        let joined = "v3|" + hashes.joined(separator: ",") + "|" + level + "|" + (question ?? "")
+    static func key(hashes: [String], level: String, question: String? = nil, provider: AgentProvider? = nil) -> String {
+        let provider = provider ?? AgentTaskPurpose.gitInsight.selectedProvider()
+        let suffix = provider == .claude ? "" : "|provider=" + provider.rawValue
+        let joined = ["v3", hashes.joined(separator: ","), level, question ?? ""].joined(separator: "|") + suffix
         return SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -50,7 +52,8 @@ final class GitInsights {
     func generate(httpBase: String, dir: String, level: String,
                   hashes: [String], newest: String, base: String?,
                   metaLines: String, question: String? = nil) async -> Outcome {
-        let key = Self.key(hashes: hashes, level: level, question: question)
+        let provider = AgentTaskPurpose.gitInsight.selectedProvider()
+        let key = Self.key(hashes: hashes, level: level, question: question, provider: provider)
         if let hit = cached(key) { return .ok(text: hit.text, cost: hit.cost, cached: true) }
 
         // The steps matter, not just the destination: fetch each commit's own
@@ -94,14 +97,10 @@ final class GitInsights {
 
             QUESTION: \(q)
             """
-            guard let outer = await Self.runClaude(
-                args: ["--dangerously-skip-permissions", "-p", qPrompt,
-                       "--model", "sonnet", "--output-format", "json"],
-                stdin: input)
-            else { return .fail("claude did not produce output (timeout or non-zero exit)") }
-            guard let env = Self.envelope(outer) else { return .fail("claude returned an error envelope") }
-            store(key, Cached(text: env.result, cost: env.cost))
-            return .ok(text: env.result, cost: env.cost, cached: false)
+            guard let result = await Self.runAgent(provider: provider, prompt: qPrompt, input: input)
+            else { return .fail("\(provider.displayName) did not produce a final answer.") }
+            store(key, Cached(text: result.text, cost: result.costUSD))
+            return .ok(text: result.text, cost: result.costUSD, cached: false)
         }
         let levelSpec = Self.levelSpec(level)
         let prompt = """
@@ -141,15 +140,10 @@ final class GitInsights {
         \(levelSpec)
         """
 
-        guard let outer = await Self.runClaude(
-            args: ["--dangerously-skip-permissions", "-p", prompt,
-                   "--model", "sonnet", "--output-format", "json"],
-            stdin: input)
-        else { return .fail("claude did not produce output (timeout or non-zero exit)") }
-        guard let env = Self.envelope(outer) else { return .fail("claude returned an error envelope") }
-
-        store(key, Cached(text: env.result, cost: env.cost))
-        return .ok(text: env.result, cost: env.cost, cached: false)
+        guard let result = await Self.runAgent(provider: provider, prompt: prompt, input: input)
+        else { return .fail("\(provider.displayName) did not produce a final answer.") }
+        store(key, Cached(text: result.text, cost: result.costUSD))
+        return .ok(text: result.text, cost: result.costUSD, cached: false)
     }
 
     /// The three depth specs, shared by commit-range and PR insights.
@@ -180,6 +174,7 @@ final class GitInsights {
     /// Insight for a whole pull request: fed the PR's combined diff + commit list.
     /// Cache keys on the diff content, so an updated PR regenerates automatically.
     func generatePR(httpBase: String, dir: String, num: Int, level: String, question: String?) async -> Outcome {
+        let provider = AgentTaskPurpose.gitInsight.selectedProvider()
         guard let enc = dir.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
             return .fail("bad folder")
         }
@@ -205,7 +200,7 @@ final class GitInsights {
             }
         }
         // cache key ties to the diff content (PR updates → new diff → fresh insight)
-        let ck = Self.key(hashes: ["pr", String(num), String(diffText.hashValue)], level: level, question: question)
+        let ck = Self.key(hashes: ["pr", String(num), String(diffText.hashValue)], level: level, question: question, provider: provider)
         if let hit = cached(ck) { return .ok(text: hit.text, cost: hit.cost, cached: true) }
 
         if diffText.utf8.count > 180_000 {
@@ -248,13 +243,10 @@ final class GitInsights {
             \(Self.levelSpec(level))
             """
         }
-        guard let outer = await Self.runClaude(
-            args: ["--dangerously-skip-permissions", "-p", prompt, "--model", "sonnet", "--output-format", "json"],
-            stdin: input)
-        else { return .fail("claude did not produce output (timeout or non-zero exit)") }
-        guard let env = Self.envelope(outer) else { return .fail("claude returned an error envelope") }
-        store(ck, Cached(text: env.result, cost: env.cost))
-        return .ok(text: env.result, cost: env.cost, cached: false)
+        guard let result = await Self.runAgent(provider: provider, prompt: prompt, input: input)
+        else { return .fail("\(provider.displayName) did not produce a final answer.") }
+        store(ck, Cached(text: result.text, cost: result.costUSD))
+        return .ok(text: result.text, cost: result.costUSD, cached: false)
     }
 
     private func fetchDiff(httpBase: String, dir: String,
@@ -274,55 +266,9 @@ final class GitInsights {
         return d
     }
 
-    // Same Process shape as the Command Center's runner (proven against the
-    // same binary), plus a hard 4-minute kill so a wedged run can't leak.
-    private static let claudePath: String = {
-        let candidates = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude",
-                          NSHomeDirectory() + "/.claude/local/claude",
-                          NSHomeDirectory() + "/.local/bin/claude"]
-        for c in candidates where FileManager.default.isExecutableFile(atPath: c) { return c }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", "command -v claude"]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        try? p.run(); p.waitUntilExit()
-        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.isEmpty ? "/opt/homebrew/bin/claude" : out
-    }()
-
-    private static func runClaude(args: [String], stdin: String) async -> String? {
-        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-            DispatchQueue.global(qos: .utility).async {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: claudePath)
-                p.arguments = args
-                p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
-                let inPipe = Pipe(), outPipe = Pipe()
-                p.standardInput = inPipe
-                p.standardOutput = outPipe
-                p.standardError = Pipe()
-                do { try p.run() } catch { cont.resume(returning: nil); return }
-                let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 240, execute: killer)
-                DispatchQueue.global(qos: .utility).async {
-                    inPipe.fileHandleForWriting.write(Data(stdin.utf8))
-                    try? inPipe.fileHandleForWriting.close()
-                }
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                killer.cancel()
-                cont.resume(returning: p.terminationStatus == 0
-                            ? String(decoding: data, as: UTF8.self) : nil)
-            }
-        }
-    }
-
-    private static func envelope(_ outer: String) -> (result: String, cost: Double)? {
-        struct Outer: Decodable { let result: String?; let is_error: Bool?; let total_cost_usd: Double? }
-        guard let d = outer.data(using: .utf8),
-              let o = try? JSONDecoder().decode(Outer.self, from: d),
-              o.is_error != true, let r = o.result else { return nil }
-        return (r, o.total_cost_usd ?? 0)
+    private static func runAgent(provider: AgentProvider, prompt: String, input: String) async -> AgentGenerationResult? {
+        try? await AgentCLIRunner().run(AgentGenerationRequest(
+            provider: provider, purpose: .gitInsight, prompt: prompt + "\n\n" + input, timeout: 240
+        ))
     }
 }

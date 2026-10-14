@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"universal-tmux/internal/devinsession"
 )
 
 // preflight defines restore safety once for every session backend. A backend
@@ -45,7 +47,8 @@ func preflight(entry Entry, current map[string]Entry) PanelStatus {
 			return panel
 		}
 		if entry.SessionEvidence != "resume-argv" && entry.SessionEvidence != SessionEvidenceUserEdit {
-			if _, err := os.Stat(entry.SessionPath); err != nil {
+			_, storageErr := os.Stat(entry.SessionPath)
+			if storageErr != nil || (entry.Agent == AgentDevin && !devinsession.Exists(entry.SessionPath, entry.SessionID)) {
 				panel.CapturedLaunchReviewable = capturedLaunchAvailable(entry)
 				panel.State = PanelMissingSession
 				if panel.CapturedLaunchReviewable {
@@ -102,9 +105,11 @@ func applyEntryEdit(entry Entry, edit EntryEdit) (Entry, error) {
 		entry.SessionEvidence = ""
 		entry.CodexHome = ""
 		entry.ClaudeConfig = ""
+		entry.XDGDataHome = ""
+		entry.XDGConfigHome = ""
 		entry.CaptureError = ""
 		return entry, nil
-	case AgentCodex, AgentClaude:
+	case AgentCodex, AgentClaude, AgentDevin:
 	default:
 		return Entry{}, fmt.Errorf("edited agent type %q is unsupported", entry.Agent)
 	}
@@ -113,8 +118,8 @@ func applyEntryEdit(entry Entry, edit EntryEdit) (Entry, error) {
 		entry.SessionPath = ""
 		entry.SessionEvidence = SessionEvidenceUserEdit
 	}
-	if !uuidPattern.MatchString(entry.SessionID) {
-		return Entry{}, fmt.Errorf("edited %s conversation ID must be a UUID", entry.Agent)
+	if !validSessionID(entry.Agent, entry.SessionID) {
+		return Entry{}, fmt.Errorf("edited %s conversation ID is invalid", entry.Agent)
 	}
 	if edit.Executable != nil {
 		entry.Executable = strings.TrimSpace(*edit.Executable)
@@ -138,6 +143,12 @@ func applyEntryEdit(entry Entry, edit EntryEdit) (Entry, error) {
 	}
 	if edit.ClaudeConfig != nil {
 		entry.ClaudeConfig = strings.TrimSpace(*edit.ClaudeConfig)
+	}
+	if edit.XDGDataHome != nil {
+		entry.XDGDataHome = strings.TrimSpace(*edit.XDGDataHome)
+	}
+	if edit.XDGConfigHome != nil {
+		entry.XDGConfigHome = strings.TrimSpace(*edit.XDGConfigHome)
 	}
 	entry.CaptureError = ""
 	return entry, nil

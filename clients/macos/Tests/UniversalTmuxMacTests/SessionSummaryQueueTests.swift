@@ -221,7 +221,7 @@ final class CommandCenterSchedulingTests: XCTestCase {
         XCTAssertEqual(model.statuses["a-slow/job-0"]?.oneLiner, "Saved 0")
         gate.release(); await settle(model)
         await withCheckedContinuation { continuation in
-            CodexStatusProvider.writeDefaults { continuation.resume() }
+            CLIAgentStatusProvider.writeDefaults { continuation.resume() }
         }
         XCTAssertEqual(defaults.data(forKey: "ut.ccPresentation.v2.saved-workspace"), readerCache,
                        "Collector persistence must not overwrite reader-owned pending corrections")

@@ -696,13 +696,14 @@ actor ArtifactDiskStore {
     func applyAutomaticTitle(
         id: UUID,
         expectedFilename: String,
-        title: String
+        title: String,
+        provider: AgentProvider = .codex
     ) throws -> ArtifactRecord? {
         guard var updated = try loadRecord(id: id),
               updated.filename == expectedFilename,
               ArtifactAutomaticTitleEligibility.isEligible(updated) else { return nil }
         updated.filename = ArtifactFilename.normalized(title, fileExtension: updated.fileExtension)
-        updated.titleSource = ArtifactTitleSource.codex
+        updated.titleSource = provider.rawValue
         try writeManifest(updated)
         return updated
     }
@@ -836,7 +837,7 @@ final class ArtifactStore: ObservableObject {
         self.initialRootURL = rootURL
         disk = ArtifactDiskStore(rootURL: rootURL)
         self.logEvents = logEvents && !AppState.isRunningTests
-        self.titleProvider = titleProvider ?? (AppState.isRunningTests ? nil : CodexArtifactTitleProvider())
+        self.titleProvider = titleProvider ?? (AppState.isRunningTests ? nil : AgentArtifactTitleProvider())
         if loadImmediately {
             Task { await reload() }
         } else {
@@ -1127,14 +1128,15 @@ final class ArtifactStore: ObservableObject {
                 .filter { $0.id != id }
                 .map { ($0.filename as NSString).deletingPathExtension }
         )
-        guard let generated = await titleProvider.title(for: request) else { return false }
+        guard let generated = await titleProvider.generatedTitle(for: request) else { return false }
         guard workspace == workspaceID, !Task.isCancelled else { return true }
-        let unique = uniqueAutomaticTitle(generated, for: record)
+        let unique = uniqueAutomaticTitle(generated.text, for: record)
         do {
             guard let updated = try await disk.applyAutomaticTitle(
                 id: id,
                 expectedFilename: expectedFilename,
-                title: unique
+                title: unique,
+                provider: generated.provider
             ), let index = records.firstIndex(where: { $0.id == id }),
                   records[index].titleSource != ArtifactTitleSource.manual else { return true }
             records[index] = updated

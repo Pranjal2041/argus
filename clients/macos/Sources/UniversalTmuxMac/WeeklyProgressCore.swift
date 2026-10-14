@@ -304,6 +304,8 @@ struct WeeklyProgressGenerationManifest: Codable, Hashable {
     var reasoningEffort: String
     var promptRevision: String?
     var codexSessionID: String?
+    var agentProvider: AgentProvider? = nil
+    var agentSessionID: String? = nil
     var auditPasses: Int
     var evidence: WeeklyProgressEvidenceSummary?
     var outputs: [String: String]
@@ -311,6 +313,17 @@ struct WeeklyProgressGenerationManifest: Codable, Hashable {
     /// Idempotency key supplied by a remote client. Older manifests decode with
     /// nil, so this remains backwards-compatible with every existing review.
     var remoteRequestID: String?
+
+    var conversation: AgentConversation? {
+        guard let id = agentSessionID ?? codexSessionID else { return nil }
+        return AgentConversation(provider: agentProvider ?? .codex, id: id)
+    }
+
+    mutating func recordConversation(_ id: String, provider: AgentProvider) {
+        agentProvider = provider
+        agentSessionID = id
+        codexSessionID = provider == .codex ? id : nil
+    }
 }
 
 struct WeeklyProgressGeneration {

@@ -118,7 +118,7 @@ func (p *Provider) AgentTranscript(name string) (rendersource.TranscriptRef, err
 		return rendersource.TranscriptRef{}, err
 	}
 	return rendersource.TranscriptRef{
-		Provider: result.Agent, Path: result.Path, RequireScreenMatch: result.RequireScreenMatch,
+		Provider: result.Agent, Path: result.Path, SessionID: result.ID, RequireScreenMatch: result.RequireScreenMatch,
 	}, nil
 }
 

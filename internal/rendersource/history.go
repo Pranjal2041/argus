@@ -29,16 +29,11 @@ func HistoryWithScreen(ref TranscriptRef, screen string) ([]HistoryEntry, error)
 	if ref.Path == "" {
 		return nil, ErrNoMatch
 	}
-	var decode func([]byte) (HistoryEntry, bool)
-	switch ref.Provider {
-	case "codex":
-		decode = codexHistoryEntry
-	case "claude":
-		decode = claudeHistoryEntry
-	default:
+	adapter := adapterFor(ref.Provider)
+	if adapter == nil {
 		return nil, ErrNoMatch
 	}
-	entries := readHistoryTail(ref.Path, decode)
+	entries := adapter.history(ref)
 	if len(entries) == 0 {
 		return nil, ErrNoMatch
 	}

@@ -61,56 +61,31 @@ enum CodexStatusCommand {
     static let reasoningEffort = "high"
 
     static func initialArguments(finalMessageURL: URL) -> [String] {
-        [
-            "exec",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "--sandbox", "read-only",
-            "--color", "never",
-            "-m", model,
-            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
-            "--json",
-            "-o", finalMessageURL.path,
-            "-",
-        ]
+        arguments(conversation: nil, finalMessageURL: finalMessageURL)
     }
 
     static func resumeArguments(sessionID: String, finalMessageURL: URL) -> [String] {
-        [
-            "exec", "resume",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "-m", model,
-            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
-            "--json",
-            "-o", finalMessageURL.path,
-            sessionID,
-            "-",
-        ]
+        arguments(conversation: AgentConversation(provider: .codex, id: sessionID), finalMessageURL: finalMessageURL)
+    }
+
+    private static func arguments(conversation: AgentConversation?, finalMessageURL: URL) -> [String] {
+        AgentCLIRunner.arguments(AgentGenerationRequest(provider: .codex, purpose: .status, prompt: "", conversation: conversation),
+            directory: FileManager.default.temporaryDirectory, finalURL: finalMessageURL, exportURL: finalMessageURL,
+            promptURL: finalMessageURL, configURL: finalMessageURL)
     }
 
     static func sessionID(in jsonl: String) -> String? {
-        for line in jsonl.split(separator: "\n") {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["type"] as? String == "thread.started",
-                  let sessionID = object["thread_id"] as? String,
-                  !sessionID.isEmpty else { continue }
-            return sessionID
-        }
-        return nil
+        AgentCLIRunner.codexSessionID(in: jsonl)
     }
 }
 
-/// Generates status updates by shelling out to Codex CLI. Keeps a Codex session
+/// Generates status updates through the selected CLI. Keeps a provider-bound session
 /// id per terminal session and resumes it so the model carries a rolling
 /// understanding; resets the id every `resetEvery` turns so the resumed conversation
 /// can't grow without bound.
-final class CodexStatusProvider: AgentStatusProvider {
+final class CLIAgentStatusProvider: AgentStatusProvider {
     private let resetEvery = 20
-    private var sessions: [String: (id: String, turns: Int)] = [:]
+    private var sessions: [String: (conversation: AgentConversation, turns: Int)] = [:]
     private let lock = NSLock()
 
     // Cumulative spend, persisted so cost can be assessed across launches.
@@ -170,22 +145,25 @@ final class CodexStatusProvider: AgentStatusProvider {
         // Resume the session's rolling conversation; reset it every `resetEvery`
         // turns so it can't grow without bound.
         var entry = lock.withLock { sessions[key] }
-        if let e = entry, e.turns >= resetEvery { entry = nil }
+        let provider = AgentTaskPurpose.status.selectedProvider()
+        if let e = entry, e.turns >= resetEvery || e.conversation.provider != provider { entry = nil }
 
         // Up to 2 attempts: a transient API/connection error (ECONNRESET, overloaded)
         // shouldn't leave the card stale until the next 30s sweep. After the first
-        // attempt the Codex session exists, so the retry resumes it.
+        // attempt the conversation exists, so the retry resumes it.
         for attempt in 0..<2 {
             guard !Task.isCancelled else { return nil }
-            let resumingID = entry?.id
-            let prompt = resumingID == nil ? Self.systemPrompt + "\n\n" + msg : msg
-            if let run = await Self.runCodex(sessionID: resumingID, stdin: prompt) {
-                entry = (run.sessionID, entry?.turns ?? 0)
-                if let status = Self.parseStatus(run.finalMessage) {
+            let conversation = entry?.conversation
+            let prompt = conversation == nil ? Self.systemPrompt + "\n\n" + msg : msg
+            if let run = try? await AgentCLIRunner().run(AgentGenerationRequest(
+                provider: provider, purpose: .status, prompt: prompt, conversation: conversation
+            )), let identity = run.conversation {
+                entry = (identity, entry?.turns ?? 0)
+                if let status = Self.parseStatus(run.text) {
                     lock.withLock {
-                        sessions[key] = (run.sessionID, (entry?.turns ?? 0) + 1)
+                        sessions[key] = (identity, (entry?.turns ?? 0) + 1)
                     }
-                    recordCost(0)
+                    recordCost(run.costUSD)
                     return status
                 }
             }
@@ -195,43 +173,6 @@ final class CodexStatusProvider: AgentStatusProvider {
             }
         }
         return nil
-    }
-
-    // MARK: Codex invocation
-
-    /// GUI apps don't inherit a login shell's PATH, so resolve the binary explicitly.
-    private static let codexPath: String = {
-        let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex",
-                          NSHomeDirectory() + "/.local/bin/codex"]
-        for c in candidates where FileManager.default.isExecutableFile(atPath: c) { return c }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", "command -v codex"]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        try? p.run(); p.waitUntilExit()
-        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.isEmpty ? "/opt/homebrew/bin/codex" : out
-    }()
-
-    private struct CodexRun {
-        let sessionID: String
-        let finalMessage: String
-    }
-
-    private static func runCodex(sessionID: String?, stdin: String) async -> CodexRun? {
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("argus-command-center-\(UUID().uuidString).txt")
-        defer { try? FileManager.default.removeItem(at: outputURL) }
-        let arguments = sessionID.map {
-            CodexStatusCommand.resumeArguments(sessionID: $0, finalMessageURL: outputURL)
-        } ?? CodexStatusCommand.initialArguments(finalMessageURL: outputURL)
-        guard let result = try? await BoundedProcessRunner().run(executable: URL(fileURLWithPath: codexPath),
-                                                               arguments: arguments, input: Data(stdin.utf8)),
-              result.status == 0,
-              let resolvedSessionID = CodexStatusCommand.sessionID(in: String(decoding: result.stdout, as: UTF8.self)) ?? sessionID,
-              let finalMessage = try? String(contentsOf: outputURL, encoding: .utf8) else { return nil }
-        return CodexRun(sessionID: resolvedSessionID, finalMessage: finalMessage)
     }
 
     // MARK: parsing
@@ -605,7 +546,7 @@ final class CommandCenterModel: ObservableObject {
     }
 
     init(collector: Bool = false, defaults: UserDefaults = .standard,
-         provider: AgentStatusProvider = CodexStatusProvider(), maximumConcurrentSummaries: Int = 5) {
+         provider: AgentStatusProvider = CLIAgentStatusProvider(), maximumConcurrentSummaries: Int = 5) {
         isCollector = collector
         self.defaults = defaults
         self.provider = provider
@@ -650,7 +591,7 @@ final class CommandCenterModel: ObservableObject {
         let workspace = presentationWorkspaceID
         let presentation = try? JSONEncoder().encode(Presentation(statuses: statuses, lifetimes: sessionLifetimes,
                                                                   corrections: pendingCorrections))
-        CodexStatusProvider.writeDefaults {
+        CLIAgentStatusProvider.writeDefaults {
             defaults.set(d, forKey: key)
             if let workspace, let presentation { defaults.set(presentation, forKey: "ut.ccCollector.v1." + workspace) }
         }

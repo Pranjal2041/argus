@@ -383,6 +383,8 @@ struct SettingsView: View {
 
             MachineLaunchersSettingsSection(store: machineLaunchers)
 
+            AgentProviderSettingsSection()
+
             Section {
                 Toggle(
                     "Save foreground clipboard screenshots to Artifacts",

@@ -2,6 +2,17 @@ import XCTest
 @testable import UniversalTmuxMac
 
 final class BoundedProcessRunnerTests: XCTestCase {
+    func testStderrDrainsConcurrentlyAndUsesTheSharedOutputBudget() async throws {
+        let result = try await BoundedProcessRunner(timeout: 3).run(executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "printf 'diagnostic' >&2; printf 'answer'"])
+        XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "answer")
+        XCTAssertEqual(String(decoding: result.stderr, as: UTF8.self), "diagnostic")
+        do {
+            _ = try await BoundedProcessRunner(timeout: 3, maximumOutputBytes: 1024).run(executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "exec /usr/bin/yes >&2"])
+            XCTFail("stderr exceeded the common budget")
+        } catch BoundedProcessRunner.Failure.oversizedOutput {} catch { XCTFail("\(error)") }
+    }
     func testInputAndOutputDrainConcurrently() async throws {
         let input = Data(repeating: 65, count: 150_000)
         let result = try await BoundedProcessRunner(timeout: 3).run(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [], input: input)

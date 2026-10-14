@@ -6,10 +6,27 @@ import (
 	"regexp"
 	"strings"
 
+	"universal-tmux/internal/devinsession"
 	"universal-tmux/internal/toolcommand"
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func validSessionID(agent, id string) bool {
+	switch agent {
+	case AgentCodex, AgentClaude:
+		return uuidPattern.MatchString(id)
+	case AgentDevin:
+		return devinsession.ValidSessionID(id)
+	default:
+		return false
+	}
+}
+
+var devinRestoreOptions = map[string]optionSpec{
+	"--model": {1}, "--permission-mode": {1}, "--config": {1},
+	"--sandbox": {0}, "--respect-workspace-trust": {1},
+}
 
 type optionSpec struct {
 	Values int // number of following argv values; -1 means consume values until the next option
@@ -201,7 +218,7 @@ func resumeArgv(entry Entry) ([]string, error) {
 	if entry.Agent == AgentShell {
 		return nil, nil
 	}
-	if !uuidPattern.MatchString(entry.SessionID) {
+	if !validSessionID(entry.Agent, entry.SessionID) {
 		return nil, fmt.Errorf("%s session ID is missing or invalid", entry.Agent)
 	}
 	executable, err := effectiveExecutable(entry)
@@ -213,6 +230,24 @@ func resumeArgv(entry Entry) ([]string, error) {
 		return nil, fmt.Errorf("%s kernel argv was not captured", entry.Agent)
 	}
 	switch entry.Agent {
+	case AgentDevin:
+		options, err := preserveOptions(args[1:], devinRestoreOptions, map[string]bool{
+			"-r": true, "--resume": true, "-c": true, "--continue": true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		command := append([]string{executable}, append(options, "--resume", entry.SessionID)...)
+		var environment []string
+		for _, item := range []struct{ key, value string }{{"XDG_DATA_HOME", entry.XDGDataHome}, {"XDG_CONFIG_HOME", entry.XDGConfigHome}} {
+			if value := strings.TrimSpace(item.value); value != "" {
+				environment = append(environment, item.key+"="+filepath.Clean(value))
+			}
+		}
+		if len(environment) > 0 {
+			command = append(append([]string{environmentExecutable()}, environment...), command...)
+		}
+		return command, nil
 	case AgentCodex:
 		codexArgs := normalizeCodexResumeArgs(args[1:], entry.SessionID)
 		options, err := preserveOptions(codexArgs, codexRestoreOptions, map[string]bool{"resume": true})

@@ -43,6 +43,8 @@ struct WorkspaceRecoveryPanel: Decodable, Identifiable {
     let argv: [String]?
     let codexHome: String?
     let claudeConfig: String?
+    var xdgDataHome: String? = nil
+    var xdgConfigHome: String? = nil
     let state: String
     let detail: String?
     let restoreCommand: String?
@@ -77,6 +79,8 @@ struct WorkspaceRecoveryEdit: Codable, Equatable, Identifiable {
     var arguments: [String]?
     var codexHome: String?
     var claudeConfig: String?
+    var xdgDataHome: String?
+    var xdgConfigHome: String?
 
     var id: String { panel }
 
@@ -89,17 +93,19 @@ struct WorkspaceRecoveryEdit: Codable, Equatable, Identifiable {
         arguments = panel.argv.map { Array($0.dropFirst()) }
         codexHome = panel.codexHome
         claudeConfig = panel.claudeConfig
+        xdgDataHome = panel.xdgDataHome
+        xdgConfigHome = panel.xdgConfigHome
     }
 
     var validationError: String? {
         let folder = directory.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !folder.isEmpty else { return "Enter the working folder." }
         guard Self.isAbsolutePath(folder) else { return "The working folder must be an absolute path." }
-        guard ["shell", "codex", "claude"].contains(agent) else { return "Choose a supported session type." }
+        guard agent == "shell" || AgentProvider(rawValue: agent) != nil else { return "Choose a supported session type." }
         if agent != "shell" {
             let conversation = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard UUID(uuidString: conversation) != nil else {
-                return "Enter the exact Codex or Claude conversation UUID."
+            guard AgentProvider(rawValue: agent)?.isValidSessionID(conversation) == true else {
+                return "Enter the exact \(AgentProvider(rawValue: agent)?.displayName ?? "agent") conversation ID."
             }
             let command = executable?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !command.isEmpty else { return "Enter the agent executable." }
@@ -808,7 +814,7 @@ struct WorkspaceRecoveryView: View {
     private var snapshot: WorkspaceRecoverySnapshot? { recovery.status?.snapshot }
     private var panels: [WorkspaceRecoveryPanel] { recovery.status?.panels ?? [] }
     private var agentCounts: [(String, Int)] {
-        ["claude", "codex", "shell"].compactMap { agent in
+        (AgentProvider.allCases.map(\.rawValue) + ["shell"]).compactMap { agent in
             let count = recovery.readyPanels.filter { $0.agent == agent }.count
             return count == 0 ? nil : (agent, count)
         }
@@ -1181,11 +1187,11 @@ struct WorkspaceRecoveryView: View {
     }
 
     private func agentTitle(_ agent: String) -> String {
-        switch agent { case "claude": return "Claude"; case "codex": return "Codex"; default: return "Shell" }
+        AgentProvider(rawValue: agent)?.displayName ?? (agent == "shell" ? "Shell" : agent)
     }
 
     private func agentColor(_ agent: String) -> Color {
-        switch agent { case "claude": return Theme.waiting; case "codex": return Theme.running; default: return Theme.textTertiary }
+        AgentProvider(rawValue: agent)?.tint ?? Theme.textTertiary
     }
 }
 
@@ -1327,11 +1333,12 @@ private struct WorkspaceRecoveryRow: View {
     }
 
     private var agentTitle: String {
-        switch edit?.agent ?? panel.agent { case "claude": return "CLAUDE"; case "codex": return "CODEX"; default: return "SHELL" }
+        let agent = edit?.agent ?? panel.agent
+        return AgentProvider(rawValue: agent)?.displayName.uppercased() ?? agent.uppercased()
     }
 
     private var agentColor: Color {
-        switch edit?.agent ?? panel.agent { case "claude": return Theme.waiting; case "codex": return Theme.running; default: return Theme.textTertiary }
+        AgentProvider(rawValue: edit?.agent ?? panel.agent)?.tint ?? Theme.textTertiary
     }
 }
 
@@ -1390,15 +1397,16 @@ struct WorkspaceRecoveryEditView: View {
                             .foregroundStyle(Theme.textTertiary)
                         HStack(spacing: 3 * scale) {
                             sessionTypeButton("shell", title: "Shell")
-                            sessionTypeButton("codex", title: "Codex")
-                            sessionTypeButton("claude", title: "Claude")
+                            ForEach(AgentProvider.allCases) { provider in
+                                sessionTypeButton(provider.rawValue, title: provider.displayName)
+                            }
                         }
                         .padding(3 * scale)
                         .frame(maxWidth: .infinity)
                         .background(RoundedRectangle(cornerRadius: 7 * scale).fill(Theme.sidebarBackground))
                         .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(Theme.border, lineWidth: 1))
                         if edit.agent != "shell" {
-                            editField("Conversation UUID", text: optionalBinding(\.sessionId), monospaced: true)
+                            editField("Conversation ID", text: optionalBinding(\.sessionId), monospaced: true)
                             editField("Executable", text: optionalBinding(\.executable), monospaced: true)
                             VStack(alignment: .leading, spacing: 6 * scale) {
                                 Text("Arguments · one per line")
@@ -1414,8 +1422,11 @@ struct WorkspaceRecoveryEditView: View {
                             }
                             if edit.agent == "codex" {
                                 editField("CODEX_HOME · optional", text: optionalBinding(\.codexHome), monospaced: true)
-                            } else {
+                            } else if edit.agent == "claude" {
                                 editField("Claude config directory · optional", text: optionalBinding(\.claudeConfig), monospaced: true)
+                            } else if edit.agent == "devin" {
+                                editField("XDG_DATA_HOME · optional", text: optionalBinding(\.xdgDataHome), monospaced: true)
+                                editField("XDG_CONFIG_HOME · optional", text: optionalBinding(\.xdgConfigHome), monospaced: true)
                             }
                         }
                     }
@@ -1443,6 +1454,7 @@ struct WorkspaceRecoveryEditView: View {
                 .buttonStyle(RecoveryPrimaryButtonStyle(enabled: edit.validationError == nil, scale: scale))
                 .disabled(edit.validationError != nil)
                 .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("recovery-save-details")
             }
             .padding(.horizontal, 22 * scale)
             .padding(.vertical, 15 * scale)
@@ -1533,6 +1545,7 @@ struct WorkspaceRecoveryEditView: View {
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("recovery-agent-" + agent)
     }
 
     private func optionalBinding(_ keyPath: WritableKeyPath<WorkspaceRecoveryEdit, String?>) -> Binding<String> {
@@ -1562,6 +1575,8 @@ struct WorkspaceRecoveryEditView: View {
             value.arguments = nil
             value.codexHome = nil
             value.claudeConfig = nil
+            value.xdgDataHome = nil
+            value.xdgConfigHome = nil
         } else {
             value.sessionId = value.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
             value.executable = value.executable?.trimmingCharacters(in: .whitespacesAndNewlines)

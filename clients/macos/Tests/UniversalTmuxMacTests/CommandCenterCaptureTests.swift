@@ -11,7 +11,7 @@ final class CommandCenterCaptureTests: XCTestCase {
         )
 
         XCTAssertEqual(CodexStatusCommand.model, "gpt-6-luna")
-        XCTAssertEqual(CodexStatusCommand.model, CodexArtifactTitleProvider.model)
+        XCTAssertEqual(CodexStatusCommand.model, AgentArtifactTitleProvider.model)
         XCTAssertEqual(initial.filter { $0.hasPrefix("gpt-") }, ["gpt-6-luna"])
         XCTAssertTrue(initial.contains("model_reasoning_effort=\"high\""))
         XCTAssertTrue(initial.contains("read-only"))
