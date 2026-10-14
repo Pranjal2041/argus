@@ -3,6 +3,7 @@ import SwiftUI
 import UsageKit
 
 WorkspaceServiceLauncher.runIfRequested()
+UsageDiagnosticCommand.runIfRequested()
 
 // Register bundled fonts (MesloLGS NF) so the terminal can render powerline /
 // Nerd-Font glyphs that the system monospace font lacks (otherwise: tofu boxes).

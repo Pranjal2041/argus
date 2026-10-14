@@ -4,9 +4,15 @@ import ArgusProtocol
 /// One launchd installation contract for both the local broker and its clients.
 /// One-shot reconcilers use StartInterval; long-running workers use KeepAlive.
 struct LaunchAgentService {
+    enum ProcessType: String {
+        case background = "Background"
+        case interactive = "Interactive"
+    }
+
     let label: String
     let arguments: [String]
     var environment: [String: String] = [:]
+    var processType: ProcessType = .background
     var keepAlive = false
     var interval: Int? = nil
     let logName: String
@@ -14,7 +20,7 @@ struct LaunchAgentService {
     func propertyList(logs: URL) -> [String: Any] {
         var result: [String: Any] = [
             "Label": label, "ProgramArguments": arguments, "RunAtLoad": true,
-            "ProcessType": "Background", "ThrottleInterval": 15,
+            "ProcessType": processType.rawValue, "ThrottleInterval": 15,
             "StandardOutPath": logs.appendingPathComponent(logName).path,
             "StandardErrorPath": logs.appendingPathComponent(logName).path,
         ]

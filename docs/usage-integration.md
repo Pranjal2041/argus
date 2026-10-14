@@ -24,6 +24,8 @@ One `UsageController` in the launchd-owned workspace process runs standalone Usa
 
 Route/wake notifications and account-state RPCs never start another automatic usage refresh. Account edits and completed sign-ins own their targeted refresh in the store; the workspace wrapper only publishes their results. Failed account requests cannot trigger an all-account poll. Explicit refresh commands remain separate from the original recurring loop.
 
+The app-serving workspace process uses launchd's `Interactive` resource policy, matching a normal app. A headless process is not necessarily background-priority work: marking this service `Background` throttles its provider subprocesses too, consuming their deadlines under CPU/I/O contention. The independent broker reconciler keeps its background policy. This distinction applies to every provider and workspace job, not a particular command or account.
+
 HTTP reads use standalone Usage's implementation: a 429 or 5xx receives one short retry within that refresh, and there is no additional persistent Argus cooldown. Every later collection calls the adapters again. The original store prevents overlapping refreshes, retains each failed account's previous reading and timestamp, and replaces it after a successful fetch. There is no separate fetch-result coordinator or timeout slot that can poison subsequent collections. Standalone Usage is an independent process; the cutover step below avoids duplicate polling.
 
 Command Center shows per-provider quota averages with account coverage, per-account consumed units and cloud/API spending, separate drives, and connection issues. Providers, billing accounts, and storage capacities are not pooled together.
@@ -77,6 +79,8 @@ Account visibility is independent of measurement availability for every provider
 On October 2, 2026, a signed-in enterprise account's CLI returned identity and plan metadata but no consumption. Its personal-consumption API returned an ACU total without an ACU limit, matching the My analytics page. `/usage` reports session consumption and is not used as an account total. See the official [CLI command reference](https://docs.devin.ai/cli/reference/commands) and [personal analytics documentation](https://docs.devin.ai/enterprise/security-access/personal-analytics).
 
 ## Automated verification
+
+The signed app executable accepts `--usage-diagnostic CONNECTION_ID` for an explicit headless collection of one enabled connection. It uses the real adapter, credentials, HTTP implementation and command runner without writing readings or publishing a workspace snapshot. JSON output contains elapsed times, HTTP status/retry delay and command exit status; request paths, headers, bodies, command arguments, environment values and raw errors are omitted. This makes a provider request; it is not a passive cache inspection and does not run automatically.
 
 ```sh
 swift test --package-path clients/macos --filter 'UsageKitTests|UsageIntegrationTests'

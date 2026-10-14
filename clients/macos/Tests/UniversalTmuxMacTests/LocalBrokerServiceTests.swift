@@ -15,6 +15,7 @@ final class LocalBrokerServiceTests: XCTestCase {
             XCTAssertEqual(plist["RunAtLoad"] as? Bool, true)
             XCTAssertEqual(plist["StartInterval"] as? Int, 15)
             XCTAssertNil(plist["KeepAlive"])
+            XCTAssertEqual(plist["ProcessType"] as? String, "Background")
             XCTAssertNil(service.environment["TS_AUTHKEY"])
             XCTAssertEqual(service.environment["UT_LOCAL_PORT"], "8732")
         }
@@ -24,6 +25,52 @@ final class LocalBrokerServiceTests: XCTestCase {
         XCTAssertThrowsError(try LocalBrokerServiceLauncher.specification(
             home: URL(fileURLWithPath: "/Users/test"), resources: nil, environment: [:], executable: { _ in false }
         ))
+    }
+
+    func testAppServingWorkerPreservesAppResourcePolicyWithoutChangingBrokerPolicy() throws {
+        let executable = URL(fileURLWithPath: "/Applications/Test.app/Contents/MacOS/Test")
+        let worker = WorkspaceServiceLauncher.specification(executable: executable, build: 123)
+        let plist = worker.propertyList(logs: URL(fileURLWithPath: "/tmp/logs"))
+        XCTAssertEqual(plist["ProcessType"] as? String, "Interactive")
+        XCTAssertEqual(plist["KeepAlive"] as? Bool, true)
+        XCTAssertNil(plist["StartInterval"])
+        XCTAssertEqual(worker.arguments, [executable.path, "--workspace-worker", "--build=123.0"])
+
+        let broker = try LocalBrokerServiceLauncher.specification(
+            home: URL(fileURLWithPath: "/Users/test"), resources: nil,
+            environment: [:], executable: { _ in true })
+        XCTAssertEqual(broker.processType, .background)
+    }
+
+    func testResourcePolicyChangeReloadsOnlyItsServiceAndRemainsIdempotent() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        var loaded = false
+        var calls: [[String]] = []
+        let run: ([String]) -> Int32 = { args in
+            calls.append(args)
+            switch args[0] {
+            case "print": return loaded ? 0 : 1
+            case "bootstrap": loaded = true; return 0
+            case "bootout": loaded = false; return 0
+            default: XCTFail("unexpected command"); return 1
+            }
+        }
+        var service = LaunchAgentService(label: "test.policy", arguments: ["/bin/service"], logName: "test.log")
+        try service.ensureRunning(home: home, uid: 123, run: run)
+        calls = []
+        service.processType = .interactive
+        try service.ensureRunning(home: home, uid: 123, run: run)
+        XCTAssertEqual(calls, [
+            ["bootout", "gui/123/test.policy"], ["print", "gui/123/test.policy"],
+            ["bootstrap", "gui/123", home.appendingPathComponent("Library/LaunchAgents/test.policy.plist").path],
+        ])
+        let saved = try Data(contentsOf: home.appendingPathComponent("Library/LaunchAgents/test.policy.plist"))
+        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: saved, format: nil) as? [String: Any])
+        XCTAssertEqual(plist["ProcessType"] as? String, "Interactive")
+        calls = []
+        try service.ensureRunning(home: home, uid: 123, run: run)
+        XCTAssertEqual(calls, [["print", "gui/123/test.policy"]])
     }
 
     func testLaunchAgentsInstallIdempotentlyAndReloadChangedDefinitions() throws {

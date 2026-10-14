@@ -28,14 +28,23 @@ final class WorkspaceRecurringJob {
 /// cannot start a second collector or stop the workspace's collection work.
 enum WorkspaceServiceLauncher {
     static let label = "dev.universaltmux.workspace"
+
+    static func specification(executable: URL, build: TimeInterval) -> LaunchAgentService {
+        // This service supplies the live app and runs bounded provider commands.
+        // Darwin-background throttling is inherited by those commands and can
+        // turn a healthy fetch into a timeout. Match the app's resource policy;
+        // Adaptive cannot promote our HTTP IPC as it would an XPC connection.
+        LaunchAgentService(label: label,
+            arguments: [executable.path, "--workspace-worker", "--build=\(build)"],
+            processType: .interactive, keepAlive: true, logName: "workspace.log")
+    }
+
     @MainActor static func ensureRunning() throws {
         guard Bundle.main.bundleURL.pathExtension == "app", let executable = Bundle.main.executableURL,
               !CommandLine.arguments.contains("--workspace-worker") else { return }
         try LocalBrokerServiceLauncher.ensureRunning()
         let build = (try? executable.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?.timeIntervalSince1970) ?? 0
-        try LaunchAgentService(label: label,
-            arguments: [executable.path, "--workspace-worker", "--build=\(build)"],
-            keepAlive: true, logName: "workspace.log").ensureRunning()
+        try specification(executable: executable, build: build).ensureRunning()
     }
 
     static func runIfRequested() {
