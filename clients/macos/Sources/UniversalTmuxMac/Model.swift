@@ -483,7 +483,23 @@ final class AppState: ObservableObject {
     /// are hidden by default and revealed by the Settings toggle.
     /// Persisted across launches.
     @Published var showAgentSessions: Bool = UserDefaults.standard.bool(forKey: "ut.showAgentSessions") {
-        didSet { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") }
+        didSet { if persistenceEnabled { UserDefaults.standard.set(showAgentSessions, forKey: "ut.showAgentSessions") } }
+    }
+
+    /// A local presentation preference, not a change to panel visibility or lifecycle.
+    /// Command Center and the command palette keep access to backlogged panels.
+    static let hideBackloggedPanelsKey = "ut.sidebar.hideBackloggedPanels"
+    private let sidebarPreferences: UserDefaults?
+    @Published var hideBackloggedPanels = false {
+        didSet { sidebarPreferences?.set(hideBackloggedPanels, forKey: Self.hideBackloggedPanelsKey) }
+    }
+
+    /// Every sidebar entry point uses the same machine-qualified visibility rule.
+    func isSidebarSessionVisible(_ session: SessionInfo, machineID: String) -> Bool {
+        let id = SessionRef(machineID: machineID, session: session.name).id
+        return (showAgentSessions || !session.agent)
+            && !hiddenSessions.contains(id)
+            && (!hideBackloggedPanels || !backlog.contains(id))
     }
 
     /// "Keep this Mac awake & reachable while locked." When on, hold a power assertion that
@@ -1239,13 +1255,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// First session visible in the sidebar (not hidden, agent-toggle honored) — used
+    /// First session visible in the sidebar (all sidebar filters honored) — used
     /// to re-select after hiding the current one.
     private func firstVisibleSession() -> SessionRef? {
         for m in machines {
             for s in (sessionsByMachine[m.id] ?? []) {
                 let r = SessionRef(machineID: m.id, session: s.name)
-                if !hiddenSessions.contains(r.id), showAgentSessions || !s.agent { return r }
+                if isSidebarSessionVisible(s, machineID: m.id) { return r }
             }
         }
         return nil
@@ -1403,6 +1419,11 @@ final class AppState: ObservableObject {
         .sorted { $0.activity > $1.activity }
     }
 
+    /// Sidebar filtering does not change the app-wide attention/notification policy.
+    var sidebarWaitingSessions: [WaitingSession] {
+        waitingSessions.filter { !hideBackloggedPanels || !backlog.contains($0.ref.id) }
+    }
+
     /// Sessions the user has viewed or answered while waiting — suppressed from the
     /// inbox/badge until the broker reports them leaving "waiting" (which re-arms them
     /// for the next genuine prompt). Published so the inbox/badge recompute on change.
@@ -1433,11 +1454,14 @@ final class AppState: ObservableObject {
     /// selection — rendered as an ORANGE "done, unseen" dot until you open the pane.
     @Published var unseen: Set<String> = []
 
-    init(isolatedForTesting: Bool = false, sessionMonitor: BrokerSessionMonitor? = nil, runtime: Runtime = .interactive) {
+    init(isolatedForTesting: Bool = false, sessionMonitor: BrokerSessionMonitor? = nil, runtime: Runtime = .interactive,
+         sidebarPreferences: UserDefaults? = nil) {
         self.sessionMonitor = sessionMonitor ?? BrokerSessionMonitor()
         let isolated = isolatedForTesting || Self.isRunningTests || runtime == .background
         allowsDesktopEffects = !isolated
         persistenceEnabled = !isolated
+        self.sidebarPreferences = sidebarPreferences ?? (isolated ? nil : .standard)
+        hideBackloggedPanels = self.sidebarPreferences?.bool(forKey: Self.hideBackloggedPanelsKey) ?? false
         // Local (loopback) is fixed; cluster brokers are discovered from the tailnet.
         machines = [
             Machine(id: "local", name: "this mac", isLocal: true,
@@ -1886,10 +1910,12 @@ final class AppState: ObservableObject {
     /// Pick a sensible session to select after `ref` is killed: another on the
     /// same machine, else the first session on any reachable machine, else nil.
     func neighborSession(excluding ref: SessionRef) -> SessionRef? {
-        let same = (sessionsByMachine[ref.machineID] ?? []).filter { $0.name != ref.session }
+        let same = (sessionsByMachine[ref.machineID] ?? []).filter {
+            $0.name != ref.session && isSidebarSessionVisible($0, machineID: ref.machineID)
+        }
         if let s = same.first { return SessionRef(machineID: ref.machineID, session: s.name) }
         for m in machines where m.id != ref.machineID {
-            if let s = (sessionsByMachine[m.id] ?? []).first {
+            if let s = (sessionsByMachine[m.id] ?? []).first(where: { isSidebarSessionVisible($0, machineID: m.id) }) {
                 return SessionRef(machineID: m.id, session: s.name)
             }
         }
@@ -1938,13 +1964,7 @@ final class AppState: ObservableObject {
     /// Sessions for a machine grouped by folder, folders sorted. An optional
     /// `query` filters by a case-insensitive substring of the name or path.
     func folderGroups(for machineID: String, matching query: String = "") -> [FolderGroup] {
-        var sessions = sessionsByMachine[machineID] ?? []
-        if !showAgentSessions { // agent (ut spawn) sessions are background work — hidden unless toggled on
-            sessions = sessions.filter { !$0.agent }
-        }
-        if !hiddenSessions.isEmpty { // user-hidden panels (⇧⌘B to restore)
-            sessions = sessions.filter { !hiddenSessions.contains(SessionRef(machineID: machineID, session: $0.name).id) }
-        }
+        var sessions = (sessionsByMachine[machineID] ?? []).filter { isSidebarSessionVisible($0, machineID: machineID) }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
             sessions = sessions.filter {

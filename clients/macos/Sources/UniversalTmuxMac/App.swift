@@ -374,6 +374,7 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Show agent sessions", isOn: $state.showAgentSessions)
+                SidebarBacklogToggle(isOn: $state.hideBackloggedPanels, label: "Hide backlogged panels in sidebar")
             } header: {
                 Text("Sessions")
             } footer: {
@@ -1133,6 +1134,12 @@ struct RootView: View {
         VStack(spacing: 0) {
             sidebarHeader
             searchField
+            SidebarBacklogToggle(isOn: $state.hideBackloggedPanels)
+                .font(cf(11))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             ScrollView {
                 // The sidebar is deliberately non-lazy. A real fleet is tens of rows,
                 // while SwiftUI's pinned LazyVStack repeatedly entered multi-second
@@ -1140,7 +1147,7 @@ struct RootView: View {
                 // A stable VStack is both cheaper at this scale and cannot enter that
                 // lazy scroll-anchor reconciliation path.
                 VStack(alignment: .leading, spacing: 1) {
-                    NeedsAttentionSection(waiting: state.waitingSessions, selection: $state.selection)
+                    NeedsAttentionSection(waiting: state.sidebarWaitingSessions, selection: $state.selection)
                     ForEach(state.machines) { machine in
                         let groups = filteredGroups(machine)
                         VStack(alignment: .leading, spacing: 1) {
@@ -1168,16 +1175,16 @@ struct RootView: View {
             Text("Argus")
                 .font(cf(13, .semibold))
                 .foregroundStyle(Theme.textPrimary)
-            if state.waitingCount > 0 {
+            if !state.sidebarWaitingSessions.isEmpty {
                 HStack(spacing: 3) {
                     Image(systemName: "bell.fill").font(cf(8.5))
-                    Text("\(state.waitingCount)").font(cf(10.5, .semibold)).monospacedDigit()
+                    Text("\(state.sidebarWaitingSessions.count)").font(cf(10.5, .semibold)).monospacedDigit()
                 }
                 .foregroundStyle(SwiftUI.Color(hex: "#24252F"))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Theme.waiting))
-                .help("\(state.waitingCount) session\(state.waitingCount == 1 ? "" : "s") waiting on you")
+                .help("\(state.sidebarWaitingSessions.count) sidebar session\(state.sidebarWaitingSessions.count == 1 ? "" : "s") waiting on you")
                 .transition(.scale.combined(with: .opacity))
             }
             Spacer()
@@ -1402,6 +1409,7 @@ struct RootView: View {
         if state.statusByMachine[m.id] == .delayed { return "session refresh delayed — retrying" }
         if state.statusByMachine[m.id] == nil || state.statusByMachine[m.id] == .checking { return "checking sessions…" }
         if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "no matches" }
+        if state.hideBackloggedPanels { return "no non-backlog panels" }
         return "no sessions"
     }
 
