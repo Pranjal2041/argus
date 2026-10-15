@@ -1992,6 +1992,9 @@ struct CommandPalette: View {
             ("gauge.with.dots.needle.50percent", "Open Usage", "Accounts, limits, spending & storage", {
                 try? state.navigate(to: .usage)
             }),
+            (state.hideCommandCenterUsage ? "eye" : "eye.slash",
+             state.hideCommandCenterUsage ? "Show Usage in Command Center" : "Hide Usage in Command Center",
+             "Command Center only", { state.hideCommandCenterUsage.toggle() }),
             ("chart.bar.doc.horizontal", "Open Weekly Progress", "⇧⌘U", {
                 state.presentWeeklyProgress()
             }),

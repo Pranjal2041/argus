@@ -7,7 +7,7 @@ import ArgusProtocol
 final class SidebarBacklogFilterTests: XCTestCase {
     private func fixture(defaults: UserDefaults? = nil) -> AppState {
         let monitor = BrokerSessionMonitor(fetch: { _, _ in .failure(.invalidSnapshot) }, probe: { _ in false })
-        let state = AppState(isolatedForTesting: true, sessionMonitor: monitor, sidebarPreferences: defaults)
+        let state = AppState(isolatedForTesting: true, sessionMonitor: monitor, presentationPreferences: defaults)
         state.showAgentSessions = false
         state.hiddenSessions = []
         state.backlog = ["local/later", "remote/review"]
