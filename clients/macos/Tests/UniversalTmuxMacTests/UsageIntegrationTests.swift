@@ -86,7 +86,7 @@ final class UsageIntegrationTests: XCTestCase {
         let controller = UsageController(store: store, defaults: defaults)
         await controller.refresh()
         var opened = false
-        let cc = UsageCommandCenterSection(usage: controller) { opened = true }
+        let cc = UsageCommandCenterSection(state: AppState(isolatedForTesting: true), usage: controller) { opened = true }
             .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark)
         let (window, host) = mount(cc, width: 1100, height: 540)
         defer { window.close() }
@@ -258,7 +258,7 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertEqual(store.selection?.sourceID, "modal")
         controller.open()
         var opened = false
-        let (ccWindow, ccHost) = mount(UsageCommandCenterSection(usage: controller) { opened = true }
+        let (ccWindow, ccHost) = mount(UsageCommandCenterSection(state: AppState(isolatedForTesting: true), usage: controller) { opened = true }
             .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 900, height: 350)
         defer { ccWindow.close() }
         try await settle(); try capture(ccHost, name: "unavailable-command-center")
@@ -300,7 +300,7 @@ final class UsageIntegrationTests: XCTestCase {
         let original = controller.glances.map(\.id)
         let first = try XCTUnwrap(original.first), second = original[1]
         var opened = false
-        let (window, host) = mount(UsageCommandCenterSection(usage: controller) { opened = true }
+        let (window, host) = mount(UsageCommandCenterSection(state: AppState(isolatedForTesting: true), usage: controller) { opened = true }
             .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 1100, height: 650)
         defer { window.close() }
         try await settle(); try capture(host, name: "arrange-default")
@@ -364,7 +364,7 @@ final class UsageIntegrationTests: XCTestCase {
         XCTAssertEqual(store.selection?.sourceID, "metered-api")
         controller.open()
         var opened = false
-        let (ccWindow, ccHost) = mount(UsageCommandCenterSection(usage: controller) { opened = true }
+        let (ccWindow, ccHost) = mount(UsageCommandCenterSection(state: AppState(isolatedForTesting: true), usage: controller) { opened = true }
             .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 1100, height: 350)
         defer { ccWindow.close() }
         try await settle(); try capture(ccHost, name: "consumption-command-center")
@@ -395,7 +395,7 @@ final class UsageIntegrationTests: XCTestCase {
         store.didLoad = true
         let controller = UsageController(store: store, defaults: defaults)
         XCTAssertEqual(controller.warnings.count, 2)
-        let (window, host) = mount(UsageCommandCenterSection(usage: controller) {}
+        let (window, host) = mount(UsageCommandCenterSection(state: AppState(isolatedForTesting: true), usage: controller) {}
             .padding(24).background(Theme.appBackground).environment(\.colorScheme, .dark), width: 1100, height: 550)
         defer { window.close() }
         try await settle(); try capture(host, name: "warning-episode-before")

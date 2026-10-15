@@ -458,6 +458,11 @@ final class AppState: ObservableObject {
     @Published var showPalette = false
     @Published var openWindowRequest: String?  // palette → ContentView bridge to SwiftUI openWindow
     @Published var showUsage = false
+    /// Local presentation only: collection and the full Usage destination remain available.
+    static let hideCommandCenterUsageKey = "ut.commandCenter.hideUsage"
+    @Published var hideCommandCenterUsage = false {
+        didSet { presentationPreferences?.set(hideCommandCenterUsage, forKey: Self.hideCommandCenterUsageKey) }
+    }
     // Command Center is home (⇧⌘A). Legacy panel entry points also leave Usage.
     @Published var showOverview = true { didSet { if showOverview { showUsage = false } } }
     // Chronological finish-line agenda (⇧⌘P).
@@ -489,9 +494,9 @@ final class AppState: ObservableObject {
     /// A local presentation preference, not a change to panel visibility or lifecycle.
     /// Command Center and the command palette keep access to backlogged panels.
     static let hideBackloggedPanelsKey = "ut.sidebar.hideBackloggedPanels"
-    private let sidebarPreferences: UserDefaults?
+    private let presentationPreferences: UserDefaults?
     @Published var hideBackloggedPanels = false {
-        didSet { sidebarPreferences?.set(hideBackloggedPanels, forKey: Self.hideBackloggedPanelsKey) }
+        didSet { presentationPreferences?.set(hideBackloggedPanels, forKey: Self.hideBackloggedPanelsKey) }
     }
 
     /// Every sidebar entry point uses the same machine-qualified visibility rule.
@@ -1455,13 +1460,14 @@ final class AppState: ObservableObject {
     @Published var unseen: Set<String> = []
 
     init(isolatedForTesting: Bool = false, sessionMonitor: BrokerSessionMonitor? = nil, runtime: Runtime = .interactive,
-         sidebarPreferences: UserDefaults? = nil) {
+         presentationPreferences: UserDefaults? = nil) {
         self.sessionMonitor = sessionMonitor ?? BrokerSessionMonitor()
         let isolated = isolatedForTesting || Self.isRunningTests || runtime == .background
         allowsDesktopEffects = !isolated
         persistenceEnabled = !isolated
-        self.sidebarPreferences = sidebarPreferences ?? (isolated ? nil : .standard)
-        hideBackloggedPanels = self.sidebarPreferences?.bool(forKey: Self.hideBackloggedPanelsKey) ?? false
+        self.presentationPreferences = presentationPreferences ?? (isolated ? nil : .standard)
+        hideBackloggedPanels = self.presentationPreferences?.bool(forKey: Self.hideBackloggedPanelsKey) ?? false
+        hideCommandCenterUsage = self.presentationPreferences?.bool(forKey: Self.hideCommandCenterUsageKey) ?? false
         // Local (loopback) is fixed; cluster brokers are discovered from the tailnet.
         machines = [
             Machine(id: "local", name: "this mac", isLocal: true,

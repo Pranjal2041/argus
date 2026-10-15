@@ -1117,7 +1117,7 @@ struct CommandCenterView: View {
                     CommandCenterStatusNotice(issue: issue)
                 }
                 if #available(macOS 14.0, *) {
-                    UsageCommandCenterSection(usage: ArgusUsage.shared) { try? state.navigate(to: .usage) }
+                    UsageCommandCenterSection(state: state, usage: ArgusUsage.shared) { try? state.navigate(to: .usage) }
                 }
                 needsYouBlock(sessions: sessionNeeds, labItems: labNeeds)
                 sectionBlock(1, "Done & idle", .medium, 270, in: all)

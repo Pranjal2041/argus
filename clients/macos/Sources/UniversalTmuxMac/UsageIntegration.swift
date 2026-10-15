@@ -52,6 +52,7 @@ struct UsageWorkspaceView: View {
 struct UsageCommandCenterSection: View {
     private static let cardWidth: CGFloat = 236
     private static let cardPadding: CGFloat = 14
+    @ObservedObject var state: AppState
     @ObservedObject var usage: UsageController
     var open: () -> Void
     @State private var showAllWarnings = false
@@ -60,6 +61,12 @@ struct UsageCommandCenterSection: View {
     @State private var targetedCardID: String?
 
     var body: some View {
+        if !state.hideCommandCenterUsage {
+            content
+        }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "gauge.with.dots.needle.50percent").foregroundStyle(Theme.accent)
